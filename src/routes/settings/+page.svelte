@@ -5,17 +5,17 @@
 	// because the server hands back "***" for a stored key and treats it as "leave it".
 	import { onMount } from 'svelte';
 	import {
+		DEFAULT_MIN_CONFIDENCE,
 		MASKED,
+		changedSettings,
+		draftFromSettings,
 		loadSettings,
 		saveSettings,
-		settingBool,
-		settingNumber,
 		settingString,
-		settings,
-		DEFAULT_MIN_CONFIDENCE
+		settings
 	} from '$lib/stores/settings.svelte';
 	import { daemon } from '$lib/daemon.svelte';
-	import type { Settings } from '$lib/types';
+	import { errorMessage } from '$lib/errors';
 	import Button from '$lib/ui/Button.svelte';
 	import Card from '$lib/ui/Card.svelte';
 	import ErrorState from '$lib/ui/ErrorState.svelte';
@@ -35,34 +35,22 @@
 	/** True once the daemon holds a key, which is all `"***"` tells us. */
 	const keyStored = $derived(settings.values['extraction.api_key'] === MASKED);
 	const port = $derived(settingString('daemon.port', String(daemon.port)));
-	const embeddingModel = $derived(settingString('embedding.model', '—') || '—');
+	const embeddingModel = $derived(settingString('embedding.model', 'not set') || 'not set');
 
 	/** Copies the server's values into the draft, discarding any unsaved edits. */
 	function syncDraft() {
-		enabled = settingBool('extraction.enabled');
-		baseUrl = settingString('extraction.base_url');
-		model = settingString('extraction.model');
-		threshold = settingNumber('extraction.auto_accept_min_confidence', DEFAULT_MIN_CONFIDENCE);
-		apiKey = '';
-	}
-
-	/** Only the keys the user actually changed; floats compare with a tolerance. */
-	function changes(): Settings {
-		const out: Settings = {};
-		if (enabled !== settingBool('extraction.enabled')) out['extraction.enabled'] = enabled;
-		if (baseUrl !== settingString('extraction.base_url')) out['extraction.base_url'] = baseUrl;
-		if (model !== settingString('extraction.model')) out['extraction.model'] = model;
-		const stored = settingNumber('extraction.auto_accept_min_confidence', DEFAULT_MIN_CONFIDENCE);
-		if (Math.abs(threshold - stored) > 1e-9) {
-			out['extraction.auto_accept_min_confidence'] = threshold;
-		}
-		// A blank box means "leave the stored key alone", so never send "" or "***".
-		if (apiKey !== '') out['extraction.api_key'] = apiKey;
-		return out;
+		const d = draftFromSettings();
+		enabled = d.enabled;
+		baseUrl = d.baseUrl;
+		apiKey = d.apiKey;
+		model = d.model;
+		threshold = d.threshold;
 	}
 
 	async function save() {
-		const partial = changes();
+		// The diff lives in the store so it can be unit tested; a blank API key box
+		// means "leave the stored key alone" and sends nothing for that key.
+		const partial = changedSettings({ enabled, baseUrl, apiKey, model, threshold });
 		if (Object.keys(partial).length === 0) {
 			push('info', 'No changes to save');
 			return;
@@ -75,7 +63,7 @@
 			push('success', 'Settings saved');
 		} catch (e) {
 			// The daemon's `error` string is the whole explanation; show it verbatim.
-			saveError = e instanceof Error ? e.message : String(e);
+			saveError = errorMessage(e);
 			push('error', saveError);
 		} finally {
 			saving = false;

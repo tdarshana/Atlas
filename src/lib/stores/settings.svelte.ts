@@ -3,8 +3,8 @@
 // a partial map and returns the whole masked map, so the store keeps the server's
 // answer as the single source of truth and never guesses at what it stored.
 
-import { ApiError } from '$lib/api';
-import { api, daemon } from '$lib/daemon.svelte';
+import { api } from '$lib/daemon.svelte';
+import { errorLogPath, errorMessage } from '$lib/errors';
 import type { Settings } from '$lib/types';
 
 /** The value `extraction.api_key` reads back as once a key is stored. */
@@ -20,8 +20,12 @@ export const SETTINGS_KEYS = [
 	'daemon.port'
 ] as const;
 
-/** Used when the daemon has never stored a threshold. */
-export const DEFAULT_MIN_CONFIDENCE = 0.8;
+/**
+ * Used when the daemon has never stored a threshold. The spec's default is 1.0,
+ * which auto-accepts nothing: a confidence is at most 1.0 and a row only qualifies
+ * at or above the threshold, so an unconfigured Atlas asks about every memory.
+ */
+export const DEFAULT_MIN_CONFIDENCE = 1.0;
 
 export const settings = $state({
 	values: {} as Settings,
@@ -32,10 +36,6 @@ export const settings = $state({
 	errorLogPath: null as string | null
 });
 
-function message(e: unknown): string {
-	return e instanceof Error ? e.message : String(e);
-}
-
 export async function loadSettings(): Promise<void> {
 	settings.loading = true;
 	try {
@@ -44,9 +44,8 @@ export async function loadSettings(): Promise<void> {
 		settings.errorLogPath = null;
 		settings.loaded = true;
 	} catch (e) {
-		settings.error = message(e);
-		settings.errorLogPath =
-			e instanceof ApiError && e.status === 0 ? daemon.logPath || '~/.atlas/atlasd.log' : null;
+		settings.error = errorMessage(e);
+		settings.errorLogPath = errorLogPath(e);
 	} finally {
 		settings.loading = false;
 	}
@@ -63,7 +62,8 @@ export async function saveSettings(partial: Settings): Promise<void> {
 }
 
 // ---- readers ----
-// The map is `Record<string, unknown>`, so every read coerces and falls back.
+// The map is `Record<string, unknown>` and the daemon answers `null` for a key it
+// has never stored, so every read coerces and falls back.
 
 export function settingString(key: string, fallback = ''): string {
 	const v = settings.values[key];
@@ -88,4 +88,51 @@ export function settingNumber(key: string, fallback: number): number {
 /** The auto-accept threshold Review compares confidences against. */
 export function minConfidence(): number {
 	return settingNumber('extraction.auto_accept_min_confidence', DEFAULT_MIN_CONFIDENCE);
+}
+
+// ---- the form's diff ----
+
+/** What the settings form holds. The API key is blank unless the user typed one. */
+export interface SettingsDraft {
+	enabled: boolean;
+	baseUrl: string;
+	apiKey: string;
+	model: string;
+	threshold: number;
+}
+
+/** The draft that matches what the server currently reports. */
+export function draftFromSettings(): SettingsDraft {
+	return {
+		enabled: settingBool('extraction.enabled'),
+		baseUrl: settingString('extraction.base_url'),
+		// A stored key reads back as "***", which is not a key; the box starts blank.
+		apiKey: '',
+		model: settingString('extraction.model'),
+		threshold: minConfidence()
+	};
+}
+
+/**
+ * Only the keys the user actually changed. The API key is sent only when the user
+ * typed one: a blank box means "leave the stored key alone", so the "***" the
+ * server reports never travels back. Floats compare with a tolerance so a slider
+ * round trip at the stored value is not reported as a change.
+ */
+export function changedSettings(draft: SettingsDraft): Settings {
+	const out: Settings = {};
+	if (draft.enabled !== settingBool('extraction.enabled')) {
+		out['extraction.enabled'] = draft.enabled;
+	}
+	if (draft.baseUrl !== settingString('extraction.base_url')) {
+		out['extraction.base_url'] = draft.baseUrl;
+	}
+	if (draft.model !== settingString('extraction.model')) {
+		out['extraction.model'] = draft.model;
+	}
+	if (Math.abs(draft.threshold - minConfidence()) > 1e-9) {
+		out['extraction.auto_accept_min_confidence'] = draft.threshold;
+	}
+	if (draft.apiKey !== '') out['extraction.api_key'] = draft.apiKey;
+	return out;
 }

@@ -2,8 +2,8 @@
 // `active`, Reject marks it `rejected`; either way the row leaves the list, because
 // the list only ever shows what is still pending.
 
-import { ApiError } from '$lib/api';
-import { api, daemon } from '$lib/daemon.svelte';
+import { api } from '$lib/daemon.svelte';
+import { errorLogPath, errorMessage } from '$lib/errors';
 import { minConfidence } from '$lib/stores/settings.svelte';
 import type { Memory, Uuid } from '$lib/types';
 
@@ -25,9 +25,8 @@ export async function loadReview(): Promise<void> {
 		review.errorLogPath = null;
 	} catch (e) {
 		review.items = [];
-		review.error = e instanceof Error ? e.message : String(e);
-		review.errorLogPath =
-			e instanceof ApiError && e.status === 0 ? daemon.logPath || '~/.atlas/atlasd.log' : null;
+		review.error = errorMessage(e);
+		review.errorLogPath = errorLogPath(e);
 	} finally {
 		review.loading = false;
 	}
@@ -74,7 +73,7 @@ export async function acceptAllAboveThreshold(): Promise<BulkResult> {
 			result.accepted += 1;
 		} catch (e) {
 			result.failed += 1;
-			result.failure ??= e instanceof Error ? e.message : String(e);
+			result.failure ??= errorMessage(e);
 		}
 	}
 	return result;

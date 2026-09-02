@@ -11,6 +11,7 @@
 	} from '$lib/stores/review.svelte';
 	import { loadProjects, projects } from '$lib/stores/projects.svelte';
 	import { loadSettings, minConfidence } from '$lib/stores/settings.svelte';
+	import { errorMessage } from '$lib/errors';
 	import type { Memory } from '$lib/types';
 	import Badge from '$lib/ui/Badge.svelte';
 	import Button from '$lib/ui/Button.svelte';
@@ -38,11 +39,7 @@
 	}
 
 	function source(m: Memory): string {
-		return [m.source_agent, m.source_tool].filter(Boolean).join(' · ') || '—';
-	}
-
-	function message(e: unknown): string {
-		return e instanceof Error ? e.message : String(e);
+		return [m.source_agent, m.source_tool].filter(Boolean).join(' · ') || 'not set';
 	}
 
 	async function accept(m: Memory) {
@@ -51,7 +48,7 @@
 			push('success', 'Memory accepted');
 		} catch (e) {
 			// The daemon's `error` string is the whole explanation; show it verbatim.
-			push('error', message(e));
+			push('error', errorMessage(e));
 		}
 	}
 
@@ -60,7 +57,7 @@
 			await decide(m.id, 'rejected');
 			push('success', 'Memory rejected');
 		} catch (e) {
-			push('error', message(e));
+			push('error', errorMessage(e));
 		}
 	}
 
