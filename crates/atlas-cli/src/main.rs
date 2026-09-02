@@ -1,18 +1,16 @@
-mod daemon_ctl;
-mod remote;
-
+use std::path::PathBuf;
 use std::sync::Arc;
+use atlas_cli::{commands, daemon_ctl, remote::RemoteBackend};
+use atlas_core::backend::Backend;
 use atlas_core::{models::*, paths::AtlasPaths};
 use atlas_mcp::AtlasMcp;
 use clap::{Parser, Subcommand};
-use remote::RemoteBackend;
-use atlas_core::backend::Backend;
 
 #[derive(Parser)]
 #[command(name = "atlas", about = "Shared memory and agents for coding agents", version)]
 struct Cli {
     #[arg(long, global = true, env = "ATLAS_PORT", default_value_t = 7433)] port: u16,
-    #[arg(long, global = true, env = "ATLAS_HOME")] home: Option<std::path::PathBuf>,
+    #[arg(long, global = true, env = "ATLAS_HOME")] home: Option<PathBuf>,
     #[command(subcommand)] cmd: Cmd,
 }
 
@@ -26,10 +24,29 @@ enum Cmd {
     Remember { text: String, #[arg(long, default_value = "fact")] kind: String, #[arg(long = "tag")] tags: Vec<String>, #[arg(long)] project_id: Option<uuid::Uuid>, #[arg(long)] agent: Option<String> },
     /// Search memories
     Recall { query: String, #[arg(long, default_value_t = 10)] limit: usize, #[arg(long = "kind")] kinds: Vec<String>, #[arg(long = "tag")] tags: Vec<String>, #[arg(long)] project_id: Option<uuid::Uuid> },
+    /// Connect and inspect projects
+    Project { #[command(subcommand)] action: commands::project::ProjectCmd },
+    /// Manage the agents Atlas exports to Claude Code and Codex
+    Agent { #[command(subcommand)] action: commands::agent::AgentCmd },
+    /// Manage practices
+    Practice { #[command(subcommand)] action: commands::doc::DocCmd },
+    /// Manage workflows
+    Workflow { #[command(subcommand)] action: commands::doc::DocCmd },
+    /// Write agent files and managed instruction blocks into a project or the home directory
+    Sync(commands::sync::SyncArgs),
+    /// Write the whole library to DIR as JSONL and Markdown
+    Export { dir: PathBuf },
+    /// Read a directory written by `atlas export` back into Atlas
+    Import { dir: PathBuf },
 }
 
 #[derive(Subcommand)]
 enum DaemonCmd { Start, Stop, Status }
+
+/// Starts the daemon if it is not already up and returns a client for it.
+async fn backend(paths: &AtlasPaths, port: u16) -> anyhow::Result<RemoteBackend> {
+    Ok(RemoteBackend::new(daemon_ctl::ensure_daemon(paths, port).await?))
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -56,18 +73,23 @@ async fn main() -> anyhow::Result<()> {
             running.waiting().await?;
         }
         Cmd::Remember { text, kind, tags, project_id, agent } => {
-            let port = daemon_ctl::ensure_daemon(&paths, cli.port).await?;
             let scope = if project_id.is_some() { MemoryScope::Project } else { MemoryScope::Global };
             let m = NewMemory { scope, project_id, kind: kind.parse()?, text, tags, source_agent: agent, source_tool: Some("cli".into()), confidence: 1.0, status: MemoryStatus::Active };
-            let saved = RemoteBackend::new(port).remember(m, "cli").await?;
+            let saved = backend(&paths, cli.port).await?.remember(m, "cli").await?;
             println!("{}", serde_json::to_string_pretty(&saved)?);
         }
         Cmd::Recall { query, limit, kinds, tags, project_id } => {
-            let port = daemon_ctl::ensure_daemon(&paths, cli.port).await?;
             let mut ks = vec![]; for k in kinds { ks.push(k.parse::<MemoryKind>()?); }
-            let hits = RemoteBackend::new(port).recall(RecallQuery { query, limit, scope: None, project_id, kinds: ks, tags }).await?;
+            let hits = backend(&paths, cli.port).await?.recall(RecallQuery { query, limit, scope: None, project_id, kinds: ks, tags }).await?;
             for h in hits { println!("{:.2}  [{}] {}  {}", h.score, h.memory.kind, h.memory.text, if h.memory.tags.is_empty() { String::new() } else { format!("#{}", h.memory.tags.join(" #")) }); }
         }
+        Cmd::Project { action } => commands::project::run(action, &backend(&paths, cli.port).await?).await?,
+        Cmd::Agent { action } => commands::agent::run(action, &backend(&paths, cli.port).await?).await?,
+        Cmd::Practice { action } => commands::doc::run(DocKind::Practice, action, &backend(&paths, cli.port).await?).await?,
+        Cmd::Workflow { action } => commands::doc::run(DocKind::Workflow, action, &backend(&paths, cli.port).await?).await?,
+        Cmd::Sync(args) => commands::sync::run(args, &backend(&paths, cli.port).await?).await?,
+        Cmd::Export { dir } => commands::export::run(dir, &backend(&paths, cli.port).await?).await?,
+        Cmd::Import { dir } => commands::import::run(dir, &backend(&paths, cli.port).await?).await?,
     }
     Ok(())
 }
