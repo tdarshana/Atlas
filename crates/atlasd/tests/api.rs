@@ -7,11 +7,16 @@ impl Drop for Daemon { fn drop(&mut self) { let _ = self.child.kill(); let _ = s
 
 fn free_port() -> u16 { std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port() }
 
-async fn start() -> Daemon {
+async fn start() -> Daemon { start_with_env(&[]).await }
+
+/// A daemon with extra environment variables, for the settings the daemon reads at
+/// call time rather than from its arguments (`ATLAS_SYNC_HOME`).
+async fn start_with_env(env: &[(&str, &str)]) -> Daemon {
     let home = tempfile::tempdir().unwrap();
     let port = free_port();
     let child = Command::new(env!("CARGO_BIN_EXE_atlasd"))
         .args(["--port", &port.to_string(), "--home", home.path().to_str().unwrap(), "--no-embed"])
+        .envs(env.iter().copied())
         .stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap();
     let client = reqwest::Client::new();
     for _ in 0..100 {
@@ -260,6 +265,52 @@ async fn projects_agents_docs_and_sync() {
     assert_eq!(bad.status(), 400);
     let no_root = c.post(format!("{base}/sync")).json(&serde_json::json!({"global": false, "targets": targets, "check_only": true})).send().await.unwrap();
     assert_eq!(no_root.status(), 400, "a project sync needs a root");
+}
+
+/// A global sync must write into the home `ATLAS_SYNC_HOME` names, not the real one, and
+/// must write agent files only: home has no project to name in a managed block.
+#[tokio::test]
+async fn global_sync_honours_the_sync_home_override() {
+    let home = tempfile::tempdir().unwrap();
+    let d = start_with_env(&[("ATLAS_SYNC_HOME", home.path().to_str().unwrap())]).await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+
+    let saved = c.post(format!("{base}/agents")).json(&serde_json::json!({"name":"reviewer","description":"Reviews PRs","instructions":"Be strict.","tools":["Read"],"tags":[]})).send().await.unwrap();
+    assert_eq!(saved.status(), 201);
+
+    let targets = serde_json::json!(["claude", "codex", "agents_md", "claude_md"]);
+    let rep: serde_json::Value = c.post(format!("{base}/sync")).json(&serde_json::json!({"global": true, "targets": targets, "check_only": false})).send().await.unwrap().json().await.unwrap();
+    assert_eq!(rep["created"], 2, "{rep}");
+    assert_eq!(rep["skipped"], 2, "the two managed-block targets are reported, not dropped: {rep}");
+
+    assert!(home.path().join(".claude/agents/reviewer.md").exists(), "no Claude agent file under the override home");
+    assert!(home.path().join(".codex/agents/reviewer.toml").exists(), "no Codex agent file under the override home");
+    assert!(!home.path().join("AGENTS.md").exists(), "a global sync must not write AGENTS.md");
+    assert!(!home.path().join("CLAUDE.md").exists(), "a global sync must not write CLAUDE.md");
+}
+
+/// `POST /sync` writes files and has no authentication, so it must refuse a root that is
+/// not a git repository, the filesystem root included.
+#[tokio::test]
+async fn sync_refuses_a_root_that_is_not_a_repository() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+
+    let slash = c.post(format!("{base}/sync")).json(&serde_json::json!({"root": "/", "check_only": true})).send().await.unwrap();
+    assert_eq!(slash.status(), 400, "the filesystem root is not a project root");
+
+    let plain = tempfile::tempdir().unwrap();
+    let not_git = c.post(format!("{base}/sync")).json(&serde_json::json!({"root": plain.path(), "check_only": true})).send().await.unwrap();
+    assert_eq!(not_git.status(), 400, "a directory with no git repository is not a sync target");
+    let body: serde_json::Value = not_git.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("git repository"), "{body}");
+
+    let repo = tempfile::tempdir().unwrap();
+    fixture_repo(repo.path());
+    let ok = c.post(format!("{base}/sync")).json(&serde_json::json!({"root": repo.path(), "check_only": true})).send().await.unwrap();
+    assert_eq!(ok.status(), 200, "a real repository still syncs");
 }
 
 /// Memories captured for review land as `pending`: invisible to recall until a status

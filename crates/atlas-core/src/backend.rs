@@ -18,6 +18,38 @@ const MCP_COMMAND: &str = "atlas mcp";
 /// Targets a sync writes when the request names none.
 const DEFAULT_TARGETS: &[SyncKind] = &[SyncKind::Claude, SyncKind::Codex, SyncKind::AgentsMd, SyncKind::ClaudeMd];
 
+/// Why a global sync reports a managed-block target as skipped.
+const GLOBAL_SKIP: &str = "global sync writes agent files only";
+
+/// Where a global sync writes: the request's own `home`, then `ATLAS_SYNC_HOME`,
+/// then the daemon user's home directory. Read at call time, not at startup, so a
+/// caller (or a test) can redirect a write that would otherwise land in the real
+/// home with no way to override it.
+fn sync_home(req: &SyncRequest) -> Result<PathBuf> {
+    req.home
+        .clone()
+        .or_else(|| std::env::var_os("ATLAS_SYNC_HOME").map(PathBuf::from))
+        .or_else(|| directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf()))
+        .ok_or_else(|| AtlasError::Other("no home directory to sync into".into()))
+}
+
+/// Guards the root of a project sync. `POST /sync` writes files, so an
+/// unauthenticated caller must not be able to aim it at any directory the daemon
+/// can reach: the root has to be a git repository, and neither the filesystem
+/// root nor the home directory.
+fn check_project_root(root: &std::path::Path, home: Option<&std::path::Path>) -> Result<()> {
+    if root.parent().is_none() {
+        return Err(AtlasError::Invalid(format!("{} is not a project root", root.display())));
+    }
+    if home.is_some_and(|h| h.canonicalize().as_deref().unwrap_or(h) == root) {
+        return Err(AtlasError::Invalid("the home directory is not a project root; use a global sync".into()));
+    }
+    if git2::Repository::open(root).is_err() {
+        return Err(AtlasError::Invalid(format!("{} is not a git repository; sync only writes into a repository", root.display())));
+    }
+    Ok(())
+}
+
 #[async_trait::async_trait]
 pub trait Backend: Send + Sync + 'static {
     async fn status(&self) -> Result<StatusReport>;
@@ -155,25 +187,41 @@ impl Backend for LocalBackend {
     async fn sync(&self, req: SyncRequest) -> Result<SyncReport> {
         let agents = self.agents().list()?;
         let requested = if req.targets.is_empty() { DEFAULT_TARGETS.to_vec() } else { req.targets.clone() };
-        let (root, targets, block) = if req.global {
-            let home = directories::BaseDirs::new()
-                .map(|b| b.home_dir().to_path_buf())
-                .ok_or_else(|| AtlasError::Other("no home directory to sync into".into()))?;
+        let (root, targets, block, skipped) = if req.global {
+            let home = sync_home(&req)?;
             // Home is not a project, so only the agent exporters apply: splicing a managed
             // block into ~/AGENTS.md would name practices and a project that aren't there.
-            let targets = requested.into_iter().filter(|t| matches!(t, SyncKind::Claude | SyncKind::Codex)).collect();
+            // The dropped targets are still reported, so a caller who asked for one is told
+            // why nothing was written for it instead of reading a silent success.
+            let (targets, filtered): (Vec<SyncKind>, Vec<SyncKind>) =
+                requested.into_iter().partition(|t| matches!(t, SyncKind::Claude | SyncKind::Codex));
+            let skipped = filtered
+                .into_iter()
+                .map(|kind| SyncOp {
+                    path: home.join(if matches!(kind, SyncKind::AgentsMd) { "AGENTS.md" } else { "CLAUDE.md" }),
+                    kind,
+                    content: String::new(),
+                    action: SyncAction::Skip(GLOBAL_SKIP.into()),
+                })
+                .collect();
             let block = BlockContext { mcp_command: MCP_COMMAND.into(), agents: agents.clone(), practices: vec![], project_name: None };
-            (home, targets, block)
+            (home, targets, block, skipped)
         } else {
-            let root = req.root.clone().ok_or_else(|| AtlasError::Invalid("sync requires a root unless global is set".into()))?;
+            let requested_root = req.root.clone().ok_or_else(|| AtlasError::Invalid("sync requires a root unless global is set".into()))?;
+            // Resolve and vet the root before anything is written or recorded: the route is
+            // unauthenticated, so an arbitrary directory must not become a project row.
+            let detected = detect_root(&requested_root)?;
+            check_project_root(&detected.root, sync_home(&req).ok().as_deref())?;
             // Connect rather than look up, so a sync into a fresh checkout still names the
-            // project in the block instead of silently writing an anonymous one.
-            let project = self.connect_project(root, "sync").await?;
+            // project in the block instead of silently writing an anonymous one; the root
+            // is either already known to `ProjectRepo` or becomes known right here.
+            let project = self.connect_project(detected.root, "sync").await?;
             let practices = self.docs(DocKind::Practice).list(Some(project.id))?;
             let block = BlockContext { mcp_command: MCP_COMMAND.into(), agents: agents.clone(), practices, project_name: Some(project.name.clone()) };
-            (PathBuf::from(project.root_path), requested, block)
+            (PathBuf::from(project.root_path), requested, block, vec![])
         };
-        let ops = sync::plan_sync(&SyncInputs { root: &root, agents: &agents, block, targets: &targets })?;
+        let mut ops = sync::plan_sync(&SyncInputs { root: &root, agents: &agents, block, targets: &targets })?;
+        ops.extend(skipped);
         if req.check_only { Ok(sync::summarize(&ops)) } else { sync::apply(&ops) }
     }
 }
