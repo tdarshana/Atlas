@@ -293,6 +293,34 @@ async fn global_sync_honours_the_sync_home_override() {
     assert!(home.path().join(".codex/agents/reviewer.toml").exists(), "no Codex agent file under the override home");
     assert!(!home.path().join("AGENTS.md").exists(), "a global sync must not write AGENTS.md");
     assert!(!home.path().join("CLAUDE.md").exists(), "a global sync must not write CLAUDE.md");
+
+    // `SyncRequest` has no `home` field: only `ATLAS_SYNC_HOME`, set on the daemon
+    // process, can redirect a global sync. A `home` key in the request body is an
+    // unknown field that serde silently ignores, so it must not steer the write.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let rep2: serde_json::Value = c.post(format!("{base}/sync")).json(&serde_json::json!({
+        "global": true, "home": elsewhere.path(), "targets": targets, "check_only": false,
+    })).send().await.unwrap().json().await.unwrap();
+    assert_eq!(rep2["created"], 0, "{rep2}");
+    assert_eq!(rep2["unchanged"], 2, "a second sync still lands in the ATLAS_SYNC_HOME override: {rep2}");
+    assert!(!elsewhere.path().join(".claude/agents/reviewer.md").exists(), "a `home` field in the request body must not redirect the sync");
+    assert!(!elsewhere.path().join(".codex/agents/reviewer.toml").exists(), "a `home` field in the request body must not redirect the sync");
+}
+
+/// A project sync must refuse the `ATLAS_SYNC_HOME` override too, not just the real home
+/// directory, or a caller could set a project root there and have it treated as a project.
+#[tokio::test]
+async fn project_sync_refuses_the_sync_home_override_too() {
+    let sync_home = tempfile::tempdir().unwrap();
+    fixture_repo(sync_home.path());
+    let d = start_with_env(&[("ATLAS_SYNC_HOME", sync_home.path().to_str().unwrap())]).await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+
+    let refused = c.post(format!("{base}/sync")).json(&serde_json::json!({"root": sync_home.path(), "check_only": true})).send().await.unwrap();
+    assert_eq!(refused.status(), 400, "the ATLAS_SYNC_HOME override must not double as a project root");
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("not a project root"), "{body}");
 }
 
 /// `POST /sync` writes files and has no authentication, so it must refuse a root that is

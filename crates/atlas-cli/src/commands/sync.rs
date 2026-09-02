@@ -11,9 +11,6 @@ pub struct SyncArgs {
     /// Sync the home directory's agent files instead of a project
     #[arg(long)]
     pub global: bool,
-    /// With --global, write into PATH instead of the daemon user's home directory
-    #[arg(long, requires = "global")]
-    pub home: Option<PathBuf>,
     /// Report what would change without writing; exits 1 if anything would change
     #[arg(long)]
     pub check: bool,
@@ -49,7 +46,6 @@ pub async fn run(args: SyncArgs, backend: &RemoteBackend) -> anyhow::Result<()> 
     let request = SyncRequest {
         root: if args.global { None } else { Some(super::abs_path(args.project)?) },
         global: args.global,
-        home: args.home.map(|h| super::abs_path(Some(h))).transpose()?,
         targets: args.targets.iter().map(|t| t.kind()).collect(),
         check_only: args.check,
     };

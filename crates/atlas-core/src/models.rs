@@ -180,13 +180,14 @@ pub struct ProjectContext {
 }
 
 /// One sync request. `root` is required unless `global` is set, in which case
-/// the sync targets a home directory instead of a project: `home` when given,
-/// else `ATLAS_SYNC_HOME`, else the daemon user's own home.
+/// the sync targets a home directory instead of a project: `ATLAS_SYNC_HOME`
+/// when set on the daemon process, else the daemon user's own home. There is
+/// no client-side override; `POST /sync` is unauthenticated, so the request
+/// itself must not be able to name an arbitrary write target.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct SyncRequest {
     #[serde(default)] pub root: Option<PathBuf>,
     #[serde(default)] pub global: bool,
-    #[serde(default)] pub home: Option<PathBuf>,
     #[serde(default)] pub targets: Vec<SyncKind>,
     #[serde(default)] pub check_only: bool,
 }

@@ -21,14 +21,15 @@ const DEFAULT_TARGETS: &[SyncKind] = &[SyncKind::Claude, SyncKind::Codex, SyncKi
 /// Why a global sync reports a managed-block target as skipped.
 const GLOBAL_SKIP: &str = "global sync writes agent files only";
 
-/// Where a global sync writes: the request's own `home`, then `ATLAS_SYNC_HOME`,
-/// then the daemon user's home directory. Read at call time, not at startup, so a
-/// caller (or a test) can redirect a write that would otherwise land in the real
-/// home with no way to override it.
-fn sync_home(req: &SyncRequest) -> Result<PathBuf> {
-    req.home
-        .clone()
-        .or_else(|| std::env::var_os("ATLAS_SYNC_HOME").map(PathBuf::from))
+/// Where a global sync writes: `ATLAS_SYNC_HOME` when set, else the daemon
+/// user's home directory. Read at call time, not at startup, so a test (or a
+/// headless setup with no real home) can redirect the write. This is a
+/// daemon-side env var only; the request carries no override, since `POST
+/// /sync` is unauthenticated and a client-supplied path would let any local
+/// caller write into an arbitrary directory.
+fn sync_home() -> Result<PathBuf> {
+    std::env::var_os("ATLAS_SYNC_HOME")
+        .map(PathBuf::from)
         .or_else(|| directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf()))
         .ok_or_else(|| AtlasError::Other("no home directory to sync into".into()))
 }
@@ -36,12 +37,16 @@ fn sync_home(req: &SyncRequest) -> Result<PathBuf> {
 /// Guards the root of a project sync. `POST /sync` writes files, so an
 /// unauthenticated caller must not be able to aim it at any directory the daemon
 /// can reach: the root has to be a git repository, and neither the filesystem
-/// root nor the home directory.
-fn check_project_root(root: &std::path::Path, home: Option<&std::path::Path>) -> Result<()> {
+/// root, the real home directory, nor the `ATLAS_SYNC_HOME` override (when set).
+fn check_project_root(root: &std::path::Path) -> Result<()> {
     if root.parent().is_none() {
         return Err(AtlasError::Invalid(format!("{} is not a project root", root.display())));
     }
-    if home.is_some_and(|h| h.canonicalize().as_deref().unwrap_or(h) == root) {
+    let guarded_homes = [
+        directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf()),
+        std::env::var_os("ATLAS_SYNC_HOME").map(PathBuf::from),
+    ];
+    if guarded_homes.into_iter().flatten().any(|h| h.canonicalize().as_deref().unwrap_or(&h) == root) {
         return Err(AtlasError::Invalid("the home directory is not a project root; use a global sync".into()));
     }
     if git2::Repository::open(root).is_err() {
@@ -193,7 +198,7 @@ impl Backend for LocalBackend {
         let agents = self.agents().list()?;
         let requested = if req.targets.is_empty() { DEFAULT_TARGETS.to_vec() } else { req.targets.clone() };
         let (root, targets, block, skipped) = if req.global {
-            let home = sync_home(&req)?;
+            let home = sync_home()?;
             // Home is not a project, so only the agent exporters apply: splicing a managed
             // block into ~/AGENTS.md would name practices and a project that aren't there.
             // The dropped targets are still reported, so a caller who asked for one is told
@@ -216,7 +221,7 @@ impl Backend for LocalBackend {
             // Resolve and vet the root before anything is written or recorded: the route is
             // unauthenticated, so an arbitrary directory must not become a project row.
             let detected = detect_root(&requested_root)?;
-            check_project_root(&detected.root, sync_home(&req).ok().as_deref())?;
+            check_project_root(&detected.root)?;
             // Connect rather than look up, so a sync into a fresh checkout still names the
             // project in the block instead of silently writing an anonymous one; the root
             // is either already known to `ProjectRepo` or becomes known right here.
