@@ -45,4 +45,10 @@ Once synced, saved agents show up as Claude Code and Codex subagents: Claude Cod
 
 `atlas project`, `atlas agent`, `atlas practice` and `atlas workflow` manage the corresponding library with `list`, `show`, `save` and `delete` subcommands (`project` has `connect`, `list` and `show`). `atlas export DIR` writes the whole library to `DIR` as JSONL and Markdown; `atlas import DIR` reads it back. Export empties `DIR/agents`, `DIR/practices` and `DIR/workflows` first, so a deleted document does not come back on the next import, and refuses when one of them holds a file the export did not write unless you pass `--force`. Import seeds a destination rather than restoring one: it creates no projects, and ids and timestamps are new. Full flags in `docs/usage.md`.
 
+## TUI
+
+    atlas tui
+
+A terminal UI over the daemon, read-mostly: browse memories, projects, agents, practices and workflows, and review pending memories. Honours `--port` and `--home` like every other command, and starts the daemon first if it is not already running. Needs a real terminal: it exits with an error if stdout is not a TTY. Editing long text such as agent instructions or a practice's body is done through the CLI or the desktop app, not the TUI. Tabs and key legend are in `docs/usage.md`.
+
 Data lives in `~/.atlas/atlas.duckdb`. Set `ATLAS_HOME` to relocate it. See `docs/usage.md` and `docs/superpowers/specs/2026-09-02-atlas-design.md`.
