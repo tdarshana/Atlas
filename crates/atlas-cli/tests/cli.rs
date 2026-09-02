@@ -1,26 +1,18 @@
 mod common;
 
-use std::process::Command;
-fn atlas() -> Command { Command::new(env!("CARGO_BIN_EXE_atlas")) }
+use common::TestDaemon;
 
 #[test]
 fn remember_and_recall_via_cli_starting_daemon() {
-    let home = tempfile::tempdir().unwrap();
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    let atlasd_dir = std::path::Path::new(env!("CARGO_BIN_EXE_atlas")).parent().unwrap().to_path_buf();
-    let env = |c: &mut Command| { c.env("ATLAS_HOME", home.path()).env("ATLAS_PORT", port.to_string()).env("ATLAS_NO_EMBED", "1").env("PATH", format!("{}:{}", atlasd_dir.display(), std::env::var("PATH").unwrap_or_default())); };
-    let mut c = atlas(); env(&mut c);
-    let out = c.args(["remember", "the deploy target is fly.io", "--kind", "decision", "--tag", "infra"]).output().unwrap();
+    let daemon = TestDaemon::new();
+    let out = daemon.cmd().args(["remember", "the deploy target is fly.io", "--kind", "decision", "--tag", "infra"]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let mut c = atlas(); env(&mut c);
-    let out = c.args(["recall", "where do we deploy"]).output().unwrap();
+    let out = daemon.cmd().args(["recall", "where do we deploy"]).output().unwrap();
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("fly.io"), "{s}");
-    let mut c = atlas(); env(&mut c);
-    let out = c.args(["daemon", "status"]).output().unwrap();
+    let out = daemon.cmd().args(["daemon", "status"]).output().unwrap();
     assert!(String::from_utf8_lossy(&out.stdout).contains("memories_active"));
-    let mut c = atlas(); env(&mut c);
-    assert!(c.args(["daemon", "stop"]).status().unwrap().success());
+    assert!(daemon.cmd().args(["daemon", "stop"]).status().unwrap().success());
 }
 
 /// The whole project workflow from the command line: connect a repository, save an
@@ -28,24 +20,17 @@ fn remember_and_recall_via_cli_starting_daemon() {
 /// nothing to do, and export and re-import the library.
 #[test]
 fn project_agent_sync_export_and_import_round_trip() {
-    let home = tempfile::tempdir().unwrap();
+    let daemon = TestDaemon::new();
     let repo = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     common::fixture_repo(repo.path());
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    let atlasd_dir = std::path::Path::new(env!("CARGO_BIN_EXE_atlas")).parent().unwrap().to_path_buf();
-    let env = |c: &mut Command| { c.env("ATLAS_HOME", home.path()).env("ATLAS_PORT", port.to_string()).env("ATLAS_NO_EMBED", "1").env("PATH", format!("{}:{}", atlasd_dir.display(), std::env::var("PATH").unwrap_or_default())); };
     let run = |args: &[&str]| {
-        let mut c = atlas();
-        env(&mut c);
-        let out = c.args(args).output().unwrap();
+        let out = daemon.cmd().args(args).output().unwrap();
         (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
     };
     let run_stdin = |args: &[&str], input: &str| {
         use std::io::Write;
-        let mut c = atlas();
-        env(&mut c);
-        let mut child = c.args(args).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+        let mut child = daemon.cmd().args(args).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
         child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
         let out = child.wait_with_output().unwrap();
         (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
@@ -146,9 +131,6 @@ fn project_agent_sync_export_and_import_round_trip() {
     assert!(!out.contains("linter"), "import should not resurrect an agent the export pruned: {out}");
     let (_, out, _) = run(&["recall", "deploy target"]);
     assert_eq!(out.lines().filter(|l| l.contains("fly.io")).count(), 1, "import should not duplicate an existing memory: {out}");
-
-    let mut c = atlas(); env(&mut c);
-    assert!(c.args(["daemon", "stop"]).status().unwrap().success());
 }
 
 /// `atlas mcp` is how editors reach Atlas, so the stdio shim must complete an MCP
@@ -159,13 +141,8 @@ fn mcp_stdio_shim_lists_tools() {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    let home = tempfile::tempdir().unwrap();
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    let atlasd_dir = std::path::Path::new(env!("CARGO_BIN_EXE_atlas")).parent().unwrap().to_path_buf();
-    let env = |c: &mut Command| { c.env("ATLAS_HOME", home.path()).env("ATLAS_PORT", port.to_string()).env("ATLAS_NO_EMBED", "1").env("PATH", format!("{}:{}", atlasd_dir.display(), std::env::var("PATH").unwrap_or_default())); };
-
-    let mut c = atlas(); env(&mut c);
-    let mut child = c.arg("mcp")
+    let daemon = TestDaemon::new();
+    let mut child = daemon.cmd().arg("mcp")
         .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null())
         .spawn().unwrap();
 
@@ -195,7 +172,4 @@ fn mcp_stdio_shim_lists_tools() {
     let _ = child.wait();
     let listing = listing.expect("atlas mcp produced no tools/list response within 30s");
     for t in ["remember", "recall", "forget", "status"] { assert!(listing.contains(&format!("\"name\":\"{t}\"")), "tools/list missing {t}: {listing}"); }
-
-    let mut c = atlas(); env(&mut c);
-    assert!(c.args(["daemon", "stop"]).status().unwrap().success());
 }

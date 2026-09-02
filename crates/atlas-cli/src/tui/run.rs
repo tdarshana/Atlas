@@ -8,6 +8,7 @@ use super::data::perform;
 use super::state::{initial_effects, reduce, Action, App, Effect};
 use super::ui::draw;
 use crate::remote::RemoteBackend;
+use anyhow::Context;
 use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
@@ -31,7 +32,16 @@ pub async fn run(port: u16) -> anyhow::Result<()> {
         previous(info);
     }));
 
-    let mut terminal = ratatui::init();
+    // `try_init`, not `init`: piping the TUI anywhere should be one clear error
+    // line and exit 1, not a panic and a backtrace note. It leaves behind
+    // whatever it did manage to change, so undo that before returning.
+    let mut terminal = match ratatui::try_init() {
+        Ok(terminal) => terminal,
+        Err(e) => {
+            ratatui::restore();
+            return Err(e).context("atlas tui needs an interactive terminal");
+        }
+    };
     // Restore on the error path too, so a failed draw does not cost the shell.
     let result = event_loop(&mut terminal, backend, cwd).await;
     ratatui::restore();
