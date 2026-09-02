@@ -476,7 +476,10 @@ async fn transcript_hooks_follow_the_extraction_setting() {
     let d = start_with_env(&[("ATLAS_SYNC_HOME", home.path().to_str().unwrap())]).await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
     let c = reqwest::Client::new();
-    let claude_hook = repo.path().join(".claude/settings.json");
+    // A project hook is per-machine, so it goes in the settings file Claude Code keeps
+    // out of git, not the shared one a `git commit -a` would ship to the whole team.
+    let claude_hook = repo.path().join(".claude/settings.local.json");
+    let shared_settings = repo.path().join(".claude/settings.json");
     let codex_hook = home.path().join(".codex/config.toml");
 
     let sync = || c.post(format!("{base}/sync")).json(&serde_json::json!({"root": repo.path()})).send();
@@ -490,6 +493,7 @@ async fn transcript_hooks_follow_the_extraction_setting() {
     let rep: serde_json::Value = sync().await.unwrap().json().await.unwrap();
     assert!(claude_hook.exists(), "enabling extraction should install the Stop hook: {rep}");
     assert!(codex_hook.exists(), "enabling extraction should install the Codex notify: {rep}");
+    assert!(!shared_settings.exists(), "the hook must not land in the repository's shared, committed settings file: {rep}");
     let settings: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&claude_hook).unwrap()).unwrap();
     assert_eq!(settings["hooks"]["Stop"][0]["hooks"][0]["command"], "atlas ingest --tool claude-code --hook-stdin");
     assert!(std::fs::read_to_string(&codex_hook).unwrap().contains(r#"notify = ["atlas", "ingest", "--tool", "codex", "--hook-arg"]"#));
@@ -582,13 +586,21 @@ const STUB_CANDIDATES: &str = r#"[{"text":"the project uses bun","kind":"fact","
 /// extraction runs end to end without reaching the network. Returns its base url,
 /// `/v1`, which is what `extraction.base_url` is set to. Answers every prompt with
 /// `reply`, whatever it was.
-async fn stub_llm_with_reply(reply: &str) -> String {
+async fn stub_llm_with_reply(reply: &str) -> String { stub_llm_with_delay(reply, Duration::ZERO).await }
+
+/// The same stub, holding each request open for `delay` first. The worker drains the
+/// queue one job at a time, so a slow first job is what keeps a second one queued long
+/// enough for a test to change the daemon's settings underneath it.
+async fn stub_llm_with_delay(reply: &str, delay: Duration) -> String {
     let content = reply.to_string();
     let app = axum::Router::new().route(
         "/v1/chat/completions",
         axum::routing::post(move || {
             let content = content.clone();
-            async move { axum::Json(serde_json::json!({"choices": [{"message": {"content": content}}]})) }
+            async move {
+                tokio::time::sleep(delay).await;
+                axum::Json(serde_json::json!({"choices": [{"message": {"content": content}}]}))
+            }
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -636,6 +648,15 @@ async fn ingest_extracts_candidates_and_skips_duplicates_on_replay() {
     assert_eq!(job["status"], "done", "{job}");
     assert_eq!(job["result"]["inserted"], 2, "{job}");
     assert_eq!(job["result"]["skipped_duplicates"], 0, "{job}");
+
+    // The route does not hand the transcript back: `jobs` rows are never pruned, so
+    // re-serving the payload would leave a second readable copy of the conversation
+    // behind every job id. Its length stands in for it, and the rest of the payload,
+    // which is what a caller follows a job by, is still there.
+    let text = transcript["text"].as_str().unwrap();
+    assert!(job["payload"]["text"].is_null(), "the transcript must not be served back: {job}");
+    assert_eq!(job["payload"]["chars"], text.chars().count(), "{job}");
+    assert_eq!(job["payload"]["source_tool"], "test", "{job}");
 
     // Neither candidate clears the default auto-accept threshold of 1.0, so both wait
     // for review rather than becoming recallable straight away.
@@ -698,18 +719,59 @@ async fn ingest_is_refused_while_extraction_is_disabled() {
 }
 
 /// `POST /ingest` refuses a transcript over the 1,000,000 character cap with 413
-/// before it ever reaches the queue, so no oversized body can spend a model call.
+/// before it ever reaches the queue, so no oversized body can spend a model call. The
+/// cap now lives in the backend, which is what MCP reaches too, and the route maps
+/// `AtlasError::TooLarge` onto the status.
 #[tokio::test]
 async fn ingest_refuses_a_transcript_over_the_size_cap() {
+    let stub = stub_llm().await;
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
     let c = reqwest::Client::new();
+    let put = c.put(format!("{base}/settings")).json(&serde_json::json!({
+        "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub",
+    })).send().await.unwrap();
+    assert_eq!(put.status(), 200);
 
     let text = "x".repeat(1_000_001);
     let big = c.post(format!("{base}/ingest")).json(&serde_json::json!({"text": text, "source_tool": "test"})).send().await.unwrap();
     assert_eq!(big.status(), 413);
     let body: serde_json::Value = big.json().await.unwrap();
     assert_eq!(body["error"], "transcript too large", "{body}");
+}
+
+/// A job queued while extraction was on, and run after it was switched off, ends
+/// `failed` with the disabled message. The worker re-reads the settings at the top of
+/// every job, so the alternative would be a job stuck `queued` for ever behind a 202
+/// its caller is still polling.
+#[tokio::test]
+async fn a_job_queued_before_extraction_was_disabled_fails_rather_than_hanging() {
+    // The first job holds the worker on the model call for two seconds, which is what
+    // keeps the second one queued while the settings change lands.
+    let stub = stub_llm_with_delay(STUB_CANDIDATES, Duration::from_secs(2)).await;
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    let put = c.put(format!("{base}/settings")).json(&serde_json::json!({
+        "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub",
+    })).send().await.unwrap();
+    assert_eq!(put.status(), 200);
+
+    let queue = |text: &str| {
+        let body = serde_json::json!({"text": text, "source_tool": "test"});
+        c.post(format!("{base}/ingest")).json(&body).send()
+    };
+    let slow: serde_json::Value = queue("user: the first transcript").await.unwrap().json().await.unwrap();
+    let waiting: serde_json::Value = queue("user: the second transcript").await.unwrap().json().await.unwrap();
+    let waiting_id = waiting["job_id"].as_str().unwrap_or_else(|| panic!("no job_id: {waiting}")).to_string();
+    assert!(slow["job_id"].is_string(), "{slow}");
+
+    let off = c.put(format!("{base}/settings")).json(&serde_json::json!({"extraction.enabled": false})).send().await.unwrap();
+    assert_eq!(off.status(), 200);
+
+    let job = wait_for_job(&c, &base, &waiting_id).await;
+    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["error"], "extraction is disabled", "{job}");
 }
 
 /// `POST /extraction/test` gates on the same settings `POST /ingest` does (409 while
@@ -747,6 +809,34 @@ async fn extraction_test_endpoint_checks_connectivity_and_reports_model_errors()
     let body: serde_json::Value = failed.json().await.unwrap();
     assert_eq!(body["ok"], false, "{body}");
     assert!(body["error"].as_str().is_some(), "{body}");
+}
+
+/// The daemon has no authentication of its own, so any process that can reach the
+/// loopback port could otherwise repoint `extraction.base_url` and then have the
+/// daemon send the stored key to a host of its choosing. Moving the endpoint without
+/// supplying a new key drops the stored one, and the PUT says so.
+#[tokio::test]
+async fn changing_the_base_url_clears_the_stored_key() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    let put = |body: serde_json::Value| c.put(format!("{base}/settings")).json(&body).send();
+
+    let configured: serde_json::Value = put(serde_json::json!({
+        "extraction.enabled": true, "extraction.base_url": "https://api.deepseek.com", "extraction.model": "m", "extraction.api_key": "sk-real",
+    })).await.unwrap().json().await.unwrap();
+    assert_eq!(configured["extraction.api_key"], "***", "{configured}");
+    assert!(configured["extraction.api_key_cleared"].is_null(), "a key entered with its endpoint is kept: {configured}");
+
+    // The same endpoint again, trailing slash and all, is not a move.
+    let same: serde_json::Value = put(serde_json::json!({"extraction.base_url": "https://api.deepseek.com/"})).await.unwrap().json().await.unwrap();
+    assert!(same["extraction.api_key_cleared"].is_null(), "{same}");
+    assert_eq!(same["extraction.api_key"], "***", "{same}");
+
+    // Somewhere new, with no key of its own: the old key does not follow it there.
+    let moved: serde_json::Value = put(serde_json::json!({"extraction.base_url": "http://attacker.example/v1"})).await.unwrap().json().await.unwrap();
+    assert_eq!(moved["extraction.api_key_cleared"], true, "{moved}");
+    assert_eq!(moved["extraction.api_key"], "", "the masked key is gone because there is no key: {moved}");
 }
 
 /// `POST /projects/{id}/refresh` enqueues a `project_summary` job when extraction is

@@ -13,6 +13,7 @@ impl IntoResponse for ApiError {
             AtlasError::NotFound(_) => StatusCode::NOT_FOUND,
             AtlasError::Invalid(_) => StatusCode::BAD_REQUEST,
             AtlasError::Conflict(_) => StatusCode::CONFLICT,
+            AtlasError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (code, Json(serde_json::json!({"error": self.0.to_string()}))).into_response()
@@ -137,10 +138,6 @@ pub fn cors_layer() -> CorsLayer {
 #[derive(Deserialize)] pub struct ProjectQ { pub project_id: Option<Uuid> }
 #[derive(Deserialize)] pub struct ListMemoriesQ { pub status: Option<String>, pub project_id: Option<Uuid> }
 #[derive(Deserialize)] pub struct IngestBody { pub text: String, pub source_tool: String, #[serde(default)] pub project_root: Option<std::path::PathBuf> }
-
-/// Characters a transcript may carry. `POST /ingest` is unauthenticated, so this
-/// bounds how much any one caller can push into a single model call.
-const MAX_INGEST_CHARS: usize = 1_000_000;
 
 fn actor(q: &ActorQ) -> &str { q.actor.as_deref().unwrap_or("api") }
 
@@ -272,25 +269,31 @@ async fn set_settings(State(s): State<AppState>, ApiQuery(q): ApiQuery<ActorQ>, 
 // Ingest is asynchronous: the model call can take a minute, so the request only
 // queues the work (202) and the caller follows the job.
 
+/// The blank check and the character cap live in `LocalBackend::ingest_transcript`,
+/// not here: the MCP `ingest_transcript` tool reaches the same backend and is just as
+/// unauthenticated, so a guard in this handler would only cover half the doors. This
+/// route keeps the status mapping, where 413 comes from `AtlasError::TooLarge`.
 async fn ingest(State(s): State<AppState>, ApiJson(b): ApiJson<IngestBody>) -> Response {
-    // A blank transcript would queue a job whose only effect is to spend a model
-    // call on nothing, so refuse it here rather than at the far end.
-    if b.text.trim().is_empty() {
-        return ApiError(AtlasError::Invalid("ingest text is empty".into())).into_response();
-    }
-    // A caller could otherwise push an unbounded body into a single model call;
-    // 413 rather than 400, since the request is well formed, just too large.
-    if b.text.chars().count() > MAX_INGEST_CHARS {
-        return (StatusCode::PAYLOAD_TOO_LARGE, Json(serde_json::json!({"error": "transcript too large"}))).into_response();
-    }
     match s.backend.ingest_transcript(b.text, b.source_tool, b.project_root).await {
         Ok(job_id) => (StatusCode::ACCEPTED, Json(serde_json::json!({"job_id": job_id}))).into_response(),
         Err(e) => ApiError(e).into_response(),
     }
 }
 
+/// The `jobs` row keeps the transcript so the worker can read it, but the route does
+/// not hand it back: an ingest payload is up to a million characters of somebody's
+/// conversation, the rows are never pruned, and re-serving them turns every job id
+/// into a second copy for anything on loopback to read. The payload's other fields
+/// (`source_tool`, `project_root`) are what a caller actually follows a job by, so
+/// they stay, and `text` becomes its own character count.
 async fn get_job(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Result<Json<Job>, ApiError> {
-    s.backend.get_job(id).await?.map(Json).ok_or_else(|| ApiError(AtlasError::NotFound(format!("job {id}"))))
+    let mut job = s.backend.get_job(id).await?.ok_or_else(|| ApiError(AtlasError::NotFound(format!("job {id}"))))?;
+    if let Some(payload) = job.payload.as_object_mut() {
+        if let Some(chars) = payload.remove("text").as_ref().and_then(|t| t.as_str()).map(|t| t.chars().count()) {
+            payload.insert("chars".into(), serde_json::json!(chars));
+        }
+    }
+    Ok(Json(job))
 }
 
 /// A connectivity check against the configured model. Unlike other extraction

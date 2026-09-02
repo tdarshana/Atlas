@@ -110,7 +110,15 @@ pub struct AtlasMcp<B: Backend> {
 }
 
 fn err(e: atlas_core::AtlasError) -> McpError {
-    match e { atlas_core::AtlasError::NotFound(m) => McpError::invalid_params(m, None), atlas_core::AtlasError::Invalid(m) => McpError::invalid_params(m, None), other => McpError::internal_error(other.to_string(), None) }
+    match e {
+        atlas_core::AtlasError::NotFound(m) => McpError::invalid_params(m, None),
+        atlas_core::AtlasError::Invalid(m) => McpError::invalid_params(m, None),
+        // An argument past a size cap is the caller's to fix, and rmcp has no error
+        // kind for "too large", so it reads as invalid params like any other argument
+        // the server will not take.
+        atlas_core::AtlasError::TooLarge(m) => McpError::invalid_params(m, None),
+        other => McpError::internal_error(other.to_string(), None),
+    }
 }
 
 /// Like [`err`], but for lookups addressed by a resource URI: a name or id that is not
@@ -421,6 +429,48 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
         assert!(err.message.contains("extraction is disabled"), "{err:?}");
+    }
+
+    /// The blank check and the size cap live in the backend, not in the daemon's HTTP
+    /// handler, so this tool inherits them: MCP is as unauthenticated as `POST /ingest`
+    /// and reaches the same queue. Neither refusal spends a model call, and neither is
+    /// an internal error: they are arguments the server will not take.
+    #[tokio::test]
+    async fn ingest_transcript_refuses_a_blank_or_oversized_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(dir.path()), None, false).unwrap());
+        // Configured, so the enable gate is open and the transcript itself is what is
+        // being judged. The endpoint is never called: both refusals happen before the
+        // job is queued.
+        backend
+            .set_settings(
+                serde_json::Map::from_iter([
+                    ("extraction.enabled".to_string(), serde_json::Value::Bool(true)),
+                    ("extraction.base_url".to_string(), serde_json::Value::String("http://127.0.0.1:1/v1".into())),
+                    ("extraction.model".to_string(), serde_json::Value::String("stub".into())),
+                ]),
+                "t",
+            )
+            .await
+            .unwrap();
+        let s = AtlasMcp::new(backend);
+        let ingest = |text: String| {
+            let s = &s;
+            async move { s.ingest_transcript(Parameters(IngestTranscriptArgs { text, source_tool: None, project_root: None })).await }
+        };
+
+        for blank in ["", "   \n\t "] {
+            let err = ingest(blank.to_string()).await.unwrap_err();
+            assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS, "{err:?}");
+            assert!(err.message.contains("empty"), "{err:?}");
+        }
+
+        let err = ingest("x".repeat(1_000_001)).await.unwrap_err();
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS, "{err:?}");
+        assert!(err.message.contains("too large"), "{err:?}");
+
+        // A transcript at the cap is fine, so the boundary is not off by one.
+        ingest("x".repeat(1_000_000)).await.unwrap();
     }
 
     /// A server started in a project scopes memories to it without being told, and does

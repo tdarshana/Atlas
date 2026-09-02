@@ -33,7 +33,13 @@ impl RemoteBackend {
     async fn error(r: reqwest::Response) -> AtlasError {
         let status = r.status();
         let msg = r.json::<serde_json::Value>().await.ok().and_then(|v| v["error"].as_str().map(String::from)).unwrap_or_else(|| status.to_string());
-        match status.as_u16() { 404 => AtlasError::NotFound(msg), 400 => AtlasError::Invalid(msg), 409 => AtlasError::Conflict(msg), _ => AtlasError::Other(msg) }
+        match status.as_u16() {
+            404 => AtlasError::NotFound(msg),
+            400 => AtlasError::Invalid(msg),
+            409 => AtlasError::Conflict(msg),
+            413 => AtlasError::TooLarge(msg),
+            _ => AtlasError::Other(msg),
+        }
     }
     fn net(e: reqwest::Error) -> AtlasError { AtlasError::Other(format!("daemon unreachable: {e}")) }
 }
