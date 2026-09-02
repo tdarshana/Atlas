@@ -50,7 +50,7 @@ fn message_bar(app: &App) -> Paragraph<'static> {
         ("forget the selected memory? y confirms, any other key cancels".into(), Style::new().fg(Color::Yellow))
     } else if let Some(message) = &app.message {
         (message.clone(), Style::new().fg(Color::Red))
-    } else if app.loading {
+    } else if app.is_loading() {
         ("loading…".to_string(), dim())
     } else {
         (String::new(), Style::new())
@@ -60,12 +60,12 @@ fn message_bar(app: &App) -> Paragraph<'static> {
 
 fn help(tab: Tab) -> &'static str {
     match tab {
-        Tab::Memories => "Tab switch  j/k move  / search  f forget  r refresh  q quit",
-        Tab::Projects => "Tab switch  j/k move  Enter open  c connect  r refresh  q quit",
-        Tab::Agents => "Tab switch  j/k move  s sync  r refresh  q quit",
-        Tab::Practices | Tab::Workflows => "Tab switch  j/k move  r refresh  q quit",
-        Tab::Review => "Tab switch  j/k move  a accept  x reject  r refresh  q quit",
-        Tab::Status => "Tab switch  r refresh  q quit",
+        Tab::Memories => "Tab switch  j/k move  / search  f forget  r refresh  q/Ctrl+C quit",
+        Tab::Projects => "Tab switch  j/k move  Enter open  c connect  r refresh  q/Ctrl+C quit",
+        Tab::Agents => "Tab switch  j/k move  s sync  r refresh  q/Ctrl+C quit",
+        Tab::Practices | Tab::Workflows => "Tab switch  j/k move  r refresh  q/Ctrl+C quit",
+        Tab::Review => "Tab switch  j/k move  a accept  x reject  r refresh  q/Ctrl+C quit",
+        Tab::Status => "Tab switch  r refresh  q/Ctrl+C quit",
     }
 }
 
@@ -73,7 +73,10 @@ fn memories(f: &mut Frame, app: &App, area: Rect) {
     let area = if app.focus == Focus::Search { search_box(f, app, area) } else { area };
     let [left, right] = Layout::horizontal(SPLIT).areas(area);
     let rows: Vec<String> = app.memories.iter().map(memory_row).collect();
-    list_pane(f, left, "Memories", &rows, app.memories_sel);
+    // The query stays in the title once focus leaves Search, so the list
+    // still shows what it is a result of.
+    let suffix = if app.query.is_empty() { String::new() } else { format!("/{}", app.query) };
+    list_pane_with_suffix(f, left, "Memories", &rows, app.memories_sel, &suffix);
     let lines = match app.memories.get(app.memories_sel) {
         Some(hit) => memory_detail(hit),
         None => vec![Line::from("no memories")],
@@ -264,10 +267,21 @@ fn status(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn list_pane(f: &mut Frame, area: Rect, title: &str, rows: &[String], sel: usize) {
+    list_pane_with_suffix(f, area, title, rows, sel, "");
+}
+
+/// Like [`list_pane`], but with `suffix` appended to the title after the
+/// count, e.g. `Memories (3) /duckdb`.
+fn list_pane_with_suffix(f: &mut Frame, area: Rect, title: &str, rows: &[String], sel: usize, suffix: &str) {
     let width = usize::from(area.width.saturating_sub(2));
     let items: Vec<ListItem> = rows.iter().map(|r| ListItem::new(truncate(r, width))).collect();
+    let title = if suffix.is_empty() {
+        format!("{title} ({})", rows.len())
+    } else {
+        format!("{title} ({}) {suffix}", rows.len())
+    };
     let list = List::new(items)
-        .block(Block::bordered().title(format!("{title} ({})", rows.len())))
+        .block(Block::bordered().title(title))
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
     let mut state = ListState::default().with_selected((!rows.is_empty()).then_some(sel));
     f.render_stateful_widget(list, area, &mut state);
@@ -422,14 +436,24 @@ mod tests {
     fn memories_tab_renders_tabs_rows_and_help() {
         let app = App {
             memories: vec![hit("rust is fast"), hit("bun is quick")],
-            loading: false,
             ..Default::default()
         };
         let out = render(&app, 80, 24);
         assert!(out.contains("Memories"), "{out}");
         assert!(out.contains("Projects"), "{out}");
         assert!(out.contains("rust is fast"), "{out}");
-        assert!(out.contains("q quit"), "{out}");
+        assert!(out.contains("q/Ctrl+C quit"), "{out}");
+    }
+
+    #[test]
+    fn memories_title_shows_the_active_query_once_focus_leaves_search() {
+        let app = App {
+            query: "duckdb".into(),
+            memories: vec![hit("rust is fast"), hit("bun is quick"), hit("uses duckdb")],
+            ..Default::default()
+        };
+        let out = render(&app, 80, 24);
+        assert!(out.contains("Memories (3) /duckdb"), "{out}");
     }
 
     #[test]
@@ -453,7 +477,6 @@ mod tests {
                 practices: vec![],
                 workflows: vec![],
             }),
-            loading: false,
             ..Default::default()
         };
         let out = render(&app, 80, 24);
@@ -468,7 +491,6 @@ mod tests {
             tab: Tab::Agents,
             agents: vec![agent("reviewer")],
             last_sync: Some(SyncReport { created: 1, ..Default::default() }),
-            loading: false,
             ..Default::default()
         };
         let out = render(&app, 80, 24);
@@ -482,7 +504,6 @@ mod tests {
         let app = App {
             tab: Tab::Practices,
             practices: vec![doc(DocKind::Practice, "tdd")],
-            loading: false,
             ..Default::default()
         };
         let out = render(&app, 80, 24);
@@ -495,7 +516,6 @@ mod tests {
         let app = App {
             tab: Tab::Workflows,
             workflows: vec![doc(DocKind::Workflow, "release")],
-            loading: false,
             ..Default::default()
         };
         let out = render(&app, 80, 24);
@@ -507,7 +527,6 @@ mod tests {
         let app = App {
             tab: Tab::Review,
             pending: vec![mem("maybe true")],
-            loading: false,
             ..Default::default()
         };
         let out = render(&app, 80, 24);
@@ -526,7 +545,6 @@ mod tests {
                 embedding: "off".into(),
                 port: Some(7433),
             }),
-            loading: false,
             ..Default::default()
         };
         let out = render(&app, 80, 24);

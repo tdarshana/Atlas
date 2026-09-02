@@ -92,7 +92,17 @@ pub struct App {
     pub pending: Vec<Memory>,
     pub pending_sel: usize,
     pub status: Option<StatusReport>,
-    pub loading: bool,
+    /// Effects issued but not yet answered by an action. Startup's batch is
+    /// counted in by [`note_effects_started`]; everything `reduce` issues or
+    /// resolves counts itself.
+    pub in_flight: usize,
+}
+
+impl App {
+    /// Whether anything issued from this state is still outstanding.
+    pub fn is_loading(&self) -> bool {
+        self.in_flight > 0
+    }
 }
 
 impl Default for App {
@@ -119,7 +129,7 @@ impl Default for App {
             pending: vec![],
             pending_sel: 0,
             status: None,
-            loading: true,
+            in_flight: 0,
         }
     }
 }
@@ -169,49 +179,95 @@ pub fn initial_effects() -> Vec<Effect> {
     ]
 }
 
+/// Counts `n` effects as started. For effects `reduce` returns, `reduce`
+/// counts them itself; this is for the startup batch `run.rs` spawns outside
+/// `reduce`, via [`initial_effects`].
+pub fn note_effects_started(app: &mut App, n: usize) {
+    app.in_flight += n;
+}
+
 pub fn reduce(app: &mut App, action: Action) -> Vec<Effect> {
-    match action {
-        Action::Key(code, mods) => return on_key(app, code, mods),
-        Action::Tick => return vec![],
+    let effects = match action {
+        Action::Key(code, mods) => on_key(app, code, mods),
+        Action::Tick => vec![],
         Action::MemoriesLoaded(hits) => {
+            app.in_flight = app.in_flight.saturating_sub(1);
             app.memories = hits;
             clamp(&mut app.memories_sel, app.memories.len());
+            vec![]
         }
         Action::ProjectsLoaded(projects) => {
+            app.in_flight = app.in_flight.saturating_sub(1);
             app.projects = projects;
             clamp(&mut app.projects_sel, app.projects.len());
+            vec![]
         }
-        Action::ProjectContextLoaded(ctx) => app.project_context = Some(ctx),
+        Action::ProjectContextLoaded(ctx) => {
+            app.in_flight = app.in_flight.saturating_sub(1);
+            app.project_context = Some(ctx);
+            vec![]
+        }
         Action::AgentsLoaded(agents) => {
+            app.in_flight = app.in_flight.saturating_sub(1);
             app.agents = agents;
             clamp(&mut app.agents_sel, app.agents.len());
+            vec![]
         }
-        Action::SyncDone(report) => app.last_sync = Some(report),
+        Action::SyncDone(report) => {
+            app.in_flight = app.in_flight.saturating_sub(1);
+            app.last_sync = Some(report);
+            vec![]
+        }
         Action::DocsLoaded(DocKind::Practice, docs) => {
+            app.in_flight = app.in_flight.saturating_sub(1);
             app.practices = docs;
             clamp(&mut app.practices_sel, app.practices.len());
+            vec![]
         }
         Action::DocsLoaded(DocKind::Workflow, docs) => {
+            app.in_flight = app.in_flight.saturating_sub(1);
             app.workflows = docs;
             clamp(&mut app.workflows_sel, app.workflows.len());
+            vec![]
         }
         Action::PendingLoaded(pending) => {
+            app.in_flight = app.in_flight.saturating_sub(1);
             app.pending = pending;
             clamp(&mut app.pending_sel, app.pending.len());
+            vec![]
         }
-        Action::StatusLoaded(status) => app.status = Some(status),
+        Action::StatusLoaded(status) => {
+            app.in_flight = app.in_flight.saturating_sub(1);
+            app.status = Some(status);
+            vec![]
+        }
         Action::MemoryForgotten(id) => {
+            app.in_flight = app.in_flight.saturating_sub(1);
             app.memories.retain(|h| h.memory.id != id);
             clamp(&mut app.memories_sel, app.memories.len());
+            vec![]
         }
         Action::MemoryStatusChanged(memory) => {
+            app.in_flight = app.in_flight.saturating_sub(1);
+            let accepted = memory.status == MemoryStatus::Active;
             app.pending.retain(|m| m.id != memory.id);
             clamp(&mut app.pending_sel, app.pending.len());
+            // Accepting a pending memory makes it active, so the Memories
+            // list is stale until it refreshes.
+            if accepted {
+                vec![Effect::Recall(app.query.clone())]
+            } else {
+                vec![]
+            }
         }
-        Action::Error(msg) => app.message = Some(msg),
-    }
-    app.loading = false;
-    vec![]
+        Action::Error(msg) => {
+            app.in_flight = app.in_flight.saturating_sub(1);
+            app.message = Some(msg);
+            vec![]
+        }
+    };
+    app.in_flight += effects.len();
+    effects
 }
 
 /// Keeps a selection inside a list that may have shrunk or emptied.
@@ -219,7 +275,13 @@ fn clamp(sel: &mut usize, len: usize) {
     *sel = if len == 0 { 0 } else { (*sel).min(len - 1) };
 }
 
-fn on_key(app: &mut App, code: KeyCode, _mods: KeyModifiers) -> Vec<Effect> {
+fn on_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Vec<Effect> {
+    // Raw mode turns Ctrl+C and Ctrl+D into ordinary key events instead of
+    // sending SIGINT, so the loop has to quit on them itself.
+    if mods.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('c') | KeyCode::Char('d')) {
+        app.quit = true;
+        return vec![];
+    }
     if app.focus == Focus::Search {
         return search_key(app, code);
     }
@@ -238,10 +300,7 @@ fn on_key(app: &mut App, code: KeyCode, _mods: KeyModifiers) -> Vec<Effect> {
         KeyCode::Char('j') | KeyCode::Down => move_sel(app, 1),
         KeyCode::Char('k') | KeyCode::Up => move_sel(app, -1),
         KeyCode::Esc => app.message = None,
-        KeyCode::Char('r') => {
-            app.loading = true;
-            return vec![load_effect(app)];
-        }
+        KeyCode::Char('r') => return vec![load_effect(app)],
         _ => return tab_key(app, code),
     }
     vec![]
@@ -256,7 +315,6 @@ fn search_key(app: &mut App, code: KeyCode) -> Vec<Effect> {
         KeyCode::Esc => app.focus = Focus::List,
         KeyCode::Enter => {
             app.focus = Focus::List;
-            app.loading = true;
             return vec![Effect::Recall(app.query.clone())];
         }
         _ => {}
@@ -448,7 +506,7 @@ mod tests {
         let mut a = App { memories_sel: 10, ..Default::default() };
         reduce(&mut a, Action::MemoriesLoaded(vec![hit("a"), hit("b")]));
         assert_eq!(a.memories_sel, 1);
-        assert!(!a.loading);
+        assert!(!a.is_loading());
         reduce(&mut a, Action::MemoriesLoaded(vec![]));
         assert_eq!(a.memories_sel, 0);
     }
@@ -477,6 +535,24 @@ mod tests {
         assert!(matches!(eff.as_slice(), [Effect::SetStatus(i, MemoryStatus::Active)] if *i == id));
         let eff = reduce(&mut a, key('x'));
         assert!(matches!(eff.as_slice(), [Effect::SetStatus(i, MemoryStatus::Rejected)] if *i == id));
+    }
+
+    #[test]
+    fn accepting_a_pending_memory_refreshes_the_memories_list() {
+        let mut m = mem("promoted");
+        m.status = MemoryStatus::Active;
+        let mut a = App { query: "duckdb".into(), pending: vec![m.clone()], ..Default::default() };
+        let eff = reduce(&mut a, Action::MemoryStatusChanged(m));
+        assert_eq!(eff, vec![Effect::Recall("duckdb".into())]);
+    }
+
+    #[test]
+    fn rejecting_a_pending_memory_does_not_refresh_the_memories_list() {
+        let mut m = mem("rejected");
+        m.status = MemoryStatus::Rejected;
+        let mut a = App { pending: vec![m.clone()], ..Default::default() };
+        let eff = reduce(&mut a, Action::MemoryStatusChanged(m));
+        assert!(eff.is_empty());
     }
 
     #[test]
@@ -516,20 +592,39 @@ mod tests {
         for (tab, want) in cases {
             let mut a = App { tab, ..Default::default() };
             assert_eq!(reduce(&mut a, key('r')), vec![want]);
-            assert!(a.loading);
+            assert!(a.is_loading());
         }
         let mut a = App { query: "bun".into(), ..Default::default() };
         assert_eq!(reduce(&mut a, key('r')), vec![Effect::Recall("bun".into())]);
     }
 
     #[test]
-    fn error_sets_message_and_clears_loading() {
-        let mut a = App::default();
-        assert!(a.loading);
+    fn error_sets_message_and_clears_in_flight() {
+        let mut a = App { in_flight: 1, ..Default::default() };
+        assert!(a.is_loading());
         let eff = reduce(&mut a, Action::Error("boom".into()));
         assert!(eff.is_empty());
         assert_eq!(a.message.as_deref(), Some("boom"));
-        assert!(!a.loading);
+        assert!(!a.is_loading());
+    }
+
+    #[test]
+    fn ctrl_c_on_projects_tab_quits_without_an_effect() {
+        let mut a = App { tab: Tab::Projects, ..Default::default() };
+        let eff = reduce(&mut a, Action::Key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(eff.is_empty());
+        assert!(a.quit);
+    }
+
+    #[test]
+    fn ctrl_c_in_search_quits_without_touching_the_query() {
+        let mut a = App::default();
+        reduce(&mut a, key('/'));
+        reduce(&mut a, key('a'));
+        let eff = reduce(&mut a, Action::Key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(eff.is_empty());
+        assert!(a.quit);
+        assert_eq!(a.query, "a");
     }
 
     #[test]

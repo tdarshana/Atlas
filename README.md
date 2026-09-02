@@ -49,6 +49,6 @@ Once synced, saved agents show up as Claude Code and Codex subagents: Claude Cod
 
     atlas tui
 
-A terminal UI over the daemon, read-mostly: browse memories, projects, agents, practices and workflows, and review pending memories. Honours `--port` and `--home` like every other command, and starts the daemon first if it is not already running. Needs a real terminal: it exits with an error if stdout is not a TTY. Editing long text such as agent instructions or a practice's body is done through the CLI or the desktop app, not the TUI. Tabs and key legend are in `docs/usage.md`.
+A terminal UI over the daemon, read-mostly: browse memories, projects, agents, practices and workflows, and review pending memories. Honours `--port` and `--home` like every other command, and starts the daemon first if it is not already running. Needs a controlling terminal: it exits with an error if it cannot open one. `q` or `Ctrl+C` quits. Editing long text such as agent instructions or a practice's body is done through the CLI or the desktop app, not the TUI. Tabs and key legend are in `docs/usage.md`.
 
 Data lives in `~/.atlas/atlas.duckdb`. Set `ATLAS_HOME` to relocate it. See `docs/usage.md` and `docs/superpowers/specs/2026-09-02-atlas-design.md`.

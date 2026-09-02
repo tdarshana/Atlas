@@ -5,7 +5,7 @@
 //! terminal, and it must hand it back however it leaves.
 
 use super::data::perform;
-use super::state::{initial_effects, reduce, Action, App, Effect};
+use super::state::{initial_effects, note_effects_started, reduce, Action, App, Effect};
 use super::ui::draw;
 use crate::remote::RemoteBackend;
 use anyhow::Context;
@@ -55,7 +55,9 @@ async fn event_loop(
 ) -> anyhow::Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel::<Action>();
     let mut app = App::default();
-    for effect in initial_effects() {
+    let effects = initial_effects();
+    note_effects_started(&mut app, effects.len());
+    for effect in effects {
         spawn(effect, &tx, &backend, &cwd);
     }
 
@@ -82,7 +84,6 @@ async fn event_loop(
         };
 
         for effect in reduce(&mut app, action) {
-            app.loading = true;
             spawn(effect, &tx, &backend, &cwd);
         }
         terminal.draw(|f| draw(f, &app))?;
