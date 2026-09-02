@@ -1,0 +1,23 @@
+[package]
+name = "atlas-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+schemars.workspace = true
+duckdb = { version = "1.10505", features = ["bundled"] }
+directories = "6"
+fastembed = "6"
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true

@@ -1,0 +1,28 @@
+[package]
+name = "atlasd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "atlasd"
+path = "src/main.rs"
+
+[dependencies]
+atlas-core = { path = "../atlas-core" }
+atlas-mcp = { path = "../atlas-mcp" }
+rmcp = { version = "3.2", features = ["server", "transport-streamable-http-server"] }
+axum = "0.8"
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+clap = { version = "4", features = ["derive", "env"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
+tempfile.workspace = true
