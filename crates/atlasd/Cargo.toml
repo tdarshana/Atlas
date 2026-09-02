@@ -27,3 +27,4 @@ chrono.workspace = true
 reqwest.workspace = true
 tempfile.workspace = true
 uuid.workspace = true
+git2 = "0.21"

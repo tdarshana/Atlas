@@ -49,6 +49,22 @@ fn fixture_repo(dir: &Path) {
     git(dir, &["remote", "add", "origin", "https://github.com/example/fixture.git"]);
 }
 
+/// A `tempfile::tempdir()` that is not itself inside a git repository. `TMPDIR` can sit
+/// inside a repo (a checkout, a build sandbox), which would let `detect_root`'s upward
+/// search find that enclosing repository instead of the fallback a test expects.
+fn repo_free_tempdir() -> tempfile::TempDir {
+    if git2::Repository::discover(std::env::temp_dir()).is_err() {
+        return tempfile::tempdir().unwrap();
+    }
+    if git2::Repository::discover("/tmp").is_err() {
+        return tempfile::Builder::new().prefix("atlas-").tempdir_in("/tmp").unwrap();
+    }
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from).expect("HOME not set");
+    let fallback = home.join(".atlas/tmp");
+    std::fs::create_dir_all(&fallback).unwrap();
+    tempfile::Builder::new().prefix("atlas-").tempdir_in(&fallback).unwrap()
+}
+
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git").args(args).current_dir(dir)
         .env("GIT_AUTHOR_NAME", "Atlas Test").env("GIT_AUTHOR_EMAIL", "atlas-test@example.com")
@@ -334,7 +350,7 @@ async fn sync_refuses_a_root_that_is_not_a_repository() {
     let slash = c.post(format!("{base}/sync")).json(&serde_json::json!({"root": "/", "check_only": true})).send().await.unwrap();
     assert_eq!(slash.status(), 400, "the filesystem root is not a project root");
 
-    let plain = tempfile::tempdir().unwrap();
+    let plain = repo_free_tempdir();
     let not_git = c.post(format!("{base}/sync")).json(&serde_json::json!({"root": plain.path(), "check_only": true})).send().await.unwrap();
     assert_eq!(not_git.status(), 400, "a directory with no git repository is not a sync target");
     let body: serde_json::Value = not_git.json().await.unwrap();
