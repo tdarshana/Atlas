@@ -109,7 +109,7 @@ impl MemoryService {
         // Only probe the embedder when it can actually produce vectors; a failure here is
         // recorded so `status()` surfaces it, but recall still falls back to keyword-only.
         let qvec = if self.embedder.dims() > 0 {
-            match self.embedder.embed(&[q.query.clone()]) {
+            match self.embedder.embed(std::slice::from_ref(&q.query)) {
                 Ok(mut v) if !v.is_empty() => Some(v.remove(0)),
                 Ok(_) => None,
                 Err(e) => { *self.err_write() = Some(e.to_string()); None }
