@@ -9,6 +9,7 @@ pub mod paths;
 pub mod projects;
 pub mod search;
 pub mod service;
+pub mod sync;
 pub use error::{AtlasError, Result};
 
 /// Shared test fixture helpers (`tests/common/mod.rs`). Declared here rather

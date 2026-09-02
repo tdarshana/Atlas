@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use uuid::Uuid;
 
 macro_rules! str_enum {
@@ -147,3 +148,30 @@ pub struct RecallQuery {
     #[serde(default)] pub tags: Vec<String>,
 }
 fn ten() -> usize { 10 }
+
+str_enum!(SyncKind { Claude => "claude", Codex => "codex", AgentsMd => "agents_md", ClaudeMd => "claude_md" });
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub enum SyncAction {
+    Create,
+    Update,
+    Unchanged,
+    Skip(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SyncOp {
+    pub kind: SyncKind,
+    pub path: PathBuf,
+    pub content: String,
+    pub action: SyncAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct SyncReport {
+    pub ops: Vec<SyncOp>,
+    pub created: usize,
+    pub updated: usize,
+    pub unchanged: usize,
+    pub skipped: usize,
+}
