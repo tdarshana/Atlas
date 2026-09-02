@@ -25,6 +25,13 @@ impl LlmClient {
         })
     }
 
+    /// Text with every occurrence of the api key replaced by `***`. An empty key
+    /// (a local endpoint that wants none) redacts nothing.
+    fn redact(&self, text: &str) -> String {
+        if self.api_key.is_empty() { return text.to_string(); }
+        text.replace(&self.api_key, "***")
+    }
+
     pub async fn chat(&self, system: &str, user: &str) -> Result<String> {
         let body = serde_json::json!({
             "model": self.model,
@@ -46,7 +53,13 @@ impl LlmClient {
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            let excerpt: String = text.chars().take(200).collect();
+            // The excerpt keeps the upstream reason, which is the only clue a user has
+            // when a gateway rejects the call. It is redacted first: this error is
+            // logged, persisted into `jobs.error` and served back by `GET /jobs/{id}`,
+            // and an endpoint that quotes the failing request would otherwise put the
+            // key in all three. Redacting before the 200-char cut also stops a key
+            // straddling the boundary from surviving in half.
+            let excerpt: String = self.redact(&text).chars().take(200).collect();
             return Err(AtlasError::Other(format!(
                 "model endpoint returned {status}: {excerpt}"
             )));
@@ -127,5 +140,39 @@ mod tests {
         let msg = err.to_string();
         assert!(!msg.contains("super-secret-999"), "error text leaked the api key: {msg}");
         assert!(msg.contains("500"), "expected status in error text: {msg}");
+    }
+
+    /// A gateway that quotes the offending credential back at us must not get the key
+    /// into the error, which is logged and stored in `jobs.error`.
+    #[tokio::test]
+    async fn chat_error_redacts_a_key_the_endpoint_echoes_back() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|headers: axum::http::HeaderMap| async move {
+                let auth = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                (StatusCode::UNAUTHORIZED, format!("{{\"error\":\"invalid api key: {auth}\"}}"))
+            }),
+        );
+        let base = spawn(app).await;
+
+        let client = LlmClient::new(&base, "sk-live-abc123", "gpt-test").unwrap();
+        let msg = client.chat("s", "u").await.unwrap_err().to_string();
+        assert!(!msg.contains("sk-live-abc123"), "the echoed key survived into the error: {msg}");
+        assert!(msg.contains("***"), "the excerpt should keep the upstream reason, redacted: {msg}");
+        assert!(msg.contains("401"), "expected status in error text: {msg}");
+    }
+
+    /// An empty key is not a substring to redact; an empty-needle `replace` would
+    /// otherwise splice `***` between every character of the body.
+    #[tokio::test]
+    async fn an_empty_key_leaves_the_excerpt_alone() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|| async { (StatusCode::BAD_REQUEST, "model 'x' not found") }),
+        );
+        let base = spawn(app).await;
+        let msg = LlmClient::new(&base, "", "x").unwrap().chat("s", "u").await.unwrap_err().to_string();
+        assert!(msg.contains("model 'x' not found"), "{msg}");
+        assert!(!msg.contains("***"), "{msg}");
     }
 }

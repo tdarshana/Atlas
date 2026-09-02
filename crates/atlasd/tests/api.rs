@@ -618,6 +618,17 @@ async fn ingest_extracts_candidates_and_skips_duplicates_on_replay() {
     assert_eq!(pending.as_array().unwrap().len(), 2, "a replay must not double the review queue: {pending}");
 
     assert_eq!(c.get(format!("{base}/jobs/{}", uuid::Uuid::new_v4())).send().await.unwrap().status(), 404);
+
+    // A blank transcript is refused before a job is queued, so no model call is spent
+    // on nothing. Whitespace only counts as blank.
+    for blank in ["", "   \n\t "] {
+        let empty = c.post(format!("{base}/ingest")).json(&serde_json::json!({"text": blank, "source_tool": "test"})).send().await.unwrap();
+        assert_eq!(empty.status(), 400, "a blank transcript must not be queued");
+        let body: serde_json::Value = empty.json().await.unwrap();
+        assert!(body["error"].as_str().is_some(), "{body}");
+    }
+    let jobs_after: serde_json::Value = c.get(format!("{base}/memories?status=pending")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(jobs_after.as_array().unwrap().len(), 2, "a refused ingest stores nothing: {jobs_after}");
 }
 
 /// Extraction is off until it is switched on and fully configured, and each of

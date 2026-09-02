@@ -268,6 +268,11 @@ async fn set_settings(State(s): State<AppState>, ApiQuery(q): ApiQuery<ActorQ>, 
 // queues the work (202) and the caller follows the job.
 
 async fn ingest(State(s): State<AppState>, ApiJson(b): ApiJson<IngestBody>) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    // A blank transcript would queue a job whose only effect is to spend a model
+    // call on nothing, so refuse it here rather than at the far end.
+    if b.text.trim().is_empty() {
+        return Err(ApiError(AtlasError::Invalid("ingest text is empty".into())));
+    }
     let job_id = s.backend.ingest_transcript(b.text, b.source_tool, b.project_root).await?;
     Ok((StatusCode::ACCEPTED, Json(serde_json::json!({"job_id": job_id}))))
 }

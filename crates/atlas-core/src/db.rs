@@ -59,8 +59,12 @@ impl Db {
         let db = Db { conn: Mutex::new(Connection::open_in_memory()?) };
         db.migrate()?; Ok(db)
     }
+    /// Poison-tolerant, like the lock accessors in `MemoryService`: a panic raised
+    /// while the connection was held must not turn every later query in the daemon
+    /// into a "poisoned lock" error. DuckDB itself is unharmed by a panic in the
+    /// closure, so recovering the guard is safe.
     pub fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-        let guard = self.conn.lock().map_err(|e| crate::AtlasError::Other(e.to_string()))?;
+        let guard = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         f(&guard)
     }
     pub fn schema_version(&self) -> Result<i64> {

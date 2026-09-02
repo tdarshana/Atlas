@@ -5,7 +5,6 @@ use crate::backend::LocalBackend;
 use crate::db::Db;
 use crate::jobs::Job;
 use crate::llm::LlmClient;
-use crate::memories::MemoryRepo;
 use crate::models::{MemoryKind, MemoryScope, MemoryStatus, NewMemory};
 use crate::projects::{detect_root, ProjectRepo};
 use crate::service::MemoryService;
@@ -187,6 +186,13 @@ pub fn normalize_text(text: &str) -> String {
 
 /// Drops candidates the store already holds, and candidates the batch repeats.
 ///
+/// `project_id` is the scope the candidates will be stored under, and it bounds
+/// what they are compared against: a candidate for project P is a duplicate only
+/// of P's own memories or of a global one, and a global candidate only of another
+/// global memory. The daemon serves every project at once, so without this a
+/// sentence one project already recorded would silently swallow another project's
+/// version of the same fact.
+///
 /// When the embedder is ready the test against stored memories is cosine
 /// similarity; when it is not (no model loaded, or the text will not embed) it
 /// falls back to comparing the normalized text. The text comparison also runs on
@@ -194,16 +200,19 @@ pub fn normalize_text(text: &str) -> String {
 /// say, and because it is the only thing that can catch a candidate matching a
 /// `pending` memory: pending rows are deliberately kept out of the vector map,
 /// but re-proposing one would double up the review queue.
-pub fn dedupe(candidates: Vec<Candidate>, memories: &MemoryService) -> Result<Vec<Candidate>> {
+pub fn dedupe(candidates: Vec<Candidate>, memories: &MemoryService, project_id: Option<Uuid>) -> Result<Vec<Candidate>> {
+    // `list` with a project widens to that project plus every global memory; with no
+    // project, the global scope narrows it to global memories alone.
+    let scope = project_id.is_none().then_some(MemoryScope::Global);
     let mut seen: Vec<String> = Vec::new();
     for status in [MemoryStatus::Active, MemoryStatus::Pending] {
-        seen.extend(memories.list(status, None, None)?.into_iter().map(|m| normalize_text(&m.text)));
+        seen.extend(memories.list(status, scope, project_id)?.into_iter().map(|m| normalize_text(&m.text)));
     }
     let mut kept = Vec::with_capacity(candidates.len());
     for c in candidates {
         let normalized = normalize_text(&c.text);
         let duplicate = seen.contains(&normalized)
-            || memories.nearest_active(&c.text)?.is_some_and(|(_, score)| score >= DUPLICATE_COSINE);
+            || memories.nearest_active(&c.text, project_id)?.is_some_and(|(_, score)| score >= DUPLICATE_COSINE);
         if duplicate {
             continue;
         }
@@ -242,10 +251,16 @@ pub async fn run_ingest(job: &Job, backend: &LocalBackend) -> Result<Value> {
     let found = candidates.len();
 
     let project_id = project_for(&backend.db, root)?;
-    let keep = dedupe(candidates, &backend.memories)?;
-    let inserted = keep.len();
+    let keep = dedupe(candidates, &backend.memories, project_id)?;
+    let skipped_duplicates = found - keep.len();
+
+    // An insert that fails partway leaves the earlier memories stored, so the count
+    // is tracked as we go and the audit row is written either way: the trail has to
+    // name what actually landed, not what was attempted.
+    let mut inserted = 0usize;
+    let mut failure = None;
     for c in keep {
-        backend.memories.remember(
+        let stored = backend.memories.remember(
             NewMemory {
                 scope: if project_id.is_some() { MemoryScope::Project } else { MemoryScope::Global },
                 project_id,
@@ -260,11 +275,14 @@ pub async fn run_ingest(job: &Job, backend: &LocalBackend) -> Result<Value> {
                 status: if c.confidence >= cfg.auto_accept_min_confidence { MemoryStatus::Active } else { MemoryStatus::Pending },
             },
             EXTRACTOR,
-        )?;
+        );
+        match stored {
+            Ok(_) => inserted += 1,
+            Err(e) => { failure = Some(e); break; }
+        }
     }
-    let skipped_duplicates = found - inserted;
 
-    MemoryRepo::new(&backend.db).audit(
+    backend.memories.audit(
         EXTRACTOR,
         "extract",
         "job",
@@ -277,7 +295,10 @@ pub async fn run_ingest(job: &Job, backend: &LocalBackend) -> Result<Value> {
             "model": cfg.model,
         }),
     )?;
-    Ok(serde_json::json!({"inserted": inserted, "skipped_duplicates": skipped_duplicates}))
+    match failure {
+        Some(e) => Err(e),
+        None => Ok(serde_json::json!({"inserted": inserted, "skipped_duplicates": skipped_duplicates})),
+    }
 }
 
 #[cfg(test)]
@@ -392,7 +413,7 @@ mod tests {
     fn dedupe_falls_back_to_normalized_text_without_an_embedder() {
         let s = service(Arc::new(Db::open_in_memory().unwrap()));
         s.remember(stored("The project uses bun.", MemoryStatus::Active), "t").unwrap();
-        let out = dedupe(vec![candidate("the   project uses BUN"), candidate("deploy target is fly.io")], &s).unwrap();
+        let out = dedupe(vec![candidate("the   project uses BUN"), candidate("deploy target is fly.io")], &s, None).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].text, "deploy target is fly.io");
     }
@@ -401,7 +422,7 @@ mod tests {
     #[test]
     fn dedupe_drops_repeats_within_the_batch() {
         let s = service(Arc::new(Db::open_in_memory().unwrap()));
-        let out = dedupe(vec![candidate("the project uses bun"), candidate("The project uses bun!")], &s).unwrap();
+        let out = dedupe(vec![candidate("the project uses bun"), candidate("The project uses bun!")], &s, None).unwrap();
         assert_eq!(out.len(), 1);
     }
 
@@ -411,7 +432,31 @@ mod tests {
     fn dedupe_also_matches_pending_memories() {
         let s = service(Arc::new(Db::open_in_memory().unwrap()));
         s.remember(stored("the project uses bun", MemoryStatus::Pending), "t").unwrap();
-        assert!(dedupe(vec![candidate("the project uses bun")], &s).unwrap().is_empty());
+        assert!(dedupe(vec![candidate("the project uses bun")], &s, None).unwrap().is_empty());
+    }
+
+    /// The daemon serves every project at once, so a sentence project A already
+    /// holds must not swallow project B's version of it. Global memories still
+    /// suppress a candidate anywhere, and a project's memories never suppress a
+    /// global candidate.
+    #[test]
+    fn dedupe_is_scoped_to_the_candidate_project() {
+        let s = service(Arc::new(Db::open_in_memory().unwrap()));
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        let mut in_a = stored("we deploy on fly.io", MemoryStatus::Active);
+        in_a.scope = MemoryScope::Project;
+        in_a.project_id = Some(a);
+        s.remember(in_a, "t").unwrap();
+
+        let fly = || vec![candidate("we deploy on fly.io")];
+        assert_eq!(dedupe(fly(), &s, Some(b)).unwrap().len(), 1, "another project's wording must not suppress this one");
+        assert!(dedupe(fly(), &s, Some(a)).unwrap().is_empty(), "the project's own memory does suppress it");
+        assert_eq!(dedupe(fly(), &s, None).unwrap().len(), 1, "a project memory must not suppress a global candidate");
+
+        s.remember(stored("the runtime is bun", MemoryStatus::Active), "t").unwrap();
+        let bun = || vec![candidate("the runtime is bun")];
+        assert!(dedupe(bun(), &s, Some(b)).unwrap().is_empty(), "a global memory suppresses a candidate in any project");
+        assert!(dedupe(bun(), &s, None).unwrap().is_empty());
     }
 
     #[test]

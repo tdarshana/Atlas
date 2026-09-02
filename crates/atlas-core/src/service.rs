@@ -223,11 +223,23 @@ impl MemoryService {
     /// The active memory closest to `text` and its cosine similarity, for the
     /// extraction worker's duplicate check. `None` when there is nothing to
     /// compare against: no embedding model, an embedder that fails on this text,
-    /// or no active memory with a stored vector. A caller that gets `None` has to
-    /// fall back to comparing the text itself.
-    pub fn nearest_active(&self, text: &str) -> Result<Option<(Uuid, f64)>> {
+    /// or no active memory in scope with a stored vector. A caller that gets
+    /// `None` has to fall back to comparing the text itself.
+    ///
+    /// `project_id` bounds the comparison, because the daemon serves every project
+    /// at once and `vectors` spans all of them. `Some(p)` compares against that
+    /// project's memories plus every global one; `None` compares against global
+    /// memories only, so a project's wording never suppresses a global candidate.
+    pub fn nearest_active(&self, text: &str, project_id: Option<Uuid>) -> Result<Option<(Uuid, f64)>> {
         let emb = self.emb();
         if emb.dims() == 0 { return Ok(None); }
+        // Which ids are in scope comes first: with nothing to compare against there is
+        // no reason to spend an embedding on the candidate. `list_active` with a project
+        // widens to that project plus every global memory, which is the rule wanted here.
+        let scope = project_id.is_none().then_some(MemoryScope::Global);
+        let allowed: std::collections::HashSet<Uuid> =
+            self.repo().list_active(scope, project_id)?.into_iter().map(|m| m.id).collect();
+        if allowed.is_empty() { return Ok(None); }
         let qvec = match emb.embed(&[text.to_string()]) {
             Ok(mut v) if !v.is_empty() => v.remove(0),
             Ok(_) => return Ok(None),
@@ -238,8 +250,16 @@ impl MemoryService {
         let vectors = self.vec_read();
         Ok(vectors
             .iter()
+            .filter(|(id, _)| allowed.contains(*id))
             .map(|(id, v)| (*id, cosine(&qvec, v)))
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)))
+    }
+
+    /// Appends an audit row under the write gate, so a caller outside this type
+    /// records one in the same lock order as every other write on its path.
+    pub fn audit(&self, actor: &str, action: &str, entity: &str, entity_id: Option<Uuid>, detail: serde_json::Value) -> Result<()> {
+        let _gate = self.gate();
+        self.repo().audit(actor, action, entity, entity_id, detail)
     }
 
     pub fn embedding_status(&self) -> String {
