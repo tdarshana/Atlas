@@ -35,7 +35,9 @@
 >
 	<div class="inner">
 		<header>
-			<h2>{title ?? ''}</h2>
+			<!-- An untitled dialog gets no heading at all: an empty h2 is a heading a
+			     screen reader still lands on with nothing to read out. -->
+			{#if title}<h2>{title}</h2>{/if}
 			<button type="button" class="x" aria-label="Close" onclick={() => onclose?.()}>×</button>
 		</header>
 		<div class="body">{@render children?.()}</div>
@@ -72,6 +74,8 @@
 	}
 
 	.x {
+		/* Keeps the close button at the right edge when there is no heading beside it. */
+		margin-left: auto;
 		border: none;
 		background: none;
 		color: var(--muted);

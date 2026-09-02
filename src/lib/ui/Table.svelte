@@ -33,6 +33,17 @@
 		class: klass = '',
 		...rest
 	}: Props = $props();
+
+	/**
+	 * A clickable row is reachable by keyboard, so Enter and Space have to do what a
+	 * click does. Space is also the page-scroll key, so its default is suppressed once
+	 * the row has focus, matching how a button behaves.
+	 */
+	function activate(event: KeyboardEvent, row: Row) {
+		if (event.key !== 'Enter' && event.key !== ' ') return;
+		event.preventDefault();
+		onrowclick?.(row);
+	}
 </script>
 
 <div class="wrap {klass}">
@@ -48,7 +59,13 @@
 		</thead>
 		<tbody>
 			{#each rows as row, i (rowKey ? rowKey(row, i) : i)}
-				<tr class:clickable={!!onrowclick} onclick={() => onrowclick?.(row)}>
+				<tr
+					class:clickable={!!onrowclick}
+					role={onrowclick ? 'button' : undefined}
+					tabindex={onrowclick ? 0 : undefined}
+					onclick={() => onrowclick?.(row)}
+					onkeydown={onrowclick ? (e) => activate(e, row) : undefined}
+				>
 					{#each columns as column (column.key)}
 						<td style:text-align={column.align ?? 'left'}>{@render cell(row, column.key)}</td>
 					{/each}
@@ -104,6 +121,33 @@
 
 	tr.clickable:hover td {
 		background: var(--bg-hover);
+	}
+
+	/* An outline on the row itself is clipped by the cells, so the focus ring is drawn
+	   as an inset shadow on the first and last cell and a tint across the whole row. */
+	tr.clickable:focus-visible {
+		outline: none;
+	}
+
+	tr.clickable:focus-visible td {
+		background: var(--bg-hover);
+		box-shadow:
+			inset 0 2px 0 var(--accent),
+			inset 0 -2px 0 var(--accent);
+	}
+
+	tr.clickable:focus-visible td:first-child {
+		box-shadow:
+			inset 2px 0 0 var(--accent),
+			inset 0 2px 0 var(--accent),
+			inset 0 -2px 0 var(--accent);
+	}
+
+	tr.clickable:focus-visible td:last-child {
+		box-shadow:
+			inset -2px 0 0 var(--accent),
+			inset 0 2px 0 var(--accent),
+			inset 0 -2px 0 var(--accent);
 	}
 
 	td.empty {

@@ -1,7 +1,7 @@
 <script lang="ts">
 	// Dashboard: the daemon's status report, the three counts and the newest
-	// memories. Counts come from the list routes rather than the status report so
-	// projects and agents are counted the same way.
+	// memories. The active-memory count is the one the status report already carries;
+	// projects and agents have no such counter, so those come from their list routes.
 	import { onMount } from 'svelte';
 	import { api } from '$lib/daemon.svelte';
 	import { errorLogPath, errorMessage } from '$lib/errors';
@@ -24,7 +24,6 @@
 	);
 
 	let counts = $state({
-		memories: null as number | null,
 		projects: null as number | null,
 		agents: null as number | null
 	});
@@ -48,7 +47,7 @@
 				client.listProjects(),
 				client.listAgents()
 			]);
-			counts = { memories: active.length, projects: projectList.length, agents: agentList.length };
+			counts = { projects: projectList.length, agents: agentList.length };
 			recent = [...active]
 				.sort((a, b) => b.created_at.localeCompare(a.created_at))
 				.slice(0, RECENT);
@@ -70,9 +69,7 @@
 
 <div class="grid">
 	<Card title="Active memories">
-		<p class="metric" data-testid="count-memories">
-			{counts.memories ?? report?.memories_active ?? '—'}
-		</p>
+		<p class="metric" data-testid="count-memories">{report?.memories_active ?? '—'}</p>
 	</Card>
 
 	<Card title="Projects">

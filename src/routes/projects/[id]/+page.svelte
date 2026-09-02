@@ -1,14 +1,21 @@
 <script lang="ts">
 	// One project: its cached profile, and the context an agent would receive for
 	// this root (memories, practices, workflows). Refresh rebuilds the profile.
+	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { errorMessage } from '$lib/errors';
 	import { relativeAge } from '$lib/format';
-	import { loadProject, projectDetail, refreshProject } from '$lib/stores/projects.svelte';
+	import {
+		deleteProject,
+		loadProject,
+		projectDetail,
+		refreshProject
+	} from '$lib/stores/projects.svelte';
 	import type { Doc, RecallHit } from '$lib/types';
 	import Badge from '$lib/ui/Badge.svelte';
 	import Button from '$lib/ui/Button.svelte';
 	import Card from '$lib/ui/Card.svelte';
+	import Dialog from '$lib/ui/Dialog.svelte';
 	import EmptyState from '$lib/ui/EmptyState.svelte';
 	import ErrorState from '$lib/ui/ErrorState.svelte';
 	import Table from '$lib/ui/Table.svelte';
@@ -36,10 +43,25 @@
 		if (id) void loadProject(id);
 	});
 
+	let confirming = $state(false);
+
 	async function refresh() {
 		try {
 			await refreshProject(id);
 			push('success', 'Profile rebuilt');
+		} catch (e) {
+			push('error', errorMessage(e));
+		}
+	}
+
+	async function confirmRemove() {
+		const name = project?.name ?? 'Project';
+		try {
+			await deleteProject(id);
+			confirming = false;
+			// The page's own project is gone, so leave before the detail state is read again.
+			await goto('/projects');
+			push('success', `Removed ${name}`);
 		} catch (e) {
 			push('error', errorMessage(e));
 		}
@@ -54,15 +76,44 @@
 			<p class="sub"><code>{project.root_path}</code></p>
 		{/if}
 	</div>
-	<Button
-		variant="primary"
-		data-testid="project-refresh"
-		disabled={!project || projectDetail.refreshing}
-		onclick={refresh}
-	>
-		{projectDetail.refreshing ? 'Refreshing…' : 'Refresh'}
-	</Button>
+	<div class="actions">
+		<Button
+			variant="primary"
+			data-testid="project-refresh"
+			disabled={!project || projectDetail.refreshing}
+			onclick={refresh}
+		>
+			{projectDetail.refreshing ? 'Refreshing…' : 'Refresh'}
+		</Button>
+		<Button
+			variant="danger"
+			data-testid="project-remove"
+			disabled={!project || projectDetail.removing}
+			onclick={() => (confirming = true)}
+		>
+			Remove
+		</Button>
+	</div>
 </div>
+
+<Dialog open={confirming} title="Remove this project?" onclose={() => (confirming = false)}>
+	<p class="prose">
+		Atlas forgets <strong>{project?.name ?? 'this project'}</strong> and stops offering it as
+		a scope. Its memories are kept, and connecting the same root again re-adds it. Nothing on
+		disk is touched.
+	</p>
+	{#snippet footer()}
+		<Button onclick={() => (confirming = false)}>Cancel</Button>
+		<Button
+			variant="danger"
+			data-testid="project-remove-confirm"
+			disabled={projectDetail.removing}
+			onclick={confirmRemove}
+		>
+			{projectDetail.removing ? 'Removing…' : 'Remove'}
+		</Button>
+	{/snippet}
+</Dialog>
 
 {#if projectDetail.error}
 	<ErrorState message={projectDetail.error} logPath={projectDetail.errorLogPath ?? undefined}>
@@ -188,6 +239,11 @@
 
 	.head h1 {
 		margin: var(--space-1) 0 0;
+	}
+
+	.actions {
+		display: flex;
+		gap: var(--space-2);
 	}
 
 	.back {

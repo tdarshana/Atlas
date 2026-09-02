@@ -185,7 +185,6 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-1);
-		flex: 1 1 200px;
 	}
 
 	.field > span {
@@ -197,6 +196,13 @@
 		display: flex;
 		flex-wrap: wrap;
 		gap: var(--space-4);
+	}
+
+	/* Only fields laid out side by side share the row's width. Inside `.form`, which
+	   stacks its children, the same basis is read as a height and stretches every
+	   field to 200px. */
+	.row > .field {
+		flex: 1 1 200px;
 	}
 
 	.bad {

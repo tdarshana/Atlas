@@ -101,6 +101,11 @@ export class AtlasApi {
 		return this.req('POST', '/api/v1/projects/context', { root });
 	}
 
+	/** Removes the project row. Its memories are kept; nothing is hard-deleted. */
+	deleteProject(id: Uuid): Promise<void> {
+		return this.req('DELETE', `/api/v1/projects/${encodeURIComponent(id)}`);
+	}
+
 	// ---- agents ----
 
 	listAgents(): Promise<Agent[]> {

@@ -20,7 +20,8 @@ export const projectDetail = $state({
 	loading: false,
 	error: null as string | null,
 	errorLogPath: null as string | null,
-	refreshing: false
+	refreshing: false,
+	removing: false
 });
 
 /** The Tauri invoke bridge only exists inside the webview. */
@@ -63,22 +64,52 @@ export async function connectProject(root: string): Promise<Project> {
 	}
 }
 
+/**
+ * Bumped by every `loadProject`. Navigating between two project pages, or a refresh
+ * landing while the first load is still out, leaves two loads in flight against one
+ * piece of state; a load writes only while it is still the newest. Mirrors the guard
+ * in the memories store.
+ */
+let detailGeneration = 0;
+
 export async function loadProject(id: Uuid): Promise<void> {
+	const g = ++detailGeneration;
 	projectDetail.loading = true;
 	try {
 		const project = await api().getProject(id);
-		projectDetail.project = project;
 		// The context route keys on the root path, not the id.
-		projectDetail.context = await api().projectContext(project.root_path);
+		const context = await api().projectContext(project.root_path);
+		if (g !== detailGeneration) return;
+		projectDetail.project = project;
+		projectDetail.context = context;
 		projectDetail.error = null;
 		projectDetail.errorLogPath = null;
 	} catch (e) {
+		if (g !== detailGeneration) return;
 		projectDetail.project = null;
 		projectDetail.context = null;
 		projectDetail.error = errorMessage(e);
 		projectDetail.errorLogPath = errorLogPath(e);
 	} finally {
-		projectDetail.loading = false;
+		if (g === detailGeneration) projectDetail.loading = false;
+	}
+}
+
+/**
+ * Removes the project and refreshes the list. The detail state is cleared and the
+ * generation bumped, so a load still in flight for the deleted project cannot write
+ * it back. Throws so the caller can toast.
+ */
+export async function deleteProject(id: Uuid): Promise<void> {
+	projectDetail.removing = true;
+	try {
+		await api().deleteProject(id);
+		detailGeneration++;
+		projectDetail.project = null;
+		projectDetail.context = null;
+		await loadProjects();
+	} finally {
+		projectDetail.removing = false;
 	}
 }
 

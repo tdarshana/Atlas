@@ -52,7 +52,7 @@
 
 	const options = $derived([
 		{ value: GLOBAL, label: 'Global (home directory)' },
-		...projects.map((p) => ({ value: p.id, label: `${p.name} — ${p.root_path}` }))
+		...projects.map((p) => ({ value: p.id, label: `${p.name} · ${p.root_path}` }))
 	]);
 
 	onMount(async () => {
