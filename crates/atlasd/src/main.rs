@@ -38,7 +38,16 @@ async fn main() -> anyhow::Result<()> {
     // Open the database before binding the port. DuckDB's file lock is what resolves two
     // simultaneous starts: the loser fails here, with the pid of the winner, and exits
     // without ever taking the port hostage.
-    let backend = Arc::new(LocalBackend::open(&paths, Some(args.port), !args.no_embed).map_err(|e| db_open_error(&paths, e))?);
+    let mut backend = LocalBackend::open(&paths, Some(args.port), !args.no_embed).map_err(|e| db_open_error(&paths, e))?;
+
+    // `--port 0` asks the OS for an ephemeral port; the listener is the only way to learn
+    // which one it picked, so bind before anything downstream (daemon.json, the status
+    // report, the log line) needs the real port. Non-zero ports bind to the exact number
+    // requested, so this changes nothing for them.
+    let listener = tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], args.port))).await?;
+    let addr = listener.local_addr()?;
+    backend.port = Some(addr.port());
+    let backend = Arc::new(backend);
     let state = AppState { backend: backend.clone() };
 
     let mcp_backend = backend.clone();
@@ -52,9 +61,7 @@ async fn main() -> anyhow::Result<()> {
     );
     let app = http::guard_loopback(http::router(state).nest_service("/mcp", mcp));
 
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], args.port));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    let info = serde_json::json!({ "pid": std::process::id(), "port": args.port, "started_at": chrono::Utc::now().to_rfc3339() });
+    let info = serde_json::json!({ "pid": std::process::id(), "port": addr.port(), "started_at": chrono::Utc::now().to_rfc3339() });
     std::fs::write(paths.daemon_file(), serde_json::to_string_pretty(&info)?)?;
     tracing::info!("atlasd listening on http://{addr} (db {})", paths.db_path().display());
 

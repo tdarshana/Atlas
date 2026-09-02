@@ -5,23 +5,39 @@ use std::time::Duration;
 struct Daemon { child: Child, port: u16, _home: tempfile::TempDir }
 impl Drop for Daemon { fn drop(&mut self) { let _ = self.child.kill(); let _ = self.child.wait(); } }
 
-fn free_port() -> u16 { std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port() }
-
 async fn start() -> Daemon { start_with_env(&[]).await }
 
 /// A daemon with extra environment variables, for the settings the daemon reads at
 /// call time rather than from its arguments (`ATLAS_SYNC_HOME`).
+///
+/// Every test in the file starts its own daemon and they run at once, so each is asked
+/// to bind an ephemeral port (`--port 0`) rather than a port picked in the test process
+/// and handed over: with nine tests racing, two could otherwise be handed the same
+/// number and one daemon would fail to bind it. The real port is read back from
+/// `daemon.json`, which the daemon writes only once it holds the port.
 async fn start_with_env(env: &[(&str, &str)]) -> Daemon {
     let home = tempfile::tempdir().unwrap();
-    let port = free_port();
     let child = Command::new(env!("CARGO_BIN_EXE_atlasd"))
-        .args(["--port", &port.to_string(), "--home", home.path().to_str().unwrap(), "--no-embed"])
+        .args(["--port", "0", "--home", home.path().to_str().unwrap(), "--no-embed"])
         .envs(env.iter().copied())
         .stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap();
+    let daemon_json = home.path().join("daemon.json");
+    // The wait has to cover a slow start under load, same budget as the readiness poll
+    // below. A daemon that never writes the file fails here, where the reason is plain,
+    // rather than as a "port unknown" error further down.
+    let mut port = None;
+    for _ in 0..200 {
+        if let Ok(s) = std::fs::read_to_string(&daemon_json) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                if let Some(p) = v["port"].as_u64() { port = Some(p as u16); break; }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let port = port.unwrap_or_else(|| panic!("daemon.json had no port within 20s"));
     let client = reqwest::Client::new();
-    // Every test in the file starts its own daemon and they run at once, so the wait has
-    // to cover a slow start under load. A daemon that never answers fails here, where the
-    // reason is plain, rather than as a connection error inside the test body.
+    // A daemon that never answers fails here, where the reason is plain, rather than as
+    // a connection error inside the test body.
     let mut up = false;
     for _ in 0..200 {
         if client.get(format!("http://127.0.0.1:{port}/api/v1/status")).send().await.is_ok() { up = true; break; }
