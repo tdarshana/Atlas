@@ -22,16 +22,38 @@ pub async fn ensure_daemon(paths: &AtlasPaths, port: u16) -> anyhow::Result<u16>
         .stdin(std::process::Stdio::null()).stdout(log.try_clone()?).stderr(log);
     if std::env::var("ATLAS_NO_EMBED").is_ok() { cmd.arg("--no-embed"); }
     #[cfg(unix)] { use std::os::unix::process::CommandExt; cmd.process_group(0); }
-    cmd.spawn().map_err(|e| anyhow::anyhow!("failed to start atlasd ({}): {e}", atlasd_path().display()))?;
+    let mut child = cmd.spawn().map_err(|e| anyhow::anyhow!("failed to start atlasd ({}): {e}", atlasd_path().display()))?;
     let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline { if is_up(port).await { return Ok(port); } tokio::time::sleep(Duration::from_millis(150)).await; }
+    while Instant::now() < deadline {
+        if is_up(port).await { return Ok(port); }
+        // An atlasd that dies on startup (port taken, DB locked, bad home) must not cost
+        // the caller the full 30 s wait, so notice the dead child and report it at once.
+        if let Some(status) = child.try_wait()? {
+            anyhow::bail!("atlasd exited with {status}; see {}", paths.log_file().display());
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
     anyhow::bail!("atlasd did not become ready on port {port}; see {}", paths.log_file().display())
 }
 
-pub fn stop_daemon(paths: &AtlasPaths) -> anyhow::Result<bool> {
+/// True when `pid` names a live process whose command is atlasd. `daemon.json` survives a
+/// crash, so the pid it records may since have been recycled by an unrelated process.
+#[cfg(unix)]
+fn is_atlasd(pid: u64) -> bool {
+    std::process::Command::new("ps").args(["-o", "comm=", "-p", &pid.to_string()]).output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("atlasd")).unwrap_or(false)
+}
+
+/// Stop the running daemon. Returns `Ok(true)` only when a signal was actually sent to a
+/// verified atlasd; a `daemon.json` left behind by a crash is cleared and reported as
+/// "not running" rather than used to signal whatever now owns that pid.
+pub async fn stop_daemon(paths: &AtlasPaths) -> anyhow::Result<bool> {
     let Some(info) = daemon_info(paths) else { return Ok(false) };
-    let Some(pid) = info["pid"].as_u64() else { return Ok(false) };
+    let stale = || { let _ = std::fs::remove_file(paths.daemon_file()); Ok(false) };
+    let (Some(pid), Some(port)) = (info["pid"].as_u64(), info["port"].as_u64().and_then(|p| u16::try_from(p).ok())) else { return stale() };
+    if !is_up(port).await { return stale() }
     #[cfg(unix)] {
+        if !is_atlasd(pid) { return stale() }
         let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
         // `kill` only sends the signal; wait for the process to actually exit so
         // callers (and tests) don't observe atlasd still running right after this returns.

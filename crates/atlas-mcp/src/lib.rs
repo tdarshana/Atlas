@@ -41,7 +41,7 @@ pub struct RecallArgs {
 pub struct ForgetArgs { pub id: Uuid, pub reason: Option<String> }
 
 #[derive(Clone)]
-pub struct AtlasMcp<B: Backend> { backend: Arc<B>, pub tool_router: ToolRouter<Self> }
+pub struct AtlasMcp<B: Backend> { backend: Arc<B>, source_tool: String, pub tool_router: ToolRouter<Self> }
 
 fn err(e: atlas_core::AtlasError) -> McpError {
     match e { atlas_core::AtlasError::NotFound(m) => McpError::invalid_params(m, None), atlas_core::AtlasError::Invalid(m) => McpError::invalid_params(m, None), other => McpError::internal_error(other.to_string(), None) }
@@ -52,13 +52,18 @@ fn json_result<T: serde::Serialize>(v: &T) -> Result<CallToolResult, McpError> {
 
 #[tool_router]
 impl<B: Backend> AtlasMcp<B> {
-    pub fn new(backend: Arc<B>) -> Self { Self { backend, tool_router: Self::tool_router() } }
+    pub fn new(backend: Arc<B>) -> Self { Self { backend, source_tool: source_tool_label(), tool_router: Self::tool_router() } }
+
+    /// Override the label stamped on `source_tool`. Set this at construction time: the
+    /// process may already be multi-threaded, so a transport cannot announce itself by
+    /// writing to the environment.
+    pub fn with_source_tool(mut self, label: impl Into<String>) -> Self { self.source_tool = label.into(); self }
 
     #[tool(description = "Store a memory shared with every agent. Use for facts about the project, decisions and their reasons, user preferences, and insights worth keeping.")]
     async fn remember(&self, Parameters(a): Parameters<RememberArgs>) -> Result<CallToolResult, McpError> {
         let kind = a.kind.as_deref().unwrap_or("fact").parse::<MemoryKind>().map_err(err)?;
         let scope = match a.scope.as_deref() { Some(s) => s.parse::<MemoryScope>().map_err(err)?, None => if a.project_id.is_some() { MemoryScope::Project } else { MemoryScope::Global } };
-        let m = NewMemory { scope, project_id: a.project_id, kind, text: a.text, tags: a.tags.unwrap_or_default(), source_agent: a.source_agent, source_tool: Some(source_tool_label()), confidence: 1.0, status: MemoryStatus::Active };
+        let m = NewMemory { scope, project_id: a.project_id, kind, text: a.text, tags: a.tags.unwrap_or_default(), source_agent: a.source_agent, source_tool: Some(self.source_tool.clone()), confidence: 1.0, status: MemoryStatus::Active };
         json_result(&self.backend.remember(m, "mcp").await.map_err(err)?)
     }
 

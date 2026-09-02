@@ -38,15 +38,15 @@ async fn main() -> anyhow::Result<()> {
     let paths = cli.home.as_ref().map(AtlasPaths::at).unwrap_or_else(AtlasPaths::discover);
     match cli.cmd {
         Cmd::Daemon { action: DaemonCmd::Start } => { let p = daemon_ctl::ensure_daemon(&paths, cli.port).await?; println!("atlasd running on http://127.0.0.1:{p}"); }
-        Cmd::Daemon { action: DaemonCmd::Stop } => { println!("{}", if daemon_ctl::stop_daemon(&paths)? { "stopped" } else { "not running" }); }
+        Cmd::Daemon { action: DaemonCmd::Stop } => { println!("{}", if daemon_ctl::stop_daemon(&paths).await? { "stopped" } else { "not running" }); }
         Cmd::Daemon { action: DaemonCmd::Status } => {
             if daemon_ctl::is_up(cli.port).await { let s = RemoteBackend::new(cli.port).status().await?; println!("{}", serde_json::to_string_pretty(&s)?); }
             else { println!("atlasd is not running on port {}", cli.port); std::process::exit(1); }
         }
         Cmd::Mcp => {
             let port = daemon_ctl::ensure_daemon(&paths, cli.port).await?;
-            if std::env::var("ATLAS_SOURCE_TOOL").is_err() { std::env::set_var("ATLAS_SOURCE_TOOL", "stdio"); }
-            let server = AtlasMcp::new(Arc::new(RemoteBackend::new(port)));
+            let server = AtlasMcp::new(Arc::new(RemoteBackend::new(port)))
+                .with_source_tool(std::env::var("ATLAS_SOURCE_TOOL").unwrap_or_else(|_| "stdio".into()));
             use rmcp::ServiceExt;
             let running = server.serve(rmcp::transport::stdio()).await?;
             running.waiting().await?;
