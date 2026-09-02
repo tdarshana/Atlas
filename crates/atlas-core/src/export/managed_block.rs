@@ -42,10 +42,16 @@ pub fn render_block(ctx: &BlockContext) -> String {
 
 /// Replaces the content between `START`/`END` with `block` (which itself
 /// carries fresh markers), preserving everything else in `existing`
-/// byte-for-byte. When no markers are present, appends `block` after exactly
-/// one blank line (or, for empty `existing`, with no leading blank line).
+/// byte-for-byte. When no markers are present — or an `END` is found before
+/// any `START` (an orphaned marker, e.g. from a pasted example, rather than a
+/// real span) — appends `block` after exactly one blank line (or, for empty
+/// `existing`, with no leading blank line).
 pub fn splice_block(existing: &str, block: &str) -> String {
-    if let (Some(s), Some(e)) = (existing.find(START), existing.find(END)) {
+    let span = match (existing.find(START), existing.find(END)) {
+        (Some(s), Some(e)) if e > s => Some((s, e)),
+        _ => None,
+    };
+    if let Some((s, e)) = span {
         let e_end = e + END.len();
         format!("{}{}{}", &existing[..s], block, &existing[e_end..])
     } else {
@@ -55,5 +61,34 @@ pub fn splice_block(existing: &str, block: &str) -> String {
         } else {
             format!("{trimmed}\n\n{block}\n")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn end_before_start_is_left_intact_with_block_appended() {
+        let existing = "notes\n<!-- atlas:end -->\nmore notes\n<!-- atlas:start -->\ntail\n";
+        let block = "<!-- atlas:start -->\nnew\n<!-- atlas:end -->";
+        let out = splice_block(existing, block);
+        assert_eq!(out, "notes\n<!-- atlas:end -->\nmore notes\n<!-- atlas:start -->\ntail\n\n<!-- atlas:start -->\nnew\n<!-- atlas:end -->\n");
+    }
+
+    #[test]
+    fn start_without_end_appends() {
+        let existing = "notes\n<!-- atlas:start -->\nunterminated\n";
+        let block = "<!-- atlas:start -->\nnew\n<!-- atlas:end -->";
+        let out = splice_block(existing, block);
+        assert_eq!(out, "notes\n<!-- atlas:start -->\nunterminated\n\n<!-- atlas:start -->\nnew\n<!-- atlas:end -->\n");
+    }
+
+    #[test]
+    fn two_spans_replaces_only_the_first() {
+        let existing = "<!-- atlas:start -->\nold1\n<!-- atlas:end -->\nmiddle\n<!-- atlas:start -->\nold2\n<!-- atlas:end -->\n";
+        let block = "<!-- atlas:start -->\nnew\n<!-- atlas:end -->";
+        let out = splice_block(existing, block);
+        assert_eq!(out, "<!-- atlas:start -->\nnew\n<!-- atlas:end -->\nmiddle\n<!-- atlas:start -->\nold2\n<!-- atlas:end -->\n");
     }
 }

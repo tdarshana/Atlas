@@ -1,6 +1,6 @@
 use crate::export::{self, BlockContext};
 use crate::models::{Agent, SyncAction, SyncKind, SyncOp, SyncReport};
-use crate::Result;
+use crate::{AtlasError, Result};
 use std::path::{Path, PathBuf};
 
 /// Inputs describing one sync pass: the repo (or, for a global sync, home
@@ -79,14 +79,25 @@ fn block_op(kind: SyncKind, path: PathBuf, block: &BlockContext) -> Result<SyncO
 }
 
 /// Writes every `Create`/`Update` op to disk, creating parent directories as
-/// needed, then returns the tally.
+/// needed, then returns the tally. Stops at the first write failure and
+/// reports the failing path plus how many of the planned writes had already
+/// completed, since a bare io error gives no way to tell which file or how
+/// much progress was made.
 pub fn apply(ops: &[SyncOp]) -> Result<SyncReport> {
+    let total = ops.iter().filter(|o| matches!(o.action, SyncAction::Create | SyncAction::Update)).count();
+    let mut done = 0usize;
     for op in ops {
         if matches!(op.action, SyncAction::Create | SyncAction::Update) {
-            if let Some(parent) = op.path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&op.path, &op.content)?;
+            let write = || -> std::io::Result<()> {
+                if let Some(parent) = op.path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&op.path, &op.content)
+            };
+            write().map_err(|e| {
+                AtlasError::Other(format!("sync: failed to write {}: {e} ({done} of {total} files written)", op.path.display()))
+            })?;
+            done += 1;
         }
     }
     Ok(summarize(ops))
@@ -152,5 +163,26 @@ mod tests {
         assert_eq!(std::fs::read_to_string(d.path().join(".claude/agents/handwritten.md")).unwrap(), "---\nname: handwritten\n---\nmine\n");
         let again = plan_sync(&inputs).unwrap();
         assert!(again.iter().filter(|o| !matches!(o.action, SyncAction::Skip(_))).all(|o| o.action == SyncAction::Unchanged));
+    }
+
+    #[test]
+    fn apply_wraps_write_error_with_path_and_progress() {
+        let d = tempfile::tempdir().unwrap();
+        let good1 = d.path().join(".claude/agents/first.md");
+        let bad = d.path().join(".claude/agents/reviewer.md");
+        let good2 = d.path().join(".claude/agents/third.md");
+        // Make the second target unwritable: a directory sits where the file should go.
+        std::fs::create_dir_all(&bad).unwrap();
+        let ops = vec![
+            SyncOp { kind: SyncKind::Claude, path: good1.clone(), content: "one".into(), action: SyncAction::Create },
+            SyncOp { kind: SyncKind::Claude, path: bad.clone(), content: "two".into(), action: SyncAction::Create },
+            SyncOp { kind: SyncKind::Claude, path: good2.clone(), content: "three".into(), action: SyncAction::Create },
+        ];
+        let err = apply(&ops).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains(&bad.display().to_string()), "message should name the failing path: {msg}");
+        assert!(msg.contains("1 of 3 files written"), "message should report progress: {msg}");
+        assert_eq!(std::fs::read_to_string(&good1).unwrap(), "one", "earlier op should still have been written");
+        assert!(!good2.exists(), "later op should not have been attempted after the failure");
     }
 }
