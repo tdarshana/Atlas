@@ -280,8 +280,9 @@ impl Backend for LocalBackend {
         // trusting the request: `POST /sync` is unauthenticated.
         let hooks = self.extraction_enabled()?;
         // Codex keeps one config file per user, so its hook needs the sync home even
-        // when the pass writes into a project. Resolved only when it is actually a
-        // target, so a project sync still works where there is no home to find.
+        // when the pass writes into a project. `CodexHook` is one of the defaults, so
+        // with extraction on this resolves on nearly every sync, and a machine with no
+        // home to find fails the whole pass rather than just the hook.
         let home = if hooks && targets.contains(&SyncKind::CodexHook) { sync_home()? } else { PathBuf::new() };
         let mut ops = sync::plan_sync(&SyncInputs { root: &root, agents: &agents, block, targets: &targets, home: &home, hooks })?;
         ops.extend(skipped);

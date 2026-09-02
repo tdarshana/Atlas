@@ -11,7 +11,16 @@ fn docs_path(kind: DocKind) -> &'static str {
 pub struct RemoteBackend { base: String, client: reqwest::Client }
 
 impl RemoteBackend {
-    pub fn new(port: u16) -> Self { Self { base: format!("http://127.0.0.1:{port}/api/v1"), client: reqwest::Client::new() } }
+    /// A request deadline matters because `atlas ingest --hook-stdin` runs inside
+    /// someone else's turn: a daemon that accepts the connection and then never
+    /// answers (a lock it cannot take, a wedged worker) must not hold the turn open.
+    /// 30 s is well past any healthy call and well short of a stall a user would sit
+    /// through. `Client::builder` only fails on a bad TLS or resolver setup, which a
+    /// loopback client has none of, so the default is a sound fallback.
+    pub fn new(port: u16) -> Self {
+        let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_default();
+        Self { base: format!("http://127.0.0.1:{port}/api/v1"), client }
+    }
     async fn handle<T: serde::de::DeserializeOwned>(r: reqwest::Response) -> Result<T> {
         if r.status().is_success() { return r.json::<T>().await.map_err(|e| AtlasError::Other(e.to_string())); }
         Err(Self::error(r).await)

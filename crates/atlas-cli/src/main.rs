@@ -99,7 +99,9 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Sync(args) => commands::sync::run(args, &backend(&paths, cli.port).await?).await?,
         Cmd::Export { dir, force } => commands::export::run(dir, force, &backend(&paths, cli.port).await?).await?,
         Cmd::Import { dir } => commands::import::run(dir, &backend(&paths, cli.port).await?).await?,
-        Cmd::Ingest(args) => commands::ingest::run(args, &backend(&paths, cli.port).await?).await?,
+        // `ingest` reaches the daemon itself: in hook mode a daemon that will not start
+        // has to be reported the same quiet way as any other failure.
+        Cmd::Ingest(args) => commands::ingest::run(args, &paths, cli.port).await?,
         Cmd::Tui => {
             let port = daemon_ctl::ensure_daemon(&paths, cli.port).await?;
             atlas_cli::tui::run(port).await?;

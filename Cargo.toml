@@ -11,7 +11,9 @@ license = "MIT"
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order`: sync merges into the user's own `.claude/settings.json`, and a
+# BTreeMap-backed Map would hand back every key alphabetised.
+serde_json = { version = "1", features = ["preserve_order"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs", "signal", "time"] }

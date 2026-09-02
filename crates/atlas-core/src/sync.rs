@@ -8,11 +8,15 @@ use std::path::{Path, PathBuf};
 /// `jq` and no shell.
 const CLAUDE_HOOK_COMMAND: &str = "atlas ingest --tool claude-code --hook-stdin";
 
-/// What marks a `Stop` entry as already installed. Matched loosely rather than
-/// against `CLAUDE_HOOK_COMMAND`, so a user who edited the flags (a different
+/// Whether a `Stop` command is already an Atlas ingest. Looser than equality
+/// with `CLAUDE_HOOK_COMMAND`, so a user who edited the flags (a different
 /// `--tool`, an added `--project`) keeps their version instead of collecting a
-/// second entry on every sync.
-const HOOK_MARKER: &str = "atlas ingest";
+/// second entry on every sync; tight enough that a command merely mentioning
+/// the phrase, or a differently named binary, does not read as installed.
+fn is_atlas_ingest(command: &str) -> bool {
+    let command = command.trim();
+    command.starts_with("atlas ingest") && command.contains("--hook-stdin")
+}
 
 /// The `notify` argv Codex runs when a turn completes. Codex appends the
 /// notification JSON as the last element, which is why the command ends on a
@@ -154,7 +158,7 @@ fn insert_stop_hook(settings: &mut serde_json::Value) -> std::result::Result<boo
     let stop = hooks.entry("Stop").or_insert_with(|| Value::Array(Vec::new()));
     let stop = stop.as_array_mut().ok_or("hooks.Stop is not a JSON array")?;
     let installed = stop.iter().any(|entry| {
-        entry["hooks"].as_array().is_some_and(|hs| hs.iter().any(|h| h["command"].as_str().is_some_and(|c| c.contains(HOOK_MARKER))))
+        entry["hooks"].as_array().is_some_and(|hs| hs.iter().any(|h| h["command"].as_str().is_some_and(is_atlas_ingest)))
     });
     if installed {
         return Ok(false);
@@ -355,23 +359,33 @@ mod tests {
     fn claude_hook_merges_into_existing_settings() {
         let d = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(d.path().join(".claude")).unwrap();
+        // Deliberately not in alphabetical order, and with a Stop command that only
+        // mentions the phrase: neither the key order nor the decoy may change the merge.
         std::fs::write(
             d.path().join(".claude/settings.json"),
-            r#"{"model":"opus","permissions":{"allow":["Bash(git:*)"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"say done"}]}],"PreToolUse":[]}}"#,
+            r#"{"$schema":"https://json.schemastore.org/claude-code-settings.json","model":"opus","permissions":{"allow":["Bash(git:*)"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"say done"}]},{"hooks":[{"type":"command","command":"echo \"run atlas ingest by hand\""}]}],"PreToolUse":[]}}"#,
         )
         .unwrap();
         let ops = plan_sync(&hook_inputs(d.path(), true)).unwrap();
         assert_eq!(ops.iter().find(|o| o.kind == SyncKind::ClaudeHook).unwrap().action, SyncAction::Update);
         apply(&ops).unwrap();
 
-        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(d.path().join(".claude/settings.json")).unwrap()).unwrap();
+        let written = std::fs::read_to_string(d.path().join(".claude/settings.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&written).unwrap();
         assert_eq!(v["model"], "opus", "unrelated keys must survive");
         assert_eq!(v["permissions"]["allow"][0], "Bash(git:*)");
         assert!(v["hooks"]["PreToolUse"].is_array(), "other hook events must survive");
         let stop = v["hooks"]["Stop"].as_array().unwrap();
-        assert_eq!(stop.len(), 2, "the existing Stop entry must be kept alongside ours: {stop:?}");
+        assert_eq!(stop.len(), 3, "both existing Stop entries must be kept alongside ours: {stop:?}");
         assert_eq!(stop[0]["hooks"][0]["command"], "say done");
-        assert_eq!(stop[1]["hooks"][0]["command"], CLAUDE_HOOK_COMMAND);
+        assert!(stop[1]["hooks"][0]["command"].as_str().unwrap().starts_with("echo "), "a command that merely names atlas ingest is not ours");
+        assert_eq!(stop[2]["hooks"][0]["command"], CLAUDE_HOOK_COMMAND);
+
+        // The file is the user's: it comes back in their key order, not alphabetised.
+        let at = |key: &str| written.find(key).unwrap_or_else(|| panic!("{key} missing from {written}"));
+        assert!(at("$schema") < at("\"model\"") && at("\"model\"") < at("\"permissions\"") && at("\"permissions\"") < at("\"hooks\""), "key order must survive the merge: {written}");
+        // The last `"type"`/`"command"` pair in the file is the entry we just added.
+        assert!(written.rfind("\"type\"") < written.rfind("\"command\""), "our own entry reads type before command: {written}");
 
         let again = plan_sync(&hook_inputs(d.path(), true)).unwrap();
         assert!(again.iter().all(|o| o.action == SyncAction::Unchanged), "{again:?}");

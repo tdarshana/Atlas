@@ -175,6 +175,35 @@ fn claude_code_stop_hook_is_quiet_when_extraction_is_off() {
     assert!(err.contains("extraction is disabled"), "the hook should still say why nothing was queued: {err}");
 }
 
+/// The failure the hook exists to survive: no daemon, and none that can start. Port 1
+/// is privileged, so atlasd exits at once and `ensure_daemon` reports it - through a
+/// hook that still has to be exit 0 with the reason on stderr, or Claude Code marks
+/// every turn as having a failed Stop hook.
+#[test]
+fn hook_mode_stays_quiet_when_the_daemon_cannot_be_reached() {
+    use std::io::Write;
+    let daemon = TestDaemon::new();
+    let work = tempfile::tempdir().unwrap();
+    let transcript = work.path().join("session.jsonl");
+    std::fs::write(&transcript, "{\"type\":\"user\",\"message\":{\"content\":\"hi\"}}\n").unwrap();
+    let payload = serde_json::json!({ "transcript_path": transcript, "cwd": work.path() }).to_string();
+
+    let mut child = daemon
+        .cmd()
+        .env("ATLAS_PORT", "1")
+        .args(["ingest", "--tool", "claude-code", "--hook-stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(payload.as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "an unreachable daemon must not fail the turn: {err}");
+    assert!(err.starts_with("atlas: "), "the hook should still say what went wrong: {err:?}");
+}
+
 /// The same daemon, asked from a shell rather than a hook, has to fail instead:
 /// a person typing `atlas ingest` wants a non-zero exit when nothing was queued.
 #[test]
