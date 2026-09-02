@@ -5,7 +5,7 @@ use atlas_core::models::{Doc, DocKind, MemoryStatus};
 use std::path::{Path, PathBuf};
 
 /// Every status, so an export is a full snapshot rather than only what is live.
-const STATUSES: [MemoryStatus; 4] = [MemoryStatus::Active, MemoryStatus::Pending, MemoryStatus::Rejected, MemoryStatus::Superseded];
+pub(super) const STATUSES: [MemoryStatus; 4] = [MemoryStatus::Active, MemoryStatus::Pending, MemoryStatus::Rejected, MemoryStatus::Superseded];
 
 /// The directory each doc kind is written to, and read back from by `import`.
 pub fn doc_dir(kind: DocKind) -> &'static str {
@@ -57,9 +57,17 @@ pub async fn run(dir: PathBuf, backend: &RemoteBackend) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Writes one `<name>.md` per item. Names are validated on the way in
-/// (lowercase, digits, `-` and `_` only), so they are safe as file names.
+/// Writes one `<name>.md` per item into a directory it first empties, so that an
+/// export into a directory used before does not leave a file for something since
+/// deleted, which `import` would then bring back. Only these three subdirectories
+/// are removed, never the target directory itself, which may be the user's own.
+///
+/// Names are validated on the way in (lowercase, digits, `-` and `_` only), so
+/// they are safe as file names.
 fn write_all<'a>(dir: &Path, items: impl Iterator<Item = (&'a str, String)>) -> anyhow::Result<()> {
+    if dir.is_dir() {
+        std::fs::remove_dir_all(dir).map_err(|e| anyhow::anyhow!("failed to clear {}: {e}", dir.display()))?;
+    }
     std::fs::create_dir_all(dir)?;
     for (name, content) in items {
         std::fs::write(dir.join(format!("{name}.md")), content)?;

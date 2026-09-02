@@ -3,6 +3,7 @@
 name: reviewer
 description: Reviews pull requests for correctness and risk
 tools: Read, Grep
+tags: qa
 model: opus
 ---
 

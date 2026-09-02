@@ -1,6 +1,6 @@
 use crate::remote::RemoteBackend;
 use atlas_core::backend::Backend;
-use atlas_core::models::{DocKind, Memory, MemoryStatus, NewAgent, NewDoc, NewMemory};
+use atlas_core::models::{DocKind, Memory, NewAgent, NewDoc, NewMemory};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -20,9 +20,14 @@ pub async fn run(dir: PathBuf, backend: &RemoteBackend) -> anyhow::Result<()> {
     }
 
     // Memories have no name to upsert on, so the guard against importing the same
-    // export twice is the text itself. The active list is fetched once, and each
-    // insert joins it, which also dedupes repeats within the file.
-    let mut seen: HashSet<String> = backend.list_memories(MemoryStatus::Active, None).await?.iter().map(|m| normalize(&m.text)).collect();
+    // export twice is the text itself. Every status is seeded, not just the active
+    // one, because export writes every status and a pending or superseded memory
+    // would otherwise come back again on each import. Each insert joins the set,
+    // which also dedupes repeats within the file.
+    let mut seen = HashSet::new();
+    for status in super::export::STATUSES {
+        seen.extend(backend.list_memories(status, None).await?.iter().map(|m| normalize(&m.text)));
+    }
     let (mut imported, mut skipped) = (0usize, 0usize);
     let path = dir.join("memories.jsonl");
     if path.exists() {
@@ -77,8 +82,8 @@ fn md_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-/// Reads an agent file in the Claude export format. Tags are not part of that
-/// format, so an agent's tags do not survive an export and import.
+/// Reads an agent file in the Claude export format, including the `tags` line
+/// the exporter adds beyond what Claude Code itself defines.
 fn read_agent(path: &Path) -> anyhow::Result<NewAgent> {
     let (front, body) = split_frontmatter(&std::fs::read_to_string(path)?).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
     Ok(NewAgent {
@@ -87,7 +92,7 @@ fn read_agent(path: &Path) -> anyhow::Result<NewAgent> {
         instructions: body,
         model_hint: front.get("model").cloned(),
         tools: comma_list(front.get("tools")),
-        tags: vec![],
+        tags: comma_list(front.get("tags")),
     })
 }
 
@@ -169,7 +174,7 @@ mod tests {
             instructions: "Review the diff.\n".into(),
             model_hint: Some("sonnet".into()),
             tools: vec!["read".into(), "grep".into()],
-            tags: vec![],
+            tags: vec!["qa".into(), "slow".into()],
             version: 1,
             created_at: Default::default(),
             updated_at: Default::default(),
@@ -179,6 +184,7 @@ mod tests {
         assert_eq!(front.get("description").unwrap(), "note: careful", "a quoted scalar is unquoted, colon and all");
         assert_eq!(front.get("model").unwrap(), "sonnet");
         assert_eq!(comma_list(front.get("tools")), vec!["read", "grep"]);
+        assert_eq!(comma_list(front.get("tags")), vec!["qa", "slow"], "tags must survive the round trip");
         assert_eq!(body, "Review the diff.\n");
     }
 

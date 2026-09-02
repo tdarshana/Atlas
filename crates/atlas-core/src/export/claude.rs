@@ -13,6 +13,12 @@ pub fn claude_agent_md(a: &Agent) -> String {
     if !a.tools.is_empty() {
         out.push_str(&format!("tools: {}\n", a.tools.join(", ")));
     }
+    // Not part of Claude Code's own frontmatter, which ignores keys it does not
+    // know. It is here so that `atlas export` followed by `atlas import` returns
+    // an agent's tags instead of clearing them.
+    if !a.tags.is_empty() {
+        out.push_str(&format!("tags: {}\n", a.tags.join(", ")));
+    }
     if let Some(hint) = &a.model_hint {
         out.push_str(&format!("model: {hint}\n"));
     }

@@ -41,6 +41,15 @@ fn project_agent_sync_export_and_import_round_trip() {
         let out = c.args(args).output().unwrap();
         (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
     };
+    let run_stdin = |args: &[&str], input: &str| {
+        use std::io::Write;
+        let mut c = atlas();
+        env(&mut c);
+        let mut child = c.args(args).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
+    };
     let repo_path = repo.path().to_str().unwrap();
 
     let (code, out, err) = run(&["project", "connect", repo_path]);
@@ -52,7 +61,7 @@ fn project_agent_sync_export_and_import_round_trip() {
 
     let instructions = work.path().join("reviewer.md");
     std::fs::write(&instructions, "Review the diff and report only real defects.\n").unwrap();
-    let (code, _, err) = run(&["agent", "save", "reviewer", "--description", "Reviews", "--instructions-file", instructions.to_str().unwrap()]);
+    let (code, _, err) = run(&["agent", "save", "reviewer", "--description", "Reviews", "--instructions-file", instructions.to_str().unwrap(), "--tag", "qa"]);
     assert_eq!(code, 0, "{err}");
 
     let (code, out, err) = run(&["sync", "--project", repo_path]);
@@ -66,6 +75,43 @@ fn project_agent_sync_export_and_import_round_trip() {
     assert_eq!(code, 0, "a second sync should have nothing to do: {out}{err}");
     assert!(out.contains("unchanged"), "check should list each op: {out}");
 
+    // An agent saved but not synced is what --check exists to catch, and its
+    // non-zero exit is what lets a hook or a CI job fail on the difference.
+    let (code, _, err) = run(&["agent", "save", "linter", "--description", "Lints", "--instructions-file", instructions.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    let (code, out, err) = run(&["sync", "--project", repo_path, "--check"]);
+    assert_eq!(code, 1, "check should fail while a change is pending: {out}{err}");
+    assert!(
+        out.lines().any(|l| l.starts_with("create") && l.contains(".claude/agents/linter.md")),
+        "check should name the file it would create: {out}"
+    );
+
+    // Practices and workflows, with the practice body read from standard input.
+    let (code, _, err) = run_stdin(&["practice", "save", "commits", "--body-file", "-", "--project", repo_path], "Imperative mood, one change per commit.\n");
+    assert_eq!(code, 0, "{err}");
+    let (code, out, err) = run(&["practice", "list"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("commits"), "practice list should show the saved practice: {out}");
+    let (code, out, err) = run(&["practice", "show", "commits"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("Imperative mood"), "the body should have been read from stdin: {out}");
+
+    let release = work.path().join("release.md");
+    std::fs::write(&release, "Tag, build, publish.\n").unwrap();
+    let (code, _, err) = run(&["workflow", "save", "release", "--body-file", release.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    let (_, out, _) = run(&["workflow", "list"]);
+    assert!(out.contains("release"), "workflow list should show the saved workflow: {out}");
+    let (code, _, err) = run(&["workflow", "delete", "release"]);
+    assert_eq!(code, 0, "{err}");
+    let (_, out, _) = run(&["workflow", "list"]);
+    assert!(!out.contains("release"), "delete should have removed the workflow: {out}");
+
+    let (code, out, err) = run(&["project", "show", repo_path]);
+    assert_eq!(code, 0, "{err}");
+    let practices = out.split("\"practices\"").nth(1).unwrap_or_else(|| panic!("project show should list practices: {out}"));
+    assert!(practices.contains("\"name\": \"commits\""), "the project-scoped practice should appear in the project context: {out}");
+
     // A memory gives the export a `memories.jsonl` line, and lets the re-import
     // below prove that an already-present memory is not stored a second time.
     let (code, _, err) = run(&["remember", "the deploy target is fly.io", "--kind", "decision"]);
@@ -75,7 +121,18 @@ fn project_agent_sync_export_and_import_round_trip() {
     let (code, _, err) = run(&["export", dump.to_str().unwrap()]);
     assert_eq!(code, 0, "{err}");
     assert!(dump.join("agents/reviewer.md").exists(), "export should write agents/reviewer.md");
+    assert!(dump.join("agents/linter.md").exists(), "export should write agents/linter.md");
+    assert!(dump.join("practices/commits.md").exists(), "export should write practices/commits.md");
     assert!(std::fs::read_to_string(dump.join("memories.jsonl")).unwrap().contains("fly.io"));
+
+    // Exporting again over the same directory has to drop the file of an agent
+    // that has since been deleted, or the next import would bring it back.
+    let (code, _, err) = run(&["agent", "delete", "linter"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = run(&["export", dump.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!dump.join("agents/linter.md").exists(), "a second export should prune the deleted agent's file");
+    assert!(dump.join("agents/reviewer.md").exists(), "a second export should keep the agents that remain");
 
     let (code, _, err) = run(&["agent", "delete", "reviewer"]);
     assert_eq!(code, 0, "{err}");
@@ -84,6 +141,9 @@ fn project_agent_sync_export_and_import_round_trip() {
     let (code, out, err) = run(&["agent", "show", "reviewer"]);
     assert_eq!(code, 0, "import should have restored the agent: {err}");
     assert!(out.contains("Review the diff"), "{out}");
+    assert!(out.contains("\"qa\""), "import should restore the agent's tags: {out}");
+    let (_, out, _) = run(&["agent", "list"]);
+    assert!(!out.contains("linter"), "import should not resurrect an agent the export pruned: {out}");
     let (_, out, _) = run(&["recall", "deploy target"]);
     assert_eq!(out.lines().filter(|l| l.contains("fly.io")).count(), 1, "import should not duplicate an existing memory: {out}");
 
