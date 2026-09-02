@@ -43,6 +43,8 @@ enum Cmd {
     },
     /// Read a directory written by `atlas export` back into Atlas
     Import { dir: PathBuf },
+    /// Queue a transcript for extraction; the hook modes read Claude Code's and Codex's own payloads
+    Ingest(commands::ingest::IngestArgs),
     /// Open the terminal UI
     Tui,
 }
@@ -97,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Sync(args) => commands::sync::run(args, &backend(&paths, cli.port).await?).await?,
         Cmd::Export { dir, force } => commands::export::run(dir, force, &backend(&paths, cli.port).await?).await?,
         Cmd::Import { dir } => commands::import::run(dir, &backend(&paths, cli.port).await?).await?,
+        Cmd::Ingest(args) => commands::ingest::run(args, &backend(&paths, cli.port).await?).await?,
         Cmd::Tui => {
             let port = daemon_ctl::ensure_daemon(&paths, cli.port).await?;
             atlas_cli::tui::run(port).await?;

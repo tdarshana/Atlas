@@ -20,6 +20,9 @@ fastembed = "6"
 git2 = "0.21"
 ignore = "0.4"
 reqwest.workspace = true
+# Codex's config.toml is the user's file: edited in place so comments and
+# formatting survive a hook install.
+toml_edit = "0.25"
 # `sync` on top of the workspace features: `JobQueue` holds a `tokio::sync::Notify`.
 tokio = { workspace = true, features = ["sync"] }
 

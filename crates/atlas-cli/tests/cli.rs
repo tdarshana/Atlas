@@ -133,6 +133,69 @@ fn project_agent_sync_export_and_import_round_trip() {
     assert_eq!(out.lines().filter(|l| l.contains("fly.io")).count(), 1, "import should not duplicate an existing memory: {out}");
 }
 
+/// The Claude Code Stop hook runs inside someone else's turn: with extraction off
+/// it has to say so and still exit 0, or Claude Code reports the turn as failed.
+#[test]
+fn claude_code_stop_hook_is_quiet_when_extraction_is_off() {
+    use std::io::Write;
+    let daemon = TestDaemon::new();
+    let work = tempfile::tempdir().unwrap();
+    let transcript = work.path().join("session.jsonl");
+    std::fs::write(
+        &transcript,
+        concat!(
+            r#"{"type":"user","message":{"content":"we deploy to fly.io"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Noted."}]}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let payload = serde_json::json!({
+        "session_id": "s",
+        "transcript_path": transcript,
+        "cwd": work.path(),
+        "hook_event_name": "Stop",
+        "stop_hook_active": false,
+    })
+    .to_string();
+
+    let mut child = daemon
+        .cmd()
+        .args(["ingest", "--tool", "claude-code", "--hook-stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(payload.as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "a hook must never fail the turn: {err}");
+    assert!(err.contains("extraction is disabled"), "the hook should still say why nothing was queued: {err}");
+}
+
+/// The same daemon, asked from a shell rather than a hook, has to fail instead:
+/// a person typing `atlas ingest` wants a non-zero exit when nothing was queued.
+#[test]
+fn ingest_from_a_pipe_fails_when_extraction_is_off() {
+    use std::io::Write;
+    let daemon = TestDaemon::new();
+    let mut child = daemon
+        .cmd()
+        .args(["ingest", "--tool", "test"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"user: we deploy to fly.io\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "an interactive ingest should fail: {err}");
+    assert!(err.contains("extraction is disabled"), "{err}");
+}
+
 /// `atlas mcp` is how editors reach Atlas, so the stdio shim must complete an MCP
 /// handshake and list the four tools without a client ever touching the HTTP API.
 #[test]

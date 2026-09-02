@@ -3,6 +3,25 @@ use crate::models::{Agent, SyncAction, SyncKind, SyncOp, SyncReport};
 use crate::{AtlasError, Result};
 use std::path::{Path, PathBuf};
 
+/// The `Stop` hook command Claude Code runs when a turn ends. `--hook-stdin`
+/// makes the CLI read Claude Code's hook JSON itself, so the entry needs no
+/// `jq` and no shell.
+const CLAUDE_HOOK_COMMAND: &str = "atlas ingest --tool claude-code --hook-stdin";
+
+/// What marks a `Stop` entry as already installed. Matched loosely rather than
+/// against `CLAUDE_HOOK_COMMAND`, so a user who edited the flags (a different
+/// `--tool`, an added `--project`) keeps their version instead of collecting a
+/// second entry on every sync.
+const HOOK_MARKER: &str = "atlas ingest";
+
+/// The `notify` argv Codex runs when a turn completes. Codex appends the
+/// notification JSON as the last element, which is why the command ends on a
+/// flag: `atlas ingest --tool codex --hook-arg <json>`.
+const CODEX_NOTIFY: &[&str] = &["atlas", "ingest", "--tool", "codex", "--hook-arg"];
+
+/// Why a Codex hook op leaves an existing `notify` alone.
+const CODEX_NOTIFY_TAKEN: &str = "notify already set to another command";
+
 /// Inputs describing one sync pass: the repo (or, for a global sync, home
 /// directory) root, the agents to export, the managed-block context, and
 /// which targets to write.
@@ -11,6 +30,14 @@ pub struct SyncInputs<'a> {
     pub agents: &'a [Agent],
     pub block: BlockContext,
     pub targets: &'a [SyncKind],
+    /// The directory holding `.codex`. Codex reads one config file per user
+    /// rather than one per repository, so its hook lands in the sync home even
+    /// when the rest of the pass writes into a project.
+    pub home: &'a Path,
+    /// Whether the transcript hooks may be installed. The backend resolves it
+    /// from `extraction.enabled`: installing a hook that feeds transcripts to a
+    /// model is not something a sync should do behind the user's back.
+    pub hooks: bool,
 }
 
 /// Computes what a sync would do, without touching the filesystem beyond
@@ -33,6 +60,16 @@ pub fn plan_sync(i: &SyncInputs) -> Result<Vec<SyncOp>> {
             }
             SyncKind::AgentsMd => ops.push(block_op(*kind, i.root.join("AGENTS.md"), &i.block)?),
             SyncKind::ClaudeMd => ops.push(block_op(*kind, i.root.join("CLAUDE.md"), &i.block)?),
+            SyncKind::ClaudeHook => {
+                if i.hooks {
+                    ops.push(claude_hook_op(i.root.join(".claude/settings.json"))?);
+                }
+            }
+            SyncKind::CodexHook => {
+                if i.hooks {
+                    ops.push(codex_hook_op(i.home.join(".codex/config.toml"))?);
+                }
+            }
         }
     }
     Ok(ops)
@@ -76,6 +113,80 @@ fn block_op(kind: SyncKind, path: PathBuf, block: &BlockContext) -> Result<SyncO
         SyncAction::Update
     };
     Ok(SyncOp { kind, path, content, action })
+}
+
+/// Claude Code's `settings.json`: a user-owned file Atlas only adds one `Stop`
+/// entry to. Every other key, and every other `Stop` entry, is carried through
+/// untouched, and a file whose shape we do not recognise is left alone rather
+/// than rewritten.
+fn claude_hook_op(path: PathBuf) -> Result<SyncOp> {
+    let kind = SyncKind::ClaudeHook;
+    let existed = path.exists();
+    let existing = if existed { std::fs::read_to_string(&path)? } else { String::new() };
+    let mut settings = if existing.trim().is_empty() {
+        serde_json::Value::Object(Default::default())
+    } else {
+        match serde_json::from_str::<serde_json::Value>(&existing) {
+            Ok(v) => v,
+            Err(e) => return Ok(SyncOp { kind, path, content: existing, action: SyncAction::Skip(format!("not valid JSON: {e}")) }),
+        }
+    };
+    let action = match insert_stop_hook(&mut settings) {
+        Err(reason) => return Ok(SyncOp { kind, path, content: existing, action: SyncAction::Skip(reason) }),
+        // Already installed: answer with the file as it stands, so a sync never
+        // reformats a settings.json it had nothing to add to.
+        Ok(false) => return Ok(SyncOp { kind, path, content: existing, action: SyncAction::Unchanged }),
+        Ok(true) if existed => SyncAction::Update,
+        Ok(true) => SyncAction::Create,
+    };
+    let content = format!("{}\n", serde_json::to_string_pretty(&settings)?);
+    Ok(SyncOp { kind, path, content, action })
+}
+
+/// Adds the `Stop` entry to a parsed `settings.json`. `Ok(true)` when it was
+/// added, `Ok(false)` when an `atlas ingest` command was already there, and
+/// `Err(reason)` when a key on the way holds a shape this cannot merge into.
+fn insert_stop_hook(settings: &mut serde_json::Value) -> std::result::Result<bool, String> {
+    use serde_json::Value;
+    let root = settings.as_object_mut().ok_or("settings.json does not hold a JSON object")?;
+    let hooks = root.entry("hooks").or_insert_with(|| Value::Object(Default::default()));
+    let hooks = hooks.as_object_mut().ok_or("hooks is not a JSON object")?;
+    let stop = hooks.entry("Stop").or_insert_with(|| Value::Array(Vec::new()));
+    let stop = stop.as_array_mut().ok_or("hooks.Stop is not a JSON array")?;
+    let installed = stop.iter().any(|entry| {
+        entry["hooks"].as_array().is_some_and(|hs| hs.iter().any(|h| h["command"].as_str().is_some_and(|c| c.contains(HOOK_MARKER))))
+    });
+    if installed {
+        return Ok(false);
+    }
+    stop.push(serde_json::json!({ "hooks": [{ "type": "command", "command": CLAUDE_HOOK_COMMAND }] }));
+    Ok(true)
+}
+
+/// Codex's `config.toml`: edited through `toml_edit` so comments, ordering and
+/// formatting survive. Codex supports a single `notify` command, so one that is
+/// already set to something else is reported and left alone rather than taken
+/// over.
+fn codex_hook_op(path: PathBuf) -> Result<SyncOp> {
+    let kind = SyncKind::CodexHook;
+    let existing = if path.exists() { std::fs::read_to_string(&path)? } else { String::new() };
+    let mut doc = match existing.parse::<toml_edit::DocumentMut>() {
+        Ok(d) => d,
+        Err(e) => return Ok(SyncOp { kind, path, content: existing, action: SyncAction::Skip(format!("not valid TOML: {e}")) }),
+    };
+    if let Some(item) = doc.get("notify") {
+        let ours = item.as_array().is_some_and(|a| {
+            a.len() == CODEX_NOTIFY.len() && a.iter().zip(CODEX_NOTIFY).all(|(v, want)| v.as_str() == Some(*want))
+        });
+        let action = if ours { SyncAction::Unchanged } else { SyncAction::Skip(CODEX_NOTIFY_TAKEN.into()) };
+        return Ok(SyncOp { kind, path, content: existing, action });
+    }
+    let mut argv = toml_edit::Array::new();
+    for word in CODEX_NOTIFY {
+        argv.push(*word);
+    }
+    doc["notify"] = toml_edit::value(argv);
+    Ok(SyncOp { kind, path, content: doc.to_string(), action: SyncAction::Create })
 }
 
 /// Writes every `Create`/`Update` op to disk, creating parent directories as
@@ -150,6 +261,8 @@ mod tests {
             agents: &agents,
             block: BlockContext { mcp_command: "atlas mcp".into(), agents: agents.clone(), practices: vec![], project_name: Some("p".into()) },
             targets: &[SyncKind::Claude, SyncKind::Codex, SyncKind::AgentsMd, SyncKind::ClaudeMd],
+            home: d.path(),
+            hooks: false,
         };
         let ops = plan_sync(&inputs).unwrap();
         assert!(ops.iter().any(|o| o.kind == SyncKind::Claude && o.path.ends_with("reviewer.md") && o.action == SyncAction::Create));
@@ -186,6 +299,8 @@ mod tests {
             agents: &[],
             block: BlockContext { mcp_command: "atlas mcp".into(), agents: vec![], practices: vec![practice], project_name: Some("p".into()) },
             targets: &[SyncKind::AgentsMd],
+            home: d.path(),
+            hooks: false,
         };
         let ops = plan_sync(&inputs).unwrap();
         apply(&ops).unwrap();
@@ -193,6 +308,106 @@ mod tests {
         assert_eq!(written.matches(export::END).count(), 1, "the body's marker must not read as a second end marker: {written}");
         let again = plan_sync(&inputs).unwrap();
         assert!(again.iter().all(|o| o.action == SyncAction::Unchanged), "a second plan should be a no-op: {again:?}");
+    }
+
+    /// The hook targets in isolation: no agents, no managed block, just the two
+    /// files a hook install touches.
+    fn hook_inputs<'a>(root: &'a Path, hooks: bool) -> SyncInputs<'a> {
+        SyncInputs {
+            root,
+            agents: &[],
+            block: BlockContext { mcp_command: "atlas mcp".into(), agents: vec![], practices: vec![], project_name: None },
+            targets: &[SyncKind::ClaudeHook, SyncKind::CodexHook],
+            home: root,
+            hooks,
+        }
+    }
+
+    #[test]
+    fn hooks_are_only_planned_when_extraction_is_enabled() {
+        let d = tempfile::tempdir().unwrap();
+        let ops = plan_sync(&hook_inputs(d.path(), false)).unwrap();
+        assert!(ops.is_empty(), "extraction off must plan no hook ops: {ops:?}");
+    }
+
+    #[test]
+    fn claude_hook_is_created_then_unchanged() {
+        let d = tempfile::tempdir().unwrap();
+        let ops = plan_sync(&hook_inputs(d.path(), true)).unwrap();
+        let claude = ops.iter().find(|o| o.kind == SyncKind::ClaudeHook).expect("a claude hook op");
+        assert_eq!(claude.action, SyncAction::Create);
+        assert!(claude.path.ends_with(".claude/settings.json"), "{}", claude.path.display());
+        apply(&ops).unwrap();
+
+        let written = std::fs::read_to_string(d.path().join(".claude/settings.json")).unwrap();
+        assert!(written.ends_with("\n"), "settings.json should end with a newline: {written:?}");
+        let v: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["type"], "command");
+        assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["command"], CLAUDE_HOOK_COMMAND);
+
+        let again = plan_sync(&hook_inputs(d.path(), true)).unwrap();
+        assert!(again.iter().all(|o| o.action == SyncAction::Unchanged), "a second plan should have nothing to do: {again:?}");
+    }
+
+    /// The file is the user's, not ours: unrelated top-level keys and an
+    /// unrelated `Stop` entry both have to survive the merge.
+    #[test]
+    fn claude_hook_merges_into_existing_settings() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join(".claude")).unwrap();
+        std::fs::write(
+            d.path().join(".claude/settings.json"),
+            r#"{"model":"opus","permissions":{"allow":["Bash(git:*)"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"say done"}]}],"PreToolUse":[]}}"#,
+        )
+        .unwrap();
+        let ops = plan_sync(&hook_inputs(d.path(), true)).unwrap();
+        assert_eq!(ops.iter().find(|o| o.kind == SyncKind::ClaudeHook).unwrap().action, SyncAction::Update);
+        apply(&ops).unwrap();
+
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(d.path().join(".claude/settings.json")).unwrap()).unwrap();
+        assert_eq!(v["model"], "opus", "unrelated keys must survive");
+        assert_eq!(v["permissions"]["allow"][0], "Bash(git:*)");
+        assert!(v["hooks"]["PreToolUse"].is_array(), "other hook events must survive");
+        let stop = v["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop.len(), 2, "the existing Stop entry must be kept alongside ours: {stop:?}");
+        assert_eq!(stop[0]["hooks"][0]["command"], "say done");
+        assert_eq!(stop[1]["hooks"][0]["command"], CLAUDE_HOOK_COMMAND);
+
+        let again = plan_sync(&hook_inputs(d.path(), true)).unwrap();
+        assert!(again.iter().all(|o| o.action == SyncAction::Unchanged), "{again:?}");
+    }
+
+    #[test]
+    fn codex_notify_is_created_kept_and_never_overwritten() {
+        let d = tempfile::tempdir().unwrap();
+        let config = d.path().join(".codex/config.toml");
+
+        // No file at all: the notify entry is written.
+        let ops = plan_sync(&hook_inputs(d.path(), true)).unwrap();
+        assert_eq!(ops.iter().find(|o| o.kind == SyncKind::CodexHook).unwrap().action, SyncAction::Create);
+        apply(&ops).unwrap();
+        let written = std::fs::read_to_string(&config).unwrap();
+        assert!(written.contains(r#"notify = ["atlas", "ingest", "--tool", "codex", "--hook-arg"]"#), "{written}");
+        let again = plan_sync(&hook_inputs(d.path(), true)).unwrap();
+        assert!(again.iter().all(|o| o.action == SyncAction::Unchanged), "{again:?}");
+
+        // A file with other settings but no notify: everything else survives.
+        std::fs::write(&config, "model = \"gpt-5\"\n\n# keep me\n[tui]\nnotifications = true\n").unwrap();
+        let ops = plan_sync(&hook_inputs(d.path(), true)).unwrap();
+        let op = ops.iter().find(|o| o.kind == SyncKind::CodexHook).unwrap();
+        assert_eq!(op.action, SyncAction::Create, "a config without notify is still ours to add to");
+        apply(&ops).unwrap();
+        let written = std::fs::read_to_string(&config).unwrap();
+        assert!(written.contains("# keep me") && written.contains("notifications = true"), "the rest of the file must survive: {written}");
+        assert!(written.contains("notify = ["), "{written}");
+
+        // Someone else's notify is reported, not replaced.
+        std::fs::write(&config, "notify = [\"my-notifier\"]\n").unwrap();
+        let ops = plan_sync(&hook_inputs(d.path(), true)).unwrap();
+        let op = ops.iter().find(|o| o.kind == SyncKind::CodexHook).unwrap();
+        assert_eq!(op.action, SyncAction::Skip(CODEX_NOTIFY_TAKEN.into()));
+        apply(&ops).unwrap();
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), "notify = [\"my-notifier\"]\n");
     }
 
     #[test]

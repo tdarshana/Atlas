@@ -465,6 +465,42 @@ async fn global_sync_honours_the_sync_home_override() {
     assert!(!elsewhere.path().join(".codex/agents/reviewer.toml").exists(), "a `home` field in the request body must not redirect the sync");
 }
 
+/// The transcript hooks are installed only once extraction is switched on, and the
+/// daemon decides that from its own settings: `POST /sync` is unauthenticated, so the
+/// request must not be able to ask for a hook the user never enabled.
+#[tokio::test]
+async fn transcript_hooks_follow_the_extraction_setting() {
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    fixture_repo(repo.path());
+    let d = start_with_env(&[("ATLAS_SYNC_HOME", home.path().to_str().unwrap())]).await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    let claude_hook = repo.path().join(".claude/settings.json");
+    let codex_hook = home.path().join(".codex/config.toml");
+
+    let sync = || c.post(format!("{base}/sync")).json(&serde_json::json!({"root": repo.path()})).send();
+    let rep: serde_json::Value = sync().await.unwrap().json().await.unwrap();
+    assert!(!claude_hook.exists(), "extraction is off by default, so no Stop hook: {rep}");
+    assert!(!codex_hook.exists(), "extraction is off by default, so no notify: {rep}");
+
+    let put = c.put(format!("{base}/settings")).json(&serde_json::json!({"extraction.enabled": true})).send().await.unwrap();
+    assert_eq!(put.status(), 200);
+
+    let rep: serde_json::Value = sync().await.unwrap().json().await.unwrap();
+    assert!(claude_hook.exists(), "enabling extraction should install the Stop hook: {rep}");
+    assert!(codex_hook.exists(), "enabling extraction should install the Codex notify: {rep}");
+    let settings: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&claude_hook).unwrap()).unwrap();
+    assert_eq!(settings["hooks"]["Stop"][0]["hooks"][0]["command"], "atlas ingest --tool claude-code --hook-stdin");
+    assert!(std::fs::read_to_string(&codex_hook).unwrap().contains(r#"notify = ["atlas", "ingest", "--tool", "codex", "--hook-arg"]"#));
+
+    // `--check` reports the hooks like any other op once they are in place.
+    let rep: serde_json::Value = c.post(format!("{base}/sync")).json(&serde_json::json!({"root": repo.path(), "check_only": true})).send().await.unwrap().json().await.unwrap();
+    let kinds: Vec<&str> = rep["ops"].as_array().unwrap().iter().filter_map(|o| o["kind"].as_str()).collect();
+    assert!(kinds.contains(&"claude_hook") && kinds.contains(&"codex_hook"), "check should report the hook ops: {rep}");
+    assert_eq!(rep["created"].as_u64().unwrap() + rep["updated"].as_u64().unwrap(), 0, "a second pass has nothing to do: {rep}");
+}
+
 /// A project sync must refuse the `ATLAS_SYNC_HOME` override too, not just the real home
 /// directory, or a caller could set a project root there and have it treated as a project.
 #[tokio::test]

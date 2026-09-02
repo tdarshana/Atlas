@@ -17,7 +17,8 @@ use crate::{AtlasError, Result};
 const MCP_COMMAND: &str = "atlas mcp";
 
 /// Targets a sync writes when the request names none.
-const DEFAULT_TARGETS: &[SyncKind] = &[SyncKind::Claude, SyncKind::Codex, SyncKind::AgentsMd, SyncKind::ClaudeMd];
+const DEFAULT_TARGETS: &[SyncKind] =
+    &[SyncKind::Claude, SyncKind::Codex, SyncKind::AgentsMd, SyncKind::ClaudeMd, SyncKind::ClaudeHook, SyncKind::CodexHook];
 
 /// Why a global sync reports a managed-block target as skipped.
 const GLOBAL_SKIP: &str = "global sync writes agent files only";
@@ -226,8 +227,9 @@ impl Backend for LocalBackend {
             // block into ~/AGENTS.md would name practices and a project that aren't there.
             // The dropped targets are still reported, so a caller who asked for one is told
             // why nothing was written for it instead of reading a silent success.
-            let (targets, filtered): (Vec<SyncKind>, Vec<SyncKind>) =
-                requested.into_iter().partition(|t| matches!(t, SyncKind::Claude | SyncKind::Codex));
+            let (targets, filtered): (Vec<SyncKind>, Vec<SyncKind>) = requested
+                .into_iter()
+                .partition(|t| matches!(t, SyncKind::Claude | SyncKind::Codex | SyncKind::ClaudeHook | SyncKind::CodexHook));
             let skipped = filtered
                 .into_iter()
                 .map(|kind| SyncOp {
@@ -253,7 +255,15 @@ impl Backend for LocalBackend {
             let block = BlockContext { mcp_command: MCP_COMMAND.into(), agents: agents.clone(), practices, project_name: Some(project.name.clone()) };
             (PathBuf::from(project.root_path), requested, block, vec![])
         };
-        let mut ops = sync::plan_sync(&SyncInputs { root: &root, agents: &agents, block, targets: &targets })?;
+        // The hooks feed transcripts to a model, so they are installed only once the
+        // user has switched extraction on. The daemon resolves that here rather than
+        // trusting the request: `POST /sync` is unauthenticated.
+        let hooks = self.settings().get_raw("extraction.enabled")?.and_then(|v| v.as_bool()) == Some(true);
+        // Codex keeps one config file per user, so its hook needs the sync home even
+        // when the pass writes into a project. Resolved only when it is actually a
+        // target, so a project sync still works where there is no home to find.
+        let home = if hooks && targets.contains(&SyncKind::CodexHook) { sync_home()? } else { PathBuf::new() };
+        let mut ops = sync::plan_sync(&SyncInputs { root: &root, agents: &agents, block, targets: &targets, home: &home, hooks })?;
         ops.extend(skipped);
         if req.check_only { Ok(sync::summarize(&ops)) } else { sync::apply(&ops) }
     }

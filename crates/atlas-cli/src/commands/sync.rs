@@ -14,7 +14,7 @@ pub struct SyncArgs {
     /// Report what would change without writing; exits 1 if anything would change
     #[arg(long)]
     pub check: bool,
-    /// Target to write; repeatable. Defaults to all four, or claude and codex with --global
+    /// Target to write; repeatable. Defaults to every target, minus the managed blocks with --global
     #[arg(long = "target", value_enum)]
     pub targets: Vec<Target>,
 }
@@ -27,6 +27,10 @@ pub enum Target {
     AgentsMd,
     #[value(name = "claude_md")]
     ClaudeMd,
+    #[value(name = "claude_hook")]
+    ClaudeHook,
+    #[value(name = "codex_hook")]
+    CodexHook,
 }
 
 impl Target {
@@ -36,6 +40,8 @@ impl Target {
             Target::Codex => SyncKind::Codex,
             Target::AgentsMd => SyncKind::AgentsMd,
             Target::ClaudeMd => SyncKind::ClaudeMd,
+            Target::ClaudeHook => SyncKind::ClaudeHook,
+            Target::CodexHook => SyncKind::CodexHook,
         }
     }
 }

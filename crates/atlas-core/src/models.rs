@@ -151,7 +151,14 @@ pub struct RecallQuery {
 }
 fn ten() -> usize { 10 }
 
-str_enum!(SyncKind { Claude => "claude", Codex => "codex", AgentsMd => "agents_md", ClaudeMd => "claude_md" });
+str_enum!(SyncKind {
+    Claude => "claude",
+    Codex => "codex",
+    AgentsMd => "agents_md",
+    ClaudeMd => "claude_md",
+    ClaudeHook => "claude_hook",
+    CodexHook => "codex_hook",
+});
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum SyncAction {
