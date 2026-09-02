@@ -9,15 +9,16 @@ use crate::{AtlasError, Result};
 
 pub struct MemoryService {
     db: Arc<Db>,
-    embedder: Arc<dyn Embedder>,
+    embedder: RwLock<Arc<dyn Embedder>>,
     index: RwLock<Bm25Index>,
     vectors: RwLock<HashMap<Uuid, Vec<f32>>>,
     embed_error: RwLock<Option<String>>,
+    loading: RwLock<bool>,
 }
 
 impl MemoryService {
     pub fn new(db: Arc<Db>, embedder: Arc<dyn Embedder>) -> Result<Self> {
-        let svc = Self { db, embedder, index: RwLock::new(Bm25Index::new()), vectors: RwLock::new(HashMap::new()), embed_error: RwLock::new(None) };
+        let svc = Self { db, embedder: RwLock::new(embedder), index: RwLock::new(Bm25Index::new()), vectors: RwLock::new(HashMap::new()), embed_error: RwLock::new(None), loading: RwLock::new(false) };
         svc.reload()?;
         Ok(svc)
     }
@@ -32,6 +33,29 @@ impl MemoryService {
     fn vec_write(&self) -> RwLockWriteGuard<'_, HashMap<Uuid, Vec<f32>>> { self.vectors.write().unwrap_or_else(|e| e.into_inner()) }
     fn err_read(&self) -> RwLockReadGuard<'_, Option<String>> { self.embed_error.read().unwrap_or_else(|e| e.into_inner()) }
     fn err_write(&self) -> RwLockWriteGuard<'_, Option<String>> { self.embed_error.write().unwrap_or_else(|e| e.into_inner()) }
+    fn loading_read(&self) -> RwLockReadGuard<'_, bool> { self.loading.read().unwrap_or_else(|e| e.into_inner()) }
+    fn loading_write(&self) -> RwLockWriteGuard<'_, bool> { self.loading.write().unwrap_or_else(|e| e.into_inner()) }
+
+    /// Clone of the current embedder's `Arc`, so callers don't hold the lock while embedding.
+    fn emb(&self) -> Arc<dyn Embedder> { self.embedder.read().unwrap_or_else(|e| e.into_inner()).clone() }
+
+    /// Swap in a new embedder, drop any stale error, reload persisted vectors for it, and
+    /// backfill a vector for every active memory that doesn't have one under the new model.
+    pub fn set_embedder(&self, e: Arc<dyn Embedder>) -> Result<()> {
+        *self.embedder.write().unwrap_or_else(|e| e.into_inner()) = e;
+        *self.err_write() = None;
+        self.reload()?;
+        let missing: Vec<(Uuid, String)> = {
+            let vectors = self.vec_read();
+            self.repo().list_active(None, None)?.into_iter().filter(|m| !vectors.contains_key(&m.id)).map(|m| (m.id, m.text)).collect()
+        };
+        for (id, text) in missing { self.try_embed(id, &text); }
+        Ok(())
+    }
+
+    pub fn set_loading(&self, v: bool) { *self.loading_write() = v; }
+
+    pub fn set_embed_error(&self, msg: String) { *self.err_write() = Some(msg); }
 
     /// Rebuild the keyword index and load stored vectors for active memories.
     pub fn reload(&self) -> Result<()> {
@@ -39,9 +63,10 @@ impl MemoryService {
         let mut idx = Bm25Index::new();
         for m in &mems { idx.upsert(m.id, &m.text); }
         *self.idx_write() = idx;
+        let emb = self.emb();
         let vecs: Vec<(Uuid, Vec<f32>)> = self.db.with_conn(|c| {
             let mut st = c.prepare("select e.memory_id::text, to_json(e.vector)::text from memory_embeddings e join memories m on m.id = e.memory_id where m.status='active' and e.model = ?")?;
-            let rows = st.query_map([self.embedder.name()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            let rows = st.query_map([emb.name()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
             let mut out = vec![];
             for row in rows { let (id, v) = row?; if let (Ok(id), Ok(v)) = (Uuid::parse_str(&id), serde_json::from_str::<Vec<f32>>(&v)) { out.push((id, v)); } }
             Ok(out)
@@ -54,13 +79,14 @@ impl MemoryService {
     /// make it visible in the in-memory `vectors` map. A DB write failure must not leave
     /// the in-memory index claiming a vector exists that isn't actually stored.
     fn try_embed(&self, id: Uuid, text: &str) {
-        match self.embedder.embed(&[text.to_string()]) {
+        let emb = self.emb();
+        match emb.embed(&[text.to_string()]) {
             Ok(mut v) if !v.is_empty() => {
                 let vec = v.remove(0);
                 let json = serde_json::to_string(&vec).unwrap_or_default();
                 let write_result = self.db.with_conn(|c| {
                     c.execute("delete from memory_embeddings where memory_id = ?", [id.to_string()])?;
-                    c.execute(&format!("insert into memory_embeddings values (?, ?, {json}::float[])"), duckdb::params![id.to_string(), self.embedder.name()])?;
+                    c.execute(&format!("insert into memory_embeddings values (?, ?, {json}::float[])"), duckdb::params![id.to_string(), emb.name()])?;
                     Ok(())
                 });
                 match write_result {
@@ -108,8 +134,9 @@ impl MemoryService {
         let kw: HashMap<Uuid, f64> = self.idx_read().query(&q.query, usize::MAX).into_iter().filter(|(id, _)| allowed.contains_key(id)).collect();
         // Only probe the embedder when it can actually produce vectors; a failure here is
         // recorded so `status()` surfaces it, but recall still falls back to keyword-only.
-        let qvec = if self.embedder.dims() > 0 {
-            match self.embedder.embed(std::slice::from_ref(&q.query)) {
+        let emb = self.emb();
+        let qvec = if emb.dims() > 0 {
+            match emb.embed(std::slice::from_ref(&q.query)) {
                 Ok(mut v) if !v.is_empty() => Some(v.remove(0)),
                 Ok(_) => None,
                 Err(e) => { *self.err_write() = Some(e.to_string()); None }
@@ -137,7 +164,9 @@ impl MemoryService {
     }
 
     pub fn embedding_status(&self) -> String {
-        if self.embedder.dims() == 0 { return "unavailable: no embedding model loaded".into(); }
+        let dims = self.emb().dims();
+        if *self.loading_read() && dims == 0 { return "loading".into(); }
+        if dims == 0 { return "unavailable: no embedding model loaded".into(); }
         match &*self.err_read() { Some(e) => format!("unavailable: {e}"), None => "ready".into() }
     }
 
@@ -246,6 +275,21 @@ mod tests {
         assert_eq!(hits1[0].memory.id, hits2[0].memory.id);
         let count: i64 = db.with_conn(|c| Ok(c.query_row("select count(*) from memory_embeddings", [], |r| r.get(0))?)).unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn set_embedder_backfills_existing_memories() {
+        let s = svc();
+        s.remember(nm("bun is the javascript runtime here"), "t").unwrap();
+        s.remember(nm("the api listens on port 3210"), "t").unwrap();
+        assert!(s.status(None).unwrap().embedding.starts_with("unavailable"));
+        s.set_embedder(Arc::new(FakeEmbedder)).unwrap();
+        let count: i64 = s.db.with_conn(|c| Ok(c.query_row("select count(*) from memory_embeddings", [], |r| r.get(0))?)).unwrap();
+        assert_eq!(count, 2);
+        let hits = s.recall(&RecallQuery { query: "which runtime do we use".into(), limit: 5, scope: None, project_id: None, kinds: vec![], tags: vec![] }).unwrap();
+        assert!(!hits.is_empty());
+        assert!(hits[0].memory.text.contains("bun"));
+        assert_eq!(s.status(None).unwrap().embedding, "ready");
     }
 
     #[test]

@@ -3,7 +3,7 @@ use uuid::Uuid;
 use crate::db::Db;
 use crate::models::*;
 use crate::paths::AtlasPaths;
-use crate::search::{Embedder, FastEmbedder, NoopEmbedder};
+use crate::search::{FastEmbedder, NoopEmbedder};
 use crate::service::MemoryService;
 use crate::Result;
 
@@ -22,13 +22,28 @@ impl LocalBackend {
     pub fn open(paths: &AtlasPaths, port: Option<u16>, load_embedder: bool) -> Result<Self> {
         paths.ensure()?;
         let db = Arc::new(Db::open(&paths.db_path())?);
-        let embedder: Arc<dyn Embedder> = if load_embedder {
-            match FastEmbedder::try_new(&paths.models_dir()) {
-                Ok(e) => Arc::new(e),
-                Err(e) => { tracing::warn!("embedding model unavailable, keyword-only search: {e}"); Arc::new(NoopEmbedder) }
-            }
-        } else { Arc::new(NoopEmbedder) };
-        Ok(Self { memories: Arc::new(MemoryService::new(db, embedder)?), paths: paths.clone(), port })
+        let memories = Arc::new(MemoryService::new(db, Arc::new(NoopEmbedder))?);
+        if load_embedder {
+            memories.set_loading(true);
+            let models_dir = paths.models_dir();
+            let bg = memories.clone();
+            std::thread::spawn(move || {
+                match FastEmbedder::try_new(&models_dir) {
+                    Ok(e) => {
+                        if let Err(err) = bg.set_embedder(Arc::new(e)) {
+                            tracing::warn!("failed to activate embedding model: {err}");
+                            bg.set_embed_error(err.to_string());
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("embedding model unavailable, keyword-only search: {e}");
+                        bg.set_embed_error(e.to_string());
+                    }
+                }
+                bg.set_loading(false);
+            });
+        }
+        Ok(Self { memories, paths: paths.clone(), port })
     }
 }
 
@@ -59,5 +74,17 @@ mod tests {
         let st = b.status().await.unwrap();
         assert!(st.db_path.ends_with("atlas.duckdb"));
         assert_eq!(st.port, Some(1));
+    }
+
+    #[tokio::test]
+    async fn open_returns_before_embedder_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::paths::AtlasPaths::at(dir.path());
+        // load_embedder = false must not spawn the background download thread, so status
+        // should reflect the (permanent) unavailable state, never the transient "loading" one.
+        let b = LocalBackend::open(&paths, None, false).unwrap();
+        let st = b.status().await.unwrap();
+        assert!(st.embedding.starts_with("unavailable"), "expected unavailable, got {}", st.embedding);
+        assert_ne!(st.embedding, "loading");
     }
 }

@@ -23,7 +23,7 @@ pub async fn ensure_daemon(paths: &AtlasPaths, port: u16) -> anyhow::Result<u16>
     if std::env::var("ATLAS_NO_EMBED").is_ok() { cmd.arg("--no-embed"); }
     #[cfg(unix)] { use std::os::unix::process::CommandExt; cmd.process_group(0); }
     cmd.spawn().map_err(|e| anyhow::anyhow!("failed to start atlasd ({}): {e}", atlasd_path().display()))?;
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline { if is_up(port).await { return Ok(port); } tokio::time::sleep(Duration::from_millis(150)).await; }
     anyhow::bail!("atlasd did not become ready on port {port}; see {}", paths.log_file().display())
 }
