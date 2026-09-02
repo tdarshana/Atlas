@@ -97,6 +97,23 @@ async fn rpc(c: &reqwest::Client, url: &str, session: &Option<String>, body: ser
     req.json(&body).send().await.unwrap().text().await.unwrap()
 }
 
+/// The JSON-RPC response inside an `rpc` reply, whether it arrived bare or as SSE frames.
+fn rpc_json(body: &str) -> serde_json::Value {
+    if let Ok(v) = serde_json::from_str(body) { return v; }
+    let frame = body.lines().filter_map(|l| l.strip_prefix("data: "))
+        .find_map(|d| serde_json::from_str::<serde_json::Value>(d).ok().filter(|v| v.get("result").is_some() || v.get("error").is_some()));
+    frame.unwrap_or_else(|| panic!("no JSON-RPC result in reply: {body}"))
+}
+
+/// The text a `tools/call` returned, parsed back into JSON. Tool results carry their
+/// payload as a JSON *string*, so it takes two parses to reach the data.
+fn tool_json(body: &str) -> serde_json::Value {
+    let reply = rpc_json(body);
+    let text = reply["result"]["content"][0]["text"].as_str()
+        .unwrap_or_else(|| panic!("tool result had no text content: {reply}"));
+    serde_json::from_str(text).unwrap_or_else(|e| panic!("tool result text was not JSON ({e}): {text}"))
+}
+
 #[tokio::test]
 async fn mcp_over_http_lists_and_calls_tools() {
     let d = start().await;
@@ -146,10 +163,10 @@ async fn mcp_over_http_lists_and_calls_tools() {
     fixture_repo(repo.path());
     let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":8,"method":"tools/call",
         "params":{"name":"project_context","arguments":{"project_root": repo.path().to_str().unwrap()}}})).await;
-    // The tool result is JSON inside a JSON string, so its quoting is escaped: match on
-    // the key and value text rather than on quoted JSON.
-    assert!(body.contains("frameworks"), "project_context returned no profile: {body}");
-    assert!(body.contains("nextjs") || body.contains("next"), "project_context profile missing the detected framework: {body}");
+    let ctx = tool_json(&body);
+    let frameworks = ctx["project"]["profile"]["frameworks"].as_array()
+        .unwrap_or_else(|| panic!("project_context returned no profile: {ctx}"));
+    assert!(frameworks.iter().any(|f| f == "next"), "profile missing the framework from package.json: {frameworks:?}");
 }
 
 /// The daemon has no authentication, so a page open in the user's browser must not be able

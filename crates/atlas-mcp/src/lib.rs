@@ -1,7 +1,8 @@
 //! MCP tool surface for Atlas, generic over a Backend so the same tools serve
 //! from the daemon (LocalBackend) and from the stdio shim (RemoteBackend).
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use atlas_core::backend::Backend;
 use atlas_core::export::claude_agent_md;
 use atlas_core::models::*;
@@ -86,11 +87,27 @@ pub struct AtlasMcp<B: Backend> {
     /// Project root to fall back on when neither the tool argument nor
     /// `ATLAS_PROJECT_ROOT` names one. Seeded by the stdio shim from its cwd.
     project_root: Option<PathBuf>,
+    /// Whether `ATLAS_PROJECT_ROOT` may name the project. True for the stdio shim,
+    /// which runs per project; false for the daemon, whose environment says nothing
+    /// about the repository any given client is working in.
+    env_project_root: bool,
+    /// Roots already connected by this server, so a read never writes. Shared across
+    /// clones because rmcp builds one handler per session from a shared factory.
+    projects: Arc<Mutex<HashMap<PathBuf, Project>>>,
     pub tool_router: ToolRouter<Self>,
 }
 
 fn err(e: atlas_core::AtlasError) -> McpError {
     match e { atlas_core::AtlasError::NotFound(m) => McpError::invalid_params(m, None), atlas_core::AtlasError::Invalid(m) => McpError::invalid_params(m, None), other => McpError::internal_error(other.to_string(), None) }
+}
+
+/// Like [`err`], but for lookups addressed by a resource URI: a name or id that is not
+/// in the store means the resource does not exist, not that the request was malformed.
+fn resource_err(uri: &str, e: atlas_core::AtlasError) -> McpError {
+    match e {
+        atlas_core::AtlasError::NotFound(m) => McpError::resource_not_found(format!("{uri}: {m}"), None),
+        other => err(other),
+    }
 }
 fn json_result<T: serde::Serialize>(v: &T) -> Result<CallToolResult, McpError> {
     Ok(CallToolResult::success(vec![ContentBlock::text(serde_json::to_string_pretty(v).map_err(|e| McpError::internal_error(e.to_string(), None))?)]))
@@ -98,7 +115,9 @@ fn json_result<T: serde::Serialize>(v: &T) -> Result<CallToolResult, McpError> {
 
 #[tool_router]
 impl<B: Backend> AtlasMcp<B> {
-    pub fn new(backend: Arc<B>) -> Self { Self { backend, source_tool: source_tool_label(), project_root: None, tool_router: Self::tool_router() } }
+    pub fn new(backend: Arc<B>) -> Self {
+        Self { backend, source_tool: source_tool_label(), project_root: None, env_project_root: true, projects: Arc::default(), tool_router: Self::tool_router() }
+    }
 
     /// Override the label stamped on `source_tool`. Set this at construction time: the
     /// process may already be multi-threaded, so a transport cannot announce itself by
@@ -110,21 +129,52 @@ impl<B: Backend> AtlasMcp<B> {
     /// write once the process is multi-threaded.
     pub fn with_project_root(mut self, root: PathBuf) -> Self { self.project_root = Some(root); self }
 
+    /// Whether `ATLAS_PROJECT_ROOT` may name the project. Defaults to true, which is
+    /// right for the stdio shim: it is launched per repository and inherits the client's
+    /// environment. The daemon serves every project at once and must turn this off, or
+    /// whatever repository its own environment happens to name would scope every client.
+    pub fn with_env_project_root(mut self, enabled: bool) -> Self { self.env_project_root = enabled; self }
+
     /// The root a call is about: the argument first, then `ATLAS_PROJECT_ROOT`, then the
     /// root this server was started in. `None` when none of the three names one.
     fn root_for(&self, project_root: Option<PathBuf>) -> Option<PathBuf> {
         project_root
-            .or_else(|| std::env::var("ATLAS_PROJECT_ROOT").ok().map(PathBuf::from))
+            .or_else(|| self.env_project_root.then(|| std::env::var("ATLAS_PROJECT_ROOT").ok().map(PathBuf::from)).flatten())
             .or_else(|| self.project_root.clone())
     }
 
-    /// Connects the resolved root so the caller has a project id to scope by. `None`
-    /// when no root resolves, which leaves the caller global.
+    /// The project for the resolved root, connecting it the first time and remembering
+    /// it after. `None` when no root resolves, which leaves the caller global.
+    ///
+    /// Reads go through here so they stay reads: `connect_project` upserts the row and
+    /// writes an audit entry, which a recall or a doc listing has no business doing on
+    /// every call. `connect_project` and `project_context` are explicit connects and
+    /// refresh the entry instead.
     async fn resolve_project(&self, project_root: Option<PathBuf>) -> Result<Option<Project>, McpError> {
-        match self.root_for(project_root) {
-            Some(r) => Ok(Some(self.backend.connect_project(r, "mcp").await.map_err(err)?)),
-            None => Ok(None),
-        }
+        let Some(root) = self.root_for(project_root) else { return Ok(None) };
+        if let Some(p) = self.cached(&root) { return Ok(Some(p)); }
+        let project = self.backend.connect_project(root.clone(), "mcp").await.map_err(err)?;
+        self.cache(root, &project);
+        Ok(Some(project))
+    }
+
+    /// A lock poisoned by a panic in another session must not take this one down: the
+    /// cache is a shortcut, so fall back to the backend rather than propagate.
+    fn cached(&self, root: &PathBuf) -> Option<Project> {
+        self.projects.lock().ok()?.get(root).cloned()
+    }
+    fn cache(&self, root: PathBuf, project: &Project) {
+        if let Ok(mut m) = self.projects.lock() { m.insert(root, project.clone()); }
+    }
+
+    /// The docs that apply where this call is coming from: the project's plus the
+    /// global ones, or — when no project resolves — only the global ones. The store's
+    /// unfiltered listing spans every project, which is right for a resource listing
+    /// but not for a tool that says it lists what applies here.
+    async fn docs_here(&self, kind: DocKind, project_root: Option<PathBuf>) -> Result<Vec<Doc>, McpError> {
+        let id = self.resolve_project(project_root).await?.map(|p| p.id);
+        let docs = self.backend.list_docs(kind, id).await.map_err(err)?;
+        Ok(match id { Some(_) => docs, None => docs.into_iter().filter(|d| d.project_id.is_none()).collect() })
     }
 
     /// The project id to scope by, or `None` for global. `project_id` wins over any
@@ -172,12 +222,18 @@ impl<B: Backend> AtlasMcp<B> {
     async fn project_context(&self, Parameters(a): Parameters<ProjectRootArgs>) -> Result<CallToolResult, McpError> {
         let root = self.root_for(a.project_root)
             .ok_or_else(|| McpError::invalid_params("no project root: pass project_root or set ATLAS_PROJECT_ROOT", None))?;
-        json_result(&self.backend.project_context(root, "mcp").await.map_err(err)?)
+        // An explicit connect: it goes to the backend even on a cache hit, so a profile
+        // that has gone stale is rebuilt rather than served from memory.
+        let ctx = self.backend.project_context(root.clone(), "mcp").await.map_err(err)?;
+        self.cache(root, &ctx.project);
+        json_result(&ctx)
     }
 
     #[tool(description = "Register a repository with Atlas and build its profile (languages, frameworks, tree, recent commits). Call this once when starting work in a repository Atlas has not seen.")]
     async fn connect_project(&self, Parameters(a): Parameters<ConnectProjectArgs>) -> Result<CallToolResult, McpError> {
-        json_result(&self.backend.connect_project(a.root_path, "mcp").await.map_err(err)?)
+        let project = self.backend.connect_project(a.root_path.clone(), "mcp").await.map_err(err)?;
+        self.cache(a.root_path, &project);
+        json_result(&project)
     }
 
     #[tool(description = "List the agent roles stored in Atlas, with their descriptions. Call this to see which specialist role fits the task before doing the work yourself.")]
@@ -198,8 +254,7 @@ impl<B: Backend> AtlasMcp<B> {
 
     #[tool(description = "List the coding practices that apply here: the global ones plus any scoped to this project. Call before writing code so the work follows the house style.")]
     async fn list_practices(&self, Parameters(a): Parameters<ProjectRootArgs>) -> Result<CallToolResult, McpError> {
-        let id = self.resolve_project(a.project_root).await?.map(|p| p.id);
-        json_result(&self.backend.list_docs(DocKind::Practice, id).await.map_err(err)?)
+        json_result(&self.docs_here(DocKind::Practice, a.project_root).await?)
     }
 
     #[tool(description = "Fetch the full text of one practice by name. Call after list_practices when a practice looks relevant to the task.")]
@@ -209,8 +264,7 @@ impl<B: Backend> AtlasMcp<B> {
 
     #[tool(description = "List the workflows that apply here: the global ones plus any scoped to this project. Call when the user asks for a multi-step process such as a release or a review.")]
     async fn list_workflows(&self, Parameters(a): Parameters<ProjectRootArgs>) -> Result<CallToolResult, McpError> {
-        let id = self.resolve_project(a.project_root).await?.map(|p| p.id);
-        json_result(&self.backend.list_docs(DocKind::Workflow, id).await.map_err(err)?)
+        json_result(&self.docs_here(DocKind::Workflow, a.project_root).await?)
     }
 
     #[tool(description = "Fetch the full text of one workflow by name. Call after list_workflows to follow its steps.")]
@@ -258,15 +312,15 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
     async fn read_resource(&self, request: ReadResourceRequestParams, _context: RequestContext<RoleServer>) -> Result<ReadResourceResponse, McpError> {
         let uri = request.uri;
         let (text, mime) = if let Some(name) = uri.strip_prefix(AGENTS) {
-            (claude_agent_md(&self.backend.get_agent(name).await.map_err(err)?), MARKDOWN)
+            (claude_agent_md(&self.backend.get_agent(name).await.map_err(|e| resource_err(&uri, e))?), MARKDOWN)
         } else if let Some(name) = uri.strip_prefix(PRACTICES) {
-            (self.backend.get_doc(DocKind::Practice, name).await.map_err(err)?.body, MARKDOWN)
+            (self.backend.get_doc(DocKind::Practice, name).await.map_err(|e| resource_err(&uri, e))?.body, MARKDOWN)
         } else if let Some(name) = uri.strip_prefix(WORKFLOWS) {
-            (self.backend.get_doc(DocKind::Workflow, name).await.map_err(err)?.body, MARKDOWN)
+            (self.backend.get_doc(DocKind::Workflow, name).await.map_err(|e| resource_err(&uri, e))?.body, MARKDOWN)
         } else if let Some(id) = uri.strip_prefix(PROJECTS).and_then(|r| r.strip_suffix("/context")) {
             let id = id.parse::<Uuid>().map_err(|e| McpError::resource_not_found(format!("{uri} is not a project context resource: {e}"), None))?;
-            let project = self.backend.get_project(id).await.map_err(err)?;
-            let ctx = self.backend.project_context(PathBuf::from(project.root_path), "mcp").await.map_err(err)?;
+            let project = self.backend.get_project(id).await.map_err(|e| resource_err(&uri, e))?;
+            let ctx = self.backend.project_context(PathBuf::from(project.root_path), "mcp").await.map_err(|e| resource_err(&uri, e))?;
             (serde_json::to_string_pretty(&ctx).map_err(|e| McpError::internal_error(e.to_string(), None))?, JSON)
         } else {
             return Err(McpError::resource_not_found(format!("no Atlas resource at {uri}"), None));
@@ -295,6 +349,18 @@ mod tests {
     use super::*;
     use atlas_core::backend::LocalBackend;
     use atlas_core::paths::AtlasPaths;
+
+    /// The text of a tool result, so a test can read what the tool told the client.
+    fn text_of(r: &CallToolResult) -> String {
+        r.content.iter().filter_map(|c| c.as_text()).map(|t| t.text.clone()).collect()
+    }
+
+    /// How many times a project row has been upserted or re-profiled. Reads must not
+    /// move this number.
+    fn project_writes(b: &LocalBackend) -> i64 {
+        b.db.with_conn(|c| Ok(c.query_row("select count(*) from audit where entity = 'project'", [], |r| r.get::<_, i64>(0))?)).unwrap()
+    }
+
     #[test]
     fn tool_list_covers_memories_projects_agents_and_docs() {
         let dir = tempfile::tempdir().unwrap();
@@ -305,5 +371,76 @@ mod tests {
                   "get_agent", "save_agent", "list_practices", "get_practice", "list_workflows", "get_workflow"] {
             assert!(names.contains(&n.to_string()), "missing {n}");
         }
+    }
+
+    /// A server started in a project scopes memories to it without being told, and does
+    /// so from a cache: the second recall must not touch the projects table.
+    #[tokio::test]
+    async fn seeded_root_scopes_memories_and_is_resolved_once() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        let s = AtlasMcp::new(backend.clone())
+            .with_env_project_root(false)
+            .with_project_root(repo.path().to_path_buf());
+
+        // No scope, no project_id: the seeded root supplies both.
+        s.remember(Parameters(RememberArgs {
+            text: "the fixture uses duckdb".into(), kind: None, tags: None, scope: None,
+            project_id: None, project_root: None, source_agent: None,
+        })).await.unwrap();
+
+        let stored = backend.list_memories(MemoryStatus::Active, None).await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].scope, MemoryScope::Project);
+        let project_id = stored[0].project_id.expect("the seeded root should have scoped the memory");
+
+        let projects = backend.list_projects().await.unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].id, project_id);
+
+        // Recall with no project_id finds it through the same resolution.
+        let hit = s.recall(Parameters(RecallArgs {
+            query: "duckdb".into(), limit: None, scope: None, kinds: None, tags: None,
+            project_id: None, project_root: None,
+        })).await.unwrap();
+        assert!(text_of(&hit).contains("the fixture uses duckdb"), "{}", text_of(&hit));
+
+        // Everything from here on is a read, so the audit trail must stand still.
+        let before = project_writes(&backend);
+        s.recall(Parameters(RecallArgs {
+            query: "duckdb".into(), limit: None, scope: None, kinds: None, tags: None,
+            project_id: None, project_root: None,
+        })).await.unwrap();
+        s.list_practices(Parameters(ProjectRootArgs { project_root: None })).await.unwrap();
+        assert_eq!(project_writes(&backend), before, "a read reconnected the project instead of using the cache");
+    }
+
+    /// Without a seeded root and with the environment ignored, the server stays global:
+    /// memories are unscoped and only project-less docs are listed.
+    #[tokio::test]
+    async fn unscoped_server_stays_global() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        let s = AtlasMcp::new(backend.clone()).with_env_project_root(false);
+
+        s.remember(Parameters(RememberArgs {
+            text: "bun is the runtime".into(), kind: None, tags: None, scope: None,
+            project_id: None, project_root: None, source_agent: None,
+        })).await.unwrap();
+        let stored = backend.list_memories(MemoryStatus::Active, None).await.unwrap();
+        assert_eq!(stored[0].scope, MemoryScope::Global);
+        assert!(stored[0].project_id.is_none());
+        assert!(backend.list_projects().await.unwrap().is_empty(), "a global remember connected a project");
+
+        // A practice belonging to some other project must not show up in a global listing.
+        let project = backend.connect_project(repo.path().to_path_buf(), "test").await.unwrap();
+        backend.save_doc(DocKind::Practice, NewDoc { name: "scoped".into(), body: "b".into(), tags: vec![], project_id: Some(project.id) }, "test").await.unwrap();
+        backend.save_doc(DocKind::Practice, NewDoc { name: "everywhere".into(), body: "b".into(), tags: vec![], project_id: None }, "test").await.unwrap();
+        let listed = s.list_practices(Parameters(ProjectRootArgs { project_root: None })).await.unwrap();
+        let listed = text_of(&listed);
+        assert!(listed.contains("everywhere"), "{listed}");
+        assert!(!listed.contains("scoped"), "a global listing leaked another project's practice: {listed}");
     }
 }

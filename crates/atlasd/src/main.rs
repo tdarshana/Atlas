@@ -42,7 +42,14 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState { backend: backend.clone() };
 
     let mcp_backend = backend.clone();
-    let mcp = StreamableHttpService::new(move || Ok(AtlasMcp::new(mcp_backend.clone())), LocalSessionManager::default().into(), StreamableHttpServerConfig::default());
+    let mcp = StreamableHttpService::new(
+        // The daemon serves every project at once, so ATLAS_PROJECT_ROOT in its own
+        // environment says nothing about the repository a client is working in and must
+        // not scope anyone. HTTP clients name their project in the tool arguments.
+        move || Ok(AtlasMcp::new(mcp_backend.clone()).with_env_project_root(false)),
+        LocalSessionManager::default().into(),
+        StreamableHttpServerConfig::default(),
+    );
     let app = http::guard_loopback(http::router(state).nest_service("/mcp", mcp));
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], args.port));
