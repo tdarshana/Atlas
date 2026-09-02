@@ -6,6 +6,7 @@ pub use profile::build_profile;
 use crate::db::Db;
 use crate::models::{Project, ProjectProfile};
 use crate::{AtlasError, Result};
+use duckdb::types::Type;
 use duckdb::{params, Row};
 use uuid::Uuid;
 
@@ -15,14 +16,23 @@ pub struct ProjectRepo<'a> {
 
 const SEL: &str = "id::text, name, root_path, git_remote, profile::text, created_at::text, last_seen_at::text";
 
+/// Wraps a column-conversion failure so a malformed value fails the query instead of
+/// being silently coerced to a default. Mirrors `memories::conv_err`.
+fn conv_err(col: usize, ty: Type, msg: impl std::fmt::Display) -> duckdb::Error {
+    duckdb::Error::FromSqlConversionFailure(col, ty, Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, msg.to_string())))
+}
+
 fn row(r: &Row) -> duckdb::Result<Project> {
     let profile: Option<String> = r.get(4)?;
+    let profile = profile
+        .map(|s| serde_json::from_str::<ProjectProfile>(&s).map_err(|e| conv_err(4, Type::Text, e)))
+        .transpose()?;
     Ok(Project {
-        id: Uuid::parse_str(&r.get::<_, String>(0)?).unwrap_or_default(),
+        id: Uuid::parse_str(&r.get::<_, String>(0)?).map_err(|e| conv_err(0, Type::Text, e))?,
         name: r.get(1)?,
         root_path: r.get(2)?,
         git_remote: r.get(3)?,
-        profile: profile.and_then(|s| serde_json::from_str(&s).ok()),
+        profile,
         created_at: crate::memories::parse_ts_pub(r.get::<_, String>(5)?)?,
         last_seen_at: crate::memories::parse_ts_pub(r.get::<_, String>(6)?)?,
     })
@@ -166,5 +176,37 @@ mod tests {
         assert_eq!(c.id, c2.id);
         assert_eq!(repo.list().unwrap().len(), 2);
         assert!(repo.needs_refresh(&c));
+    }
+
+    #[test]
+    fn malformed_uuid_row_is_rejected() {
+        // Hand-build a result row with a malformed id column, mirroring
+        // memories::tests::malformed_uuid_row_is_rejected.
+        let db = Db::open_in_memory().unwrap();
+        let result: Result<Project> = db.with_conn(|c| {
+            let mut st = c.prepare(
+                "select 'not-a-uuid' as id, 'name' as name, '/root' as root_path, null as git_remote, \
+                 null as profile, '2026-01-01 00:00:00' as created_at, '2026-01-01 00:00:00' as last_seen_at",
+            )?;
+            let mut rows = st.query([])?;
+            let r = rows.next()?.ok_or_else(|| AtlasError::NotFound("no row".into()))?;
+            Ok(row(r)?)
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn malformed_profile_json_is_rejected() {
+        let db = Db::open_in_memory().unwrap();
+        let result: Result<Project> = db.with_conn(|c| {
+            let mut st = c.prepare(
+                "select gen_random_uuid()::text as id, 'name' as name, '/root' as root_path, null as git_remote, \
+                 'not json' as profile, '2026-01-01 00:00:00' as created_at, '2026-01-01 00:00:00' as last_seen_at",
+            )?;
+            let mut rows = st.query([])?;
+            let r = rows.next()?.ok_or_else(|| AtlasError::NotFound("no row".into()))?;
+            Ok(row(r)?)
+        });
+        assert!(result.is_err());
     }
 }
