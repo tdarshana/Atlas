@@ -67,3 +67,14 @@ pub struct StatusReport {
     pub embedding: String,
     pub port: Option<u16>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RecallQuery {
+    pub query: String,
+    #[serde(default = "ten")] pub limit: usize,
+    #[serde(default)] pub scope: Option<MemoryScope>,
+    #[serde(default)] pub project_id: Option<Uuid>,
+    #[serde(default)] pub kinds: Vec<MemoryKind>,
+    #[serde(default)] pub tags: Vec<String>,
+}
+fn ten() -> usize { 10 }
