@@ -30,7 +30,7 @@ impl Embedder for FastEmbedder {
     fn dims(&self) -> usize { 384 }
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         let mut m = self.inner.lock().map_err(|e| AtlasError::Other(e.to_string()))?;
-        m.embed(texts.to_vec(), None).map_err(|e| AtlasError::Embedding(e.to_string()))
+        m.embed(texts, None).map_err(|e| AtlasError::Embedding(e.to_string()))
     }
 }
 
