@@ -1,3 +1,4 @@
+pub mod data;
 pub mod state;
 
 /// Placeholder for the terminal loop. Task 4 replaces this with the real
