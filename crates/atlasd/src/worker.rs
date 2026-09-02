@@ -24,7 +24,19 @@ const INTERNAL_ERROR: &str = "internal error";
 #[cfg(test)]
 const PANIC_KIND: &str = "panic-for-tests";
 
+/// Requeues any job left `running` from a previous process. `atlasd` is the only
+/// writer of the `jobs` table, so a `running` row found at startup was never
+/// actually in flight: the process that claimed it is gone.
+async fn requeue_stale(backend: &LocalBackend) {
+    match backend.jobs.requeue_stale() {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("requeued {n} stale running job(s) from a previous run"),
+        Err(e) => tracing::warn!("could not requeue stale jobs at startup: {e}"),
+    }
+}
+
 pub async fn run(backend: Arc<LocalBackend>) {
+    requeue_stale(&backend).await;
     loop {
         drain(&backend).await;
         tokio::select! {
@@ -66,6 +78,10 @@ async fn drain(backend: &Arc<LocalBackend>) {
             "ingest" => {
                 let (j, b) = (job.clone(), backend.clone());
                 run_supervised(move || async move { extract::run_ingest(&j, &b).await }).await
+            }
+            "project_summary" => {
+                let (j, b) = (job.clone(), backend.clone());
+                run_supervised(move || async move { extract::run_project_summary(&j, &b).await }).await
             }
             #[cfg(test)]
             PANIC_KIND => {

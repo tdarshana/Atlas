@@ -580,12 +580,15 @@ const STUB_CANDIDATES: &str = r#"[{"text":"the project uses bun","kind":"fact","
 
 /// An OpenAI-compatible chat endpoint in the test process, so the daemon's
 /// extraction runs end to end without reaching the network. Returns its base url,
-/// `/v1`, which is what `extraction.base_url` is set to.
-async fn stub_llm() -> String {
+/// `/v1`, which is what `extraction.base_url` is set to. Answers every prompt with
+/// `reply`, whatever it was.
+async fn stub_llm_with_reply(reply: &str) -> String {
+    let content = reply.to_string();
     let app = axum::Router::new().route(
         "/v1/chat/completions",
-        axum::routing::post(|| async {
-            axum::Json(serde_json::json!({"choices": [{"message": {"content": STUB_CANDIDATES}}]}))
+        axum::routing::post(move || {
+            let content = content.clone();
+            async move { axum::Json(serde_json::json!({"choices": [{"message": {"content": content}}]})) }
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -593,6 +596,9 @@ async fn stub_llm() -> String {
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     format!("http://{addr}/v1")
 }
+
+/// The ingest tests' stub: always answers with `STUB_CANDIDATES`.
+async fn stub_llm() -> String { stub_llm_with_reply(STUB_CANDIDATES).await }
 
 /// Polls a job until it stops running, for up to 10 s. The worker calls out to the
 /// model, so the result is never there on the first read.
@@ -689,6 +695,93 @@ async fn ingest_is_refused_while_extraction_is_disabled() {
     assert_eq!(half.status(), 409);
     let body: serde_json::Value = half.json().await.unwrap();
     assert_eq!(body["error"], "extraction is disabled", "{body}");
+}
+
+/// `POST /ingest` refuses a transcript over the 1,000,000 character cap with 413
+/// before it ever reaches the queue, so no oversized body can spend a model call.
+#[tokio::test]
+async fn ingest_refuses_a_transcript_over_the_size_cap() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+
+    let text = "x".repeat(1_000_001);
+    let big = c.post(format!("{base}/ingest")).json(&serde_json::json!({"text": text, "source_tool": "test"})).send().await.unwrap();
+    assert_eq!(big.status(), 413);
+    let body: serde_json::Value = big.json().await.unwrap();
+    assert_eq!(body["error"], "transcript too large", "{body}");
+}
+
+/// `POST /extraction/test` gates on the same settings `POST /ingest` does (409 while
+/// disabled or unconfigured), sends the connectivity check to the configured model
+/// when it is, and reports a model-endpoint error as 400 rather than 500.
+#[tokio::test]
+async fn extraction_test_endpoint_checks_connectivity_and_reports_model_errors() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+
+    let disabled = c.post(format!("{base}/extraction/test")).send().await.unwrap();
+    assert_eq!(disabled.status(), 409);
+    let body: serde_json::Value = disabled.json().await.unwrap();
+    assert_eq!(body["error"], "extraction is disabled", "{body}");
+
+    let stub = stub_llm_with_reply("OK").await;
+    let put = c.put(format!("{base}/settings")).json(&serde_json::json!({
+        "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub", "extraction.api_key": "k",
+    })).send().await.unwrap();
+    assert_eq!(put.status(), 200);
+
+    let ok = c.post(format!("{base}/extraction/test")).send().await.unwrap();
+    assert_eq!(ok.status(), 200);
+    let body: serde_json::Value = ok.json().await.unwrap();
+    assert_eq!(body["ok"], true, "{body}");
+    assert_eq!(body["reply"], "OK", "{body}");
+
+    // Point at an endpoint that will refuse the connection: a model-endpoint error
+    // is a 400 with ok:false, not a 500.
+    let put2 = c.put(format!("{base}/settings")).json(&serde_json::json!({"extraction.base_url": "http://127.0.0.1:1"})).send().await.unwrap();
+    assert_eq!(put2.status(), 200);
+    let failed = c.post(format!("{base}/extraction/test")).send().await.unwrap();
+    assert_eq!(failed.status(), 400);
+    let body: serde_json::Value = failed.json().await.unwrap();
+    assert_eq!(body["ok"], false, "{body}");
+    assert!(body["error"].as_str().is_some(), "{body}");
+}
+
+/// `POST /projects/{id}/refresh` enqueues a `project_summary` job when extraction is
+/// enabled, and the worker writes the model's reply into `profile.summary`, visible
+/// through `GET /projects/{id}` once the job finishes.
+#[tokio::test]
+async fn refresh_project_enqueues_a_summary_job_when_extraction_is_enabled() {
+    let stub = stub_llm_with_reply("A Rust workspace.").await;
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    let repo = tempfile::tempdir().unwrap();
+    fixture_repo(repo.path());
+
+    let put = c.put(format!("{base}/settings")).json(&serde_json::json!({
+        "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub", "extraction.api_key": "k",
+    })).send().await.unwrap();
+    assert_eq!(put.status(), 200);
+
+    let p: serde_json::Value = c.post(format!("{base}/projects/connect")).json(&serde_json::json!({"root": repo.path()})).send().await.unwrap().json().await.unwrap();
+    let pid = p["id"].as_str().unwrap().to_string();
+
+    let refreshed: serde_json::Value = c.post(format!("{base}/projects/{pid}/refresh")).send().await.unwrap().json().await.unwrap();
+    assert!(refreshed["profile"]["summary"].is_null(), "the summary is written by the worker, not synchronously: {refreshed}");
+
+    let mut summary = None;
+    for _ in 0..100 {
+        let project: serde_json::Value = c.get(format!("{base}/projects/{pid}")).send().await.unwrap().json().await.unwrap();
+        if let Some(s) = project["profile"]["summary"].as_str() {
+            summary = Some(s.to_string());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(summary.as_deref(), Some("A Rust workspace."), "the project summary was not written within 10s");
 }
 
 /// Every 400 the API returns carries the `{"error": string}` body, query strings included:

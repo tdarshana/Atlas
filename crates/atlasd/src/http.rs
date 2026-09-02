@@ -138,6 +138,10 @@ pub fn cors_layer() -> CorsLayer {
 #[derive(Deserialize)] pub struct ListMemoriesQ { pub status: Option<String>, pub project_id: Option<Uuid> }
 #[derive(Deserialize)] pub struct IngestBody { pub text: String, pub source_tool: String, #[serde(default)] pub project_root: Option<std::path::PathBuf> }
 
+/// Characters a transcript may carry. `POST /ingest` is unauthenticated, so this
+/// bounds how much any one caller can push into a single model call.
+const MAX_INGEST_CHARS: usize = 1_000_000;
+
 fn actor(q: &ActorQ) -> &str { q.actor.as_deref().unwrap_or("api") }
 
 pub fn router(state: AppState) -> Router {
@@ -163,6 +167,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/settings", get(get_settings).put(set_settings))
         .route("/api/v1/ingest", post(ingest))
         .route("/api/v1/jobs/{id}", get(get_job))
+        .route("/api/v1/extraction/test", post(test_extraction))
         .with_state(state)
 }
 
@@ -267,16 +272,36 @@ async fn set_settings(State(s): State<AppState>, ApiQuery(q): ApiQuery<ActorQ>, 
 // Ingest is asynchronous: the model call can take a minute, so the request only
 // queues the work (202) and the caller follows the job.
 
-async fn ingest(State(s): State<AppState>, ApiJson(b): ApiJson<IngestBody>) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+async fn ingest(State(s): State<AppState>, ApiJson(b): ApiJson<IngestBody>) -> Response {
     // A blank transcript would queue a job whose only effect is to spend a model
     // call on nothing, so refuse it here rather than at the far end.
     if b.text.trim().is_empty() {
-        return Err(ApiError(AtlasError::Invalid("ingest text is empty".into())));
+        return ApiError(AtlasError::Invalid("ingest text is empty".into())).into_response();
     }
-    let job_id = s.backend.ingest_transcript(b.text, b.source_tool, b.project_root).await?;
-    Ok((StatusCode::ACCEPTED, Json(serde_json::json!({"job_id": job_id}))))
+    // A caller could otherwise push an unbounded body into a single model call;
+    // 413 rather than 400, since the request is well formed, just too large.
+    if b.text.chars().count() > MAX_INGEST_CHARS {
+        return (StatusCode::PAYLOAD_TOO_LARGE, Json(serde_json::json!({"error": "transcript too large"}))).into_response();
+    }
+    match s.backend.ingest_transcript(b.text, b.source_tool, b.project_root).await {
+        Ok(job_id) => (StatusCode::ACCEPTED, Json(serde_json::json!({"job_id": job_id}))).into_response(),
+        Err(e) => ApiError(e).into_response(),
+    }
 }
 
 async fn get_job(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Result<Json<Job>, ApiError> {
     s.backend.get_job(id).await?.map(Json).ok_or_else(|| ApiError(AtlasError::NotFound(format!("job {id}"))))
+}
+
+/// A connectivity check against the configured model. Unlike other extraction
+/// errors this does not reuse `ApiError`: a model error must come back as 400 with
+/// `{"ok": false, "error": ...}`, not the plain `{"error": ...}` every other route
+/// answers with, so the caller can render it inline as a failed check rather than
+/// a fatal one.
+async fn test_extraction(State(s): State<AppState>) -> Response {
+    match s.backend.test_extraction().await {
+        Ok(reply) => (StatusCode::OK, Json(serde_json::json!({"ok": true, "reply": reply}))).into_response(),
+        Err(e @ AtlasError::Conflict(_)) => ApiError(e).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"ok": false, "error": e.to_string()}))).into_response(),
+    }
 }

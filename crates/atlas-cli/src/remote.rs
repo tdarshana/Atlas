@@ -92,4 +92,13 @@ impl Backend for RemoteBackend {
         if r.status() == reqwest::StatusCode::NOT_FOUND { return Ok(None); }
         Self::handle(r).await.map(Some)
     }
+
+    /// The daemon runs the connectivity check, so a 409 here is its "extraction is
+    /// disabled" and a 400 is the model endpoint's own error, both carried back
+    /// through the same `error` field `Self::error` already reads.
+    async fn test_extraction(&self) -> Result<String> {
+        let r = self.client.post(format!("{}/extraction/test", self.base)).send().await.map_err(Self::net)?;
+        let v: serde_json::Value = Self::handle(r).await?;
+        v["reply"].as_str().map(str::to_string).ok_or_else(|| AtlasError::Other(format!("extraction test response had no reply: {v}")))
+    }
 }

@@ -101,6 +101,10 @@ pub trait Backend: Send + Sync + 'static {
     /// worker could not run.
     async fn ingest_transcript(&self, text: String, source_tool: String, project_root: Option<PathBuf>) -> Result<Uuid>;
     async fn get_job(&self, id: Uuid) -> Result<Option<Job>>;
+    /// Sends a minimal connectivity check to the configured model and answers with
+    /// its reply, trimmed. `Conflict` when extraction is off or half configured, the
+    /// same gate `ingest_transcript` checks.
+    async fn test_extraction(&self) -> Result<String>;
 }
 
 pub struct LocalBackend {
@@ -145,6 +149,15 @@ impl LocalBackend {
     fn agents(&self) -> AgentRepo<'_> { AgentRepo::new(&self.db) }
     fn docs(&self, kind: DocKind) -> DocRepo<'_> { DocRepo::new(&self.db, kind) }
     fn settings(&self) -> crate::settings::SettingsRepo<'_> { crate::settings::SettingsRepo::new(&self.db) }
+
+    /// Whether `extraction.enabled` is on. Read fresh on every call rather than
+    /// cached, since the daemon serves every client and a setting change must take
+    /// effect on the next sync or refresh, not after a restart. Shared by `sync`
+    /// (whether to install the transcript hooks) and `refresh_project` (whether to
+    /// enqueue a project summary).
+    fn extraction_enabled(&self) -> Result<bool> {
+        Ok(self.settings().get_raw("extraction.enabled")?.and_then(|v| v.as_bool()) == Some(true))
+    }
 }
 
 #[async_trait::async_trait]
@@ -203,7 +216,14 @@ impl Backend for LocalBackend {
     async fn refresh_project(&self, id: Uuid) -> Result<Project> {
         let project = self.projects().get(id)?;
         let profile = build_profile(std::path::Path::new(&project.root_path))?;
-        self.projects().set_profile(id, &profile, "refresh")
+        let updated = self.projects().set_profile(id, &profile, "refresh")?;
+        // A fresh profile carries no summary until the worker writes one; queue that
+        // only when extraction is on, the same gate `ingest_transcript` checks.
+        if self.extraction_enabled()? {
+            self.jobs.enqueue("project_summary", serde_json::json!({"project_id": updated.id}))?;
+            self.queue.notify.notify_one();
+        }
+        Ok(updated)
     }
     async fn delete_project(&self, id: Uuid, actor: &str) -> Result<()> { self.projects().delete(id, actor) }
 
@@ -258,7 +278,7 @@ impl Backend for LocalBackend {
         // The hooks feed transcripts to a model, so they are installed only once the
         // user has switched extraction on. The daemon resolves that here rather than
         // trusting the request: `POST /sync` is unauthenticated.
-        let hooks = self.settings().get_raw("extraction.enabled")?.and_then(|v| v.as_bool()) == Some(true);
+        let hooks = self.extraction_enabled()?;
         // Codex keeps one config file per user, so its hook needs the sync home even
         // when the pass writes into a project. Resolved only when it is actually a
         // target, so a project sync still works where there is no home to find.
@@ -287,6 +307,13 @@ impl Backend for LocalBackend {
     }
 
     async fn get_job(&self, id: Uuid) -> Result<Option<Job>> { self.jobs.get(id) }
+
+    async fn test_extraction(&self) -> Result<String> {
+        let cfg = crate::extract::extraction_config(&self.db)?;
+        let client = crate::extract::build_client(&cfg)?;
+        let reply = client.chat("You are a connectivity check.", "Reply with the single word OK").await?;
+        Ok(reply.trim().to_string())
+    }
 }
 
 #[cfg(test)]

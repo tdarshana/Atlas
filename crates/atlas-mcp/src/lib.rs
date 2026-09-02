@@ -57,6 +57,18 @@ pub struct ProjectRootArgs {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct IngestTranscriptArgs {
+    /// The conversation transcript to extract durable memories from.
+    pub text: String,
+    /// The tool the transcript came from, recorded on every memory extracted from
+    /// it. Defaults to this server's source_tool label.
+    pub source_tool: Option<String>,
+    /// Absolute path to the project this transcript belongs to. Defaults to the
+    /// root this server was started in.
+    pub project_root: Option<PathBuf>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ConnectProjectArgs {
     /// Absolute path to the project root. Any directory inside the repository works.
     pub root_path: PathBuf,
@@ -276,6 +288,21 @@ impl<B: Backend> AtlasMcp<B> {
     async fn get_workflow(&self, Parameters(a): Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         json_result(&self.backend.get_doc(DocKind::Workflow, &a.name).await.map_err(err)?)
     }
+
+    #[tool(description = "Queue a conversation transcript for opt-in LLM extraction of durable memories. Returns a job id to poll; fails if extraction is not enabled and configured on the daemon.")]
+    async fn ingest_transcript(&self, Parameters(a): Parameters<IngestTranscriptArgs>) -> Result<CallToolResult, McpError> {
+        let source_tool = a.source_tool.unwrap_or_else(|| self.source_tool.clone());
+        let root = self.root_for(a.project_root);
+        let job_id = self.backend.ingest_transcript(a.text, source_tool, root).await.map_err(|e| match e {
+            // Extraction being off is a request the caller made in good faith against
+            // a daemon not set up for it, not a malformed call - but rmcp has no
+            // "conflict" error kind, so it is reported as invalid_params with the same
+            // text `POST /ingest` answers 409 with.
+            atlas_core::AtlasError::Conflict(msg) => McpError::invalid_params(msg, None),
+            other => err(other),
+        })?;
+        json_result(&serde_json::json!({"job_id": job_id}))
+    }
 }
 
 const AGENTS: &str = "atlas://agents/";
@@ -373,9 +400,27 @@ mod tests {
         let s = AtlasMcp::new(b);
         let names: Vec<String> = s.tool_router.list_all().into_iter().map(|t| t.name.to_string()).collect();
         for n in ["remember", "recall", "forget", "status", "project_context", "connect_project", "list_agents",
-                  "get_agent", "save_agent", "list_practices", "get_practice", "list_workflows", "get_workflow"] {
+                  "get_agent", "save_agent", "list_practices", "get_practice", "list_workflows", "get_workflow",
+                  "ingest_transcript"] {
             assert!(names.contains(&n.to_string()), "missing {n}");
         }
+    }
+
+    /// A daemon with extraction off (the default) answers `ingest_transcript` with
+    /// `invalid_params` carrying the same "extraction is disabled" text `POST
+    /// /ingest` answers 409 with, not an internal error.
+    #[tokio::test]
+    async fn ingest_transcript_reports_disabled_extraction_as_invalid_params() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(dir.path()), None, false).unwrap());
+        let s = AtlasMcp::new(backend);
+
+        let err = s
+            .ingest_transcript(Parameters(IngestTranscriptArgs { text: "user: we use bun".into(), source_tool: None, project_root: None }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(err.message.contains("extraction is disabled"), "{err:?}");
     }
 
     /// A server started in a project scopes memories to it without being told, and does

@@ -1,5 +1,7 @@
 mod prompt;
+mod summary;
 pub use prompt::{project_summary_prompt, EXTRACTION_SYSTEM_PROMPT};
+pub use summary::summarize_project;
 
 use crate::backend::LocalBackend;
 use crate::db::Db;
@@ -234,6 +236,14 @@ fn project_for(db: &Db, root: Option<PathBuf>) -> Result<Option<Uuid>> {
     Ok(ProjectRepo::new(db).by_root(&resolved)?.map(|p| p.id))
 }
 
+/// Builds the client extraction talks to, from an already-read `ExtractionConfig`.
+/// Both `run_ingest` and `Backend::test_extraction` go through this rather than
+/// each constructing an `LlmClient` of their own, so the two ways of reaching the
+/// model never drift apart.
+pub fn build_client(cfg: &ExtractionConfig) -> Result<LlmClient> {
+    LlmClient::new(&cfg.base_url, &cfg.api_key, &cfg.model)
+}
+
 /// Runs one `ingest` job: read the transcript out of the payload, ask the model
 /// for candidates, drop the duplicates, and store what is left.
 ///
@@ -246,7 +256,7 @@ pub async fn run_ingest(job: &Job, backend: &LocalBackend) -> Result<Value> {
     let source_tool = job.payload["source_tool"].as_str().unwrap_or("ingest").to_string();
     let root = job.payload["project_root"].as_str().map(PathBuf::from);
 
-    let client = LlmClient::new(&cfg.base_url, &cfg.api_key, &cfg.model)?;
+    let client = build_client(&cfg)?;
     let candidates = extract_candidates(text, &client).await?;
     let found = candidates.len();
 
@@ -299,6 +309,32 @@ pub async fn run_ingest(job: &Job, backend: &LocalBackend) -> Result<Value> {
         Some(e) => Err(e),
         None => Ok(serde_json::json!({"inserted": inserted, "skipped_duplicates": skipped_duplicates})),
     }
+}
+
+/// Runs one `project_summary` job: load the project named by `payload.project_id`,
+/// ask the model to condense its profile into a couple of sentences, and store the
+/// result into `profile.summary`. Enqueued by `LocalBackend::refresh_project` when
+/// extraction is enabled.
+pub async fn run_project_summary(job: &Job, backend: &LocalBackend) -> Result<Value> {
+    let project_id = job.payload["project_id"]
+        .as_str()
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .ok_or_else(|| AtlasError::Invalid("project_summary job has no project_id".into()))?;
+
+    let cfg = extraction_config(&backend.db)?;
+    let client = build_client(&cfg)?;
+
+    let repo = ProjectRepo::new(&backend.db);
+    let project = repo.get(project_id)?;
+    let mut profile = project
+        .profile
+        .ok_or_else(|| AtlasError::Invalid(format!("project {project_id} has no profile to summarize")))?;
+
+    let summary = summarize_project(&profile, &client).await?;
+    let chars = summary.chars().count();
+    profile.summary = Some(summary);
+    repo.set_profile(project_id, &profile, EXTRACTOR)?;
+    Ok(serde_json::json!({"chars": chars}))
 }
 
 #[cfg(test)]

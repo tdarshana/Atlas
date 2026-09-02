@@ -122,6 +122,14 @@ impl JobRepo {
         })
     }
 
+    /// Requeues every job left `running`. Called once at daemon startup: `atlasd` is
+    /// the only process that opens the DuckDB file, so a `running` row found there
+    /// belongs to a process that is gone, not to work still in flight. Returns how
+    /// many rows were requeued.
+    pub fn requeue_stale(&self) -> Result<usize> {
+        self.db.with_conn(|c| Ok(c.execute("update jobs set status = 'queued', updated_at = now() where status = 'running'", [])?))
+    }
+
     pub fn get(&self, id: Uuid) -> Result<Option<Job>> {
         self.db.with_conn(|c| {
             let mut st = c.prepare(&format!("select {SEL} from jobs where id = ?"))?;
@@ -205,5 +213,28 @@ mod tests {
     #[test]
     fn get_of_an_unknown_id_is_none() {
         assert!(repo().get(Uuid::new_v4()).unwrap().is_none());
+    }
+
+    /// A job stuck `running` (the daemon that claimed it never came back) is put
+    /// back on the queue at startup; a `queued` or `done` job is left alone.
+    #[test]
+    fn requeue_stale_puts_running_jobs_back_on_the_queue() {
+        let r = repo();
+        let running = r.enqueue("ingest", json!({})).unwrap();
+        r.next_queued().unwrap().unwrap();
+        assert_eq!(r.get(running).unwrap().unwrap().status, "running");
+
+        let done = r.enqueue("ingest", json!({})).unwrap();
+        r.next_queued().unwrap().unwrap();
+        r.mark_done(done, json!({})).unwrap();
+
+        let queued = r.enqueue("ingest", json!({})).unwrap();
+
+        assert_eq!(r.requeue_stale().unwrap(), 1);
+        assert_eq!(r.get(running).unwrap().unwrap().status, "queued");
+        assert_eq!(r.get(done).unwrap().unwrap().status, "done");
+        assert_eq!(r.get(queued).unwrap().unwrap().status, "queued");
+
+        assert_eq!(r.requeue_stale().unwrap(), 0, "nothing left running to requeue");
     }
 }
