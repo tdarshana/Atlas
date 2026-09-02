@@ -253,6 +253,40 @@ async fn accepts_tauri_webview_origins() {
     }
 }
 
+/// The daemon never authenticates, so a browser or the Tauri webview only gets to read the
+/// response if `Access-Control-Allow-Origin` echoes an allowed origin; anything else must
+/// see neither the header nor a way around the loopback guard.
+#[tokio::test]
+async fn cors_headers_cover_allowed_and_reject_other_origins() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+
+    let ok = c.get(format!("{base}/status")).header("Origin", "http://localhost:1420").send().await.unwrap();
+    assert_eq!(ok.status(), 200);
+    assert_eq!(ok.headers().get("access-control-allow-origin").unwrap(), "http://localhost:1420");
+    let vary = ok.headers().get("vary").unwrap_or_else(|| panic!("no vary header")).to_str().unwrap().to_ascii_lowercase();
+    assert!(vary.contains("origin"), "{vary}");
+
+    let preflight = c.request(reqwest::Method::OPTIONS, format!("{base}/memories/search"))
+        .header("Origin", "tauri://localhost")
+        .header("Access-Control-Request-Method", "POST")
+        .header("Access-Control-Request-Headers", "content-type")
+        .send().await.unwrap();
+    assert!(preflight.status().is_success(), "{}", preflight.status());
+    assert_eq!(preflight.headers().get("access-control-allow-origin").unwrap(), "tauri://localhost");
+    let allow_headers = preflight.headers().get("access-control-allow-headers").unwrap_or_else(|| panic!("no access-control-allow-headers")).to_str().unwrap().to_ascii_lowercase();
+    assert!(allow_headers.contains("content-type"), "{allow_headers}");
+
+    let evil = c.get(format!("{base}/status")).header("Origin", "https://evil.example").send().await.unwrap();
+    assert_eq!(evil.status(), 403);
+    assert!(evil.headers().get("access-control-allow-origin").is_none(), "{:?}", evil.headers());
+
+    let bare = c.get(format!("{base}/status")).send().await.unwrap();
+    assert_eq!(bare.status(), 200);
+    assert!(bare.headers().get("access-control-allow-origin").is_none(), "{:?}", bare.headers());
+}
+
 /// `extraction.api_key` is masked on every GET and PUT response, a masked round trip
 /// leaves the real key untouched, and an unknown key is rejected with 400.
 #[tokio::test]

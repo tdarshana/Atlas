@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default(),
     );
-    let app = http::guard_loopback(http::router(state).nest_service("/mcp", mcp));
+    let app = http::guard_loopback(http::router(state).nest_service("/mcp", mcp).layer(http::cors_layer()));
 
     let info = serde_json::json!({ "pid": std::process::id(), "port": addr.port(), "started_at": chrono::Utc::now().to_rfc3339() });
     std::fs::write(paths.daemon_file(), serde_json::to_string_pretty(&info)?)?;

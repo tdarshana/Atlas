@@ -592,6 +592,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
  "uuid",

@@ -13,6 +13,7 @@ atlas-core = { path = "../atlas-core" }
 atlas-mcp = { path = "../atlas-mcp" }
 rmcp = { version = "3.2", features = ["server", "transport-streamable-http-server"] }
 axum = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

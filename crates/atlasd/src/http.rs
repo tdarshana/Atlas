@@ -1,6 +1,7 @@
-use axum::{body::Bytes, extract::{FromRequest, FromRequestParts, Path, Query, Request, State}, http::{header, request::Parts, HeaderMap, StatusCode}, middleware::{self, Next}, response::{IntoResponse, Response}, routing::{get, post}, Json, Router};
+use axum::{body::Bytes, extract::{FromRequest, FromRequestParts, Path, Query, Request, State}, http::{header, request::Parts, HeaderMap, Method, StatusCode}, middleware::{self, Next}, response::{IntoResponse, Response}, routing::{get, post}, Json, Router};
 use atlas_core::{backend::Backend, models::*, AtlasError};
 use serde::Deserialize;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
 use crate::state::AppState;
 
@@ -99,6 +100,21 @@ async fn guard(req: Request, next: Next) -> Response {
 
 /// Wrap a whole app, `/mcp` included, in the loopback guard.
 pub fn guard_loopback(app: Router) -> Router { app.layer(middleware::from_fn(guard)) }
+
+/// Sends `Access-Control-Allow-Origin` for the same origins `guard` lets through, so a
+/// browser or the Tauri webview can actually read the response instead of blocking it
+/// client-side. Reuses `is_loopback_origin` so the allow lists cannot drift apart; `guard`
+/// still runs (outside this layer) and returns 403 with no CORS headers for anything else.
+pub fn cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(|origin, _parts| {
+            origin.to_str().is_ok_and(is_loopback_origin)
+        }))
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
+        .allow_headers([header::CONTENT_TYPE, header::ACCEPT])
+        .allow_credentials(false)
+        .max_age(std::time::Duration::from_secs(600))
+}
 
 #[derive(Deserialize)] pub struct ActorQ { pub actor: Option<String> }
 #[derive(Deserialize)] pub struct ForgetBody { pub reason: Option<String> }
