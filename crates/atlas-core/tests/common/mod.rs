@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// Builds a small git-backed fixture project used by `projects::detect` and
 /// `projects::profile` tests: a Next.js/React `package.json`, a README, a
@@ -36,6 +36,8 @@ fn run(dir: &Path, args: &[&str]) {
         .env("GIT_AUTHOR_EMAIL", "atlas-test@example.com")
         .env("GIT_COMMITTER_NAME", "Atlas Test")
         .env("GIT_COMMITTER_EMAIL", "atlas-test@example.com")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .unwrap_or_else(|e| panic!("failed to run git {:?}: {e}", args));
     assert!(status.success(), "git {:?} failed", args);

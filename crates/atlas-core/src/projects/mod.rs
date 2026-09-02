@@ -43,20 +43,41 @@ impl<'a> ProjectRepo<'a> {
         Self { db }
     }
 
-    fn find_key(&self, d: &Detected) -> Result<Option<Project>> {
-        let root = d.root.to_string_lossy().to_string();
+    fn by_remote(&self, remote: &str) -> Result<Option<Project>> {
         self.db.with_conn(|c| {
-            let (sql, arg) = match &d.remote {
-                Some(r) => (format!("select {SEL} from projects where git_remote = ?"), r.clone()),
-                None => (format!("select {SEL} from projects where root_path = ? and git_remote is null"), root),
-            };
-            let mut st = c.prepare(&sql)?;
-            let mut rows = st.query(params![arg])?;
+            let mut st = c.prepare(&format!("select {SEL} from projects where git_remote = ?"))?;
+            let mut rows = st.query(params![remote])?;
             Ok(match rows.next()? {
                 Some(r) => Some(row(r)?),
                 None => None,
             })
         })
+    }
+
+    fn by_root_without_remote(&self, root: &str) -> Result<Option<Project>> {
+        self.db.with_conn(|c| {
+            let mut st = c.prepare(&format!("select {SEL} from projects where root_path = ? and git_remote is null"))?;
+            let mut rows = st.query(params![root])?;
+            Ok(match rows.next()? {
+                Some(r) => Some(row(r)?),
+                None => None,
+            })
+        })
+    }
+
+    /// Matches an existing project for `d`: by remote when one is given,
+    /// falling back to a root-path match against a remote-less row so a
+    /// project that gains a remote migrates in place instead of duplicating;
+    /// by root path (with no remote) otherwise.
+    fn find_key(&self, d: &Detected) -> Result<Option<Project>> {
+        let root = d.root.to_string_lossy().to_string();
+        match &d.remote {
+            Some(remote) => match self.by_remote(remote)? {
+                Some(p) => Ok(Some(p)),
+                None => self.by_root_without_remote(&root),
+            },
+            None => self.by_root_without_remote(&root),
+        }
     }
 
     /// Inserts a new project or updates an existing one matched by remote
@@ -73,17 +94,18 @@ impl<'a> ProjectRepo<'a> {
                 self.db.with_conn(|c| {
                     if let Some(ref pj) = profile_json {
                         c.execute(
-                            "update projects set root_path = ?, name = ?, profile = ?::json, last_seen_at = now() where id = ?",
-                            params![root, name, pj, existing.id.to_string()],
+                            "update projects set root_path = ?, name = ?, git_remote = ?, profile = ?::json, last_seen_at = now() where id = ?",
+                            params![root, name, d.remote, pj, existing.id.to_string()],
                         )?;
                     } else {
                         c.execute(
-                            "update projects set root_path = ?, last_seen_at = now() where id = ?",
-                            params![root, existing.id.to_string()],
+                            "update projects set root_path = ?, git_remote = ?, last_seen_at = now() where id = ?",
+                            params![root, d.remote, existing.id.to_string()],
                         )?;
                     }
                     Ok(())
                 })?;
+                crate::memories::MemoryRepo::new(self.db).audit(actor, "update", "project", Some(existing.id), serde_json::json!({"root": root}))?;
                 existing.id
             }
             None => {
@@ -132,7 +154,7 @@ impl<'a> ProjectRepo<'a> {
         })
     }
 
-    pub fn set_profile(&self, id: Uuid, p: &ProjectProfile) -> Result<Project> {
+    pub fn set_profile(&self, id: Uuid, p: &ProjectProfile, actor: &str) -> Result<Project> {
         let json = serde_json::to_string(p)?;
         self.db.with_conn(|c| {
             c.execute(
@@ -141,6 +163,7 @@ impl<'a> ProjectRepo<'a> {
             )?;
             Ok(())
         })?;
+        crate::memories::MemoryRepo::new(self.db).audit(actor, "update", "project", Some(id), serde_json::json!({"profile": true}))?;
         self.get(id)
     }
 
@@ -176,6 +199,32 @@ mod tests {
         assert_eq!(c.id, c2.id);
         assert_eq!(repo.list().unwrap().len(), 2);
         assert!(repo.needs_refresh(&c));
+    }
+
+    #[test]
+    fn project_migrates_when_it_gains_a_remote() {
+        let db = Db::open_in_memory().unwrap();
+        let repo = ProjectRepo::new(&db);
+        let a = repo.upsert(&Detected { root: "/tmp/r".into(), remote: None }, None, "t").unwrap();
+        assert!(a.git_remote.is_none());
+        let b = repo
+            .upsert(&Detected { root: "/tmp/r".into(), remote: Some("git@x/r.git".into()) }, None, "t")
+            .unwrap();
+        assert_eq!(a.id, b.id);
+        assert_eq!(b.git_remote.as_deref(), Some("git@x/r.git"));
+        assert_eq!(repo.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn upsert_update_and_set_profile_are_audited() {
+        let db = Db::open_in_memory().unwrap();
+        let repo = ProjectRepo::new(&db);
+        let det = Detected { root: "/tmp/audit".into(), remote: None };
+        let a = repo.upsert(&det, None, "t").unwrap(); // insert
+        repo.upsert(&det, None, "t").unwrap(); // update
+        repo.set_profile(a.id, &ProjectProfile { name: "audit".into(), ..Default::default() }, "t").unwrap(); // set_profile
+        let audits: i64 = db.with_conn(|c| Ok(c.query_row("select count(*) from audit", [], |r| r.get(0))?)).unwrap();
+        assert_eq!(audits, 3);
     }
 
     #[test]
