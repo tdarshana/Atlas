@@ -68,6 +68,29 @@ pub struct StatusReport {
     pub port: Option<u16>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct ProjectProfile {
+    pub name: String,
+    #[serde(default)] pub languages: Vec<String>,
+    #[serde(default)] pub frameworks: Vec<String>,
+    #[serde(default)] pub tree: Vec<String>,
+    #[serde(default)] pub readme_head: String,
+    #[serde(default)] pub recent_commits: Vec<String>,
+    #[serde(default)] pub summary: Option<String>,
+    #[serde(default = "chrono::Utc::now")] pub built_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Project {
+    pub id: Uuid,
+    pub name: String,
+    pub root_path: String,
+    pub git_remote: Option<String>,
+    pub profile: Option<ProjectProfile>,
+    pub created_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RecallQuery {
     pub query: String,

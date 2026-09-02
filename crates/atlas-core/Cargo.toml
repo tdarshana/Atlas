@@ -17,6 +17,8 @@ schemars.workspace = true
 duckdb = { version = "1.10505", features = ["bundled"] }
 directories = "6"
 fastembed = "6"
+git2 = "0.21"
+ignore = "0.4"
 
 [dev-dependencies]
 tempfile.workspace = true
