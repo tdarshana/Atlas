@@ -80,20 +80,46 @@ pub fn guard_loopback(app: Router) -> Router { app.layer(middleware::from_fn(gua
 
 #[derive(Deserialize)] pub struct ActorQ { pub actor: Option<String> }
 #[derive(Deserialize)] pub struct ForgetBody { pub reason: Option<String> }
+#[derive(Deserialize)] pub struct RootBody { pub root: std::path::PathBuf }
+#[derive(Deserialize)] pub struct StatusBody { pub status: String }
+#[derive(Deserialize)] pub struct ProjectQ { pub project_id: Option<Uuid> }
+#[derive(Deserialize)] pub struct ListMemoriesQ { pub status: Option<String>, pub project_id: Option<Uuid> }
+
+fn actor(q: &ActorQ) -> &str { q.actor.as_deref().unwrap_or("api") }
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/status", get(status))
-        .route("/api/v1/memories", post(create_memory))
+        .route("/api/v1/memories", post(create_memory).get(list_memories))
         .route("/api/v1/memories/search", post(search))
         .route("/api/v1/memories/{id}", get(get_memory))
         .route("/api/v1/memories/{id}/forget", post(forget))
+        .route("/api/v1/memories/{id}/status", post(set_memory_status))
+        .route("/api/v1/projects", get(list_projects))
+        .route("/api/v1/projects/connect", post(connect_project))
+        .route("/api/v1/projects/context", post(project_context))
+        .route("/api/v1/projects/{id}", get(get_project))
+        .route("/api/v1/projects/{id}/refresh", post(refresh_project))
+        .route("/api/v1/agents", get(list_agents).post(save_agent))
+        .route("/api/v1/agents/{name}", get(get_agent).delete(delete_agent))
+        .route("/api/v1/practices", get(list_practices).post(save_practice))
+        .route("/api/v1/practices/{name}", get(get_practice).delete(delete_practice))
+        .route("/api/v1/workflows", get(list_workflows).post(save_workflow))
+        .route("/api/v1/workflows/{name}", get(get_workflow).delete(delete_workflow))
+        .route("/api/v1/sync", post(sync))
         .with_state(state)
 }
 
 async fn status(State(s): State<AppState>) -> Result<Json<StatusReport>, ApiError> { Ok(Json(s.backend.status().await?)) }
 async fn create_memory(State(s): State<AppState>, Query(q): Query<ActorQ>, ApiJson(m): ApiJson<NewMemory>) -> Result<(StatusCode, Json<Memory>), ApiError> {
-    Ok((StatusCode::CREATED, Json(s.backend.remember(m, q.actor.as_deref().unwrap_or("api")).await?)))
+    Ok((StatusCode::CREATED, Json(s.backend.remember(m, actor(&q)).await?)))
+}
+async fn list_memories(State(s): State<AppState>, Query(q): Query<ListMemoriesQ>) -> Result<Json<Vec<Memory>>, ApiError> {
+    let status = match &q.status { Some(v) => v.parse()?, None => MemoryStatus::Active };
+    Ok(Json(s.backend.list_memories(status, q.project_id).await?))
+}
+async fn set_memory_status(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Query(q): Query<ActorQ>, ApiJson(b): ApiJson<StatusBody>) -> Result<Json<Memory>, ApiError> {
+    Ok(Json(s.backend.set_memory_status(id, b.status.parse()?, actor(&q)).await?))
 }
 async fn get_memory(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Result<Json<Memory>, ApiError> { Ok(Json(s.backend.get_memory(id).await?)) }
 async fn search(State(s): State<AppState>, ApiJson(q): ApiJson<RecallQuery>) -> Result<Json<Vec<RecallHit>>, ApiError> { Ok(Json(s.backend.recall(q).await?)) }
@@ -109,5 +135,61 @@ async fn forget(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Query(q):
         }
         serde_json::from_slice::<ForgetBody>(&body).map_err(|e| ApiError(AtlasError::Invalid(e.to_string())))?.reason
     };
-    Ok(Json(s.backend.forget(id, reason, q.actor.as_deref().unwrap_or("api")).await?))
+    Ok(Json(s.backend.forget(id, reason, actor(&q)).await?))
 }
+
+// ---- projects ----
+
+async fn list_projects(State(s): State<AppState>) -> Result<Json<Vec<Project>>, ApiError> { Ok(Json(s.backend.list_projects().await?)) }
+async fn get_project(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Result<Json<Project>, ApiError> { Ok(Json(s.backend.get_project(id).await?)) }
+async fn refresh_project(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Result<Json<Project>, ApiError> { Ok(Json(s.backend.refresh_project(id).await?)) }
+async fn connect_project(State(s): State<AppState>, Query(q): Query<ActorQ>, ApiJson(b): ApiJson<RootBody>) -> Result<Json<Project>, ApiError> {
+    Ok(Json(s.backend.connect_project(b.root, actor(&q)).await?))
+}
+async fn project_context(State(s): State<AppState>, Query(q): Query<ActorQ>, ApiJson(b): ApiJson<RootBody>) -> Result<Json<ProjectContext>, ApiError> {
+    Ok(Json(s.backend.project_context(b.root, actor(&q)).await?))
+}
+
+// ---- agents ----
+
+async fn list_agents(State(s): State<AppState>) -> Result<Json<Vec<Agent>>, ApiError> { Ok(Json(s.backend.list_agents().await?)) }
+async fn get_agent(State(s): State<AppState>, ApiPath(name): ApiPath<String>) -> Result<Json<Agent>, ApiError> { Ok(Json(s.backend.get_agent(&name).await?)) }
+async fn save_agent(State(s): State<AppState>, Query(q): Query<ActorQ>, ApiJson(a): ApiJson<NewAgent>) -> Result<(StatusCode, Json<Agent>), ApiError> {
+    Ok((StatusCode::CREATED, Json(s.backend.save_agent(a, actor(&q)).await?)))
+}
+async fn delete_agent(State(s): State<AppState>, ApiPath(name): ApiPath<String>, Query(q): Query<ActorQ>) -> Result<StatusCode, ApiError> {
+    s.backend.delete_agent(&name, actor(&q)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---- practices / workflows ----
+//
+// One pair of handlers per kind, each delegating to the shared body below, because a
+// route's handler is where the kind comes from: it isn't in the path or the body.
+
+async fn list_practices(s: State<AppState>, q: Query<ProjectQ>) -> Result<Json<Vec<Doc>>, ApiError> { list_docs(DocKind::Practice, s, q).await }
+async fn list_workflows(s: State<AppState>, q: Query<ProjectQ>) -> Result<Json<Vec<Doc>>, ApiError> { list_docs(DocKind::Workflow, s, q).await }
+async fn get_practice(s: State<AppState>, n: ApiPath<String>) -> Result<Json<Doc>, ApiError> { get_doc(DocKind::Practice, s, n).await }
+async fn get_workflow(s: State<AppState>, n: ApiPath<String>) -> Result<Json<Doc>, ApiError> { get_doc(DocKind::Workflow, s, n).await }
+async fn save_practice(s: State<AppState>, q: Query<ActorQ>, d: ApiJson<NewDoc>) -> Result<(StatusCode, Json<Doc>), ApiError> { save_doc(DocKind::Practice, s, q, d).await }
+async fn save_workflow(s: State<AppState>, q: Query<ActorQ>, d: ApiJson<NewDoc>) -> Result<(StatusCode, Json<Doc>), ApiError> { save_doc(DocKind::Workflow, s, q, d).await }
+async fn delete_practice(s: State<AppState>, n: ApiPath<String>, q: Query<ActorQ>) -> Result<StatusCode, ApiError> { delete_doc(DocKind::Practice, s, n, q).await }
+async fn delete_workflow(s: State<AppState>, n: ApiPath<String>, q: Query<ActorQ>) -> Result<StatusCode, ApiError> { delete_doc(DocKind::Workflow, s, n, q).await }
+
+async fn list_docs(kind: DocKind, State(s): State<AppState>, Query(q): Query<ProjectQ>) -> Result<Json<Vec<Doc>>, ApiError> {
+    Ok(Json(s.backend.list_docs(kind, q.project_id).await?))
+}
+async fn get_doc(kind: DocKind, State(s): State<AppState>, ApiPath(name): ApiPath<String>) -> Result<Json<Doc>, ApiError> {
+    Ok(Json(s.backend.get_doc(kind, &name).await?))
+}
+async fn save_doc(kind: DocKind, State(s): State<AppState>, Query(q): Query<ActorQ>, ApiJson(d): ApiJson<NewDoc>) -> Result<(StatusCode, Json<Doc>), ApiError> {
+    Ok((StatusCode::CREATED, Json(s.backend.save_doc(kind, d, actor(&q)).await?)))
+}
+async fn delete_doc(kind: DocKind, State(s): State<AppState>, ApiPath(name): ApiPath<String>, Query(q): Query<ActorQ>) -> Result<StatusCode, ApiError> {
+    s.backend.delete_doc(kind, &name, actor(&q)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---- sync ----
+
+async fn sync(State(s): State<AppState>, ApiJson(req): ApiJson<SyncRequest>) -> Result<Json<SyncReport>, ApiError> { Ok(Json(s.backend.sync(req).await?)) }

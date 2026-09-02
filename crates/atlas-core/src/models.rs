@@ -5,9 +5,11 @@ use uuid::Uuid;
 
 macro_rules! str_enum {
     ($name:ident { $($var:ident => $s:literal),* $(,)? }) => {
+        // Each variant is renamed to the same literal `as_str`/`FromStr` use, so the JSON
+        // wire form and the string form never drift apart (`rename_all = "lowercase"`
+        // would spell `AgentsMd` as `agentsmd` while `as_str` says `agents_md`).
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-        #[serde(rename_all = "lowercase")]
-        pub enum $name { $($var),* }
+        pub enum $name { $(#[serde(rename = $s)] $var),* }
         impl $name {
             pub fn as_str(&self) -> &'static str { match self { $(Self::$var => $s),* } }
         }
@@ -165,6 +167,26 @@ pub struct SyncOp {
     pub path: PathBuf,
     pub content: String,
     pub action: SyncAction,
+}
+
+/// Everything an agent needs to start work in a project: the project itself,
+/// the memories worth reading first, and the practices and workflows in scope.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ProjectContext {
+    pub project: Project,
+    pub memories: Vec<RecallHit>,
+    pub practices: Vec<Doc>,
+    pub workflows: Vec<Doc>,
+}
+
+/// One sync request. `root` is required unless `global` is set, in which case
+/// the sync targets the user's home directory instead of a project.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct SyncRequest {
+    #[serde(default)] pub root: Option<PathBuf>,
+    #[serde(default)] pub global: bool,
+    #[serde(default)] pub targets: Vec<SyncKind>,
+    #[serde(default)] pub check_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]

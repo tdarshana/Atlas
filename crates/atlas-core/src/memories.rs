@@ -86,9 +86,15 @@ impl<'a> MemoryRepo<'a> {
     }
 
     pub fn list_active(&self, scope: Option<MemoryScope>, project_id: Option<Uuid>) -> Result<Vec<Memory>> {
+        self.list_by_status(MemoryStatus::Active, scope, project_id)
+    }
+
+    /// Newest first. `project_id` widens rather than narrows: it matches that
+    /// project's memories plus every global one, as `list_active` does.
+    pub fn list_by_status(&self, status: MemoryStatus, scope: Option<MemoryScope>, project_id: Option<Uuid>) -> Result<Vec<Memory>> {
         self.db.with_conn(|c| {
-            let mut sql = format!("select {} from memories where status = 'active'", select_cols());
-            let mut args: Vec<String> = vec![];
+            let mut sql = format!("select {} from memories where status = ?", select_cols());
+            let mut args: Vec<String> = vec![status.as_str().to_string()];
             if let Some(s) = scope { sql.push_str(" and scope = ?"); args.push(s.as_str().to_string()); }
             if let Some(p) = project_id { sql.push_str(" and (project_id = ? or scope = 'global')"); args.push(p.to_string()); }
             sql.push_str(" order by created_at desc");

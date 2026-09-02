@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -18,6 +19,33 @@ async fn start() -> Daemon {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     Daemon { child, port, _home: home }
+}
+
+/// Builds a small git-backed fixture project: a Next.js/React `package.json`, a README,
+/// a TypeScript source file, a gitignored `node_modules` dir, one commit, and an `origin`
+/// remote. Copied from `atlas-core/tests/common/mod.rs`, which an integration test in
+/// another crate cannot reach.
+fn fixture_repo(dir: &Path) {
+    git(dir, &["init"]);
+    std::fs::write(dir.join("package.json"), r#"{"name":"fixture","dependencies":{"next":"16.0.0","react":"19.0.0"}}"#).unwrap();
+    std::fs::write(dir.join("README.md"), "# fixture\n\nA test fixture.\nSecond line.\n").unwrap();
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/index.ts"), "export const x = 1;\n").unwrap();
+    std::fs::write(dir.join(".gitignore"), "node_modules/\n").unwrap();
+    std::fs::create_dir_all(dir.join("node_modules")).unwrap();
+    std::fs::write(dir.join("node_modules/x.js"), "// ignored\n").unwrap();
+    git(dir, &["add", "-A"]);
+    git(dir, &["commit", "-m", "initial fixture"]);
+    git(dir, &["remote", "add", "origin", "https://github.com/example/fixture.git"]);
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let status = Command::new("git").args(args).current_dir(dir)
+        .env("GIT_AUTHOR_NAME", "Atlas Test").env("GIT_AUTHOR_EMAIL", "atlas-test@example.com")
+        .env("GIT_COMMITTER_NAME", "Atlas Test").env("GIT_COMMITTER_EMAIL", "atlas-test@example.com")
+        .stdout(Stdio::null()).stderr(Stdio::null()).status()
+        .unwrap_or_else(|e| panic!("failed to run git {args:?}: {e}"));
+    assert!(status.success(), "git {args:?} failed");
 }
 
 #[tokio::test]
@@ -109,4 +137,104 @@ async fn rejects_browser_origins_and_non_loopback_hosts() {
     for origin in ["http://127.0.0.1", &format!("http://localhost:{}", d.port)] {
         assert!(c.get(&status).header("Origin", origin).send().await.unwrap().status().is_success(), "{origin} should be allowed");
     }
+}
+
+#[tokio::test]
+async fn projects_agents_docs_and_sync() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    let repo = tempfile::tempdir().unwrap();
+    fixture_repo(repo.path());
+
+    let p: serde_json::Value = c.post(format!("{base}/projects/connect")).json(&serde_json::json!({"root": repo.path()})).send().await.unwrap().json().await.unwrap();
+    assert_eq!(p["name"], "fixture");
+    assert!(p["profile"]["frameworks"].as_array().unwrap().iter().any(|f| f == "next"), "{p}");
+    let pid = p["id"].as_str().unwrap().to_string();
+
+    let projects: serde_json::Value = c.get(format!("{base}/projects")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(projects.as_array().unwrap().len(), 1);
+    let one: serde_json::Value = c.get(format!("{base}/projects/{pid}")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(one["id"], pid);
+    let refreshed: serde_json::Value = c.post(format!("{base}/projects/{pid}/refresh")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(refreshed["name"], "fixture");
+
+    let a: serde_json::Value = c.post(format!("{base}/agents")).json(&serde_json::json!({"name":"reviewer","description":"Reviews PRs","instructions":"Be strict.","tools":["Read"],"tags":[]})).send().await.unwrap().json().await.unwrap();
+    assert_eq!(a["version"], 1);
+    let agents: serde_json::Value = c.get(format!("{base}/agents")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(agents.as_array().unwrap().len(), 1);
+
+    let r = c.post(format!("{base}/practices")).json(&serde_json::json!({"name":"commits","body":"imperative","tags":[],"project_id": pid})).send().await.unwrap();
+    assert_eq!(r.status(), 201);
+    let w = c.post(format!("{base}/workflows")).json(&serde_json::json!({"name":"release","body":"tag then publish","tags":[]})).send().await.unwrap();
+    assert_eq!(w.status(), 201);
+    let practices: serde_json::Value = c.get(format!("{base}/practices?project_id={pid}")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(practices[0]["name"], "commits");
+
+    c.post(format!("{base}/memories")).json(&serde_json::json!({"scope":"project","project_id": pid,"kind":"decision","text":"fixture deploys to fly.io"})).send().await.unwrap();
+
+    let ctx: serde_json::Value = c.post(format!("{base}/projects/context")).json(&serde_json::json!({"root": repo.path()})).send().await.unwrap().json().await.unwrap();
+    assert_eq!(ctx["project"]["id"], pid);
+    assert_eq!(ctx["practices"][0]["name"], "commits");
+    assert_eq!(ctx["workflows"][0]["name"], "release");
+    assert!(ctx["memories"].as_array().unwrap().iter().any(|h| h["memory"]["text"].as_str().unwrap().contains("fly.io")), "{ctx}");
+
+    let targets = serde_json::json!(["claude", "codex", "agents_md", "claude_md"]);
+    let check: serde_json::Value = c.post(format!("{base}/sync")).json(&serde_json::json!({"root": repo.path(), "global": false, "targets": targets, "check_only": true})).send().await.unwrap().json().await.unwrap();
+    assert_eq!(check["created"], 4, "{check}");
+    assert!(!repo.path().join(".claude/agents/reviewer.md").exists(), "check_only must not write");
+
+    let rep: serde_json::Value = c.post(format!("{base}/sync")).json(&serde_json::json!({"root": repo.path(), "global": false, "targets": targets, "check_only": false})).send().await.unwrap().json().await.unwrap();
+    assert_eq!(rep["created"], 4);
+    assert!(repo.path().join(".claude/agents/reviewer.md").exists() && repo.path().join(".codex/agents/reviewer.toml").exists());
+    let agents_md = std::fs::read_to_string(repo.path().join("AGENTS.md")).unwrap();
+    assert!(agents_md.contains("- `reviewer`: Reviews PRs"), "{agents_md}");
+    assert!(agents_md.contains("fixture"), "the block names the connected project: {agents_md}");
+
+    let again: serde_json::Value = c.post(format!("{base}/sync")).json(&serde_json::json!({"root": repo.path(), "global": false, "targets": targets, "check_only": false})).send().await.unwrap().json().await.unwrap();
+    assert_eq!(again["unchanged"], 4);
+
+    let del = c.delete(format!("{base}/practices/commits")).send().await.unwrap();
+    assert_eq!(del.status(), 204);
+    assert_eq!(c.get(format!("{base}/practices/commits")).send().await.unwrap().status(), 404);
+    assert_eq!(c.delete(format!("{base}/agents/reviewer")).send().await.unwrap().status(), 204);
+
+    let bad = c.post(format!("{base}/agents")).json(&serde_json::json!({"name":"Bad Name","description":"x","instructions":"y"})).send().await.unwrap();
+    assert_eq!(bad.status(), 400);
+    let no_root = c.post(format!("{base}/sync")).json(&serde_json::json!({"global": false, "targets": targets, "check_only": true})).send().await.unwrap();
+    assert_eq!(no_root.status(), 400, "a project sync needs a root");
+}
+
+/// Memories captured for review land as `pending`: invisible to recall until a status
+/// change accepts them, at which point they become recallable.
+#[tokio::test]
+async fn pending_memories_can_be_listed_and_accepted() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    let m: serde_json::Value = c.post(format!("{base}/memories")).json(&serde_json::json!({"scope":"global","kind":"insight","text":"the cache is warmed on boot","status":"pending"})).send().await.unwrap().json().await.unwrap();
+    let id = m["id"].as_str().unwrap().to_string();
+    assert_eq!(m["status"], "pending");
+
+    let hits: serde_json::Value = c.post(format!("{base}/memories/search")).json(&serde_json::json!({"query":"cache warmed"})).send().await.unwrap().json().await.unwrap();
+    assert_eq!(hits.as_array().unwrap().len(), 0, "a pending memory is not recallable");
+
+    let pending: serde_json::Value = c.get(format!("{base}/memories?status=pending")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(pending.as_array().unwrap().len(), 1);
+    assert_eq!(pending[0]["id"], id);
+    let active: serde_json::Value = c.get(format!("{base}/memories")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(active.as_array().unwrap().len(), 0, "status defaults to active");
+
+    let accepted = c.post(format!("{base}/memories/{id}/status")).json(&serde_json::json!({"status":"active"})).send().await.unwrap();
+    assert_eq!(accepted.status(), 200);
+    let hits: serde_json::Value = c.post(format!("{base}/memories/search")).json(&serde_json::json!({"query":"cache warmed"})).send().await.unwrap().json().await.unwrap();
+    assert_eq!(hits[0]["memory"]["id"], id, "accepting a memory adds it to the search index");
+
+    let rejected = c.post(format!("{base}/memories/{id}/status")).json(&serde_json::json!({"status":"rejected"})).send().await.unwrap();
+    assert_eq!(rejected.status(), 200);
+    let hits: serde_json::Value = c.post(format!("{base}/memories/search")).json(&serde_json::json!({"query":"cache warmed"})).send().await.unwrap().json().await.unwrap();
+    assert_eq!(hits.as_array().unwrap().len(), 0, "rejecting removes it from the index again");
+
+    assert_eq!(c.get(format!("{base}/memories?status=bogus")).send().await.unwrap().status(), 400);
+    assert_eq!(c.post(format!("{base}/memories/{id}/status")).json(&serde_json::json!({"status":"bogus"})).send().await.unwrap().status(), 400);
 }

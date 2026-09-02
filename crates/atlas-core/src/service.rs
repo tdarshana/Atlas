@@ -139,12 +139,38 @@ impl MemoryService {
         if m.scope == MemoryScope::Project && m.project_id.is_none() { return Err(AtlasError::Invalid("project scope requires project_id".into())); }
         let _gate = self.gate();
         let saved = self.repo().insert(&m, actor)?;
-        self.idx_write().upsert(saved.id, &saved.text);
-        self.try_embed(saved.id, &saved.text);
+        // Only active memories belong in the derived state: `reload` rebuilds it from the
+        // active rows alone, so indexing a pending one here would not survive a restart.
+        if saved.status == MemoryStatus::Active { self.index_gated(&saved); }
         Ok(saved)
     }
 
+    /// Adds `m` to the keyword index and, when the embedder can, to the vector map.
+    /// Callers must already hold `write_gate`.
+    fn index_gated(&self, m: &Memory) {
+        self.idx_write().upsert(m.id, &m.text);
+        self.try_embed(m.id, &m.text);
+    }
+
     pub fn get(&self, id: Uuid) -> Result<Memory> { self.repo().get(id) }
+
+    pub fn list(&self, status: MemoryStatus, scope: Option<MemoryScope>, project_id: Option<Uuid>) -> Result<Vec<Memory>> {
+        self.repo().list_by_status(status, scope, project_id)
+    }
+
+    /// Moves a memory between statuses, keeping the search index in step: becoming
+    /// active makes it searchable, leaving active takes it back out.
+    pub fn set_status(&self, id: Uuid, status: MemoryStatus, actor: &str) -> Result<Memory> {
+        let _gate = self.gate();
+        let m = self.repo().set_status(id, status, actor)?;
+        if status == MemoryStatus::Active {
+            self.index_gated(&m);
+        } else {
+            self.idx_write().remove(id);
+            self.vec_write().remove(&id);
+        }
+        Ok(m)
+    }
 
     pub fn forget(&self, id: Uuid, reason: Option<String>, actor: &str) -> Result<Memory> {
         let _gate = self.gate();

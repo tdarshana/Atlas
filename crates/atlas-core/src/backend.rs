@@ -1,11 +1,22 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
 use crate::db::Db;
+use crate::export::BlockContext;
+use crate::library::{AgentRepo, DocRepo};
 use crate::models::*;
 use crate::paths::AtlasPaths;
+use crate::projects::{build_profile, detect_root, ProjectRepo};
 use crate::search::{FastEmbedder, NoopEmbedder};
 use crate::service::MemoryService;
-use crate::Result;
+use crate::sync::{self, SyncInputs};
+use crate::{AtlasError, Result};
+
+/// How the managed block tells an agent to reach Atlas.
+const MCP_COMMAND: &str = "atlas mcp";
+
+/// Targets a sync writes when the request names none.
+const DEFAULT_TARGETS: &[SyncKind] = &[SyncKind::Claude, SyncKind::Codex, SyncKind::AgentsMd, SyncKind::ClaudeMd];
 
 #[async_trait::async_trait]
 pub trait Backend: Send + Sync + 'static {
@@ -14,15 +25,35 @@ pub trait Backend: Send + Sync + 'static {
     async fn recall(&self, q: RecallQuery) -> Result<Vec<RecallHit>>;
     async fn forget(&self, id: Uuid, reason: Option<String>, actor: &str) -> Result<Memory>;
     async fn get_memory(&self, id: Uuid) -> Result<Memory>;
+    async fn list_memories(&self, status: MemoryStatus, project_id: Option<Uuid>) -> Result<Vec<Memory>>;
+    async fn set_memory_status(&self, id: Uuid, status: MemoryStatus, actor: &str) -> Result<Memory>;
+
+    async fn connect_project(&self, root: PathBuf, actor: &str) -> Result<Project>;
+    async fn project_context(&self, root: PathBuf, actor: &str) -> Result<ProjectContext>;
+    async fn list_projects(&self) -> Result<Vec<Project>>;
+    async fn get_project(&self, id: Uuid) -> Result<Project>;
+    async fn refresh_project(&self, id: Uuid) -> Result<Project>;
+
+    async fn list_agents(&self) -> Result<Vec<Agent>>;
+    async fn get_agent(&self, name: &str) -> Result<Agent>;
+    async fn save_agent(&self, a: NewAgent, actor: &str) -> Result<Agent>;
+    async fn delete_agent(&self, name: &str, actor: &str) -> Result<()>;
+
+    async fn list_docs(&self, kind: DocKind, project_id: Option<Uuid>) -> Result<Vec<Doc>>;
+    async fn get_doc(&self, kind: DocKind, name: &str) -> Result<Doc>;
+    async fn save_doc(&self, kind: DocKind, d: NewDoc, actor: &str) -> Result<Doc>;
+    async fn delete_doc(&self, kind: DocKind, name: &str, actor: &str) -> Result<()>;
+
+    async fn sync(&self, req: SyncRequest) -> Result<SyncReport>;
 }
 
-pub struct LocalBackend { pub memories: Arc<MemoryService>, pub paths: AtlasPaths, pub port: Option<u16> }
+pub struct LocalBackend { pub memories: Arc<MemoryService>, pub db: Arc<Db>, pub paths: AtlasPaths, pub port: Option<u16> }
 
 impl LocalBackend {
     pub fn open(paths: &AtlasPaths, port: Option<u16>, load_embedder: bool) -> Result<Self> {
         paths.ensure()?;
         let db = Arc::new(Db::open(&paths.db_path())?);
-        let memories = Arc::new(MemoryService::new(db, Arc::new(NoopEmbedder))?);
+        let memories = Arc::new(MemoryService::new(db.clone(), Arc::new(NoopEmbedder))?);
         if load_embedder {
             memories.set_loading(true);
             let models_dir = paths.models_dir();
@@ -43,8 +74,12 @@ impl LocalBackend {
                 bg.set_loading(false);
             });
         }
-        Ok(Self { memories, paths: paths.clone(), port })
+        Ok(Self { memories, db, paths: paths.clone(), port })
     }
+
+    fn projects(&self) -> ProjectRepo<'_> { ProjectRepo::new(&self.db) }
+    fn agents(&self) -> AgentRepo<'_> { AgentRepo::new(&self.db) }
+    fn docs(&self, kind: DocKind) -> DocRepo<'_> { DocRepo::new(&self.db, kind) }
 }
 
 #[async_trait::async_trait]
@@ -58,6 +93,89 @@ impl Backend for LocalBackend {
     async fn recall(&self, q: RecallQuery) -> Result<Vec<RecallHit>> { self.memories.recall(&q) }
     async fn forget(&self, id: Uuid, reason: Option<String>, actor: &str) -> Result<Memory> { self.memories.forget(id, reason, actor) }
     async fn get_memory(&self, id: Uuid) -> Result<Memory> { self.memories.get(id) }
+    async fn list_memories(&self, status: MemoryStatus, project_id: Option<Uuid>) -> Result<Vec<Memory>> { self.memories.list(status, None, project_id) }
+    async fn set_memory_status(&self, id: Uuid, status: MemoryStatus, actor: &str) -> Result<Memory> { self.memories.set_status(id, status, actor) }
+
+    /// Detects the project at `root` and records it, building a profile when the
+    /// stored one is missing or stale. The upsert runs first, without a profile, so
+    /// `needs_refresh` can consult what is already stored before doing the work.
+    async fn connect_project(&self, root: PathBuf, actor: &str) -> Result<Project> {
+        let detected = detect_root(&root)?;
+        let repo = self.projects();
+        let project = repo.upsert(&detected, None, actor)?;
+        if repo.needs_refresh(&project) {
+            let profile = build_profile(&detected.root)?;
+            return repo.set_profile(project.id, &profile, actor);
+        }
+        Ok(project)
+    }
+
+    async fn project_context(&self, root: PathBuf, actor: &str) -> Result<ProjectContext> {
+        let project = self.connect_project(root, actor).await?;
+        let query = match &project.profile {
+            Some(p) => format!("{} {}", p.name, p.frameworks.join(" ")),
+            None => project.name.clone(),
+        };
+        let mut memories = self.memories.recall(&RecallQuery {
+            query, limit: 20, scope: None, project_id: Some(project.id), kinds: vec![], tags: vec![],
+        })?;
+        // Recall is a search, so a project whose memories don't happen to match its own
+        // name would come back empty. Top it up with the newest project-scoped memories
+        // (score 0.0: they were not ranked, they were appended) so context is never bare.
+        let seen: std::collections::HashSet<Uuid> = memories.iter().map(|h| h.memory.id).collect();
+        let recent = self.memories.list(MemoryStatus::Active, Some(MemoryScope::Project), Some(project.id))?;
+        memories.extend(recent.into_iter().filter(|m| !seen.contains(&m.id)).take(10).map(|memory| RecallHit { memory, score: 0.0 }));
+        Ok(ProjectContext {
+            practices: self.docs(DocKind::Practice).list(Some(project.id))?,
+            workflows: self.docs(DocKind::Workflow).list(Some(project.id))?,
+            project,
+            memories,
+        })
+    }
+
+    async fn list_projects(&self) -> Result<Vec<Project>> { self.projects().list() }
+    async fn get_project(&self, id: Uuid) -> Result<Project> { self.projects().get(id) }
+    async fn refresh_project(&self, id: Uuid) -> Result<Project> {
+        let project = self.projects().get(id)?;
+        let profile = build_profile(std::path::Path::new(&project.root_path))?;
+        self.projects().set_profile(id, &profile, "refresh")
+    }
+
+    async fn list_agents(&self) -> Result<Vec<Agent>> { self.agents().list() }
+    async fn get_agent(&self, name: &str) -> Result<Agent> { self.agents().get(name) }
+    async fn save_agent(&self, a: NewAgent, actor: &str) -> Result<Agent> { self.agents().save(&a, actor) }
+    async fn delete_agent(&self, name: &str, actor: &str) -> Result<()> { self.agents().delete(name, actor) }
+
+    async fn list_docs(&self, kind: DocKind, project_id: Option<Uuid>) -> Result<Vec<Doc>> { self.docs(kind).list(project_id) }
+    async fn get_doc(&self, kind: DocKind, name: &str) -> Result<Doc> { self.docs(kind).get(name) }
+    async fn save_doc(&self, kind: DocKind, d: NewDoc, actor: &str) -> Result<Doc> { self.docs(kind).save(&d, actor) }
+    async fn delete_doc(&self, kind: DocKind, name: &str, actor: &str) -> Result<()> { self.docs(kind).delete(name, actor) }
+
+    /// Plans the sync on the daemon host and, unless `check_only`, writes it.
+    async fn sync(&self, req: SyncRequest) -> Result<SyncReport> {
+        let agents = self.agents().list()?;
+        let requested = if req.targets.is_empty() { DEFAULT_TARGETS.to_vec() } else { req.targets.clone() };
+        let (root, targets, block) = if req.global {
+            let home = directories::BaseDirs::new()
+                .map(|b| b.home_dir().to_path_buf())
+                .ok_or_else(|| AtlasError::Other("no home directory to sync into".into()))?;
+            // Home is not a project, so only the agent exporters apply: splicing a managed
+            // block into ~/AGENTS.md would name practices and a project that aren't there.
+            let targets = requested.into_iter().filter(|t| matches!(t, SyncKind::Claude | SyncKind::Codex)).collect();
+            let block = BlockContext { mcp_command: MCP_COMMAND.into(), agents: agents.clone(), practices: vec![], project_name: None };
+            (home, targets, block)
+        } else {
+            let root = req.root.clone().ok_or_else(|| AtlasError::Invalid("sync requires a root unless global is set".into()))?;
+            // Connect rather than look up, so a sync into a fresh checkout still names the
+            // project in the block instead of silently writing an anonymous one.
+            let project = self.connect_project(root, "sync").await?;
+            let practices = self.docs(DocKind::Practice).list(Some(project.id))?;
+            let block = BlockContext { mcp_command: MCP_COMMAND.into(), agents: agents.clone(), practices, project_name: Some(project.name.clone()) };
+            (PathBuf::from(project.root_path), requested, block)
+        };
+        let ops = sync::plan_sync(&SyncInputs { root: &root, agents: &agents, block, targets: &targets })?;
+        if req.check_only { Ok(sync::summarize(&ops)) } else { sync::apply(&ops) }
+    }
 }
 
 #[cfg(test)]
