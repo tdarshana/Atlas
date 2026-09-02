@@ -10,7 +10,9 @@ const DEFAULT_PORT: u16 = 7433;
 /// binary. Absent under `tauri dev` and in any build made without
 /// `scripts/prepare-sidecar.sh`, in which case the daemon is looked up as usual.
 fn sidecar_atlasd(app: &tauri::AppHandle) -> Option<PathBuf> {
-    let sidecar = tauri::process::current_binary(&app.env()).ok()?.with_file_name("atlasd");
+    // `EXE_SUFFIX` is "" everywhere but Windows, where the bundled sidecar is `atlasd.exe`.
+    let name = format!("atlasd{}", std::env::consts::EXE_SUFFIX);
+    let sidecar = tauri::process::current_binary(&app.env()).ok()?.with_file_name(name);
     sidecar.exists().then_some(sidecar)
 }
 
@@ -44,7 +46,6 @@ fn log_path() -> String {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![daemon_ensure, daemon_info, log_path])
         .run(tauri::generate_context!())
