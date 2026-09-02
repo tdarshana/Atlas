@@ -19,8 +19,10 @@ directories = "6"
 fastembed = "6"
 git2 = "0.21"
 ignore = "0.4"
+reqwest.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 tokio.workspace = true
 toml = "0.9"
+axum = "0.8"

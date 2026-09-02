@@ -41,6 +41,12 @@ create table if not exists audit (
 create table if not exists sync_targets (
   id uuid primary key, project_id uuid, kind text not null check (kind in ('claude','codex','agents_md')),
   path text not null, last_synced_at timestamp);
+"#), (2, r#"
+create table if not exists jobs (
+  id uuid primary key, kind text not null,
+  status text not null default 'queued' check (status in ('queued','running','done','failed')),
+  payload json, result json, error text,
+  created_at timestamp not null default now(), updated_at timestamp not null default now());
 "#)];
 
 impl Db {
@@ -82,13 +88,13 @@ mod tests {
     #[test]
     fn migrate_creates_tables_and_is_idempotent() {
         let db = Db::open_in_memory().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 1);
+        assert_eq!(db.schema_version().unwrap(), 2);
         let n: i64 = db.with_conn(|c| Ok(c.query_row(
-            "select count(*) from information_schema.tables where table_name in ('memories','memory_embeddings','audit','settings','projects','agents','practices','workflows','sync_targets')",
+            "select count(*) from information_schema.tables where table_name in ('memories','memory_embeddings','audit','settings','projects','agents','practices','workflows','sync_targets','jobs')",
             [], |r| r.get(0))?)).unwrap();
-        assert_eq!(n, 9);
+        assert_eq!(n, 10);
         db.migrate().unwrap(); // second run is a no-op
-        assert_eq!(db.schema_version().unwrap(), 1);
+        assert_eq!(db.schema_version().unwrap(), 2);
     }
     #[test]
     fn open_on_disk_creates_file() {
