@@ -6,6 +6,8 @@ import type {
 	Agent,
 	Doc,
 	DocKind,
+	ExtractionTestResult,
+	Job,
 	Memory,
 	MemoryStatus,
 	NewAgent,
@@ -154,6 +156,47 @@ export class AtlasApi {
 
 	setSettings(partial: Settings): Promise<Settings> {
 		return this.req('PUT', '/api/v1/settings', partial);
+	}
+
+	// ---- extraction ----
+
+	/**
+	 * Queues a transcript for extraction. 202 carries the job id to follow with
+	 * `getJob`; a disabled or half-configured setup throws `ApiError` with status
+	 * 409 and the daemon's "extraction is disabled" message.
+	 */
+	ingest(text: string, sourceTool: string, projectRoot?: string): Promise<{ job_id: Uuid }> {
+		return this.req('POST', '/api/v1/ingest', {
+			text,
+			source_tool: sourceTool,
+			project_root: projectRoot
+		});
+	}
+
+	getJob(id: Uuid): Promise<Job> {
+		return this.req('GET', `/api/v1/jobs/${encodeURIComponent(id)}`);
+	}
+
+	/**
+	 * A connectivity check against the configured model. Unlike every other route,
+	 * a model error comes back as 400 with `{ok: false, error}` rather than the
+	 * usual `{error}` shape, so it is returned as data instead of thrown; a 409
+	 * (extraction disabled) still throws `ApiError` like any other route.
+	 */
+	async testExtraction(): Promise<ExtractionTestResult> {
+		let res: Response;
+		try {
+			res = await fetch(`${this.baseUrl}/api/v1/extraction/test`, {
+				method: 'POST',
+				headers: { Accept: 'application/json' }
+			});
+		} catch (e) {
+			throw new ApiError(e instanceof Error ? e.message : String(e), 0);
+		}
+		const text = await res.text();
+		if (res.status === 400) return JSON.parse(text) as ExtractionTestResult;
+		if (!res.ok) throw new ApiError(errorMessage(text, res), res.status);
+		return JSON.parse(text) as ExtractionTestResult;
 	}
 
 	// ---- transport ----

@@ -34,6 +34,10 @@ Any MCP client that speaks streamable HTTP can use `http://127.0.0.1:7433/mcp` o
 
 Once synced, saved agents show up as Claude Code and Codex subagents: Claude Code reads `.claude/agents/*.md`, Codex reads `.codex/agents/*.toml`.
 
+## Extraction
+
+Atlas can optionally turn conversation transcripts into candidate memories through an OpenAI-compatible endpoint. It is off by default; turn it on from the desktop app's Settings screen or `PUT /api/v1/settings`, then `atlas sync` installs a Claude Code Stop hook and a Codex `notify` entry that feed transcripts to `atlas ingest` automatically. Candidates land as pending memories for review before they count as real. See [Extraction](docs/usage.md#extraction) in `docs/usage.md` for the settings keys, the HTTP and CLI surfaces, and the trust boundary for the API key.
+
 ## CLI
 
     atlas remember "we deploy to fly.io" --kind decision --tag infra

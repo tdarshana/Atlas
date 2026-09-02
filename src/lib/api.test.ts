@@ -94,6 +94,26 @@ describe('AtlasApi', () => {
 		expect(calls[0].init.method ?? 'GET').toBe('GET');
 	});
 
+	it('resolves testExtraction with the ok:false body on a 400 connectivity failure', async () => {
+		stubFetch([{ status: 400, body: { ok: false, error: 'model call failed' } }]);
+
+		const result = await api().testExtraction();
+
+		expect(result).toEqual({ ok: false, error: 'model call failed' });
+	});
+
+	it('throws ApiError on a 409 when extraction is disabled', async () => {
+		stubFetch([{ status: 409, body: { error: 'extraction is disabled' } }]);
+
+		const err = await api()
+			.testExtraction()
+			.catch((e) => e);
+
+		expect(err).toBeInstanceOf(ApiError);
+		expect(err.message).toBe('extraction is disabled');
+		expect(err.status).toBe(409);
+	});
+
 	it('maps doc kinds onto the plural routes', async () => {
 		const calls = stubFetch([
 			{ status: 200, body: [] },

@@ -10,7 +10,7 @@
 		review
 	} from '$lib/stores/review.svelte';
 	import { loadProjects, projects } from '$lib/stores/projects.svelte';
-	import { loadSettings, minConfidence } from '$lib/stores/settings.svelte';
+	import { loadSettings, minConfidence, settingBool } from '$lib/stores/settings.svelte';
 	import { errorMessage } from '$lib/errors';
 	import type { Memory } from '$lib/types';
 	import Badge from '$lib/ui/Badge.svelte';
@@ -31,6 +31,7 @@
 
 	const threshold = $derived(minConfidence());
 	const qualified = $derived(qualifying());
+	const extractionEnabled = $derived(settingBool('extraction.enabled'));
 	let accepting = $state(false);
 
 	function projectName(m: Memory): string {
@@ -91,6 +92,13 @@
 		Accept all above threshold ({qualified.length})
 	</Button>
 </header>
+
+<p class="muted" data-testid="review-extraction-status">
+	Extraction: {extractionEnabled ? 'enabled' : 'disabled'}.
+	{#if !extractionEnabled}
+		<a href="/settings">Enable it in Settings</a> to propose memories from transcripts.
+	{/if}
+</p>
 
 <p class="muted">
 	Pending memories wait here until someone accepts them. The threshold is

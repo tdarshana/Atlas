@@ -161,6 +161,27 @@ export interface SyncReport {
 /** `GET/PUT /api/v1/settings` is a flat key/value map; `extraction.api_key` reads back as `"***"`. */
 export type Settings = Record<string, unknown>;
 
+export type JobStatus = 'queued' | 'running' | 'done' | 'failed';
+
+/** A background extraction job, returned by `POST /ingest` (as `job_id`) and `GET /jobs/{id}`. */
+export interface Job {
+	id: Uuid;
+	kind: string;
+	status: JobStatus;
+	payload: unknown;
+	result: unknown;
+	error: string | null;
+	created_at: Timestamp;
+	updated_at: Timestamp;
+}
+
+/** `POST /extraction/test`'s body: 200 carries `reply`, the 400 connectivity failure carries `error`. */
+export interface ExtractionTestResult {
+	ok: boolean;
+	reply?: string;
+	error?: string;
+}
+
 /** The reason on a skipped op, or null when the action is not a skip. */
 export function skipReason(action: SyncAction): string | null {
 	return typeof action === 'object' ? action.Skip : null;

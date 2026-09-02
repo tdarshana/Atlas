@@ -14,8 +14,9 @@
 		settingString,
 		settings
 	} from '$lib/stores/settings.svelte';
-	import { daemon } from '$lib/daemon.svelte';
+	import { api, daemon } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
+	import type { ExtractionTestResult } from '$lib/types';
 	import Button from '$lib/ui/Button.svelte';
 	import Card from '$lib/ui/Card.svelte';
 	import ErrorState from '$lib/ui/ErrorState.svelte';
@@ -31,6 +32,14 @@
 
 	let saving = $state(false);
 	let saveError = $state<string | null>(null);
+
+	let testing = $state(false);
+	let testResult = $state<ExtractionTestResult | null>(null);
+
+	/** The button needs extraction on and both endpoint fields filled to mean anything. */
+	const testDisabled = $derived(
+		!enabled || baseUrl.trim() === '' || model.trim() === '' || testing
+	);
 
 	/** True once the daemon holds a key, which is all `"***"` tells us. */
 	const keyStored = $derived(settings.values['extraction.api_key'] === MASKED);
@@ -75,6 +84,30 @@
 		syncDraft();
 	}
 
+	/** Saves the form first when it is dirty, then calls `/extraction/test`. */
+	async function testConnection() {
+		if (Object.keys(changedSettings({ enabled, baseUrl, apiKey, model, threshold })).length > 0) {
+			await save();
+			if (saveError) return;
+		}
+		testing = true;
+		testResult = null;
+		try {
+			testResult = await api().testExtraction();
+			if (testResult.ok) {
+				push('success', `Connected. Reply: ${testResult.reply}`);
+			} else {
+				push('error', testResult.error ?? 'Connection failed');
+			}
+		} catch (e) {
+			const message = errorMessage(e);
+			testResult = { ok: false, error: message };
+			push('error', message);
+		} finally {
+			testing = false;
+		}
+	}
+
 	onMount(() => {
 		void reload();
 	});
@@ -112,11 +145,23 @@
 			{#snippet actions()}
 				<Button
 					data-testid="settings-test"
-					disabled
-					title="available after extraction is set up"
+					disabled={testDisabled}
+					title={testDisabled
+						? 'Enable extraction and set a base URL and model first'
+						: 'Send a test request to the configured endpoint'}
+					onclick={testConnection}
 				>
-					Test connection
+					{testing ? 'Testing…' : 'Test connection'}
 				</Button>
+				{#if testResult}
+					<span
+						class="test-result"
+						class:bad={!testResult.ok}
+						data-testid="extraction-test-result"
+					>
+						{testResult.ok ? `Connected. Reply: ${testResult.reply}` : testResult.error}
+					</span>
+				{/if}
 			{/snippet}
 
 			<div class="form">
@@ -172,6 +217,11 @@
 						Review's "Accept all above threshold" uses this value.
 					</span>
 				</label>
+
+				<p class="hint" data-testid="extraction-key-note">
+					The API key is stored in the local Atlas database, sent only to the base URL
+					above, and never logged.
+				</p>
 
 				{#if saveError}
 					<p class="bad" role="alert" data-testid="settings-error">{saveError}</p>
@@ -260,6 +310,15 @@
 		margin: 0;
 		color: var(--muted);
 		font-size: 12px;
+	}
+
+	.test-result {
+		font-size: 13px;
+		color: var(--accent);
+	}
+
+	.test-result.bad {
+		color: var(--danger);
 	}
 
 	.bad {
