@@ -254,8 +254,10 @@ async fn accepts_tauri_webview_origins() {
 }
 
 /// The daemon never authenticates, so a browser or the Tauri webview only gets to read the
-/// response if `Access-Control-Allow-Origin` echoes an allowed origin; anything else must
-/// see neither the header nor a way around the loopback guard.
+/// response if `Access-Control-Allow-Origin` echoes an allowed origin. The CORS allow list is
+/// narrower than the request guard: a page on another loopback port has its request run (200)
+/// but gets no allow-origin header, so the browser will not hand it the body; a non-loopback
+/// origin never gets past the guard at all.
 #[tokio::test]
 async fn cors_headers_cover_allowed_and_reject_other_origins() {
     let d = start().await;
@@ -277,6 +279,12 @@ async fn cors_headers_cover_allowed_and_reject_other_origins() {
     assert_eq!(preflight.headers().get("access-control-allow-origin").unwrap(), "tauri://localhost");
     let allow_headers = preflight.headers().get("access-control-allow-headers").unwrap_or_else(|| panic!("no access-control-allow-headers")).to_str().unwrap().to_ascii_lowercase();
     assert!(allow_headers.contains("content-type"), "{allow_headers}");
+
+    // A local page on another port is allowed through the guard, but must not be able to
+    // read what came back: the request runs, the allow-origin header is absent.
+    let other_port = c.get(format!("{base}/status")).header("Origin", "http://localhost:3000").send().await.unwrap();
+    assert_eq!(other_port.status(), 200);
+    assert!(other_port.headers().get("access-control-allow-origin").is_none(), "{:?}", other_port.headers());
 
     let evil = c.get(format!("{base}/status")).header("Origin", "https://evil.example").send().await.unwrap();
     assert_eq!(evil.status(), 403);
@@ -319,6 +327,41 @@ async fn settings_api_masks_the_key_and_validates_keys() {
     assert_eq!(bad.status(), 400);
     let body: serde_json::Value = bad.json().await.unwrap();
     assert!(body["error"].as_str().is_some(), "{body}");
+}
+
+/// `DELETE /projects/{id}` answers 204 and drops the project from the list. The memories
+/// scoped to it stay: nothing is hard-deleted from `memories`.
+#[tokio::test]
+async fn projects_can_be_deleted_without_losing_their_memories() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    let repo = tempfile::tempdir().unwrap();
+    fixture_repo(repo.path());
+
+    let p: serde_json::Value = c.post(format!("{base}/projects/connect")).json(&serde_json::json!({"root": repo.path()})).send().await.unwrap().json().await.unwrap();
+    let pid = p["id"].as_str().unwrap().to_string();
+    let m = c.post(format!("{base}/memories"))
+        .json(&serde_json::json!({"scope":"project","project_id": pid,"kind":"fact","text":"kept after the project goes"}))
+        .send().await.unwrap();
+    assert_eq!(m.status(), 201);
+    let mid = m.json::<serde_json::Value>().await.unwrap()["id"].as_str().unwrap().to_string();
+
+    let gone = c.delete(format!("{base}/projects/{pid}?actor=test")).send().await.unwrap();
+    assert_eq!(gone.status(), 204);
+
+    let projects: serde_json::Value = c.get(format!("{base}/projects")).send().await.unwrap().json().await.unwrap();
+    assert!(projects.as_array().unwrap().is_empty(), "{projects}");
+    assert_eq!(c.get(format!("{base}/projects/{pid}")).send().await.unwrap().status(), 404);
+    // A repeat delete is a 404, not a silent success.
+    assert_eq!(c.delete(format!("{base}/projects/{pid}")).send().await.unwrap().status(), 404);
+    // The memory survives its project.
+    let kept: serde_json::Value = c.get(format!("{base}/memories/{mid}")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(kept["id"], mid, "{kept}");
+    assert_eq!(kept["status"], "active");
+
+    // A malformed id is a 400 from the path extractor, not a 500.
+    assert_eq!(c.delete(format!("{base}/projects/not-a-uuid")).send().await.unwrap().status(), 400);
 }
 
 #[tokio::test]

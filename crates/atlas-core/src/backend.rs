@@ -73,6 +73,7 @@ pub trait Backend: Send + Sync + 'static {
     async fn list_projects(&self) -> Result<Vec<Project>>;
     async fn get_project(&self, id: Uuid) -> Result<Project>;
     async fn refresh_project(&self, id: Uuid) -> Result<Project>;
+    async fn delete_project(&self, id: Uuid, actor: &str) -> Result<()>;
 
     // ---- library ----
     async fn list_agents(&self) -> Result<Vec<Agent>>;
@@ -187,6 +188,7 @@ impl Backend for LocalBackend {
         let profile = build_profile(std::path::Path::new(&project.root_path))?;
         self.projects().set_profile(id, &profile, "refresh")
     }
+    async fn delete_project(&self, id: Uuid, actor: &str) -> Result<()> { self.projects().delete(id, actor) }
 
     async fn list_agents(&self) -> Result<Vec<Agent>> { self.agents().list() }
     async fn get_agent(&self, name: &str) -> Result<Agent> { self.agents().get(name) }

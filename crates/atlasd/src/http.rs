@@ -101,14 +101,23 @@ async fn guard(req: Request, next: Next) -> Response {
 /// Wrap a whole app, `/mcp` included, in the loopback guard.
 pub fn guard_loopback(app: Router) -> Router { app.layer(middleware::from_fn(guard)) }
 
-/// Sends `Access-Control-Allow-Origin` for the same origins `guard` lets through, so a
-/// browser or the Tauri webview can actually read the response instead of blocking it
-/// client-side. Reuses `is_loopback_origin` so the allow lists cannot drift apart; `guard`
-/// still runs (outside this layer) and returns 403 with no CORS headers for anything else.
+/// The only origins allowed to *read* a response: the two the Tauri webview sends
+/// (`tauri://localhost` on WKWebView/wry, `http://tauri.localhost` on WebView2) and the
+/// desktop app's Vite dev server. Deliberately narrower than `is_loopback_origin`, which
+/// admits any loopback host on any port.
+const CORS_ORIGINS: &[&str] = &["tauri://localhost", "http://tauri.localhost", "http://localhost:1420"];
+
+fn is_cors_origin(origin: &str) -> bool { CORS_ORIGINS.contains(&origin) }
+
+/// Sends `Access-Control-Allow-Origin` only for `CORS_ORIGINS`, so the desktop app can read
+/// responses. This is a strict subset of what `guard` lets through: a local page served from
+/// another loopback port passes the guard (its request runs) but gets no allow-origin header,
+/// so the browser blocks it from reading the body. `guard` still runs outside this layer and
+/// returns 403 with no CORS headers for a non-loopback origin.
 pub fn cors_layer() -> CorsLayer {
     CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(|origin, _parts| {
-            origin.to_str().is_ok_and(is_loopback_origin)
+            origin.to_str().is_ok_and(is_cors_origin)
         }))
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
         .allow_headers([header::CONTENT_TYPE, header::ACCEPT])
@@ -136,7 +145,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/projects", get(list_projects))
         .route("/api/v1/projects/connect", post(connect_project))
         .route("/api/v1/projects/context", post(project_context))
-        .route("/api/v1/projects/{id}", get(get_project))
+        .route("/api/v1/projects/{id}", get(get_project).delete(delete_project))
         .route("/api/v1/projects/{id}/refresh", post(refresh_project))
         .route("/api/v1/agents", get(list_agents).post(save_agent))
         .route("/api/v1/agents/{name}", get(get_agent).delete(delete_agent))
@@ -183,6 +192,10 @@ async fn forget(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, ApiQuery(
 async fn list_projects(State(s): State<AppState>) -> Result<Json<Vec<Project>>, ApiError> { Ok(Json(s.backend.list_projects().await?)) }
 async fn get_project(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Result<Json<Project>, ApiError> { Ok(Json(s.backend.get_project(id).await?)) }
 async fn refresh_project(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Result<Json<Project>, ApiError> { Ok(Json(s.backend.refresh_project(id).await?)) }
+async fn delete_project(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, ApiQuery(q): ApiQuery<ActorQ>) -> Result<StatusCode, ApiError> {
+    s.backend.delete_project(id, actor(&q)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
 async fn connect_project(State(s): State<AppState>, ApiQuery(q): ApiQuery<ActorQ>, ApiJson(b): ApiJson<RootBody>) -> Result<Json<Project>, ApiError> {
     Ok(Json(s.backend.connect_project(b.root, actor(&q)).await?))
 }

@@ -167,6 +167,22 @@ impl<'a> ProjectRepo<'a> {
         self.get(id)
     }
 
+    /// Removes the project row and the `sync_targets` that point at it, and audits the
+    /// removal. Memories scoped to the project are deliberately left alone: nothing is
+    /// ever hard-deleted from `memories`, so they stay readable through the audit trail
+    /// and through a re-connect of the same root, which restores the id's meaning only
+    /// if the project is added again. Errors with `NotFound` when the id is unknown, so
+    /// a repeat call is not a silent success.
+    pub fn delete(&self, id: Uuid, actor: &str) -> Result<()> {
+        let p = self.get(id)?;
+        self.db.with_conn(|c| {
+            c.execute("delete from sync_targets where project_id = ?", params![id.to_string()])?;
+            c.execute("delete from projects where id = ?", params![id.to_string()])?;
+            Ok(())
+        })?;
+        crate::memories::MemoryRepo::new(self.db).audit(actor, "delete", "project", Some(id), serde_json::json!({"root": p.root_path, "name": p.name}))
+    }
+
     /// True when the project has no profile yet, or its profile is more than
     /// 24 hours old.
     pub fn needs_refresh(&self, p: &Project) -> bool {
@@ -225,6 +241,74 @@ mod tests {
         repo.set_profile(a.id, &ProjectProfile { name: "audit".into(), ..Default::default() }, "t").unwrap(); // set_profile
         let audits: i64 = db.with_conn(|c| Ok(c.query_row("select count(*) from audit", [], |r| r.get(0))?)).unwrap();
         assert_eq!(audits, 3);
+    }
+
+    #[test]
+    fn delete_removes_the_row_and_its_sync_targets_and_is_audited() {
+        let db = Db::open_in_memory().unwrap();
+        let repo = ProjectRepo::new(&db);
+        let a = repo.upsert(&Detected { root: "/tmp/gone".into(), remote: None }, None, "t").unwrap();
+        let b = repo.upsert(&Detected { root: "/tmp/stays".into(), remote: None }, None, "t").unwrap();
+        for p in [a.id, b.id] {
+            db.with_conn(|c| {
+                c.execute(
+                    "insert into sync_targets (id, project_id, kind, path) values (?, ?, 'claude', '/tmp/x')",
+                    params![Uuid::new_v4().to_string(), p.to_string()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        }
+
+        repo.delete(a.id, "t").unwrap();
+        assert!(matches!(repo.get(a.id), Err(AtlasError::NotFound(_))));
+        assert_eq!(repo.list().unwrap().len(), 1);
+        let targets: i64 = db
+            .with_conn(|c| Ok(c.query_row("select count(*) from sync_targets where project_id = ?", params![a.id.to_string()], |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(targets, 0, "the deleted project's sync targets must go with it");
+        let kept: i64 = db
+            .with_conn(|c| Ok(c.query_row("select count(*) from sync_targets where project_id = ?", params![b.id.to_string()], |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(kept, 1, "another project's sync targets must survive");
+        let deletes: i64 = db
+            .with_conn(|c| Ok(c.query_row("select count(*) from audit where entity = 'project' and action = 'delete'", [], |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(deletes, 1);
+
+        // A second delete of the same id is a NotFound, not a silent success.
+        assert!(matches!(repo.delete(a.id, "t"), Err(AtlasError::NotFound(_))));
+    }
+
+    /// Deleting a project leaves its memories in place; nothing is hard-deleted from
+    /// `memories`, so the rows stay readable even though the project row is gone.
+    #[test]
+    fn delete_leaves_project_scoped_memories_alone() {
+        use crate::models::{MemoryKind, MemoryScope, MemoryStatus, NewMemory};
+        let db = Db::open_in_memory().unwrap();
+        let repo = ProjectRepo::new(&db);
+        let p = repo.upsert(&Detected { root: "/tmp/mem".into(), remote: None }, None, "t").unwrap();
+        crate::memories::MemoryRepo::new(&db)
+            .insert(
+                &NewMemory {
+                    scope: MemoryScope::Project,
+                    project_id: Some(p.id),
+                    kind: MemoryKind::Fact,
+                    text: "kept".into(),
+                    tags: vec![],
+                    source_agent: None,
+                    source_tool: None,
+                    confidence: 1.0,
+                    status: MemoryStatus::Active,
+                },
+                "t",
+            )
+            .unwrap();
+        repo.delete(p.id, "t").unwrap();
+        let left: i64 = db
+            .with_conn(|c| Ok(c.query_row("select count(*) from memories where project_id = ?", params![p.id.to_string()], |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(left, 1);
     }
 
     #[test]

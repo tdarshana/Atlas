@@ -53,6 +53,7 @@ impl Backend for RemoteBackend {
     async fn list_projects(&self) -> Result<Vec<Project>> { Self::handle(self.client.get(format!("{}/projects", self.base)).send().await.map_err(Self::net)?).await }
     async fn get_project(&self, id: Uuid) -> Result<Project> { Self::handle(self.client.get(format!("{}/projects/{id}", self.base)).send().await.map_err(Self::net)?).await }
     async fn refresh_project(&self, id: Uuid) -> Result<Project> { Self::handle(self.client.post(format!("{}/projects/{id}/refresh", self.base)).send().await.map_err(Self::net)?).await }
+    async fn delete_project(&self, id: Uuid, actor: &str) -> Result<()> { Self::handle_empty(self.client.delete(format!("{}/projects/{id}?actor={actor}", self.base)).send().await.map_err(Self::net)?).await }
 
     async fn list_agents(&self) -> Result<Vec<Agent>> { Self::handle(self.client.get(format!("{}/agents", self.base)).send().await.map_err(Self::net)?).await }
     async fn get_agent(&self, name: &str) -> Result<Agent> { Self::handle(self.client.get(format!("{}/agents/{name}", self.base)).send().await.map_err(Self::net)?).await }
