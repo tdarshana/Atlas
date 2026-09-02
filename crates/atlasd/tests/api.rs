@@ -54,6 +54,9 @@ async fn json_api_round_trip() {
     let bad_forget_body: serde_json::Value = bad_forget.json().await.unwrap();
     assert!(bad_forget_body["error"].as_str().is_some(), "{bad_forget_body}");
 
+    let untyped_forget = c.post(format!("{base}/memories/{id}/forget")).body("{\"reason\":\"test\"}").send().await.unwrap();
+    assert_eq!(untyped_forget.status(), 400, "a body without a JSON content type must be refused");
+
     let daemon_json = std::fs::read_to_string(d._home.path().join("daemon.json")).unwrap();
     assert!(daemon_json.contains(&format!("\"port\":{}", d.port)) || daemon_json.contains(&format!("\"port\": {}", d.port)));
 }
@@ -79,4 +82,31 @@ async fn mcp_over_http_lists_and_calls_tools() {
     if let Some(s) = &session { req = req.header("mcp-session-id", s); }
     let body = req.json(&serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"remember","arguments":{"text":"mcp round trip works","kind":"insight"}}})).send().await.unwrap().text().await.unwrap();
     assert!(body.contains("mcp round trip works"), "{body}");
+}
+
+/// The daemon has no authentication, so a page open in the user's browser must not be able
+/// to reach it, on the JSON API or on /mcp.
+#[tokio::test]
+async fn rejects_browser_origins_and_non_loopback_hosts() {
+    let d = start().await;
+    let status = format!("http://127.0.0.1:{}/api/v1/status", d.port);
+    let c = reqwest::Client::new();
+
+    let cross = c.get(&status).header("Origin", "https://evil.example").send().await.unwrap();
+    assert_eq!(cross.status(), 403);
+    let body: serde_json::Value = cross.json().await.unwrap();
+    assert_eq!(body["error"], "forbidden origin");
+
+    let rebound = c.get(&status).header("Host", "evil.example").send().await.unwrap();
+    assert_eq!(rebound.status(), 403);
+
+    let mcp = c.post(format!("http://127.0.0.1:{}/mcp", d.port)).header("Origin", "https://evil.example")
+        .header("Accept", "application/json, text/event-stream").header("Content-Type", "application/json")
+        .json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}))
+        .send().await.unwrap();
+    assert_eq!(mcp.status(), 403, "the guard must cover /mcp too");
+
+    for origin in ["http://127.0.0.1", &format!("http://localhost:{}", d.port)] {
+        assert!(c.get(&status).header("Origin", origin).send().await.unwrap().status().is_success(), "{origin} should be allowed");
+    }
 }
