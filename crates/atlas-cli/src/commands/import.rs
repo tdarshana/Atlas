@@ -74,10 +74,16 @@ fn md_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     if !dir.is_dir() {
         return Ok(vec![]);
     }
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|e| e == "md"))
-        .collect();
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        // An unreadable entry is a file this import would have brought in, so it is
+        // reported rather than dropped: a partial import that says nothing is worse
+        // than one that stops.
+        let path = entry.map_err(|e| anyhow::anyhow!("failed to read {}: {e}", dir.display()))?.path();
+        if path.extension().is_some_and(|e| e == "md") {
+            paths.push(path);
+        }
+    }
     paths.sort();
     Ok(paths)
 }

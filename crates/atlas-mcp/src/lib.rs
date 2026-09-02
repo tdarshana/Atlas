@@ -137,10 +137,15 @@ impl<B: Backend> AtlasMcp<B> {
 
     /// The root a call is about: the argument first, then `ATLAS_PROJECT_ROOT`, then the
     /// root this server was started in. `None` when none of the three names one.
+    ///
+    /// Canonicalized, so two spellings of one directory (a relative path, a symlink, a
+    /// trailing slash) share a cache entry instead of connecting the project twice. A
+    /// path that does not resolve is passed on as given, for the backend to report.
     fn root_for(&self, project_root: Option<PathBuf>) -> Option<PathBuf> {
-        project_root
+        let root = project_root
             .or_else(|| self.env_project_root.then(|| std::env::var("ATLAS_PROJECT_ROOT").ok().map(PathBuf::from)).flatten())
-            .or_else(|| self.project_root.clone())
+            .or_else(|| self.project_root.clone())?;
+        Some(root.canonicalize().unwrap_or(root))
     }
 
     /// The project for the resolved root, connecting it the first time and remembering

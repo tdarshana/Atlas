@@ -53,6 +53,8 @@ fn check_project_root(root: &std::path::Path, home: Option<&std::path::Path>) ->
 #[async_trait::async_trait]
 pub trait Backend: Send + Sync + 'static {
     async fn status(&self) -> Result<StatusReport>;
+
+    // ---- memories ----
     async fn remember(&self, m: NewMemory, actor: &str) -> Result<Memory>;
     async fn recall(&self, q: RecallQuery) -> Result<Vec<RecallHit>>;
     async fn forget(&self, id: Uuid, reason: Option<String>, actor: &str) -> Result<Memory>;
@@ -60,12 +62,14 @@ pub trait Backend: Send + Sync + 'static {
     async fn list_memories(&self, status: MemoryStatus, project_id: Option<Uuid>) -> Result<Vec<Memory>>;
     async fn set_memory_status(&self, id: Uuid, status: MemoryStatus, actor: &str) -> Result<Memory>;
 
+    // ---- projects ----
     async fn connect_project(&self, root: PathBuf, actor: &str) -> Result<Project>;
     async fn project_context(&self, root: PathBuf, actor: &str) -> Result<ProjectContext>;
     async fn list_projects(&self) -> Result<Vec<Project>>;
     async fn get_project(&self, id: Uuid) -> Result<Project>;
     async fn refresh_project(&self, id: Uuid) -> Result<Project>;
 
+    // ---- library ----
     async fn list_agents(&self) -> Result<Vec<Agent>>;
     async fn get_agent(&self, name: &str) -> Result<Agent>;
     async fn save_agent(&self, a: NewAgent, actor: &str) -> Result<Agent>;
@@ -76,6 +80,7 @@ pub trait Backend: Send + Sync + 'static {
     async fn save_doc(&self, kind: DocKind, d: NewDoc, actor: &str) -> Result<Doc>;
     async fn delete_doc(&self, kind: DocKind, name: &str, actor: &str) -> Result<()>;
 
+    // ---- sync ----
     async fn sync(&self, req: SyncRequest) -> Result<SyncReport>;
 }
 
