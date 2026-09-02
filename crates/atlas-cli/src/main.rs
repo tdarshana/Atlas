@@ -45,8 +45,12 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Mcp => {
             let port = daemon_ctl::ensure_daemon(&paths, cli.port).await?;
-            let server = AtlasMcp::new(Arc::new(RemoteBackend::new(port)))
+            let mut server = AtlasMcp::new(Arc::new(RemoteBackend::new(port)))
                 .with_source_tool(std::env::var("ATLAS_SOURCE_TOOL").unwrap_or_else(|_| "stdio".into()));
+            // The client launches the shim in the repository it is working in, so the cwd
+            // names the project. Handed over rather than exported: writing an env var is
+            // unsound once the process is multi-threaded, which it already is here.
+            if let Ok(cwd) = std::env::current_dir() { server = server.with_project_root(cwd); }
             use rmcp::ServiceExt;
             let running = server.serve(rmcp::transport::stdio()).await?;
             running.waiting().await?;

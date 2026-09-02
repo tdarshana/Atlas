@@ -89,27 +89,67 @@ async fn json_api_round_trip() {
     assert!(daemon_json.contains(&format!("\"port\":{}", d.port)) || daemon_json.contains(&format!("\"port\": {}", d.port)));
 }
 
+/// One JSON-RPC round trip over streamable HTTP. The reply may come back as a bare JSON
+/// body or as an SSE stream, so the raw text is returned and callers assert against it.
+async fn rpc(c: &reqwest::Client, url: &str, session: &Option<String>, body: serde_json::Value) -> String {
+    let mut req = c.post(url).header("Accept", "application/json, text/event-stream").header("Content-Type", "application/json");
+    if let Some(s) = session { req = req.header("mcp-session-id", s); }
+    req.json(&body).send().await.unwrap().text().await.unwrap()
+}
+
 #[tokio::test]
 async fn mcp_over_http_lists_and_calls_tools() {
     let d = start().await;
     let url = format!("http://127.0.0.1:{}/mcp", d.port);
+    let api = format!("http://127.0.0.1:{}/api/v1", d.port);
     let c = reqwest::Client::new();
     let init = c.post(&url).header("Accept", "application/json, text/event-stream").header("Content-Type", "application/json")
         .json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}))
         .send().await.unwrap();
     assert!(init.status().is_success(), "initialize failed: {}", init.status());
     let session = init.headers().get("mcp-session-id").map(|v| v.to_str().unwrap().to_string());
-    let mut req = c.post(&url).header("Accept", "application/json, text/event-stream").header("Content-Type", "application/json");
-    if let Some(s) = &session { req = req.header("mcp-session-id", s); }
-    let _ = req.json(&serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})).send().await.unwrap();
-    let mut req = c.post(&url).header("Accept", "application/json, text/event-stream").header("Content-Type", "application/json");
-    if let Some(s) = &session { req = req.header("mcp-session-id", s); }
-    let body = req.json(&serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).send().await.unwrap().text().await.unwrap();
-    for t in ["remember", "recall", "forget", "status"] { assert!(body.contains(&format!("\"name\":\"{t}\"")), "tools/list missing {t}: {body}"); }
-    let mut req = c.post(&url).header("Accept", "application/json, text/event-stream").header("Content-Type", "application/json");
-    if let Some(s) = &session { req = req.header("mcp-session-id", s); }
-    let body = req.json(&serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"remember","arguments":{"text":"mcp round trip works","kind":"insight"}}})).send().await.unwrap().text().await.unwrap();
+    let _ = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})).await;
+
+    let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).await;
+    for t in ["remember", "recall", "forget", "status", "project_context", "connect_project", "list_agents",
+              "get_agent", "save_agent", "list_practices", "get_practice", "list_workflows", "get_workflow"] {
+        assert!(body.contains(&format!("\"name\":\"{t}\"")), "tools/list missing {t}: {body}");
+    }
+
+    let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"remember","arguments":{"text":"mcp round trip works","kind":"insight"}}})).await;
     assert!(body.contains("mcp round trip works"), "{body}");
+
+    // Agents reach MCP through the same store the JSON API writes, so save one there and
+    // expect it to show up as a resource and as a prompt.
+    let saved = c.post(format!("{api}/agents")).json(&serde_json::json!({
+        "name": "reviewer", "description": "Reviews diffs for regressions",
+        "instructions": "Read the diff and name the riskiest change.", "tools": ["Read"], "tags": ["review"],
+    })).send().await.unwrap();
+    assert_eq!(saved.status(), 201, "save_agent failed");
+
+    let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":4,"method":"resources/list"})).await;
+    assert!(body.contains("atlas://agents/reviewer"), "resources/list missing the agent: {body}");
+
+    let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":5,"method":"resources/read","params":{"uri":"atlas://agents/reviewer"}})).await;
+    assert!(body.contains("name: reviewer"), "resources/read did not return the Claude export: {body}");
+
+    let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":6,"method":"prompts/list"})).await;
+    assert!(body.contains("\"name\":\"reviewer\""), "prompts/list missing the agent: {body}");
+
+    let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":7,"method":"prompts/get","params":{"name":"reviewer"}})).await;
+    assert!(body.contains("Adopt the following agent role"), "prompts/get lost the preamble: {body}");
+    assert!(body.contains("name the riskiest change"), "prompts/get lost the instructions: {body}");
+
+    // project_context takes an explicit root, which is how an MCP client that cannot set
+    // ATLAS_PROJECT_ROOT still scopes its session to a project.
+    let repo = tempfile::tempdir().unwrap();
+    fixture_repo(repo.path());
+    let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":8,"method":"tools/call",
+        "params":{"name":"project_context","arguments":{"project_root": repo.path().to_str().unwrap()}}})).await;
+    // The tool result is JSON inside a JSON string, so its quoting is escaped: match on
+    // the key and value text rather than on quoted JSON.
+    assert!(body.contains("frameworks"), "project_context returned no profile: {body}");
+    assert!(body.contains("nextjs") || body.contains("next"), "project_context profile missing the detected framework: {body}");
 }
 
 /// The daemon has no authentication, so a page open in the user's browser must not be able
@@ -237,4 +277,37 @@ async fn pending_memories_can_be_listed_and_accepted() {
 
     assert_eq!(c.get(format!("{base}/memories?status=bogus")).send().await.unwrap().status(), 400);
     assert_eq!(c.post(format!("{base}/memories/{id}/status")).json(&serde_json::json!({"status":"bogus"})).send().await.unwrap().status(), 400);
+}
+
+/// Every 400 the API returns carries the `{"error": string}` body, query strings included:
+/// axum's own rejections are plain text, so the extractors have to own the mapping.
+#[tokio::test]
+async fn bad_query_strings_are_json_errors() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+
+    let bad_project = c.get(format!("{base}/memories?project_id=nope")).send().await.unwrap();
+    assert_eq!(bad_project.status(), 400);
+    let body: serde_json::Value = bad_project.json().await.unwrap();
+    assert!(body["error"].as_str().is_some(), "{body}");
+
+    let bad_docs = c.get(format!("{base}/practices?project_id=nope")).send().await.unwrap();
+    assert_eq!(bad_docs.status(), 400);
+    let body: serde_json::Value = bad_docs.json().await.unwrap();
+    assert!(body["error"].as_str().is_some(), "{body}");
+
+    // A blank filter is a caller who left it empty, not a bad status.
+    let blank = c.get(format!("{base}/memories?status=")).send().await.unwrap();
+    assert_eq!(blank.status(), 200);
+    assert_eq!(blank.json::<serde_json::Value>().await.unwrap().as_array().unwrap().len(), 0);
+
+    // A file is not a project root, however well the path resolves.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("not-a-dir.txt");
+    std::fs::write(&file, "x").unwrap();
+    let not_dir = c.post(format!("{base}/projects/connect")).json(&serde_json::json!({"root": file})).send().await.unwrap();
+    assert_eq!(not_dir.status(), 400);
+    let body: serde_json::Value = not_dir.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("is not a directory"), "{body}");
 }
