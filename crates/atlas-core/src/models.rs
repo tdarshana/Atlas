@@ -92,6 +92,52 @@ pub struct Project {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct NewAgent {
+    pub name: String,
+    pub description: String,
+    pub instructions: String,
+    pub model_hint: Option<String>,
+    #[serde(default)] pub tools: Vec<String>,
+    #[serde(default)] pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Agent {
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub instructions: String,
+    pub model_hint: Option<String>,
+    pub tools: Vec<String>,
+    pub tags: Vec<String>,
+    pub version: i32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+str_enum!(DocKind { Practice => "practice", Workflow => "workflow" });
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct NewDoc {
+    pub name: String,
+    pub body: String,
+    #[serde(default)] pub tags: Vec<String>,
+    pub project_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Doc {
+    pub id: Uuid,
+    pub kind: DocKind,
+    pub name: String,
+    pub body: String,
+    pub tags: Vec<String>,
+    pub project_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RecallQuery {
     pub query: String,
     #[serde(default = "ten")] pub limit: usize,
