@@ -51,4 +51,20 @@ Once synced, saved agents show up as Claude Code and Codex subagents: Claude Cod
 
 A terminal UI over the daemon, read-mostly: browse memories, projects, agents, practices and workflows, and review pending memories. Honours `--port` and `--home` like every other command, and starts the daemon first if it is not already running. Needs a controlling terminal: it exits with an error if it cannot open one. `q` or `Ctrl+C` quits. Editing long text such as agent instructions or a practice's body is done through the CLI or the desktop app, not the TUI. Tabs and key legend are in `docs/usage.md`.
 
+## Desktop app
+
+    bun install
+    bun run tauri dev
+
+A Tauri 2 desktop app over the same daemon, with eight screens: Dashboard, Projects, Memories, Agents, Practices, Workflows, Review and Settings. It starts the daemon itself when none is running, and shows the log path when that fails.
+
+To package it:
+
+    bash scripts/prepare-sidecar.sh
+    bun run tauri build
+
+`scripts/prepare-sidecar.sh` builds `atlasd` in release mode and stages it as `src-tauri/binaries/atlasd-<target triple>`. `bun run tauri build` then ships that binary inside the bundle and writes the result under `target/release/bundle/`: on macOS `macos/atlas.app` plus `dmg/atlas_<version>_<arch>.dmg`. That is the shared workspace `target/`, not `src-tauri/target/`, because `src-tauri` is a workspace member. Run the script first; the build fails if no staged sidecar is there.
+
+The app prefers the bundled sidecar over anything else when it starts the daemon, so a packaged install works on a machine with no `atlasd` on PATH. Without a sidecar, as under `bun run tauri dev`, it falls back to the usual lookup: `atlasd` next to the running executable, then `atlasd` on PATH.
+
 Data lives in `~/.atlas/atlas.duckdb`. Set `ATLAS_HOME` to relocate it. See `docs/usage.md` and `docs/superpowers/specs/2026-09-02-atlas-design.md`.
