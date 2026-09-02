@@ -43,6 +43,19 @@
 
 	/** True once the daemon holds a key, which is all `"***"` tells us. */
 	const keyStored = $derived(settings.values['extraction.api_key'] === MASKED);
+
+	/**
+	 * A key is entered against one endpoint, so the daemon drops it when the base URL
+	 * moves without a new one: nothing local can point Atlas somewhere else and have the
+	 * old key follow it there. Warn before saving, not after, since the key has to be
+	 * typed again either way. A trailing slash is not a move; neither is it to the daemon.
+	 */
+	const trimTrailingSlash = (url: string) => url.trim().replace(/\/+$/, '');
+	const keyWillBeCleared = $derived(
+		keyStored &&
+			apiKey === '' &&
+			trimTrailingSlash(baseUrl) !== trimTrailingSlash(settingString('extraction.base_url'))
+	);
 	const port = $derived(settingString('daemon.port', String(daemon.port)));
 	const embeddingModel = $derived(settingString('embedding.model', 'not set') || 'not set');
 
@@ -157,6 +170,7 @@
 					<span
 						class="test-result"
 						class:bad={!testResult.ok}
+						role="status"
 						data-testid="extraction-test-result"
 					>
 						{testResult.ok ? `Connected. Reply: ${testResult.reply}` : testResult.error}
@@ -193,6 +207,11 @@
 							? 'A key is stored. Leave this blank to keep it.'
 							: 'No key stored yet.'}
 					</span>
+					{#if keyWillBeCleared}
+						<span class="hint warn" role="status" data-testid="settings-key-cleared-note">
+							Changing the base URL clears the stored key; enter it again.
+						</span>
+					{/if}
 				</label>
 
 				<label class="field">
@@ -310,6 +329,11 @@
 		margin: 0;
 		color: var(--muted);
 		font-size: 12px;
+	}
+
+	/* Same size as the hint it sits under; only the colour says it is a warning. */
+	.hint.warn {
+		color: var(--danger);
 	}
 
 	.test-result {
