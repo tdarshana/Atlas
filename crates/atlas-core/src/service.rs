@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use uuid::Uuid;
 use crate::db::Db;
 use crate::memories::MemoryRepo;
@@ -14,11 +14,16 @@ pub struct MemoryService {
     vectors: RwLock<HashMap<Uuid, Vec<f32>>>,
     embed_error: RwLock<Option<String>>,
     loading: RwLock<bool>,
+    /// Serializes everything that mutates the derived state (`index`, `vectors`) against
+    /// everything that rebuilds it from the DB. Without it a `remember` whose DB insert
+    /// lands after `reload`'s read but whose `upsert` lands before `reload`'s wholesale
+    /// replacement is silently dropped from the index and stays unrecallable until restart.
+    write_gate: Mutex<()>,
 }
 
 impl MemoryService {
     pub fn new(db: Arc<Db>, embedder: Arc<dyn Embedder>) -> Result<Self> {
-        let svc = Self { db, embedder: RwLock::new(embedder), index: RwLock::new(Bm25Index::new()), vectors: RwLock::new(HashMap::new()), embed_error: RwLock::new(None), loading: RwLock::new(false) };
+        let svc = Self { db, embedder: RwLock::new(embedder), index: RwLock::new(Bm25Index::new()), vectors: RwLock::new(HashMap::new()), embed_error: RwLock::new(None), loading: RwLock::new(false), write_gate: Mutex::new(()) };
         svc.reload()?;
         Ok(svc)
     }
@@ -35,6 +40,7 @@ impl MemoryService {
     fn err_write(&self) -> RwLockWriteGuard<'_, Option<String>> { self.embed_error.write().unwrap_or_else(|e| e.into_inner()) }
     fn loading_read(&self) -> RwLockReadGuard<'_, bool> { self.loading.read().unwrap_or_else(|e| e.into_inner()) }
     fn loading_write(&self) -> RwLockWriteGuard<'_, bool> { self.loading.write().unwrap_or_else(|e| e.into_inner()) }
+    fn gate(&self) -> MutexGuard<'_, ()> { self.write_gate.lock().unwrap_or_else(|e| e.into_inner()) }
 
     /// Clone of the current embedder's `Arc`, so callers don't hold the lock while embedding.
     fn emb(&self) -> Arc<dyn Embedder> { self.embedder.read().unwrap_or_else(|e| e.into_inner()).clone() }
@@ -42,9 +48,19 @@ impl MemoryService {
     /// Swap in a new embedder, drop any stale error, reload persisted vectors for it, and
     /// backfill a vector for every active memory that doesn't have one under the new model.
     pub fn set_embedder(&self, e: Arc<dyn Embedder>) -> Result<()> {
+        let _gate = self.gate();
+        // `loading` spans the swap, reload and backfill so `embedding_status` doesn't
+        // announce "ready" while memories still have no vector under the new model.
+        self.set_loading(true);
+        let result = self.set_embedder_gated(e);
+        self.set_loading(false);
+        result
+    }
+
+    fn set_embedder_gated(&self, e: Arc<dyn Embedder>) -> Result<()> {
         *self.embedder.write().unwrap_or_else(|e| e.into_inner()) = e;
         *self.err_write() = None;
-        self.reload()?;
+        self.reload_gated()?;
         let missing: Vec<(Uuid, String)> = {
             let vectors = self.vec_read();
             self.repo().list_active(None, None)?.into_iter().filter(|m| !vectors.contains_key(&m.id)).map(|m| (m.id, m.text)).collect()
@@ -59,6 +75,12 @@ impl MemoryService {
 
     /// Rebuild the keyword index and load stored vectors for active memories.
     pub fn reload(&self) -> Result<()> {
+        let _gate = self.gate();
+        self.reload_gated()
+    }
+
+    /// The body of `reload`, for callers that already hold `write_gate`.
+    fn reload_gated(&self) -> Result<()> {
         let mems = self.repo().list_active(None, None)?;
         let mut idx = Bm25Index::new();
         for m in &mems { idx.upsert(m.id, &m.text); }
@@ -68,7 +90,14 @@ impl MemoryService {
             let mut st = c.prepare("select e.memory_id::text, to_json(e.vector)::text from memory_embeddings e join memories m on m.id = e.memory_id where m.status='active' and e.model = ?")?;
             let rows = st.query_map([emb.name()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
             let mut out = vec![];
-            for row in rows { let (id, v) = row?; if let (Ok(id), Ok(v)) = (Uuid::parse_str(&id), serde_json::from_str::<Vec<f32>>(&v)) { out.push((id, v)); } }
+            for row in rows {
+                let (id, v) = row?;
+                match (Uuid::parse_str(&id), serde_json::from_str::<Vec<f32>>(&v)) {
+                    (Ok(id), Ok(v)) => out.push((id, v)),
+                    (Ok(id), Err(e)) => tracing::warn!("skipping unparseable stored vector for memory {id}: {e}"),
+                    (Err(e), _) => tracing::warn!("skipping stored vector with unparseable memory id {id:?}: {e}"),
+                }
+            }
             Ok(out)
         })?;
         *self.vec_write() = vecs.into_iter().collect();
@@ -108,6 +137,7 @@ impl MemoryService {
 
     pub fn remember(&self, m: NewMemory, actor: &str) -> Result<Memory> {
         if m.scope == MemoryScope::Project && m.project_id.is_none() { return Err(AtlasError::Invalid("project scope requires project_id".into())); }
+        let _gate = self.gate();
         let saved = self.repo().insert(&m, actor)?;
         self.idx_write().upsert(saved.id, &saved.text);
         self.try_embed(saved.id, &saved.text);
@@ -117,6 +147,7 @@ impl MemoryService {
     pub fn get(&self, id: Uuid) -> Result<Memory> { self.repo().get(id) }
 
     pub fn forget(&self, id: Uuid, reason: Option<String>, actor: &str) -> Result<Memory> {
+        let _gate = self.gate();
         let m = self.repo().supersede(id, None, actor)?;
         if let Some(r) = reason { self.repo().audit(actor, "forget_reason", "memory", Some(id), serde_json::json!({"reason": r}))?; }
         self.idx_write().remove(id);
@@ -164,9 +195,10 @@ impl MemoryService {
     }
 
     pub fn embedding_status(&self) -> String {
-        let dims = self.emb().dims();
-        if *self.loading_read() && dims == 0 { return "loading".into(); }
-        if dims == 0 { return "unavailable: no embedding model loaded".into(); }
+        // "loading" wins over everything: the model may already be swapped in while the
+        // backfill is still running, and reporting "ready" then would be a lie.
+        if *self.loading_read() { return "loading".into(); }
+        if self.emb().dims() == 0 { return "unavailable: no embedding model loaded".into(); }
         match &*self.err_read() { Some(e) => format!("unavailable: {e}"), None => "ready".into() }
     }
 
@@ -290,6 +322,38 @@ mod tests {
         assert!(!hits.is_empty());
         assert!(hits[0].memory.text.contains("bun"));
         assert_eq!(s.status(None).unwrap().embedding, "ready");
+    }
+
+    /// A `set_embedder` (which rebuilds the index from the DB) running concurrently with
+    /// writers must not erase memories whose insert raced the rebuild.
+    #[test]
+    fn concurrent_remember_survives_set_embedder() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let s = Arc::new(MemoryService::new(Arc::new(Db::open_in_memory().unwrap()), Arc::new(NoopEmbedder)).unwrap());
+        // Pre-existing bulk so each rebuild spends real time between reading the DB and
+        // swapping in the fresh index; that is the window a racing write falls into.
+        let filler = "alpha beta gamma delta epsilon zeta eta theta iota kappa ".repeat(40);
+        for i in 0..100 { s.remember(nm(&format!("filler {i} {filler}")), "t").unwrap(); }
+
+        let done = Arc::new(AtomicBool::new(false));
+        let writer = { let (s, done) = (s.clone(), done.clone()); std::thread::spawn(move || {
+            for i in 0..50 { s.remember(nm(&format!("concurrent marker zqx{i} recorded")), "t").unwrap(); }
+            done.store(true, Ordering::SeqCst);
+        })};
+        for _ in 0..25 {
+            if done.load(Ordering::SeqCst) { break; }
+            s.set_embedder(Arc::new(FakeEmbedder)).unwrap();
+        }
+        writer.join().unwrap();
+
+        let active = s.repo().count_active().unwrap() as usize;
+        assert_eq!(active, 150);
+        assert_eq!(s.idx_read().len(), active, "index lost memories written during the rebuild");
+        assert_eq!(s.vec_read().len(), active, "vectors lost memories written during the rebuild");
+        for i in 0..50 {
+            let token = format!("zqx{i}");
+            assert!(!s.idx_read().query(&token, 5).is_empty(), "memory {token} is unrecallable");
+        }
     }
 
     #[test]
