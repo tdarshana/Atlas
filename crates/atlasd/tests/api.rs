@@ -238,6 +238,55 @@ async fn rejects_browser_origins_and_non_loopback_hosts() {
     }
 }
 
+/// The Tauri desktop app's webview sends one of these fixed origins depending on
+/// platform (WKWebView/wry: `tauri://localhost`; WebView2: `http://tauri.localhost`),
+/// plus its dev server origin `http://localhost:1420`. None of them may be rejected as
+/// a browser origin.
+#[tokio::test]
+async fn accepts_tauri_webview_origins() {
+    let d = start().await;
+    let status = format!("http://127.0.0.1:{}/api/v1/status", d.port);
+    let c = reqwest::Client::new();
+    for origin in ["tauri://localhost", "http://tauri.localhost", "http://localhost:1420"] {
+        let r = c.get(&status).header("Origin", origin).send().await.unwrap();
+        assert_eq!(r.status(), 200, "{origin} should be allowed");
+    }
+}
+
+/// `extraction.api_key` is masked on every GET and PUT response, a masked round trip
+/// leaves the real key untouched, and an unknown key is rejected with 400.
+#[tokio::test]
+async fn settings_api_masks_the_key_and_validates_keys() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+
+    let put: serde_json::Value = c.put(format!("{base}/settings")).json(&serde_json::json!({
+        "extraction.enabled": true, "extraction.api_key": "sk-test", "extraction.model": "deepseek-chat",
+    })).send().await.unwrap().json().await.unwrap();
+    assert_eq!(put["extraction.api_key"], "***", "{put}");
+    assert_eq!(put["extraction.enabled"], true);
+    assert_eq!(put["extraction.model"], "deepseek-chat");
+
+    let get: serde_json::Value = c.get(format!("{base}/settings")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(get["extraction.api_key"], "***", "{get}");
+    assert_eq!(get["extraction.enabled"], true);
+
+    // A masked round trip (the shape a GET->PUT client sends back) must not clobber the
+    // real key: it stays masked and non-empty after another PUT that doesn't touch it.
+    let put2: serde_json::Value = c.put(format!("{base}/settings")).json(&serde_json::json!({
+        "extraction.model": "x", "extraction.api_key": "***",
+    })).send().await.unwrap().json().await.unwrap();
+    assert_eq!(put2["extraction.api_key"], "***", "{put2}");
+    assert_ne!(put2["extraction.api_key"], "", "{put2}");
+    assert_eq!(put2["extraction.model"], "x");
+
+    let bad = c.put(format!("{base}/settings")).json(&serde_json::json!({"bogus": 1})).send().await.unwrap();
+    assert_eq!(bad.status(), 400);
+    let body: serde_json::Value = bad.json().await.unwrap();
+    assert!(body["error"].as_str().is_some(), "{body}");
+}
+
 #[tokio::test]
 async fn projects_agents_docs_and_sync() {
     let d = start().await;

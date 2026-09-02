@@ -72,10 +72,14 @@ fn strip_port(host: &str) -> &str {
     }
 }
 
-fn is_loopback_host(host: &str) -> bool { matches!(strip_port(host), "127.0.0.1" | "localhost" | "[::1]") }
+fn is_loopback_host(host: &str) -> bool { matches!(strip_port(host), "127.0.0.1" | "localhost" | "[::1]" | "tauri.localhost") }
 
-/// Only `http://` loopback origins count; anything else is a page on the open web.
+/// `http://` loopback origins count, plus the two fixed origins the Tauri desktop
+/// app's webview sends: `tauri://localhost` (WKWebView/wry, macOS and Linux) and
+/// `http://tauri.localhost` (WebView2, Windows; covered by `is_loopback_host` above).
+/// Anything else is a page on the open web.
 fn is_loopback_origin(origin: &str) -> bool {
+    if origin == "tauri://localhost" { return true; }
     match origin.strip_prefix("http://") { Some(rest) => !rest.contains('/') && is_loopback_host(rest), None => false }
 }
 
@@ -125,6 +129,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/workflows", get(list_workflows).post(save_workflow))
         .route("/api/v1/workflows/{name}", get(get_workflow).delete(delete_workflow))
         .route("/api/v1/sync", post(sync))
+        .route("/api/v1/settings", get(get_settings).put(set_settings))
         .with_state(state)
 }
 
@@ -212,3 +217,10 @@ async fn delete_doc(kind: DocKind, State(s): State<AppState>, ApiPath(name): Api
 // ---- sync ----
 
 async fn sync(State(s): State<AppState>, ApiJson(req): ApiJson<SyncRequest>) -> Result<Json<SyncReport>, ApiError> { Ok(Json(s.backend.sync(req).await?)) }
+
+// ---- settings ----
+
+async fn get_settings(State(s): State<AppState>) -> Result<Json<serde_json::Map<String, serde_json::Value>>, ApiError> { Ok(Json(s.backend.get_settings().await?)) }
+async fn set_settings(State(s): State<AppState>, ApiQuery(q): ApiQuery<ActorQ>, ApiJson(values): ApiJson<serde_json::Map<String, serde_json::Value>>) -> Result<Json<serde_json::Map<String, serde_json::Value>>, ApiError> {
+    Ok(Json(s.backend.set_settings(values, actor(&q)).await?))
+}

@@ -69,4 +69,9 @@ impl Backend for RemoteBackend {
 
     /// The daemon runs the sync, so the paths written are the daemon host's.
     async fn sync(&self, req: SyncRequest) -> Result<SyncReport> { Self::handle(self.client.post(format!("{}/sync", self.base)).json(&req).send().await.map_err(Self::net)?).await }
+
+    async fn get_settings(&self) -> Result<serde_json::Map<String, serde_json::Value>> { Self::handle(self.client.get(format!("{}/settings", self.base)).send().await.map_err(Self::net)?).await }
+    async fn set_settings(&self, values: serde_json::Map<String, serde_json::Value>, actor: &str) -> Result<serde_json::Map<String, serde_json::Value>> {
+        Self::handle(self.client.put(format!("{}/settings?actor={actor}", self.base)).json(&values).send().await.map_err(Self::net)?).await
+    }
 }

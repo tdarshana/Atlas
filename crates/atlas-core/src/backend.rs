@@ -87,6 +87,10 @@ pub trait Backend: Send + Sync + 'static {
 
     // ---- sync ----
     async fn sync(&self, req: SyncRequest) -> Result<SyncReport>;
+
+    // ---- settings ----
+    async fn get_settings(&self) -> Result<serde_json::Map<String, serde_json::Value>>;
+    async fn set_settings(&self, values: serde_json::Map<String, serde_json::Value>, actor: &str) -> Result<serde_json::Map<String, serde_json::Value>>;
 }
 
 pub struct LocalBackend { pub memories: Arc<MemoryService>, pub db: Arc<Db>, pub paths: AtlasPaths, pub port: Option<u16> }
@@ -122,6 +126,7 @@ impl LocalBackend {
     fn projects(&self) -> ProjectRepo<'_> { ProjectRepo::new(&self.db) }
     fn agents(&self) -> AgentRepo<'_> { AgentRepo::new(&self.db) }
     fn docs(&self, kind: DocKind) -> DocRepo<'_> { DocRepo::new(&self.db, kind) }
+    fn settings(&self) -> crate::settings::SettingsRepo<'_> { crate::settings::SettingsRepo::new(&self.db) }
 }
 
 #[async_trait::async_trait]
@@ -233,6 +238,12 @@ impl Backend for LocalBackend {
         let mut ops = sync::plan_sync(&SyncInputs { root: &root, agents: &agents, block, targets: &targets })?;
         ops.extend(skipped);
         if req.check_only { Ok(sync::summarize(&ops)) } else { sync::apply(&ops) }
+    }
+
+    async fn get_settings(&self) -> Result<serde_json::Map<String, serde_json::Value>> { self.settings().get_all() }
+    async fn set_settings(&self, values: serde_json::Map<String, serde_json::Value>, actor: &str) -> Result<serde_json::Map<String, serde_json::Value>> {
+        self.settings().set_many(&values, actor)?;
+        self.settings().get_all()
     }
 }
 
