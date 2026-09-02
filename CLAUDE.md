@@ -33,7 +33,7 @@ cargo run -p atlas-cli -- recall "query"     # CLI
 - `remember`, `forget`, `reload` and `set_embedder` take the `write_gate` mutex first. Do not take `index`, `vectors` or the Db mutex before it.
 - User text never reaches SQL unescaped. Tag literals double single quotes; everything else is bound.
 - The `audit` timestamp column is `"at"`, a reserved word; quote it.
-- `typescript`-style speculation does not apply here, but the same discipline does: check the installed crate source under `~/.cargo/registry` for rmcp and duckdb API names before writing against them.
+- Check the installed crate source under `~/.cargo/registry` for rmcp and duckdb API names before writing against them; both moved recently.
 - stdout of `atlas mcp` is the MCP channel. Log to stderr only.
 
 ## Quality gates
