@@ -103,6 +103,25 @@ fn check_prunable(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Renders a practice or workflow as frontmatter plus body, the form `import`
+/// reads back.
+pub(super) fn doc_md(doc: &Doc) -> String {
+    let mut out = String::from("---\n");
+    out.push_str(&format!("name: {}\n", doc.name));
+    if !doc.tags.is_empty() {
+        out.push_str(&format!("tags: {}\n", doc.tags.join(", ")));
+    }
+    if let Some(project_id) = doc.project_id {
+        out.push_str(&format!("project_id: {project_id}\n"));
+    }
+    out.push_str("---\n\n");
+    out.push_str(&doc.body);
+    // Always one closing newline, matching the agent exporter, so `import` can
+    // undo the framing without having to guess how the body ended.
+    out.push('\n');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,23 +148,4 @@ mod tests {
         std::fs::create_dir(dir.join("nested")).unwrap();
         assert!(check_prunable(&dir).is_err(), "a subdirectory is not prunable");
     }
-}
-
-/// Renders a practice or workflow as frontmatter plus body, the form `import`
-/// reads back.
-pub(super) fn doc_md(doc: &Doc) -> String {
-    let mut out = String::from("---\n");
-    out.push_str(&format!("name: {}\n", doc.name));
-    if !doc.tags.is_empty() {
-        out.push_str(&format!("tags: {}\n", doc.tags.join(", ")));
-    }
-    if let Some(project_id) = doc.project_id {
-        out.push_str(&format!("project_id: {project_id}\n"));
-    }
-    out.push_str("---\n\n");
-    out.push_str(&doc.body);
-    // Always one closing newline, matching the agent exporter, so `import` can
-    // undo the framing without having to guess how the body ended.
-    out.push('\n');
-    out
 }

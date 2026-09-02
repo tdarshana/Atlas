@@ -19,10 +19,15 @@ async fn start_with_env(env: &[(&str, &str)]) -> Daemon {
         .envs(env.iter().copied())
         .stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap();
     let client = reqwest::Client::new();
-    for _ in 0..100 {
-        if client.get(format!("http://127.0.0.1:{port}/api/v1/status")).send().await.is_ok() { break; }
+    // Every test in the file starts its own daemon and they run at once, so the wait has
+    // to cover a slow start under load. A daemon that never answers fails here, where the
+    // reason is plain, rather than as a connection error inside the test body.
+    let mut up = false;
+    for _ in 0..200 {
+        if client.get(format!("http://127.0.0.1:{port}/api/v1/status")).send().await.is_ok() { up = true; break; }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    assert!(up, "atlasd did not answer on port {port} within 20s");
     Daemon { child, port, _home: home }
 }
 
