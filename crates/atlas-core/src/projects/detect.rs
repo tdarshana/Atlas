@@ -14,6 +14,11 @@ pub fn detect_root(dir: &Path) -> Result<Detected> {
     let dir = dir
         .canonicalize()
         .map_err(|e| AtlasError::Invalid(format!("{}: {e}", dir.display())))?;
+    // A file resolves and would otherwise be recorded as a project root, whose profile
+    // and sync paths would then be built underneath something that cannot hold them.
+    if !dir.is_dir() {
+        return Err(AtlasError::Invalid(format!("{} is not a directory", dir.display())));
+    }
     match git2::Repository::discover(&dir) {
         Ok(repo) => {
             let root = repo.workdir().map(|p| p.to_path_buf()).unwrap_or_else(|| dir.clone());
@@ -44,6 +49,15 @@ mod tests {
         let det = detect_root(&d.path().join("src")).unwrap();
         assert_eq!(det.root.canonicalize().unwrap(), d.path().canonicalize().unwrap());
         assert_eq!(det.remote.as_deref(), Some("https://github.com/example/fixture.git"));
+    }
+
+    #[test]
+    fn file_is_rejected() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("not-a-dir.txt");
+        std::fs::write(&file, "x").unwrap();
+        let err = detect_root(&file).unwrap_err();
+        assert!(matches!(err, crate::AtlasError::Invalid(ref m) if m.ends_with("is not a directory")), "{err}");
     }
 
     #[test]
