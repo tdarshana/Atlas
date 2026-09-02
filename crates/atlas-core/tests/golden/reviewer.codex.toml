@@ -2,8 +2,8 @@
 name = "reviewer"
 description = "Reviews pull requests for correctness and risk"
 model = "opus"
-developer_instructions = """
+developer_instructions = '''
 You are a strict reviewer.
 
 Report findings with file:line.
-"""
+'''

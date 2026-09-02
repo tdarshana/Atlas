@@ -16,9 +16,10 @@ pub struct BlockContext {
 /// omit their section entirely.
 pub fn render_block(ctx: &BlockContext) -> String {
     let mut lines: Vec<String> = vec![START.to_string(), "## Atlas (shared memory and agents)".to_string(), String::new()];
+    let command = neutralize(&ctx.mcp_command);
     let sentence = match &ctx.project_name {
-        Some(name) => format!("This project is connected to Atlas as `{name}`. Atlas is available as the MCP server `atlas` (`{}`).", ctx.mcp_command),
-        None => format!("Atlas is available as the MCP server `atlas` (`{}`).", ctx.mcp_command),
+        Some(name) => format!("This project is connected to Atlas as `{}`. Atlas is available as the MCP server `atlas` (`{command}`).", neutralize(name)),
+        None => format!("Atlas is available as the MCP server `atlas` (`{command}`)."),
     };
     lines.push(sentence);
     lines.push("Call `recall` before starting a task and `remember` when you learn a durable fact, make a decision, or notice a preference.".to_string());
@@ -26,18 +27,27 @@ pub fn render_block(ctx: &BlockContext) -> String {
         lines.push(String::new());
         lines.push("### Agents".to_string());
         for a in &ctx.agents {
-            lines.push(format!("- `{}`: {}", a.name, a.description));
+            lines.push(format!("- `{}`: {}", neutralize(&a.name), neutralize(&a.description)));
         }
     }
     if !ctx.practices.is_empty() {
         lines.push(String::new());
         lines.push("### Practices".to_string());
         for p in &ctx.practices {
-            lines.push(format!("- **{}**: {}", p.name, p.body));
+            lines.push(format!("- **{}**: {}", neutralize(&p.name), neutralize(&p.body)));
         }
     }
     lines.push(END.to_string());
     format!("{}\n", lines.join("\n"))
+}
+
+/// Defuses a managed-block marker inside an interpolated value by putting a
+/// zero-width space after `atlas`. A practice body or agent description
+/// containing `<!-- atlas:end -->` would otherwise close the block early, and
+/// every later sync would splice into a shorter span and leave the tail behind,
+/// growing the file a copy at a time.
+fn neutralize(s: &str) -> String {
+    s.replace("<!-- atlas:", "<!-- atlas\u{200b}:")
 }
 
 /// Replaces the content between `START`/`END` with `block` (which itself

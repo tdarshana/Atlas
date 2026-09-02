@@ -173,7 +173,7 @@ mod tests {
             description: "note: careful".into(),
             instructions: "Review the diff.\n".into(),
             model_hint: Some("sonnet".into()),
-            tools: vec!["read".into(), "grep".into()],
+            tools: vec!["read".into(), "mcp: grep".into()],
             tags: vec!["qa".into(), "slow".into()],
             version: 1,
             created_at: Default::default(),
@@ -183,7 +183,7 @@ mod tests {
         assert_eq!(front.get("name").unwrap(), "reviewer");
         assert_eq!(front.get("description").unwrap(), "note: careful", "a quoted scalar is unquoted, colon and all");
         assert_eq!(front.get("model").unwrap(), "sonnet");
-        assert_eq!(comma_list(front.get("tools")), vec!["read", "grep"]);
+        assert_eq!(comma_list(front.get("tools")), vec!["read", "mcp: grep"], "a colon in a tool must not split the line");
         assert_eq!(comma_list(front.get("tags")), vec!["qa", "slow"], "tags must survive the round trip");
         assert_eq!(body, "Review the diff.\n");
     }

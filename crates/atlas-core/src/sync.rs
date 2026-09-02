@@ -165,6 +165,36 @@ mod tests {
         assert!(again.iter().filter(|o| !matches!(o.action, SyncAction::Skip(_))).all(|o| o.action == SyncAction::Unchanged));
     }
 
+    /// A practice body carrying the end marker used to close the block early, so the
+    /// next sync spliced into the shortened span and left the old tail in the file,
+    /// growing it on every run. The rendered block must survive a full round trip.
+    #[test]
+    fn marker_inside_a_practice_body_does_not_corrupt_the_block() {
+        let d = tempfile::tempdir().unwrap();
+        let practice = Doc {
+            id: uuid::Uuid::nil(),
+            kind: DocKind::Practice,
+            name: "markers".into(),
+            body: "Never paste <!-- atlas:end --> into a document.".into(),
+            tags: vec![],
+            project_id: None,
+            created_at: Default::default(),
+            updated_at: Default::default(),
+        };
+        let inputs = SyncInputs {
+            root: d.path(),
+            agents: &[],
+            block: BlockContext { mcp_command: "atlas mcp".into(), agents: vec![], practices: vec![practice], project_name: Some("p".into()) },
+            targets: &[SyncKind::AgentsMd],
+        };
+        let ops = plan_sync(&inputs).unwrap();
+        apply(&ops).unwrap();
+        let written = std::fs::read_to_string(d.path().join("AGENTS.md")).unwrap();
+        assert_eq!(written.matches(export::END).count(), 1, "the body's marker must not read as a second end marker: {written}");
+        let again = plan_sync(&inputs).unwrap();
+        assert!(again.iter().all(|o| o.action == SyncAction::Unchanged), "a second plan should be a no-op: {again:?}");
+    }
+
     #[test]
     fn apply_wraps_write_error_with_path_and_progress() {
         let d = tempfile::tempdir().unwrap();

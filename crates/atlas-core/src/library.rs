@@ -22,6 +22,17 @@ pub fn validate_name(name: &str) -> Result<()> {
     }
 }
 
+/// Rejects a newline in a field the exporters write as a single frontmatter line.
+/// A value carrying one would end that line early and the rest would be read back
+/// by `import` as a different key, so an agent could rewrite its own `tools` or
+/// `model` through its description.
+fn single_line(field: &str, value: &str) -> Result<()> {
+    if value.contains('\n') || value.contains('\r') {
+        return Err(AtlasError::Invalid(format!("{field} must not contain a line break")));
+    }
+    Ok(())
+}
+
 /// Wraps a column-conversion failure so a malformed value fails the query instead of
 /// being silently coerced to a default. Mirrors `memories::conv_err`.
 fn conv_err(col: usize, ty: Type, msg: impl std::fmt::Display) -> duckdb::Error {
@@ -75,6 +86,17 @@ impl<'a> AgentRepo<'a> {
     /// its fields and bumps `version`.
     pub fn save(&self, a: &NewAgent, actor: &str) -> Result<Agent> {
         validate_name(&a.name)?;
+        single_line("agent name", &a.name)?;
+        single_line("agent description", &a.description)?;
+        if let Some(hint) = &a.model_hint {
+            single_line("agent model hint", hint)?;
+        }
+        for tool in &a.tools {
+            single_line("agent tool", tool)?;
+        }
+        for tag in &a.tags {
+            single_line("agent tag", tag)?;
+        }
         let tools_list = list_literal(&a.tools);
         let tags_list = list_literal(&a.tags);
         let existing: Option<Uuid> = self.db.with_conn(|c| {
@@ -299,6 +321,22 @@ mod tests {
         assert_eq!(r.list().unwrap().len(), 1);
         r.delete("reviewer", "t").unwrap();
         assert!(matches!(r.get("reviewer"), Err(crate::AtlasError::NotFound(_))));
+    }
+
+    /// A newline in an exported field would break the Claude frontmatter, so it is
+    /// refused at the door rather than escaped in each exporter.
+    #[test]
+    fn agent_fields_reject_line_breaks() {
+        let db = Db::open_in_memory().unwrap();
+        let r = AgentRepo::new(&db);
+        let base = NewAgent { name: "reviewer".into(), description: "reviews PRs".into(), instructions: "Be strict.".into(), model_hint: None, tools: vec![], tags: vec![] };
+        let err = r.save(&NewAgent { description: "reviews PRs\ntools: Bash".into(), ..base.clone() }, "t").unwrap_err();
+        assert!(matches!(err, AtlasError::Invalid(ref m) if m.contains("line break")), "{err}");
+        assert!(r.save(&NewAgent { model_hint: Some("opus\nx".into()), ..base.clone() }, "t").is_err());
+        assert!(r.save(&NewAgent { tools: vec!["Read\nx".into()], ..base.clone() }, "t").is_err());
+        assert!(r.save(&NewAgent { tags: vec!["qa\rx".into()], ..base.clone() }, "t").is_err());
+        // The instructions are the file body, not a frontmatter line, so they may wrap.
+        assert!(r.save(&NewAgent { instructions: "Be strict.\n\nAlways.".into(), ..base }, "t").is_ok());
     }
 
     #[test]
