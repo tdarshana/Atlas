@@ -2,6 +2,7 @@ use crate::db::Db;
 use crate::models::*;
 use crate::{AtlasError, Result};
 use chrono::{DateTime, Utc};
+use duckdb::types::Type;
 use duckdb::{params, Row};
 use uuid::Uuid;
 
@@ -10,31 +11,48 @@ pub struct MemoryRepo<'a> { db: &'a Db }
 const COLS: &str = "id, scope, project_id, kind, text, tags, source_agent, source_tool, confidence, status, superseded_by, created_at, updated_at";
 
 fn parse_uuid(s: Option<String>) -> Option<Uuid> { s.and_then(|v| Uuid::parse_str(&v).ok()) }
-fn parse_ts(s: String) -> DateTime<Utc> {
-    // DuckDB timestamp text: "2026-09-02 10:11:12.123456"
-    chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S%.f").or_else(|_| chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S")).map(|n| n.and_utc()).unwrap_or_else(|_| Utc::now())
+
+/// Wraps a column-conversion failure so a malformed value fails the query instead of
+/// being silently coerced to a default.
+fn conv_err(col: usize, ty: Type, msg: impl std::fmt::Display) -> duckdb::Error {
+    duckdb::Error::FromSqlConversionFailure(col, ty, Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, msg.to_string())))
 }
 
-/// Public wrapper around `parse_ts` for reuse in Phase 2.
-pub fn parse_ts_pub(s: String) -> DateTime<Utc> { parse_ts(s) }
+fn parse_ts(col: usize, s: &str) -> duckdb::Result<DateTime<Utc>> {
+    // DuckDB timestamp text: "2026-09-02 10:11:12.123456"
+    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
+        .map(|n| n.and_utc())
+        .map_err(|e| conv_err(col, Type::Timestamp, e))
+}
+
+/// Public wrapper around `parse_ts` for reuse in Phase 2. Returns `duckdb::Result`
+/// instead of `DateTime<Utc>` so a malformed timestamp fails loudly instead of
+/// silently defaulting to `Utc::now()`; column index 0 is a placeholder since this
+/// entry point has no row context.
+pub fn parse_ts_pub(s: String) -> duckdb::Result<DateTime<Utc>> { parse_ts(0, &s) }
 
 fn row_to_memory(r: &Row) -> duckdb::Result<Memory> {
     let tags_json: String = r.get::<_, String>(5)?;
-    let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
+    let tags: Vec<String> = serde_json::from_str(&tags_json).map_err(|e| conv_err(5, Type::Text, e))?;
+    let id: Uuid = Uuid::parse_str(&r.get::<_, String>(0)?).map_err(|e| conv_err(0, Type::Text, e))?;
+    let scope: MemoryScope = r.get::<_, String>(1)?.parse().map_err(|e: AtlasError| conv_err(1, Type::Text, e))?;
+    let kind: MemoryKind = r.get::<_, String>(3)?.parse().map_err(|e: AtlasError| conv_err(3, Type::Text, e))?;
+    let status: MemoryStatus = r.get::<_, String>(9)?.parse().map_err(|e: AtlasError| conv_err(9, Type::Text, e))?;
     Ok(Memory {
-        id: Uuid::parse_str(&r.get::<_, String>(0)?).unwrap_or_default(),
-        scope: r.get::<_, String>(1)?.parse().unwrap_or(MemoryScope::Global),
+        id,
+        scope,
         project_id: parse_uuid(r.get::<_, Option<String>>(2)?),
-        kind: r.get::<_, String>(3)?.parse().unwrap_or(MemoryKind::Fact),
+        kind,
         text: r.get(4)?,
         tags,
         source_agent: r.get(6)?,
         source_tool: r.get(7)?,
         confidence: r.get(8)?,
-        status: r.get::<_, String>(9)?.parse().unwrap_or(MemoryStatus::Active),
+        status,
         superseded_by: parse_uuid(r.get::<_, Option<String>>(10)?),
-        created_at: parse_ts(r.get::<_, String>(11)?),
-        updated_at: parse_ts(r.get::<_, String>(12)?),
+        created_at: parse_ts(11, &r.get::<_, String>(11)?)?,
+        updated_at: parse_ts(12, &r.get::<_, String>(12)?)?,
     })
 }
 
@@ -111,7 +129,6 @@ impl<'a> MemoryRepo<'a> {
 mod tests {
     use super::*;
     use crate::db::Db;
-    use crate::models::*;
     fn mem(text: &str, scope: MemoryScope) -> NewMemory {
         NewMemory { scope, project_id: None, kind: MemoryKind::Fact, text: text.into(), tags: vec!["t1".into()],
             source_agent: Some("test".into()), source_tool: None, confidence: 1.0, status: MemoryStatus::Active }
@@ -138,5 +155,28 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let repo = MemoryRepo::new(&db);
         assert!(matches!(repo.get(uuid::Uuid::new_v4()), Err(crate::AtlasError::NotFound(_))));
+    }
+    #[test]
+    fn parse_ts_pub_rejects_garbage() {
+        assert!(parse_ts_pub("garbage".into()).is_err());
+    }
+    #[test]
+    fn malformed_uuid_row_is_rejected() {
+        // CHECK constraints on the `memories` table make it impossible to insert an
+        // invalid uuid/enum through the schema, so exercise row_to_memory directly
+        // against a hand-built result row with a malformed id column.
+        let db = Db::open_in_memory().unwrap();
+        let result: Result<Memory> = db.with_conn(|c| {
+            let mut st = c.prepare(
+                "select 'not-a-uuid' as id, 'global' as scope, null as project_id, 'fact' as kind, \
+                 'x' as text, '[]' as tags, null as source_agent, null as source_tool, 1.0 as confidence, \
+                 'active' as status, null as superseded_by, '2026-01-01 00:00:00' as created_at, \
+                 '2026-01-01 00:00:00' as updated_at",
+            )?;
+            let mut rows = st.query([])?;
+            let r = rows.next()?.ok_or_else(|| AtlasError::NotFound("no row".into()))?;
+            Ok(row_to_memory(r)?)
+        });
+        assert!(result.is_err());
     }
 }
