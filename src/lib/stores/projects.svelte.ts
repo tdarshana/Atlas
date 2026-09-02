@@ -2,10 +2,9 @@
 // shows. Connecting a project needs a directory; inside Tauri that comes from the
 // native folder picker, in a browser from a typed path.
 
-import { ApiError } from '$lib/api';
 import { api } from '$lib/daemon.svelte';
+import { errorLogPath, errorMessage } from '$lib/errors';
 import type { Project, ProjectContext, Uuid } from '$lib/types';
-import { logPath } from './memories.svelte';
 
 export const projects = $state({
 	items: [] as Project[],
@@ -37,8 +36,8 @@ export async function loadProjects(): Promise<void> {
 		projects.errorLogPath = null;
 	} catch (e) {
 		projects.items = [];
-		projects.error = e instanceof Error ? e.message : String(e);
-		projects.errorLogPath = e instanceof ApiError && e.status === 0 ? logPath() : null;
+		projects.error = errorMessage(e);
+		projects.errorLogPath = errorLogPath(e);
 	} finally {
 		projects.loading = false;
 	}
@@ -76,8 +75,8 @@ export async function loadProject(id: Uuid): Promise<void> {
 	} catch (e) {
 		projectDetail.project = null;
 		projectDetail.context = null;
-		projectDetail.error = e instanceof Error ? e.message : String(e);
-		projectDetail.errorLogPath = e instanceof ApiError && e.status === 0 ? logPath() : null;
+		projectDetail.error = errorMessage(e);
+		projectDetail.errorLogPath = errorLogPath(e);
 	} finally {
 		projectDetail.loading = false;
 	}

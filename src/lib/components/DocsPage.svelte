@@ -4,6 +4,7 @@
 
 	import { onMount } from 'svelte';
 	import { api, daemon } from '$lib/daemon.svelte';
+	import { errorMessage } from '$lib/errors';
 	import { nameError, parseList } from '$lib/stores/agents.svelte';
 	import type { DocsStore } from '$lib/stores/docs.svelte';
 	import type { Doc, Project } from '$lib/types';
@@ -110,7 +111,7 @@
 			open = false;
 		} catch (e) {
 			// A 400 carries the daemon's own message; show it as it came.
-			formError = e instanceof Error ? e.message : String(e);
+			formError = errorMessage(e);
 			push('error', formError);
 		} finally {
 			saving = false;
@@ -126,7 +127,7 @@
 			push('success', `Deleted ${doc.name}`);
 			if (editing?.name === doc.name) open = false;
 		} catch (e) {
-			push('error', e instanceof Error ? e.message : String(e));
+			push('error', errorMessage(e));
 		}
 	}
 </script>

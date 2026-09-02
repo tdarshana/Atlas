@@ -2,9 +2,9 @@
 // runs a hybrid search. Both paths end in `hits`, so the table renders one shape;
 // `scored` says whether the score column means anything.
 
-import { ApiError } from '$lib/api';
-import { api, daemon } from '$lib/daemon.svelte';
-import type { Memory, MemoryKind, RecallHit, Timestamp, Uuid } from '$lib/types';
+import { api } from '$lib/daemon.svelte';
+import { errorLogPath, errorMessage } from '$lib/errors';
+import type { Memory, MemoryKind, RecallHit, Uuid } from '$lib/types';
 
 export type ScopeFilter = 'all' | 'global' | 'project';
 
@@ -29,6 +29,13 @@ export const memories = $state({
 	selected: null as Memory | null
 });
 
+/**
+ * Bumped by every load. Debouncing coalesces keystrokes but says nothing about
+ * requests already in flight, and a slow early search must not land on top of a
+ * later one, so a load writes state only while it is still the newest.
+ */
+let generation = 0;
+
 /** The project filter, or null when it does not apply. */
 function activeProjectId(): Uuid | null {
 	return memories.scope === 'project' && memories.projectId ? memories.projectId : null;
@@ -44,39 +51,54 @@ function visible(hit: RecallHit): boolean {
 	return true;
 }
 
+/** Re-points the detail panel at the fresh row, or closes it when it is gone. */
+function reselect(hits: RecallHit[]): void {
+	const selected = memories.selected;
+	if (!selected) return;
+	memories.selected = hits.find((h) => h.memory.id === selected.id)?.memory ?? null;
+}
+
 export async function loadMemories(): Promise<void> {
+	const g = ++generation;
 	const query = memories.query.trim();
 	const projectId = activeProjectId();
 	memories.loading = true;
 	try {
 		let hits: RecallHit[];
+		let scored: boolean;
 		if (query) {
 			hits = await api().search({
 				query,
 				limit: SEARCH_LIMIT,
 				// Sending `project` scope without a project would ask the daemon for
 				// something we cannot name, so fall back to no scope and filter locally.
-				scope: memories.scope === 'all' || (memories.scope === 'project' && !projectId)
-					? null
-					: memories.scope,
+				scope:
+					memories.scope === 'all' || (memories.scope === 'project' && !projectId)
+						? null
+						: memories.scope,
 				project_id: projectId,
 				kinds: memories.kinds.length > 0 ? memories.kinds : undefined
 			});
-			memories.scored = true;
+			scored = true;
 		} else {
 			const rows = await api().listMemories('active', projectId);
 			hits = rows.map((memory) => ({ memory, score: 0 }));
-			memories.scored = false;
+			scored = false;
 		}
+		if (g !== generation) return;
 		memories.hits = hits.filter(visible);
+		memories.scored = scored;
+		reselect(memories.hits);
 		memories.error = null;
 		memories.errorLogPath = null;
 	} catch (e) {
+		if (g !== generation) return;
 		memories.hits = [];
-		memories.error = e instanceof Error ? e.message : String(e);
-		memories.errorLogPath = e instanceof ApiError && e.status === 0 ? logPath() : null;
+		memories.selected = null;
+		memories.error = errorMessage(e);
+		memories.errorLogPath = errorLogPath(e);
 	} finally {
-		memories.loading = false;
+		if (g === generation) memories.loading = false;
 	}
 }
 
@@ -84,11 +106,17 @@ let timer: ReturnType<typeof setTimeout> | null = null;
 
 /** Coalesces keystrokes into one request. */
 export function scheduleLoad(delayMs = SEARCH_DEBOUNCE_MS): void {
-	if (timer !== null) clearTimeout(timer);
+	cancelLoad();
 	timer = setTimeout(() => {
 		timer = null;
 		void loadMemories();
 	}, delayMs);
+}
+
+/** Drops a pending debounce so leaving the screen does not fire one more request. */
+export function cancelLoad(): void {
+	if (timer !== null) clearTimeout(timer);
+	timer = null;
 }
 
 export function toggleKind(kind: MemoryKind): void {
@@ -108,25 +136,4 @@ export async function forgetMemory(id: Uuid, reason?: string): Promise<void> {
 	const i = memories.hits.findIndex((h) => h.memory.id === id);
 	if (i >= 0) memories.hits.splice(i, 1);
 	if (memories.selected?.id === id) memories.selected = null;
-}
-
-/** The daemon log, which explains a connection failure. */
-export function logPath(): string {
-	return daemon.logPath || '~/.atlas/atlasd.log';
-}
-
-/** Compact "how long ago", e.g. `3h`. Shared by the memories and projects tables. */
-export function relativeAge(ts: Timestamp): string {
-	const ms = Date.now() - new Date(ts).getTime();
-	if (!Number.isFinite(ms)) return '—';
-	const minutes = Math.floor(ms / 60_000);
-	if (minutes < 1) return 'just now';
-	if (minutes < 60) return `${minutes}m`;
-	const hours = Math.floor(minutes / 60);
-	if (hours < 24) return `${hours}h`;
-	const days = Math.floor(hours / 24);
-	if (days < 30) return `${days}d`;
-	const months = Math.floor(days / 30);
-	if (months < 12) return `${months}mo`;
-	return `${Math.floor(days / 365)}y`;
 }

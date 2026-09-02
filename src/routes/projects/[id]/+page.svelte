@@ -2,8 +2,8 @@
 	// One project: its cached profile, and the context an agent would receive for
 	// this root (memories, practices, workflows). Refresh rebuilds the profile.
 	import { page } from '$app/state';
-	import { ApiError } from '$lib/api';
-	import { relativeAge } from '$lib/stores/memories.svelte';
+	import { errorMessage } from '$lib/errors';
+	import { relativeAge } from '$lib/format';
 	import { loadProject, projectDetail, refreshProject } from '$lib/stores/projects.svelte';
 	import type { Doc, RecallHit } from '$lib/types';
 	import Badge from '$lib/ui/Badge.svelte';
@@ -41,7 +41,7 @@
 			await refreshProject(id);
 			push('success', 'Profile rebuilt');
 		} catch (e) {
-			push('error', e instanceof ApiError ? e.message : String(e));
+			push('error', errorMessage(e));
 		}
 	}
 </script>

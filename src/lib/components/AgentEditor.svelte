@@ -1,10 +1,11 @@
 <script lang="ts">
-	// The agent form, shared by /agents/new and /agents/[name]. The name is the
+	// The agent form, shared by /agents/new and /agents/edit/[name]. The name is the
 	// identity the API saves under, so it is fixed once an agent exists.
 
 	import { onMount, untrack } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { api } from '$lib/daemon.svelte';
+	import { errorMessage } from '$lib/errors';
 	import { deleteAgent, nameError, parseList, saveAgent } from '$lib/stores/agents.svelte';
 	import Button from '$lib/ui/Button.svelte';
 	import Card from '$lib/ui/Card.svelte';
@@ -47,7 +48,7 @@
 			tools = agent.tools.join(', ');
 			tags = agent.tags.join(', ');
 		} catch (e) {
-			loadError = e instanceof Error ? e.message : String(e);
+			loadError = errorMessage(e);
 		} finally {
 			loading = false;
 		}
@@ -70,10 +71,10 @@
 				tags: parseList(tags)
 			});
 			push('success', `Saved ${name}`);
-			if (!editing) await goto(`/agents/${encodeURIComponent(name)}`);
+			if (!editing) await goto(`/agents/edit/${encodeURIComponent(name)}`);
 		} catch (e) {
 			// The daemon's `error` string is the useful message on a 400.
-			saveError = e instanceof Error ? e.message : String(e);
+			saveError = errorMessage(e);
 			push('error', saveError);
 		} finally {
 			saving = false;
@@ -88,8 +89,7 @@
 			push('success', `Deleted ${editing}`);
 			await goto('/agents');
 		} catch (e) {
-			const text = e instanceof Error ? e.message : String(e);
-			push('error', text);
+			push('error', errorMessage(e));
 		}
 	}
 </script>

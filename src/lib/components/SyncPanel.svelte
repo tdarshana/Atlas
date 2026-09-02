@@ -5,6 +5,7 @@
 
 	import { onMount } from 'svelte';
 	import { api } from '$lib/daemon.svelte';
+	import { errorMessage } from '$lib/errors';
 	import type { Project, SyncKind, SyncOp, SyncReport } from '$lib/types';
 	import { skipReason } from '$lib/types';
 	import Button from '$lib/ui/Button.svelte';
@@ -35,7 +36,10 @@
 	let running = $state(false);
 	let report = $state<SyncReport | null>(null);
 	let wasDryRun = $state(true);
+	/** A failed sync. Kept apart from `listError` so the results only ever show sync outcomes. */
 	let error = $state<string | null>(null);
+	/** A failed project list, which leaves a global sync perfectly usable. */
+	let listError = $state<string | null>(null);
 
 	const isGlobal = $derived(scope === GLOBAL);
 	const project = $derived(projects.find((p) => p.id === scope) ?? null);
@@ -55,8 +59,7 @@
 		try {
 			projects = await api().listProjects();
 		} catch (e) {
-			// A missing project list still leaves a global sync usable.
-			error = e instanceof Error ? e.message : String(e);
+			listError = errorMessage(e);
 		}
 	});
 
@@ -83,7 +86,7 @@
 			}
 		} catch (e) {
 			report = null;
-			error = e instanceof Error ? e.message : String(e);
+			error = errorMessage(e);
 			if (!checkOnly) push('error', error);
 		} finally {
 			running = false;
@@ -138,6 +141,12 @@
 			</Button>
 		</div>
 	</div>
+
+	{#if listError}
+		<p class="hint bad" role="alert" data-testid="sync-list-error">
+			Projects could not be listed ({listError}); only a global sync is available.
+		</p>
+	{/if}
 
 	{#if isGlobal}
 		<p class="hint">A global sync writes agent files into your home directory.</p>
@@ -230,6 +239,10 @@
 		margin: var(--space-3) 0 0;
 		color: var(--muted);
 		font-size: 13px;
+	}
+
+	.hint.bad {
+		color: var(--danger);
 	}
 
 	.results {

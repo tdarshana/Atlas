@@ -2,6 +2,7 @@
 // store is built per kind and kept as a module-level singleton.
 
 import { api } from '$lib/daemon.svelte';
+import { errorMessage } from '$lib/errors';
 import type { Doc, DocKind, NewDoc } from '$lib/types';
 
 export interface DocsState {
@@ -19,10 +20,6 @@ export interface DocsStore {
 	remove(name: string): Promise<void>;
 }
 
-function message(e: unknown): string {
-	return e instanceof Error ? e.message : String(e);
-}
-
 export function createDocsStore(kind: DocKind): DocsStore {
 	const state = $state<DocsState>({ list: [], loading: false, error: null, loaded: false });
 
@@ -37,7 +34,7 @@ export function createDocsStore(kind: DocKind): DocsStore {
 				state.error = null;
 				state.loaded = true;
 			} catch (e) {
-				state.error = message(e);
+				state.error = errorMessage(e);
 			} finally {
 				state.loading = false;
 			}

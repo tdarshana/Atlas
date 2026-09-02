@@ -3,9 +3,9 @@
 	// memories. Counts come from the list routes rather than the status report so
 	// projects and agents are counted the same way.
 	import { onMount } from 'svelte';
-	import { ApiError } from '$lib/api';
 	import { api } from '$lib/daemon.svelte';
-	import { logPath, relativeAge } from '$lib/stores/memories.svelte';
+	import { errorLogPath, errorMessage } from '$lib/errors';
+	import { relativeAge } from '$lib/format';
 	import { status } from '$lib/stores/status.svelte';
 	import type { Memory } from '$lib/types';
 	import Badge from '$lib/ui/Badge.svelte';
@@ -31,7 +31,7 @@
 	let recent = $state<Memory[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
-	let errorLogPath = $state<string | null>(null);
+	let loadErrorLogPath = $state<string | null>(null);
 
 	const columns = [
 		{ key: 'kind', label: 'Kind', width: '110px' },
@@ -53,11 +53,11 @@
 				.sort((a, b) => b.created_at.localeCompare(a.created_at))
 				.slice(0, RECENT);
 			error = null;
-			errorLogPath = null;
+			loadErrorLogPath = null;
 		} catch (e) {
 			recent = [];
-			error = e instanceof Error ? e.message : String(e);
-			errorLogPath = e instanceof ApiError && e.status === 0 ? logPath() : null;
+			error = errorMessage(e);
+			loadErrorLogPath = errorLogPath(e);
 		} finally {
 			loading = false;
 		}
@@ -110,7 +110,7 @@
 		{/snippet}
 
 		{#if error}
-			<ErrorState message={error} logPath={errorLogPath ?? undefined}>
+			<ErrorState message={error} logPath={loadErrorLogPath ?? undefined}>
 				<Button variant="primary" onclick={load}>Retry</Button>
 			</ErrorState>
 		{:else if loading && recent.length === 0}

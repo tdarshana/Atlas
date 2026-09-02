@@ -2,13 +2,14 @@
 	// Memories: search or list, filtered by scope and kind, with a detail panel
 	// whose Forget supersedes the memory and drops its row.
 	import { onMount } from 'svelte';
-	import { ApiError } from '$lib/api';
+	import { errorMessage } from '$lib/errors';
+	import { relativeAge } from '$lib/format';
 	import {
 		MEMORY_KINDS,
 		forgetMemory,
+		cancelLoad,
 		loadMemories,
 		memories,
-		relativeAge,
 		scheduleLoad,
 		toggleKind,
 		type ScopeFilter
@@ -78,7 +79,7 @@
 			reason = '';
 		} catch (e) {
 			// The daemon's `error` string is the whole explanation; show it verbatim.
-			push('error', e instanceof ApiError ? e.message : String(e));
+			push('error', errorMessage(e));
 		} finally {
 			forgetting = false;
 		}
@@ -87,6 +88,8 @@
 	onMount(() => {
 		void loadProjects();
 		void loadMemories();
+		// A pending debounce would fire a request for a screen that is gone.
+		return cancelLoad;
 	});
 </script>
 

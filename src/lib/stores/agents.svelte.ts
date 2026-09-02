@@ -3,6 +3,7 @@
 // mounts again without a refetch round trip.
 
 import { api } from '$lib/daemon.svelte';
+import { errorMessage } from '$lib/errors';
 import type { Agent, NewAgent } from '$lib/types';
 
 /** Mirrors the backend rule for agent, practice and workflow names. */
@@ -34,10 +35,6 @@ export const agents = $state({
 	loaded: false
 });
 
-function message(e: unknown): string {
-	return e instanceof Error ? e.message : String(e);
-}
-
 export async function loadAgents(): Promise<void> {
 	agents.loading = true;
 	try {
@@ -45,7 +42,7 @@ export async function loadAgents(): Promise<void> {
 		agents.error = null;
 		agents.loaded = true;
 	} catch (e) {
-		agents.error = message(e);
+		agents.error = errorMessage(e);
 	} finally {
 		agents.loading = false;
 	}

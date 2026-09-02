@@ -2,8 +2,8 @@
 	// Projects: the connected list plus Connect. Inside Tauri that opens the native
 	// folder picker; in a browser there is no picker, so the path is typed.
 	import { onMount } from 'svelte';
-	import { ApiError } from '$lib/api';
-	import { relativeAge } from '$lib/stores/memories.svelte';
+	import { errorMessage } from '$lib/errors';
+	import { relativeAge } from '$lib/format';
 	import {
 		connectProject,
 		inTauri,
@@ -45,7 +45,7 @@
 			root = '';
 			push('success', `Connected ${project.name}`);
 		} catch (e) {
-			push('error', e instanceof ApiError ? e.message : String(e));
+			push('error', errorMessage(e));
 		}
 	}
 

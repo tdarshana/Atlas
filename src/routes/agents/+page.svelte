@@ -40,7 +40,7 @@
 		rows={agents.list}
 		rowKey={(a) => a.id}
 		data-testid="agents-table"
-		onrowclick={(a) => goto(`/agents/${encodeURIComponent(a.name)}`)}
+		onrowclick={(a) => goto(`/agents/edit/${encodeURIComponent(a.name)}`)}
 	>
 		{#snippet cell(agent: Agent, key: string)}
 			{#if key === 'name'}
