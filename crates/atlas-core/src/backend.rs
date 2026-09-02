@@ -23,6 +23,11 @@ const DEFAULT_TARGETS: &[SyncKind] =
 /// Why a global sync reports a managed-block target as skipped.
 const GLOBAL_SKIP: &str = "global sync writes agent files only";
 
+/// Characters a transcript may carry. Neither `POST /ingest` nor the MCP
+/// `ingest_transcript` tool is authenticated, so this bounds how much any one
+/// caller can push into a single model call.
+pub const MAX_INGEST_CHARS: usize = 1_000_000;
+
 /// Where a global sync writes: `ATLAS_SYNC_HOME` when set, else the daemon
 /// user's home directory. Read at call time, not at startup, so a test (or a
 /// headless setup with no real home) can redirect the write. This is a
@@ -216,7 +221,14 @@ impl Backend for LocalBackend {
     async fn refresh_project(&self, id: Uuid) -> Result<Project> {
         let project = self.projects().get(id)?;
         let profile = build_profile(std::path::Path::new(&project.root_path))?;
-        let updated = self.projects().set_profile(id, &profile, "refresh")?;
+        // Gated because the summary job also writes this profile: it reads one, asks the
+        // model, then re-reads and writes under the same gate. Without a gate shared by
+        // both writers the two interleave and one of them loses its half of the profile.
+        // The repository scan above stays outside the gate, and nothing awaits inside it.
+        let updated = {
+            let _gate = self.memories.write_gate();
+            self.projects().set_profile(id, &profile, "refresh")?
+        };
         // A fresh profile carries no summary until the worker writes one; queue that
         // only when extraction is on, the same gate `ingest_transcript` checks.
         if self.extraction_enabled()? {
@@ -284,22 +296,38 @@ impl Backend for LocalBackend {
         // with extraction on this resolves on nearly every sync, and a machine with no
         // home to find fails the whole pass rather than just the hook.
         let home = if hooks && targets.contains(&SyncKind::CodexHook) { sync_home()? } else { PathBuf::new() };
-        let mut ops = sync::plan_sync(&SyncInputs { root: &root, agents: &agents, block, targets: &targets, home: &home, hooks })?;
+        let mut ops = sync::plan_sync(&SyncInputs { root: &root, agents: &agents, block, targets: &targets, home: &home, hooks, global: req.global })?;
         ops.extend(skipped);
         if req.check_only { Ok(sync::summarize(&ops)) } else { sync::apply(&ops) }
     }
 
     async fn get_settings(&self) -> Result<serde_json::Map<String, serde_json::Value>> { self.settings().get_all() }
     async fn set_settings(&self, values: serde_json::Map<String, serde_json::Value>, actor: &str) -> Result<serde_json::Map<String, serde_json::Value>> {
-        self.settings().set_many(&values, actor)?;
-        self.settings().get_all()
+        let cleared = self.settings().set_many(&values, actor)?;
+        let mut out = self.settings().get_all()?;
+        // Not one of `SETTING_KEYS`: a one-off flag telling the caller that pointing the
+        // base url somewhere new dropped the key it was entered against, so the endpoint
+        // it just named will not receive it.
+        if cleared {
+            out.insert("extraction.api_key_cleared".into(), serde_json::Value::Bool(true));
+        }
+        Ok(out)
     }
 
-    /// The enable gate is checked here rather than in the worker alone, so a caller
-    /// who has not configured extraction is told so straight away instead of
-    /// getting a job id for work that will only fail later.
+    /// Every check a transcript has to pass lives here rather than in the HTTP
+    /// handler, because MCP reaches this same method and is just as unauthenticated:
+    /// the enable gate, so a caller who has not configured extraction is told straight
+    /// away instead of getting a job id for work that will only fail later; a blank
+    /// transcript, which would spend a model call on nothing; and the character cap,
+    /// which bounds how much any one caller can push into a single model call.
     async fn ingest_transcript(&self, text: String, source_tool: String, project_root: Option<PathBuf>) -> Result<Uuid> {
         crate::extract::extraction_config(&self.db)?;
+        if text.trim().is_empty() {
+            return Err(AtlasError::Invalid("ingest text is empty".into()));
+        }
+        if text.chars().count() > MAX_INGEST_CHARS {
+            return Err(AtlasError::TooLarge("transcript too large".into()));
+        }
         let id = self.jobs.enqueue("ingest", serde_json::json!({
             "text": text, "source_tool": source_tool, "project_root": project_root,
         }))?;

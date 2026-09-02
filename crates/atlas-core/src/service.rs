@@ -42,6 +42,14 @@ impl MemoryService {
     fn loading_write(&self) -> RwLockWriteGuard<'_, bool> { self.loading.write().unwrap_or_else(|e| e.into_inner()) }
     fn gate(&self) -> MutexGuard<'_, ()> { self.write_gate.lock().unwrap_or_else(|e| e.into_inner()) }
 
+    /// The same gate, for a caller outside this type with its own read-modify-write to
+    /// serialize: the project profile, written by both `refresh_project` and the
+    /// summary job. Holding it also excludes `remember` and friends, which is heavier
+    /// than those callers need, but it keeps one lock ordering in the process rather
+    /// than two. The guard is a blocking, non-reentrant mutex: never hold it across an
+    /// await, and never call another `MemoryService` method while holding it.
+    pub fn write_gate(&self) -> MutexGuard<'_, ()> { self.gate() }
+
     /// Clone of the current embedder's `Arc`, so callers don't hold the lock while embedding.
     fn emb(&self) -> Arc<dyn Embedder> { self.embedder.read().unwrap_or_else(|e| e.into_inner()).clone() }
 

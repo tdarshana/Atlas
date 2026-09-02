@@ -16,7 +16,14 @@ pub const SETTING_KEYS: &[&str] = &[
 ];
 
 const API_KEY: &str = "extraction.api_key";
+const BASE_URL: &str = "extraction.base_url";
 const MASKED: &str = "***";
+
+/// Whether two base urls name the same endpoint. A trailing slash is not a change
+/// of endpoint, and `LlmClient` strips one anyway before building its request url.
+fn same_endpoint(a: &str, b: &str) -> bool {
+    a.trim().trim_end_matches('/') == b.trim().trim_end_matches('/')
+}
 
 /// Rejects a value whose JSON type does not match the key. Without this a client could
 /// store, say, an object under `extraction.api_key`, and the extraction worker would then
@@ -93,7 +100,14 @@ impl<'a> SettingsRepo<'a> {
     /// unknown or holds a value of the wrong type, before writing anything. Ignores
     /// `extraction.api_key == "***"` so a masked value read back from `get_all` and
     /// sent straight back does not clobber the real key.
-    pub fn set_many(&self, values: &Map<String, Value>, actor: &str) -> Result<()> {
+    ///
+    /// Answers whether the stored api key was cleared. The daemon has no
+    /// authentication of its own, so any process that can reach the loopback port can
+    /// repoint `extraction.base_url` and then have the daemon send the stored key to
+    /// an endpoint of its choosing. A key entered against one endpoint is therefore
+    /// not a key for another: changing the base url without supplying a new key
+    /// clears the stored one, and the next model call fails until it is entered again.
+    pub fn set_many(&self, values: &Map<String, Value>, actor: &str) -> Result<bool> {
         for key in values.keys() {
             if !SETTING_KEYS.contains(&key.as_str()) {
                 return Err(AtlasError::Invalid(format!("unknown setting key '{key}'")));
@@ -102,21 +116,49 @@ impl<'a> SettingsRepo<'a> {
         for (key, value) in values {
             check_type(key, value)?;
         }
+        let clear_key = self.base_url_moves_away_from_the_stored_key(values)?;
         for (key, value) in values {
             if key == API_KEY && value.as_str() == Some(MASKED) {
                 continue;
             }
-            let json = value.to_string();
-            self.db.with_conn(|c| {
-                c.execute("delete from settings where key = ?", params![key])?;
-                c.execute("insert into settings (key, value) values (?, ?::json)", params![key, json])?;
-                Ok(())
-            })?;
+            self.write(key, value)?;
             // The api key value itself never goes into the audit log.
             let detail = if key == API_KEY { serde_json::json!({"key": key}) } else { serde_json::json!({"key": key, "value": value}) };
             MemoryRepo::new(self.db).audit(actor, "set", "setting", None, detail)?;
         }
-        Ok(())
+        if clear_key {
+            self.write(API_KEY, &Value::String(String::new()))?;
+            MemoryRepo::new(self.db).audit(actor, "clear", "setting", None, serde_json::json!({"key": API_KEY, "reason": "base_url changed"}))?;
+            // The key itself is never named in the log, only the fact that it is gone.
+            tracing::info!("extraction.base_url changed without a new api key; the stored key was cleared");
+        }
+        Ok(clear_key)
+    }
+
+    /// Whether this call points `extraction.base_url` somewhere new while leaving the
+    /// stored api key in place. A masked `"***"` is the GUI saying "leave the key
+    /// alone", not a key, so it does not count as supplying one.
+    fn base_url_moves_away_from_the_stored_key(&self, values: &Map<String, Value>) -> Result<bool> {
+        let Some(incoming) = values.get(BASE_URL).and_then(|v| v.as_str()) else { return Ok(false) };
+        let sets_key = values.get(API_KEY).and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty() && s != MASKED);
+        if sets_key {
+            return Ok(false);
+        }
+        let stored_key = self.get_raw(API_KEY)?.and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+        if stored_key.is_empty() {
+            return Ok(false);
+        }
+        let stored_url = self.get_raw(BASE_URL)?.and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+        Ok(!same_endpoint(incoming, &stored_url))
+    }
+
+    fn write(&self, key: &str, value: &Value) -> Result<()> {
+        let json = value.to_string();
+        self.db.with_conn(|c| {
+            c.execute("delete from settings where key = ?", params![key])?;
+            c.execute("insert into settings (key, value) values (?, ?::json)", params![key, json])?;
+            Ok(())
+        })
     }
 }
 
@@ -227,6 +269,43 @@ mod tests {
         .unwrap();
         assert_eq!(repo.get_raw(API_KEY).unwrap(), Some(Value::String("sk-real".into())));
         assert_eq!(repo.get_raw("extraction.model").unwrap(), Some(Value::String("x".into())));
+    }
+
+    /// The daemon is unauthenticated on loopback, so a local process can repoint
+    /// `extraction.base_url` and have the daemon send the stored key wherever it likes.
+    /// A key belongs to the endpoint it was entered against: moving the endpoint drops
+    /// it, and the caller is told so.
+    #[test]
+    fn changing_the_base_url_clears_the_stored_api_key() {
+        let db = Db::open_in_memory().unwrap();
+        let repo = SettingsRepo::new(&db);
+        let set = |values: Vec<(&str, Value)>| {
+            repo.set_many(&Map::from_iter(values.into_iter().map(|(k, v)| (k.to_string(), v))), "t").unwrap()
+        };
+
+        // Configured in one call: the key is for the endpoint named beside it.
+        assert!(!set(vec![(BASE_URL, "https://api.deepseek.com".into()), (API_KEY, "sk-real".into())]));
+        assert_eq!(repo.get_raw(API_KEY).unwrap(), Some(Value::String("sk-real".into())));
+
+        // Re-sending the same endpoint, with or without its trailing slash, is not a move.
+        assert!(!set(vec![(BASE_URL, "https://api.deepseek.com/".into())]));
+        assert_eq!(repo.get_raw(API_KEY).unwrap(), Some(Value::String("sk-real".into())));
+        // Nor is a masked key alongside it: `"***"` means "leave the key alone".
+        assert!(!set(vec![(BASE_URL, "https://api.deepseek.com".into()), (API_KEY, MASKED.into())]));
+        assert_eq!(repo.get_raw(API_KEY).unwrap(), Some(Value::String("sk-real".into())));
+
+        // A new endpoint with no new key: the old key does not follow it there.
+        assert!(set(vec![(BASE_URL, "http://attacker.example/v1".into())]));
+        assert_eq!(repo.get_raw(API_KEY).unwrap(), Some(Value::String(String::new())));
+        assert_eq!(repo.get_raw(BASE_URL).unwrap(), Some(Value::String("http://attacker.example/v1".into())), "the endpoint itself is still stored");
+
+        // A new endpoint that brings its own key keeps it.
+        assert!(!set(vec![(BASE_URL, "http://localhost:1234/v1".into()), (API_KEY, "sk-local".into())]));
+        assert_eq!(repo.get_raw(API_KEY).unwrap(), Some(Value::String("sk-local".into())));
+
+        // With no key stored there is nothing to clear, so nothing is reported.
+        repo.set_many(&Map::from_iter([(API_KEY.to_string(), Value::String(String::new()))]), "t").unwrap();
+        assert!(!set(vec![(BASE_URL, "http://elsewhere.example/v1".into())]));
     }
 
     #[test]

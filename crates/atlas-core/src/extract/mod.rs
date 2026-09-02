@@ -99,17 +99,19 @@ struct RawCandidate {
     kind: Option<String>,
     #[serde(default)]
     tags: Option<serde_json::Value>,
+    /// Deserialized as a bare `Value` rather than an `f64` so a model that answers
+    /// `"confidence": "high"` loses only its confidence, not the whole candidate.
     #[serde(default)]
-    confidence: Option<f64>,
+    confidence: Option<serde_json::Value>,
 }
 
 /// Parses the model's response into candidates. Tolerates a Markdown code
 /// fence around the array. The array is deserialized one item at a time so a
 /// single malformed item (not an object, or a `tags` that isn't an array)
 /// cannot sink the whole batch: such items are skipped with a warning, as
-/// are items missing `text`. An unrecognized `kind` maps to
-/// `MemoryKind::Insight` with a warning. A response that is not a JSON array
-/// at all is an error.
+/// are items whose `text` is missing or blank. An unrecognized `kind` maps to
+/// `MemoryKind::Insight` with a warning, and a missing `confidence` reads as
+/// 0.0. A response that is not a JSON array at all is an error.
 pub fn parse_candidates(json_text: &str) -> Result<Vec<Candidate>> {
     let trimmed = strip_fence(json_text.trim());
     let items: Vec<serde_json::Value> = serde_json::from_str(trimmed)
@@ -128,6 +130,12 @@ pub fn parse_candidates(json_text: &str) -> Result<Vec<Candidate>> {
             tracing::warn!("extraction candidate missing text, skipping");
             continue;
         };
+        // A blank `text` is a missing one that happens to be spelled `""`: storing it
+        // would put a memory nobody can read into the review queue.
+        if text.trim().is_empty() {
+            tracing::warn!("extraction candidate text was blank, skipping");
+            continue;
+        }
         let kind = raw
             .kind
             .as_deref()
@@ -136,10 +144,39 @@ pub fn parse_candidates(json_text: &str) -> Result<Vec<Candidate>> {
                 tracing::warn!(kind = raw.kind.as_deref().unwrap_or(""), "unrecognized memory kind, defaulting to insight");
                 MemoryKind::Insight
             });
-        let confidence = raw.confidence.unwrap_or(1.0).clamp(0.0, 1.0);
+        // A model that omits `confidence`, or sends something that is not a number,
+        // has said nothing about how sure it is, and 0.0 is the honest reading of
+        // that. Defaulting to 1.0 would have cleared even the strictest auto-accept
+        // threshold, so the most common malformed answer would have skipped review.
+        let confidence = parse_confidence(raw.confidence);
         out.push(Candidate { text, kind, tags: parse_tags(raw.tags), confidence });
     }
     Ok(out)
+}
+
+/// A candidate's confidence, clamped into 0..1. A model that omits the field, or
+/// sends something that is not a number, has said nothing about how sure it is,
+/// and 0.0 is the honest reading of that: defaulting to 1.0 would clear even the
+/// strictest auto-accept threshold, so the most common malformed answer would
+/// have skipped review entirely.
+fn parse_confidence(value: Option<Value>) -> f64 {
+    match value {
+        None | Some(Value::Null) => 0.0,
+        Some(v) => match v.as_f64() {
+            Some(n) => n.clamp(0.0, 1.0),
+            None => {
+                tracing::warn!(?v, "confidence was not a number, reading it as 0");
+                0.0
+            }
+        },
+    }
+}
+
+/// Whether a candidate may be stored `active` outright. Everything waits for
+/// review unless the user has lowered the bar far enough that this candidate
+/// clears it, and a candidate carrying no confidence never clears the default.
+fn status_for(confidence: f64, threshold: f64) -> MemoryStatus {
+    if confidence >= threshold { MemoryStatus::Active } else { MemoryStatus::Pending }
 }
 
 /// `tags` is expected to be an array of strings, but the model can send
@@ -280,9 +317,7 @@ pub async fn run_ingest(job: &Job, backend: &LocalBackend) -> Result<Value> {
                 source_agent: Some(EXTRACTOR.to_string()),
                 source_tool: Some(source_tool.clone()),
                 confidence: c.confidence,
-                // Everything waits for review unless the user has lowered the bar
-                // far enough that this candidate clears it.
-                status: if c.confidence >= cfg.auto_accept_min_confidence { MemoryStatus::Active } else { MemoryStatus::Pending },
+                status: status_for(c.confidence, cfg.auto_accept_min_confidence),
             },
             EXTRACTOR,
         );
@@ -325,15 +360,29 @@ pub async fn run_project_summary(job: &Job, backend: &LocalBackend) -> Result<Va
     let client = build_client(&cfg)?;
 
     let repo = ProjectRepo::new(&backend.db);
-    let project = repo.get(project_id)?;
-    let mut profile = project
+    let profile = repo
+        .get(project_id)?
         .profile
         .ok_or_else(|| AtlasError::Invalid(format!("project {project_id} has no profile to summarize")))?;
 
+    // The model call happens here, before the gate is taken: `write_gate` is a
+    // blocking mutex and must never be held across an await.
     let summary = summarize_project(&profile, &client).await?;
     let chars = summary.chars().count();
-    profile.summary = Some(summary);
-    repo.set_profile(project_id, &profile, EXTRACTOR)?;
+
+    // The profile read above is now potentially stale: a `refresh_project` running
+    // alongside this job may have rescanned the repository and written new languages,
+    // file counts and README excerpt. Re-read it under the gate and change only
+    // `summary`, so writing the summary cannot revert that scan.
+    {
+        let _gate = backend.memories.write_gate();
+        let mut profile = repo
+            .get(project_id)?
+            .profile
+            .ok_or_else(|| AtlasError::Invalid(format!("project {project_id} has no profile to summarize")))?;
+        profile.summary = Some(summary);
+        repo.set_profile(project_id, &profile, EXTRACTOR)?;
+    }
     Ok(serde_json::json!({"chars": chars}))
 }
 
@@ -389,6 +438,43 @@ mod tests {
         let out = parse_candidates(json).unwrap();
         assert_eq!(out[0].confidence, 1.0);
         assert_eq!(out[1].confidence, 0.0);
+    }
+
+    /// Dropping `confidence` is the most common thing a model gets wrong about this
+    /// prompt, so it must be the safe case rather than the maximally confident one.
+    #[test]
+    fn a_missing_or_unusable_confidence_reads_as_zero() {
+        let json = r#"[{"text": "a", "kind": "fact"}, {"text": "b", "kind": "fact", "confidence": null}, {"text": "c", "kind": "fact", "confidence": "high"}]"#;
+        let out = parse_candidates(json).unwrap();
+        assert_eq!(out.len(), 3, "a confidence of the wrong type loses the confidence, not the candidate: {out:?}");
+        for c in &out {
+            assert_eq!(c.confidence, 0.0, "{c:?}");
+        }
+    }
+
+    /// The auto-accept boundary, which is the whole of the review gate's safety story.
+    /// `>=` is deliberate: a threshold is the lowest confidence that may skip review.
+    #[test]
+    fn auto_accept_is_inclusive_at_the_threshold_and_never_reached_without_a_confidence() {
+        assert_eq!(status_for(0.8, 0.8), MemoryStatus::Active, "confidence at the threshold is accepted");
+        assert_eq!(status_for(0.79, 0.8), MemoryStatus::Pending, "just below the threshold waits for review");
+        assert_eq!(status_for(1.0, 1.0), MemoryStatus::Active, "the default threshold accepts a fully confident candidate");
+
+        // A candidate the model gave no confidence for carries 0.0, so it waits at the
+        // default threshold and at a lowered one alike.
+        let missing = parse_candidates(r#"[{"text": "a", "kind": "fact"}]"#).unwrap();
+        for threshold in [1.0, 0.5] {
+            assert_eq!(status_for(missing[0].confidence, threshold), MemoryStatus::Pending, "threshold {threshold}");
+        }
+    }
+
+    /// A model that emits `{"text": ""}` must not put a blank row into the review queue.
+    #[test]
+    fn a_blank_text_is_skipped_like_a_missing_one() {
+        let json = r#"[{"text": "", "kind": "fact"}, {"text": "   \n\t ", "kind": "fact"}, {"text": "kept", "kind": "fact"}]"#;
+        let out = parse_candidates(json).unwrap();
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].text, "kept");
     }
 
     #[test]

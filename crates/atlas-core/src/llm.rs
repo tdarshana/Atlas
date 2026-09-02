@@ -60,8 +60,12 @@ impl LlmClient {
             // key in all three. Redacting before the 200-char cut also stops a key
             // straddling the boundary from surviving in half.
             let excerpt: String = self.redact(&text).chars().take(200).collect();
+            // An endpoint that answers with an empty body leaves nothing to quote, and a
+            // message ending in a bare `: ` reads as truncated rather than as "no reason
+            // was given".
+            let reason = if excerpt.trim().is_empty() { String::new() } else { format!(": {excerpt}") };
             return Err(AtlasError::Other(format!(
-                "model endpoint returned {status}: {excerpt}"
+                "model endpoint returned {status}{reason}"
             )));
         }
 

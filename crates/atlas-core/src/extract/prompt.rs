@@ -11,7 +11,9 @@ For each memory found, emit one JSON object with these fields:
 - "text": a short, self-contained sentence stating the memory
 - "kind": one of "fact", "decision", "preference", "insight", "todo"
 - "tags": 1-5 short lowercase words describing the topic
-- "confidence": a number from 0 to 1 for how sure you are this is durable
+- "confidence": a number from 0 to 1 for how sure you are this is durable.
+  Always include it: a candidate without one counts as 0, and is never accepted
+  without a person reading it first.
 
 Return ONLY a JSON array of these objects, nothing else: no prose, no
 Markdown fences, no explanation. If nothing durable is present, return an

@@ -15,6 +15,11 @@ pub enum AtlasError {
     /// "switch it on" apart from "the request was wrong".
     #[error("{0}")]
     Conflict(String),
+    /// A well-formed request carrying more than a route will accept, answered with
+    /// 413. `ingest_transcript` uses it for a transcript over the character cap, so a
+    /// caller can tell "too big" apart from "malformed".
+    #[error("{0}")]
+    TooLarge(String),
     #[error("{0}")]
     Other(String),
 }
