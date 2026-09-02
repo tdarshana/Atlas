@@ -3,6 +3,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 use crate::db::Db;
 use crate::export::BlockContext;
+use crate::jobs::{Job, JobQueue, JobRepo};
 use crate::library::{AgentRepo, DocRepo};
 use crate::models::*;
 use crate::paths::AtlasPaths;
@@ -92,9 +93,24 @@ pub trait Backend: Send + Sync + 'static {
     // ---- settings ----
     async fn get_settings(&self) -> Result<serde_json::Map<String, serde_json::Value>>;
     async fn set_settings(&self, values: serde_json::Map<String, serde_json::Value>, actor: &str) -> Result<serde_json::Map<String, serde_json::Value>>;
+
+    // ---- extraction ----
+    /// Queues a transcript for the extraction worker and answers with the job id.
+    /// Fails with `Conflict` when extraction is off, so nothing is queued that the
+    /// worker could not run.
+    async fn ingest_transcript(&self, text: String, source_tool: String, project_root: Option<PathBuf>) -> Result<Uuid>;
+    async fn get_job(&self, id: Uuid) -> Result<Option<Job>>;
 }
 
-pub struct LocalBackend { pub memories: Arc<MemoryService>, pub db: Arc<Db>, pub paths: AtlasPaths, pub port: Option<u16> }
+pub struct LocalBackend {
+    pub memories: Arc<MemoryService>,
+    pub db: Arc<Db>,
+    pub paths: AtlasPaths,
+    pub port: Option<u16>,
+    pub jobs: Arc<JobRepo>,
+    /// Wakes the daemon's worker the moment a job is queued.
+    pub queue: Arc<JobQueue>,
+}
 
 impl LocalBackend {
     pub fn open(paths: &AtlasPaths, port: Option<u16>, load_embedder: bool) -> Result<Self> {
@@ -121,7 +137,7 @@ impl LocalBackend {
                 bg.set_loading(false);
             });
         }
-        Ok(Self { memories, db, paths: paths.clone(), port })
+        Ok(Self { jobs: Arc::new(JobRepo::new(db.clone())), queue: Arc::new(JobQueue::new()), memories, db, paths: paths.clone(), port })
     }
 
     fn projects(&self) -> ProjectRepo<'_> { ProjectRepo::new(&self.db) }
@@ -247,6 +263,20 @@ impl Backend for LocalBackend {
         self.settings().set_many(&values, actor)?;
         self.settings().get_all()
     }
+
+    /// The enable gate is checked here rather than in the worker alone, so a caller
+    /// who has not configured extraction is told so straight away instead of
+    /// getting a job id for work that will only fail later.
+    async fn ingest_transcript(&self, text: String, source_tool: String, project_root: Option<PathBuf>) -> Result<Uuid> {
+        crate::extract::extraction_config(&self.db)?;
+        let id = self.jobs.enqueue("ingest", serde_json::json!({
+            "text": text, "source_tool": source_tool, "project_root": project_root,
+        }))?;
+        self.queue.notify.notify_one();
+        Ok(id)
+    }
+
+    async fn get_job(&self, id: Uuid) -> Result<Option<Job>> { self.jobs.get(id) }
 }
 
 #[cfg(test)]

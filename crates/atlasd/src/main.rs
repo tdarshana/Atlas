@@ -1,5 +1,6 @@
 mod http;
 mod state;
+mod worker;
 
 use std::sync::Arc;
 use atlas_core::{backend::LocalBackend, paths::AtlasPaths};
@@ -49,6 +50,10 @@ async fn main() -> anyhow::Result<()> {
     backend.port = Some(addr.port());
     let backend = Arc::new(backend);
     let state = AppState { backend: backend.clone() };
+
+    // One worker, in this process: it drains the `jobs` table the API writes into,
+    // and it is the only consumer, so a job is never claimed twice.
+    tokio::spawn(worker::run(backend.clone()));
 
     let mcp_backend = backend.clone();
     let mcp = StreamableHttpService::new(

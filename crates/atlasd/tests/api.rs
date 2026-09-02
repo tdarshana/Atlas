@@ -538,6 +538,112 @@ async fn pending_memories_can_be_listed_and_accepted() {
     assert_eq!(c.post(format!("{base}/memories/{id}/status")).json(&serde_json::json!({"status":"bogus"})).send().await.unwrap().status(), 400);
 }
 
+/// What the stub model returns for any prompt: the two candidates the ingest tests
+/// expect, neither confident enough to clear the default auto-accept bar of 1.0.
+const STUB_CANDIDATES: &str = r#"[{"text":"the project uses bun","kind":"fact","tags":["tooling"],"confidence":0.9},{"text":"deploy target is fly.io","kind":"decision","tags":["infra"],"confidence":0.7}]"#;
+
+/// An OpenAI-compatible chat endpoint in the test process, so the daemon's
+/// extraction runs end to end without reaching the network. Returns its base url,
+/// `/v1`, which is what `extraction.base_url` is set to.
+async fn stub_llm() -> String {
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(|| async {
+            axum::Json(serde_json::json!({"choices": [{"message": {"content": STUB_CANDIDATES}}]}))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}/v1")
+}
+
+/// Polls a job until it stops running, for up to 10 s. The worker calls out to the
+/// model, so the result is never there on the first read.
+async fn wait_for_job(c: &reqwest::Client, base: &str, job_id: &str) -> serde_json::Value {
+    for _ in 0..100 {
+        let job: serde_json::Value = c.get(format!("{base}/jobs/{job_id}")).send().await.unwrap().json().await.unwrap();
+        if job["status"] == "done" || job["status"] == "failed" { return job; }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("job {job_id} did not finish within 10s");
+}
+
+/// The whole opt-in extraction path: settings turn it on, `POST /ingest` queues a
+/// job, the worker asks the model, and the candidates land as pending memories
+/// stamped with the extractor. Replaying the same transcript stores nothing.
+#[tokio::test]
+async fn ingest_extracts_candidates_and_skips_duplicates_on_replay() {
+    let stub = stub_llm().await;
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+
+    let put = c.put(format!("{base}/settings")).json(&serde_json::json!({
+        "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub", "extraction.api_key": "k",
+    })).send().await.unwrap();
+    assert_eq!(put.status(), 200);
+
+    let transcript = serde_json::json!({"text": "user: we use bun\nassistant: noted", "source_tool": "test"});
+    let queued = c.post(format!("{base}/ingest")).json(&transcript).send().await.unwrap();
+    assert_eq!(queued.status(), 202);
+    let body: serde_json::Value = queued.json().await.unwrap();
+    let job_id = body["job_id"].as_str().unwrap_or_else(|| panic!("no job_id: {body}")).to_string();
+
+    let job = wait_for_job(&c, &base, &job_id).await;
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(job["result"]["inserted"], 2, "{job}");
+    assert_eq!(job["result"]["skipped_duplicates"], 0, "{job}");
+
+    // Neither candidate clears the default auto-accept threshold of 1.0, so both wait
+    // for review rather than becoming recallable straight away.
+    let pending: serde_json::Value = c.get(format!("{base}/memories?status=pending")).send().await.unwrap().json().await.unwrap();
+    let rows = pending.as_array().unwrap();
+    assert_eq!(rows.len(), 2, "{pending}");
+    for m in rows {
+        assert_eq!(m["source_agent"], "extractor", "{m}");
+        assert_eq!(m["source_tool"], "test", "{m}");
+    }
+    assert!(rows.iter().any(|m| m["text"] == "the project uses bun"), "{pending}");
+    assert!(rows.iter().any(|m| m["text"] == "deploy target is fly.io"), "{pending}");
+    let active: serde_json::Value = c.get(format!("{base}/memories")).send().await.unwrap().json().await.unwrap();
+    assert!(active.as_array().unwrap().is_empty(), "nothing is auto-accepted by default: {active}");
+
+    let again: serde_json::Value = c.post(format!("{base}/ingest")).json(&transcript).send().await.unwrap().json().await.unwrap();
+    let second = wait_for_job(&c, &base, again["job_id"].as_str().unwrap()).await;
+    assert_eq!(second["status"], "done", "{second}");
+    assert_eq!(second["result"]["skipped_duplicates"], 2, "{second}");
+    assert_eq!(second["result"]["inserted"], 0, "{second}");
+    let pending: serde_json::Value = c.get(format!("{base}/memories?status=pending")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(pending.as_array().unwrap().len(), 2, "a replay must not double the review queue: {pending}");
+
+    assert_eq!(c.get(format!("{base}/jobs/{}", uuid::Uuid::new_v4())).send().await.unwrap().status(), 404);
+}
+
+/// Extraction is off until it is switched on and fully configured, and each of
+/// those states answers 409 with the same error, so nothing is ever queued that
+/// the worker could not run.
+#[tokio::test]
+async fn ingest_is_refused_while_extraction_is_disabled() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    let transcript = serde_json::json!({"text": "user: we use bun\nassistant: noted", "source_tool": "test"});
+
+    let refused = c.post(format!("{base}/ingest")).json(&transcript).send().await.unwrap();
+    assert_eq!(refused.status(), 409);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["error"], "extraction is disabled", "{body}");
+
+    // Enabled but with no endpoint or model is still disabled, not a 500 later.
+    let put = c.put(format!("{base}/settings")).json(&serde_json::json!({"extraction.enabled": true})).send().await.unwrap();
+    assert_eq!(put.status(), 200);
+    let half = c.post(format!("{base}/ingest")).json(&transcript).send().await.unwrap();
+    assert_eq!(half.status(), 409);
+    let body: serde_json::Value = half.json().await.unwrap();
+    assert_eq!(body["error"], "extraction is disabled", "{body}");
+}
+
 /// Every 400 the API returns carries the `{"error": string}` body, query strings included:
 /// axum's own rejections are plain text, so the extractors have to own the mapping.
 #[tokio::test]

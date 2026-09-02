@@ -220,6 +220,28 @@ impl MemoryService {
         Ok(hits)
     }
 
+    /// The active memory closest to `text` and its cosine similarity, for the
+    /// extraction worker's duplicate check. `None` when there is nothing to
+    /// compare against: no embedding model, an embedder that fails on this text,
+    /// or no active memory with a stored vector. A caller that gets `None` has to
+    /// fall back to comparing the text itself.
+    pub fn nearest_active(&self, text: &str) -> Result<Option<(Uuid, f64)>> {
+        let emb = self.emb();
+        if emb.dims() == 0 { return Ok(None); }
+        let qvec = match emb.embed(&[text.to_string()]) {
+            Ok(mut v) if !v.is_empty() => v.remove(0),
+            Ok(_) => return Ok(None),
+            // A failure here is recorded so `status()` surfaces it, exactly as in `recall`,
+            // but it must not fail the ingest: the caller falls back to text comparison.
+            Err(e) => { *self.err_write() = Some(e.to_string()); return Ok(None); }
+        };
+        let vectors = self.vec_read();
+        Ok(vectors
+            .iter()
+            .map(|(id, v)| (*id, cosine(&qvec, v)))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)))
+    }
+
     pub fn embedding_status(&self) -> String {
         // "loading" wins over everything: the model may already be swapped in while the
         // backfill is still running, and reporting "ready" then would be a lie.

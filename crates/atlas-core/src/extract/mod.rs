@@ -1,11 +1,84 @@
 mod prompt;
 pub use prompt::{project_summary_prompt, EXTRACTION_SYSTEM_PROMPT};
 
+use crate::backend::LocalBackend;
+use crate::db::Db;
+use crate::jobs::Job;
 use crate::llm::LlmClient;
-use crate::models::MemoryKind;
+use crate::memories::MemoryRepo;
+use crate::models::{MemoryKind, MemoryScope, MemoryStatus, NewMemory};
+use crate::projects::{detect_root, ProjectRepo};
+use crate::service::MemoryService;
+use crate::settings::SettingsRepo;
 use crate::{AtlasError, Result};
 use serde::Deserialize;
+use serde_json::Value;
+use std::path::PathBuf;
 use std::str::FromStr;
+use uuid::Uuid;
+
+/// What `POST /ingest` answers with when extraction is off or half configured.
+/// The exact text is part of the API: clients match on it.
+pub const DISABLED: &str = "extraction is disabled";
+
+/// The `source_agent` every extracted memory carries, so a reviewer can tell a
+/// machine-proposed memory from one an agent wrote deliberately.
+pub const EXTRACTOR: &str = "extractor";
+
+/// A candidate this close to an existing memory is the same memory said twice.
+const DUPLICATE_COSINE: f64 = 0.92;
+
+/// The extraction settings, read unmasked, once the enable gate is open.
+pub struct ExtractionConfig {
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+    pub auto_accept_min_confidence: f64,
+}
+
+/// Written by hand rather than derived: a derived `Debug` would put the api key
+/// into any log line or panic message that formats the config.
+impl std::fmt::Debug for ExtractionConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtractionConfig")
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("auto_accept_min_confidence", &self.auto_accept_min_confidence)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Reads the extraction settings, or reports the feature as disabled. Extraction
+/// is off by default and stays off unless `extraction.enabled` is true and both
+/// `extraction.base_url` and `extraction.model` are set; the api key may be empty,
+/// since a local endpoint does not ask for one.
+///
+/// The values come from `SettingsRepo::get_raw`, not `get_all`: `get_all` masks
+/// `extraction.api_key` to `"***"`, which is not a key the worker could use. The
+/// key is never logged and never put in an error.
+pub fn extraction_config(db: &Db) -> Result<ExtractionConfig> {
+    let settings = SettingsRepo::new(db);
+    let disabled = || AtlasError::Conflict(DISABLED.to_string());
+    if settings.get_raw("extraction.enabled")?.and_then(|v| v.as_bool()) != Some(true) {
+        return Err(disabled());
+    }
+    let text = |key: &str| -> Result<String> {
+        settings.get_raw(key)?
+            .and_then(|v| v.as_str().map(str::to_string))
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(disabled)
+    };
+    Ok(ExtractionConfig {
+        base_url: text("extraction.base_url")?,
+        model: text("extraction.model")?,
+        api_key: settings.get_raw("extraction.api_key")?.and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default(),
+        // Defaulting to 1.0 means nothing is auto-accepted until the user lowers it.
+        auto_accept_min_confidence: settings
+            .get_raw("extraction.auto_accept_min_confidence")?
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.0),
+    })
+}
 
 /// A memory extracted from a transcript by the model, before it is turned
 /// into a `NewMemory` and persisted.
@@ -104,6 +177,109 @@ pub async fn extract_candidates(transcript: &str, client: &LlmClient) -> Result<
     parse_candidates(&response)
 }
 
+/// `text` reduced to the form two memories have to share to count as the same
+/// one when no embedding is available: lowercased, runs of whitespace collapsed
+/// to one space, trailing punctuation dropped.
+pub fn normalize_text(text: &str) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    collapsed.trim_end_matches(|c: char| c.is_ascii_punctuation()).to_string()
+}
+
+/// Drops candidates the store already holds, and candidates the batch repeats.
+///
+/// When the embedder is ready the test against stored memories is cosine
+/// similarity; when it is not (no model loaded, or the text will not embed) it
+/// falls back to comparing the normalized text. The text comparison also runs on
+/// its own account, because an exact repeat is a duplicate whatever the vectors
+/// say, and because it is the only thing that can catch a candidate matching a
+/// `pending` memory: pending rows are deliberately kept out of the vector map,
+/// but re-proposing one would double up the review queue.
+pub fn dedupe(candidates: Vec<Candidate>, memories: &MemoryService) -> Result<Vec<Candidate>> {
+    let mut seen: Vec<String> = Vec::new();
+    for status in [MemoryStatus::Active, MemoryStatus::Pending] {
+        seen.extend(memories.list(status, None, None)?.into_iter().map(|m| normalize_text(&m.text)));
+    }
+    let mut kept = Vec::with_capacity(candidates.len());
+    for c in candidates {
+        let normalized = normalize_text(&c.text);
+        let duplicate = seen.contains(&normalized)
+            || memories.nearest_active(&c.text)?.is_some_and(|(_, score)| score >= DUPLICATE_COSINE);
+        if duplicate {
+            continue;
+        }
+        seen.push(normalized);
+        kept.push(c);
+    }
+    Ok(kept)
+}
+
+/// The project an ingest is scoped to. An unknown root is not an error: the
+/// memories simply land global, which is what a transcript from a directory
+/// Atlas has never connected deserves.
+fn project_for(db: &Db, root: Option<PathBuf>) -> Result<Option<Uuid>> {
+    let Some(root) = root else { return Ok(None) };
+    // Resolve the way `connect_project` does, so a path inside a repository finds
+    // the row stored under the repository root; an unresolvable path is looked up
+    // as given and simply misses.
+    let resolved = detect_root(&root).map(|d| d.root).unwrap_or(root);
+    Ok(ProjectRepo::new(db).by_root(&resolved)?.map(|p| p.id))
+}
+
+/// Runs one `ingest` job: read the transcript out of the payload, ask the model
+/// for candidates, drop the duplicates, and store what is left.
+///
+/// The HTTP call to the model happens before anything touches DuckDB, so the
+/// write gate is never held across an await. Each insert then goes through
+/// `MemoryService::remember`, which takes the gate itself.
+pub async fn run_ingest(job: &Job, backend: &LocalBackend) -> Result<Value> {
+    let cfg = extraction_config(&backend.db)?;
+    let text = job.payload["text"].as_str().ok_or_else(|| AtlasError::Invalid("ingest job has no text".into()))?;
+    let source_tool = job.payload["source_tool"].as_str().unwrap_or("ingest").to_string();
+    let root = job.payload["project_root"].as_str().map(PathBuf::from);
+
+    let client = LlmClient::new(&cfg.base_url, &cfg.api_key, &cfg.model)?;
+    let candidates = extract_candidates(text, &client).await?;
+    let found = candidates.len();
+
+    let project_id = project_for(&backend.db, root)?;
+    let keep = dedupe(candidates, &backend.memories)?;
+    let inserted = keep.len();
+    for c in keep {
+        backend.memories.remember(
+            NewMemory {
+                scope: if project_id.is_some() { MemoryScope::Project } else { MemoryScope::Global },
+                project_id,
+                kind: c.kind,
+                text: c.text,
+                tags: c.tags,
+                source_agent: Some(EXTRACTOR.to_string()),
+                source_tool: Some(source_tool.clone()),
+                confidence: c.confidence,
+                // Everything waits for review unless the user has lowered the bar
+                // far enough that this candidate clears it.
+                status: if c.confidence >= cfg.auto_accept_min_confidence { MemoryStatus::Active } else { MemoryStatus::Pending },
+            },
+            EXTRACTOR,
+        )?;
+    }
+    let skipped_duplicates = found - inserted;
+
+    MemoryRepo::new(&backend.db).audit(
+        EXTRACTOR,
+        "extract",
+        "job",
+        Some(job.id),
+        serde_json::json!({
+            "job_id": job.id,
+            "candidates": found,
+            "inserted": inserted,
+            "skipped_duplicates": skipped_duplicates,
+            "model": cfg.model,
+        }),
+    )?;
+    Ok(serde_json::json!({"inserted": inserted, "skipped_duplicates": skipped_duplicates}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,5 +356,89 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].text, "a");
         assert_eq!(out[1].text, "b");
+    }
+
+    // ---- dedupe and the enable gate ----
+
+    use crate::search::NoopEmbedder;
+    use std::sync::Arc;
+
+    fn candidate(text: &str) -> Candidate {
+        Candidate { text: text.into(), kind: MemoryKind::Fact, tags: vec![], confidence: 0.9 }
+    }
+
+    /// A service with no embedding model, which is what forces `dedupe` down the
+    /// normalized-text path.
+    fn service(db: Arc<Db>) -> MemoryService {
+        MemoryService::new(db, Arc::new(NoopEmbedder)).unwrap()
+    }
+
+    fn stored(text: &str, status: MemoryStatus) -> NewMemory {
+        NewMemory {
+            scope: MemoryScope::Global, project_id: None, kind: MemoryKind::Fact, text: text.into(),
+            tags: vec![], source_agent: None, source_tool: None, confidence: 1.0, status,
+        }
+    }
+
+    #[test]
+    fn normalize_text_lowercases_collapses_and_trims_punctuation() {
+        assert_eq!(normalize_text("  The   Project\nuses BUN!!  "), "the project uses bun");
+        assert_eq!(normalize_text("deploy target is fly.io."), "deploy target is fly.io");
+    }
+
+    /// With no embedder, a candidate that normalizes to an existing memory's text
+    /// is a duplicate even though the wording differs in case and spacing.
+    #[test]
+    fn dedupe_falls_back_to_normalized_text_without_an_embedder() {
+        let s = service(Arc::new(Db::open_in_memory().unwrap()));
+        s.remember(stored("The project uses bun.", MemoryStatus::Active), "t").unwrap();
+        let out = dedupe(vec![candidate("the   project uses BUN"), candidate("deploy target is fly.io")], &s).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].text, "deploy target is fly.io");
+    }
+
+    /// A batch that says the same thing twice stores it once.
+    #[test]
+    fn dedupe_drops_repeats_within_the_batch() {
+        let s = service(Arc::new(Db::open_in_memory().unwrap()));
+        let out = dedupe(vec![candidate("the project uses bun"), candidate("The project uses bun!")], &s).unwrap();
+        assert_eq!(out.len(), 1);
+    }
+
+    /// A pending memory is a proposal already awaiting review, so re-extracting it
+    /// must not queue it a second time.
+    #[test]
+    fn dedupe_also_matches_pending_memories() {
+        let s = service(Arc::new(Db::open_in_memory().unwrap()));
+        s.remember(stored("the project uses bun", MemoryStatus::Pending), "t").unwrap();
+        assert!(dedupe(vec![candidate("the project uses bun")], &s).unwrap().is_empty());
+    }
+
+    #[test]
+    fn extraction_config_is_disabled_until_enabled_and_fully_configured() {
+        let db = Db::open_in_memory().unwrap();
+        let repo = SettingsRepo::new(&db);
+        let set = |values: serde_json::Map<String, Value>| repo.set_many(&values, "t").unwrap();
+        let err = |db: &Db| extraction_config(db).unwrap_err().to_string();
+
+        assert_eq!(err(&db), DISABLED, "off by default");
+        set(serde_json::Map::from_iter([("extraction.enabled".into(), Value::from(true))]));
+        assert_eq!(err(&db), DISABLED, "enabled but no base_url or model");
+        set(serde_json::Map::from_iter([("extraction.base_url".into(), Value::from("http://localhost:1234/v1"))]));
+        assert_eq!(err(&db), DISABLED, "still no model");
+
+        set(serde_json::Map::from_iter([("extraction.model".into(), Value::from("local"))]));
+        let cfg = extraction_config(&db).unwrap();
+        assert_eq!(cfg.base_url, "http://localhost:1234/v1");
+        assert_eq!(cfg.model, "local");
+        assert_eq!(cfg.api_key, "", "a local endpoint needs no key");
+        assert_eq!(cfg.auto_accept_min_confidence, 1.0, "nothing is auto-accepted by default");
+    }
+
+    /// The gate is a 409, not a 400: the request was fine, the daemon is not set up.
+    #[test]
+    fn the_disabled_error_is_a_conflict() {
+        let db = Db::open_in_memory().unwrap();
+        assert!(matches!(extraction_config(&db).unwrap_err(), AtlasError::Conflict(_)));
     }
 }

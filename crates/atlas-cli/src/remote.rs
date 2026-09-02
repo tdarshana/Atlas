@@ -1,4 +1,4 @@
-use atlas_core::{backend::Backend, models::*, AtlasError, Result};
+use atlas_core::{backend::Backend, jobs::Job, models::*, AtlasError, Result};
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -24,7 +24,7 @@ impl RemoteBackend {
     async fn error(r: reqwest::Response) -> AtlasError {
         let status = r.status();
         let msg = r.json::<serde_json::Value>().await.ok().and_then(|v| v["error"].as_str().map(String::from)).unwrap_or_else(|| status.to_string());
-        match status.as_u16() { 404 => AtlasError::NotFound(msg), 400 => AtlasError::Invalid(msg), _ => AtlasError::Other(msg) }
+        match status.as_u16() { 404 => AtlasError::NotFound(msg), 400 => AtlasError::Invalid(msg), 409 => AtlasError::Conflict(msg), _ => AtlasError::Other(msg) }
     }
     fn net(e: reqwest::Error) -> AtlasError { AtlasError::Other(format!("daemon unreachable: {e}")) }
 }
@@ -74,5 +74,22 @@ impl Backend for RemoteBackend {
     async fn get_settings(&self) -> Result<serde_json::Map<String, serde_json::Value>> { Self::handle(self.client.get(format!("{}/settings", self.base)).send().await.map_err(Self::net)?).await }
     async fn set_settings(&self, values: serde_json::Map<String, serde_json::Value>, actor: &str) -> Result<serde_json::Map<String, serde_json::Value>> {
         Self::handle(self.client.put(format!("{}/settings?actor={actor}", self.base)).json(&values).send().await.map_err(Self::net)?).await
+    }
+
+    /// The daemon runs the extraction, so a 409 here is its "extraction is
+    /// disabled", carried back as the same error a `LocalBackend` would raise.
+    async fn ingest_transcript(&self, text: String, source_tool: String, project_root: Option<PathBuf>) -> Result<Uuid> {
+        let body = serde_json::json!({"text": text, "source_tool": source_tool, "project_root": project_root});
+        let r = self.client.post(format!("{}/ingest", self.base)).json(&body).send().await.map_err(Self::net)?;
+        let v: serde_json::Value = Self::handle(r).await?;
+        v["job_id"].as_str().and_then(|s| Uuid::parse_str(s).ok())
+            .ok_or_else(|| AtlasError::Other(format!("ingest response had no job_id: {v}")))
+    }
+
+    /// A job the daemon has never heard of is `None`, not an error.
+    async fn get_job(&self, id: Uuid) -> Result<Option<Job>> {
+        let r = self.client.get(format!("{}/jobs/{id}", self.base)).send().await.map_err(Self::net)?;
+        if r.status() == reqwest::StatusCode::NOT_FOUND { return Ok(None); }
+        Self::handle(r).await.map(Some)
     }
 }

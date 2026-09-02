@@ -1,5 +1,5 @@
 use axum::{body::Bytes, extract::{FromRequest, FromRequestParts, Path, Query, Request, State}, http::{header, request::Parts, HeaderMap, Method, StatusCode}, middleware::{self, Next}, response::{IntoResponse, Response}, routing::{get, post}, Json, Router};
-use atlas_core::{backend::Backend, models::*, AtlasError};
+use atlas_core::{backend::Backend, jobs::Job, models::*, AtlasError};
 use serde::Deserialize;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
@@ -9,7 +9,12 @@ pub struct ApiError(AtlasError);
 impl From<AtlasError> for ApiError { fn from(e: AtlasError) -> Self { Self(e) } }
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let code = match self.0 { AtlasError::NotFound(_) => StatusCode::NOT_FOUND, AtlasError::Invalid(_) => StatusCode::BAD_REQUEST, _ => StatusCode::INTERNAL_SERVER_ERROR };
+        let code = match self.0 {
+            AtlasError::NotFound(_) => StatusCode::NOT_FOUND,
+            AtlasError::Invalid(_) => StatusCode::BAD_REQUEST,
+            AtlasError::Conflict(_) => StatusCode::CONFLICT,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
         (code, Json(serde_json::json!({"error": self.0.to_string()}))).into_response()
     }
 }
@@ -131,6 +136,7 @@ pub fn cors_layer() -> CorsLayer {
 #[derive(Deserialize)] pub struct StatusBody { pub status: String }
 #[derive(Deserialize)] pub struct ProjectQ { pub project_id: Option<Uuid> }
 #[derive(Deserialize)] pub struct ListMemoriesQ { pub status: Option<String>, pub project_id: Option<Uuid> }
+#[derive(Deserialize)] pub struct IngestBody { pub text: String, pub source_tool: String, #[serde(default)] pub project_root: Option<std::path::PathBuf> }
 
 fn actor(q: &ActorQ) -> &str { q.actor.as_deref().unwrap_or("api") }
 
@@ -155,6 +161,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/workflows/{name}", get(get_workflow).delete(delete_workflow))
         .route("/api/v1/sync", post(sync))
         .route("/api/v1/settings", get(get_settings).put(set_settings))
+        .route("/api/v1/ingest", post(ingest))
+        .route("/api/v1/jobs/{id}", get(get_job))
         .with_state(state)
 }
 
@@ -252,4 +260,18 @@ async fn sync(State(s): State<AppState>, ApiJson(req): ApiJson<SyncRequest>) -> 
 async fn get_settings(State(s): State<AppState>) -> Result<Json<serde_json::Map<String, serde_json::Value>>, ApiError> { Ok(Json(s.backend.get_settings().await?)) }
 async fn set_settings(State(s): State<AppState>, ApiQuery(q): ApiQuery<ActorQ>, ApiJson(values): ApiJson<serde_json::Map<String, serde_json::Value>>) -> Result<Json<serde_json::Map<String, serde_json::Value>>, ApiError> {
     Ok(Json(s.backend.set_settings(values, actor(&q)).await?))
+}
+
+// ---- extraction ----
+//
+// Ingest is asynchronous: the model call can take a minute, so the request only
+// queues the work (202) and the caller follows the job.
+
+async fn ingest(State(s): State<AppState>, ApiJson(b): ApiJson<IngestBody>) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let job_id = s.backend.ingest_transcript(b.text, b.source_tool, b.project_root).await?;
+    Ok((StatusCode::ACCEPTED, Json(serde_json::json!({"job_id": job_id}))))
+}
+
+async fn get_job(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Result<Json<Job>, ApiError> {
+    s.backend.get_job(id).await?.map(Json).ok_or_else(|| ApiError(AtlasError::NotFound(format!("job {id}"))))
 }

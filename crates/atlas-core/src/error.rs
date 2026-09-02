@@ -10,6 +10,11 @@ pub enum AtlasError {
     Invalid(String),
     #[error("embedding unavailable: {0}")]
     Embedding(String),
+    /// A well-formed request the daemon is not configured to serve, answered with
+    /// 409. `POST /ingest` uses it when extraction is off, so a caller can tell
+    /// "switch it on" apart from "the request was wrong".
+    #[error("{0}")]
+    Conflict(String),
     #[error("{0}")]
     Other(String),
 }
