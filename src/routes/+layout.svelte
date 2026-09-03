@@ -18,7 +18,7 @@
 	import StatusBar from '$lib/shell/StatusBar.svelte';
 	import TitleBar from '$lib/shell/TitleBar.svelte';
 	import { applyDaemonTheme, initShell, setView, shell } from '$lib/shell/shell.svelte';
-	import { installShortcuts, PALETTE_EVENT } from '$lib/shell/shortcuts';
+	import { installGlobalShortcutBridge, installShortcuts, PALETTE_EVENT } from '$lib/shell/shortcuts';
 	import { viewForPath, viewLabel } from '$lib/shell/views';
 	import { hubTitle, project } from '$lib/stores/project.svelte';
 
@@ -27,7 +27,15 @@
 	onMount(() => {
 		void initShell();
 		void boot();
-		return installShortcuts();
+		const removeShortcuts = installShortcuts();
+		let unlistenPalette: (() => void) | undefined;
+		void installGlobalShortcutBridge().then((fn) => {
+			unlistenPalette = fn;
+		});
+		return () => {
+			removeShortcuts();
+			unlistenPalette?.();
+		};
 	});
 
 	// Polling starts once the daemon answers and stops if the connection is lost.

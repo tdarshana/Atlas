@@ -30,6 +30,6 @@ export {
 	type StatusItems,
 	type SidePanelOverride
 } from './shell.svelte';
-export { installShortcuts, PALETTE_EVENT } from './shortcuts';
-export { resolvePlatform, inTauri } from './platform';
+export { installShortcuts, installGlobalShortcutBridge, PALETTE_EVENT } from './shortcuts';
+export { resolvePlatform, inTauri, copyText } from './platform';
 export { VIEWS, MAIN_VIEWS, viewForPath, viewLabel, panelTitle, type ViewId } from './views';

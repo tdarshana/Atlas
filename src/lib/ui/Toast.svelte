@@ -1,5 +1,6 @@
 <script lang="ts">
-	import { toasts, dismiss } from './toasts.svelte';
+	import { copyText } from '$lib/shell';
+	import { dismiss, toasts, type ToastItem } from './toasts.svelte';
 
 	/**
 	 * An error interrupts whatever a screen reader is saying; a success or an info note
@@ -7,11 +8,23 @@
 	 * is set on it rather than on the toasts that come and go inside it.
 	 */
 	const level = $derived(toasts.some((t) => t.kind === 'error') ? 'assertive' : 'polite');
+
+	/** A toast carrying `copyText` (the export path toast) copies it on click, then
+	 * dismisses as every other toast does on click. */
+	async function handleClick(toast: ToastItem): Promise<void> {
+		if (toast.copyText) await copyText(toast.copyText).catch(() => {});
+		dismiss(toast.id);
+	}
 </script>
 
 <div class="host" data-testid="toast-host" aria-live={level}>
 	{#each toasts as toast (toast.id)}
-		<button type="button" class="toast {toast.kind}" onclick={() => dismiss(toast.id)}>
+		<button
+			type="button"
+			class="toast {toast.kind}"
+			title={toast.copyText ? 'Click to copy' : undefined}
+			onclick={() => handleClick(toast)}
+		>
 			{toast.text}
 		</button>
 	{/each}

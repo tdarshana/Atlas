@@ -7,9 +7,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tauri::{Manager, Runtime, WebviewWindow};
+use tauri::{Emitter, Manager, Runtime, WebviewWindow};
+use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
+use tauri_plugin_clipboard_manager::ClipboardExt;
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_positioner::{Position, WindowExt};
 use tauri_plugin_store::{Store, StoreExt};
+
+/// The event the global shortcut and the palette's own Mod+K both raise; the shell's
+/// shortcut layer (`src/lib/shell/shortcuts.ts`) listens for it on `window`.
+const PALETTE_EVENT: &str = "atlas:palette";
 
 /// Where the persisted UI state lives, resolved by the store plugin against the app
 /// data dir.
@@ -114,6 +122,100 @@ pub fn log_dir<R: Runtime>(app: tauri::AppHandle<R>) -> Result<String, String> {
         .app_log_dir()
         .map(|dir| dir.display().to_string())
         .map_err(|e| e.to_string())
+}
+
+/// Whether the app is registered to launch at login (a macOS launch agent).
+#[tauri::command]
+pub fn autostart_get<R: Runtime>(app: tauri::AppHandle<R>) -> Result<bool, String> {
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+/// Turns launch-at-login on or off.
+#[tauri::command]
+pub fn autostart_set<R: Runtime>(app: tauri::AppHandle<R>, enabled: bool) -> Result<(), String> {
+    let manager = app.autolaunch();
+    if enabled { manager.enable() } else { manager.disable() }.map_err(|e| e.to_string())
+}
+
+/// Registers `accelerator` as the app's one global shortcut, unregistering whatever was
+/// registered before it: this command is the only writer, so there is never more than
+/// one to unregister. Validated as an accelerator (the same check `settings.rs` runs on
+/// `ui.global_shortcut`) before it ever reaches the plugin, so a bad value comes back as
+/// a plain sentence instead of a plugin error. Pressing the shortcut shows and focuses
+/// the main window and emits `atlas:palette`, which the shell's shortcut layer bridges
+/// onto the same event Mod+K raises from inside the webview.
+#[tauri::command]
+pub fn shortcut_set<R: Runtime>(app: tauri::AppHandle<R>, accelerator: String) -> Result<(), String> {
+    atlas_core::settings::validate_accelerator(&accelerator).map_err(|e| e.to_string())?;
+    let global_shortcut = app.global_shortcut();
+    global_shortcut.unregister_all().map_err(|e| e.to_string())?;
+    global_shortcut
+        .on_shortcut(accelerator.as_str(), move |app, _shortcut, event| {
+            if event.state != ShortcutState::Pressed {
+                return;
+            }
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+            let _ = app.emit(PALETTE_EVENT, ());
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// Shows an OS notification.
+#[tauri::command]
+pub fn notify<R: Runtime>(app: tauri::AppHandle<R>, title: String, body: String) -> Result<(), String> {
+    app.notification().builder().title(title).body(body).show().map_err(|e| e.to_string())
+}
+
+/// `"granted"`, `"denied"` or `"default"` (not yet decided).
+#[tauri::command]
+pub fn notification_permission<R: Runtime>(app: tauri::AppHandle<R>) -> Result<String, String> {
+    use tauri::plugin::PermissionState;
+    let state = app.notification().permission_state().map_err(|e| e.to_string())?;
+    Ok(match state {
+        PermissionState::Granted => "granted",
+        PermissionState::Denied => "denied",
+        PermissionState::Prompt | PermissionState::PromptWithRationale => "default",
+    }
+    .to_string())
+}
+
+/// Writes `text` to the system clipboard. Every copy action in the app goes through
+/// this rather than the browser's `navigator.clipboard`, which a Tauri webview does not
+/// always grant without a user gesture already in flight.
+#[tauri::command]
+pub fn clipboard_write<R: Runtime>(app: tauri::AppHandle<R>, text: String) -> Result<(), String> {
+    app.clipboard().write_text(text).map_err(|e| e.to_string())
+}
+
+/// The About card's static facts about this install: app and Tauri versions, OS,
+/// architecture, locale, and the two directories the app writes to.
+#[derive(serde::Serialize)]
+pub struct AboutInfo {
+    pub app_version: String,
+    pub tauri_version: String,
+    pub os_type: String,
+    pub os_version: String,
+    pub arch: String,
+    pub locale: Option<String>,
+    pub log_dir: String,
+    pub data_dir: String,
+}
+
+#[tauri::command]
+pub fn about_info<R: Runtime>(app: tauri::AppHandle<R>) -> Result<AboutInfo, String> {
+    Ok(AboutInfo {
+        app_version: app.package_info().version.to_string(),
+        tauri_version: tauri::VERSION.to_string(),
+        os_type: tauri_plugin_os::type_().to_string(),
+        os_version: tauri_plugin_os::version().to_string(),
+        arch: tauri_plugin_os::arch().to_string(),
+        locale: tauri_plugin_os::locale(),
+        log_dir: app.path().app_log_dir().map(|d| d.display().to_string()).map_err(|e| e.to_string())?,
+        data_dir: app.path().app_data_dir().map(|d| d.display().to_string()).map_err(|e| e.to_string())?,
+    })
 }
 
 #[cfg(test)]

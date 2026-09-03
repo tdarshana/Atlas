@@ -9,7 +9,7 @@
 	import { api } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
 	import { NOTHING, plural, relativeAge } from '$lib/format';
-	import { setStatusItems } from '$lib/shell';
+	import { copyText, setStatusItems } from '$lib/shell';
 	import { scopeOptions, scopeSelection, scopeValue } from '$lib/components/memory-scope';
 	import RememberDialog from '$lib/components/RememberDialog.svelte';
 	import {
@@ -76,6 +76,19 @@
 	function source(hit: RecallHit): string {
 		const { source_agent, source_tool } = hit.memory;
 		return [source_agent, source_tool].filter(Boolean).join(' · ') || NOTHING;
+	}
+
+	let textCopied = $state(false);
+
+	async function copyMemoryText(): Promise<void> {
+		if (!selected) return;
+		try {
+			await copyText(selected.text);
+			textCopied = true;
+			setTimeout(() => (textCopied = false), 1500);
+		} catch (e) {
+			push('error', errorMessage(e));
+		}
 	}
 
 	async function confirmForget(): Promise<void> {
@@ -248,6 +261,9 @@
 			<div class="detail-head">
 				<Badge tone={kindTone(selected.kind)}>{selected.kind}</Badge>
 				<span class="spacer"></span>
+				<Button variant="ghost" size="sm" onclick={copyMemoryText}>
+					{textCopied ? 'Copied' : 'Copy'}
+				</Button>
 				<Button variant="ghost" size="sm" onclick={() => (memories.selected = null)}>Close</Button>
 			</div>
 

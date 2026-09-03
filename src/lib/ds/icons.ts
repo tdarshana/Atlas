@@ -7,6 +7,7 @@ import ArrowDown from '@lucide/svelte/icons/arrow-down';
 import ArrowLeft from '@lucide/svelte/icons/arrow-left';
 import ArrowRight from '@lucide/svelte/icons/arrow-right';
 import ArrowUp from '@lucide/svelte/icons/arrow-up';
+import Bell from '@lucide/svelte/icons/bell';
 import BookOpen from '@lucide/svelte/icons/book-open';
 import Bot from '@lucide/svelte/icons/bot';
 import Braces from '@lucide/svelte/icons/braces';
@@ -37,6 +38,7 @@ import GitBranch from '@lucide/svelte/icons/git-branch';
 import GitCommitHorizontal from '@lucide/svelte/icons/git-commit-horizontal';
 import History from '@lucide/svelte/icons/history';
 import Info from '@lucide/svelte/icons/info';
+import Keyboard from '@lucide/svelte/icons/keyboard';
 import Layers from '@lucide/svelte/icons/layers';
 import ListChecks from '@lucide/svelte/icons/list-checks';
 import Loader from '@lucide/svelte/icons/loader';
@@ -118,7 +120,9 @@ export const icons = {
 	'external-link': ExternalLink,
 	filter: Filter,
 	'alert-triangle': AlertTriangle,
-	loader: Loader
+	loader: Loader,
+	keyboard: Keyboard,
+	bell: Bell
 } satisfies Record<string, LucideIcon>;
 
 export type IconName = keyof typeof icons;

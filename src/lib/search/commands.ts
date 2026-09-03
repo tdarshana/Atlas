@@ -10,8 +10,9 @@ import type { Uuid } from '$lib/types';
 
 /** Opens the log directory in the OS file manager. No-op outside Tauri: there is no
  * folder to reveal in a browser tab, so `desktop` is skipped entirely rather than
- * warning for a command that has nothing useful to fall back to. */
-async function openLogFolder(): Promise<void> {
+ * warning for a command that has nothing useful to fall back to. Exported so the
+ * Settings screen's About card can offer the same action as its own button. */
+export async function openLogFolder(): Promise<void> {
 	const dir = await desktop<string | null>('log_dir', undefined, () => null);
 	if (!dir) return;
 	const { revealItemInDir } = await import('@tauri-apps/plugin-opener');

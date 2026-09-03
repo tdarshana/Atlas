@@ -7,6 +7,9 @@ export interface ToastItem {
 	id: number;
 	kind: ToastKind;
 	text: string;
+	/** When set, clicking the toast copies this (e.g. a path an export just wrote to)
+	 * instead of only dismissing it. */
+	copyText?: string;
 }
 
 export const AUTO_DISMISS_MS = 4000;
@@ -15,9 +18,9 @@ export const toasts = $state<ToastItem[]>([]);
 
 let nextId = 0;
 
-export function push(kind: ToastKind, text: string, ttlMs = AUTO_DISMISS_MS): number {
+export function push(kind: ToastKind, text: string, ttlMs = AUTO_DISMISS_MS, copyText?: string): number {
 	const id = ++nextId;
-	toasts.push({ id, kind, text });
+	toasts.push({ id, kind, text, copyText });
 	if (ttlMs > 0) setTimeout(() => dismiss(id), ttlMs);
 	return id;
 }

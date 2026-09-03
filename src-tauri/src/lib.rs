@@ -3,14 +3,17 @@ use std::path::PathBuf;
 use atlas_cli::daemon_ctl;
 use atlas_core::paths::AtlasPaths;
 use tauri::Manager;
+use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
 use tauri_plugin_positioner::{Position, WindowExt};
 
 mod commands;
+mod notify_poller;
 
 use commands::platform::{
-    app_exit, app_relaunch, log_dir, ui_state_all, ui_state_get, ui_state_set, window_center,
-    window_move,
+    about_info, app_exit, app_relaunch, autostart_get, autostart_set, clipboard_write, log_dir,
+    notification_permission, notify, shortcut_set, ui_state_all, ui_state_get, ui_state_set,
+    window_center, window_move,
 };
 
 const DEFAULT_PORT: u16 = 7433;
@@ -95,6 +98,10 @@ pub fn run() {
         .plugin(tauri_plugin_persisted_scope::init())
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         // macOS keeps its own chrome under the overlay title bar; Windows and Linux draw
         // none, so the webview's title bar is the only one there.
         .setup(|app| {
@@ -115,6 +122,10 @@ pub fn run() {
                     let _ = window.move_window(Position::Center);
                 }
             }
+            // The notification poller is a plain tokio task, not a Tauri command: nothing
+            // in the webview drives it, and it must keep running whether or not a Settings
+            // page is open to read `ui.notify.*`.
+            notify_poller::spawn(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -129,7 +140,14 @@ pub fn run() {
             window_move,
             app_relaunch,
             app_exit,
-            log_dir
+            log_dir,
+            autostart_get,
+            autostart_set,
+            shortcut_set,
+            notify,
+            notification_permission,
+            clipboard_write,
+            about_info
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

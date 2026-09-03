@@ -11,7 +11,10 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
 	{ id: 'daemon', label: 'Daemon' },
 	{ id: 'extraction', label: 'Extraction' },
 	{ id: 'board-stages', label: 'Board stages' },
-	{ id: 'mcp', label: 'MCP server' }
+	{ id: 'mcp', label: 'MCP server' },
+	{ id: 'shortcuts', label: 'Shortcuts' },
+	{ id: 'notifications', label: 'Notifications' },
+	{ id: 'about', label: 'About' }
 ];
 
 /**

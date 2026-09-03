@@ -66,8 +66,21 @@ export interface StatusReport {
 	version: string;
 	db_path: string;
 	memories_active: number;
+	memories_pending: number;
 	embedding: string;
 	port: number | null;
+}
+
+/** The desktop app's `about_info` Tauri command. */
+export interface AboutInfo {
+	app_version: string;
+	tauri_version: string;
+	os_type: string;
+	os_version: string;
+	arch: string;
+	locale: string | null;
+	log_dir: string;
+	data_dir: string;
 }
 
 export interface ProjectProfile {

@@ -3,6 +3,7 @@
 // the focus is in an editable control; Mod+K reaches the palette from anywhere.
 
 import { goto } from '$app/navigation';
+import { inTauri } from './platform';
 import { shell, toggleRail, toggleSidePanel } from './shell.svelte';
 import { MAIN_VIEWS, SETTINGS_VIEW } from './views';
 
@@ -62,4 +63,19 @@ export function handleKeydown(e: KeyboardEvent): void {
 export function installShortcuts(): () => void {
 	window.addEventListener('keydown', handleKeydown);
 	return () => window.removeEventListener('keydown', handleKeydown);
+}
+
+/**
+ * The Rust global shortcut handler runs outside the webview and cannot dispatch a DOM
+ * event directly, so it emits `atlas:palette` as a Tauri event instead; this bridges
+ * that onto the same window `CustomEvent` Mod+K raises, so the palette needs only one
+ * listener. A no-op outside Tauri. Returns the teardown, for `onMount`.
+ */
+export async function installGlobalShortcutBridge(): Promise<() => void> {
+	if (!inTauri()) return () => {};
+	const { listen } = await import('@tauri-apps/api/event');
+	const unlisten = await listen(PALETTE_EVENT, () => {
+		window.dispatchEvent(new CustomEvent(PALETTE_EVENT));
+	});
+	return unlisten;
 }

@@ -12,6 +12,7 @@
 	import { Badge, Button, IconButton, Input, Select } from '$lib/ds';
 	import { errorMessage } from '$lib/errors';
 	import { relativeAge } from '$lib/format';
+	import { copyText } from '$lib/shell';
 	import {
 		clampDetail,
 		CONFLICT_MESSAGE,
@@ -75,6 +76,18 @@
 	let confirming = $state(false);
 	let titleError = $state<string | null>(null);
 	let panel = $state<HTMLElement>();
+	let keyCopied = $state(false);
+
+	async function copyKey(): Promise<void> {
+		if (!task) return;
+		try {
+			await copyText(task.key);
+			keyCopied = true;
+			setTimeout(() => (keyCopied = false), 1500);
+		} catch (e) {
+			push('error', errorMessage(e));
+		}
+	}
 
 	/** The server values the draft was last filled from, to tell an edit from staleness. */
 	let base = {
@@ -314,6 +327,14 @@
 
 	<header>
 		<span class="key">{task?.key ?? ''}</span>
+		{#if task}
+			<IconButton
+				size="sm"
+				icon={keyCopied ? 'check' : 'copy'}
+				label="Copy task key"
+				onclick={copyKey}
+			/>
+		{/if}
 		{#if task && !task.ready}
 			<Badge tone="danger" title={task.blocked_reason ?? 'Not ready'}>blocked</Badge>
 		{/if}

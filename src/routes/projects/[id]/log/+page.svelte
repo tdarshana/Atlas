@@ -100,7 +100,7 @@
 				if (!path) return;
 				const { writeTextFile } = await import('@tauri-apps/plugin-fs');
 				await writeTextFile(path, text);
-				push('success', `Log written to ${path}`);
+				push('success', `Log written to ${path}`, undefined, path);
 			} else {
 				download(filename, text);
 				push('success', `Exported ${filename}`);

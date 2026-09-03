@@ -47,3 +47,11 @@ export async function desktop<T>(
 	}
 	return fallback();
 }
+
+/**
+ * Every copy action in the app goes through this: `clipboard_write` inside Tauri,
+ * `navigator.clipboard.writeText` in the browser build.
+ */
+export async function copyText(text: string): Promise<void> {
+	await desktop('clipboard_write', { text }, () => navigator.clipboard.writeText(text));
+}

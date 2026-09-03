@@ -6,13 +6,23 @@
 	// missing key as "leave it alone".
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
-	import { Badge, Button, Checkbox, Icon, Input, Table, type TableColumn } from '$lib/ds';
+	import { Badge, Button, Checkbox, Icon, Input, KeyHint, Table, type TableColumn } from '$lib/ds';
 	import { api, daemon } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
-	import { relativeAge } from '$lib/format';
-	import { inTauri, setStatusItems } from '$lib/shell';
+	import { NOTHING, relativeAge } from '$lib/format';
+	import { copyText, inTauri, setStatusItems } from '$lib/shell';
+	import { desktop } from '$lib/shell/platform';
+	import { VIEWS } from '$lib/shell/views';
+	import { openLogFolder } from '$lib/search/commands';
 	import { CLAUDE_SNIPPET, CODEX_SNIPPET, nextDisabledTools, toolIcon } from '$lib/mcp';
 	import { scrollToSection } from '$lib/components/settings-sections';
+	import { diagnosticsText } from '$lib/components/settings/diagnostics';
+	import {
+		acceleratorToKeyHintCombo,
+		comboFromEvent,
+		comboToAccelerator,
+		type CapturedCombo
+	} from '$lib/components/settings/shortcut-recorder';
 	import StageEditor from '$lib/components/StageEditor.svelte';
 	import {
 		DEFAULT_MIN_CONFIDENCE,
@@ -24,7 +34,9 @@
 		settingString,
 		settings
 	} from '$lib/stores/settings.svelte';
+	import { status } from '$lib/stores/status.svelte';
 	import type {
+		AboutInfo,
 		ExtractionTestResult,
 		McpClient,
 		McpStatusReport,
@@ -75,6 +87,155 @@
 	const port = $derived(settingString('daemon.port', String(daemon.port)));
 	const embeddingModel = $derived(settingString('embedding.model', 'not set') || 'not set');
 	const online = $derived(!daemon.error);
+
+	// -- Start Atlas at login --------------------------------------------------------
+	//
+	// The checkbox reflects the actual launch-agent state (`autostart_get`), not the
+	// mirrored `ui.autostart` setting: another client's read of that mirror is a
+	// convenience, not the source of truth this OS-level toggle has to agree with.
+	let autostart = $state(false);
+	let autostartBusy = $state(false);
+
+	async function loadAutostart(): Promise<void> {
+		autostart = await desktop('autostart_get', undefined, () => false);
+	}
+
+	async function toggleAutostart(next: boolean): Promise<void> {
+		autostartBusy = true;
+		try {
+			await desktop('autostart_set', { enabled: next }, () => undefined);
+			autostart = next;
+			await api().setSettings({ 'ui.autostart': next });
+		} catch (e) {
+			push('error', errorMessage(e));
+			await loadAutostart();
+		} finally {
+			autostartBusy = false;
+		}
+	}
+
+	// -- Global shortcut recorder ------------------------------------------------------
+
+	let recording = $state(false);
+	let capturedCombo = $state<CapturedCombo>({ modifiers: [], key: null });
+	let shortcutError = $state<string | null>(null);
+	let applyingShortcut = $state(false);
+
+	const capturedAccelerator = $derived(comboToAccelerator(capturedCombo));
+	const storedShortcut = $derived(settingString('ui.global_shortcut'));
+	/** What the recorder shows: the combo being captured, or the stored shortcut when
+	 * nothing is being recorded right now. */
+	const recorderCombo = $derived(
+		capturedAccelerator
+			? acceleratorToKeyHintCombo(capturedAccelerator)
+			: storedShortcut
+				? acceleratorToKeyHintCombo(storedShortcut)
+				: ''
+	);
+
+	function startRecording(): void {
+		recording = true;
+		capturedCombo = { modifiers: [], key: null };
+		shortcutError = null;
+	}
+
+	function stopRecording(): void {
+		recording = false;
+		capturedCombo = { modifiers: [], key: null };
+	}
+
+	function onRecorderKeydown(e: KeyboardEvent): void {
+		if (!recording) return;
+		e.preventDefault();
+		if (e.key === 'Escape') {
+			stopRecording();
+			return;
+		}
+		capturedCombo = comboFromEvent(e);
+	}
+
+	async function applyShortcut(): Promise<void> {
+		const accelerator = capturedAccelerator;
+		if (!accelerator) return;
+		applyingShortcut = true;
+		shortcutError = null;
+		try {
+			await desktop('shortcut_set', { accelerator }, () => undefined);
+			await api().setSettings({ 'ui.global_shortcut': accelerator });
+			stopRecording();
+			push('success', 'Shortcut applied');
+		} catch (e) {
+			shortcutError = errorMessage(e);
+		} finally {
+			applyingShortcut = false;
+		}
+	}
+
+	/** Mod+K, Mod+J and Mod+B are bound by the shell directly, not per-view; the rest
+	 * come straight from the rail's own view list so this can never list a combo the
+	 * shell does not actually bind. */
+	const inAppShortcuts = [
+		{ combo: 'Mod+K', label: 'Command palette' },
+		{ combo: 'Mod+J', label: 'Toggle side panel' },
+		{ combo: 'Mod+B', label: 'Toggle rail' },
+		...VIEWS.map((v) => ({ combo: v.combo, label: v.label }))
+	];
+
+	// -- Notifications ------------------------------------------------------------------
+
+	const notifyFlag = (key: string) => settings.values[key] === true;
+
+	async function setNotifyFlag(key: string, value: boolean): Promise<void> {
+		try {
+			await api().setSettings({ [key]: value });
+			await loadSettings();
+		} catch (e) {
+			push('error', errorMessage(e));
+		}
+	}
+
+	let sendingTestNotification = $state(false);
+
+	async function sendTestNotification(): Promise<void> {
+		sendingTestNotification = true;
+		try {
+			await desktop('notify', { title: 'Atlas', body: 'This is a test notification.' }, async () => {
+				if (typeof Notification === 'undefined') return;
+				let permission = Notification.permission;
+				if (permission === 'default') permission = await Notification.requestPermission();
+				if (permission === 'granted') new Notification('Atlas', { body: 'This is a test notification.' });
+			});
+			push('success', 'Test notification sent');
+		} catch (e) {
+			push('error', errorMessage(e));
+		} finally {
+			sendingTestNotification = false;
+		}
+	}
+
+	// -- About ----------------------------------------------------------------------------
+
+	let about = $state<AboutInfo | null>(null);
+	let aboutError = $state<string | null>(null);
+
+	async function loadAbout(): Promise<void> {
+		try {
+			about = await desktop('about_info', undefined, () => null);
+			aboutError = about ? null : 'Only available in the desktop app.';
+		} catch (e) {
+			aboutError = errorMessage(e);
+		}
+	}
+
+	const diagnostics = $derived(
+		about
+			? diagnosticsText({
+					...about,
+					daemon_version: status.report?.version ?? 'unknown',
+					db_path: status.report?.db_path ?? 'unknown'
+				})
+			: ''
+	);
 
 	/** The CONNECT block shows both snippets, one after the other, as frame 10 does. */
 	const connectSnippet = `${CLAUDE_SNIPPET}\n\n${CODEX_SNIPPET}`;
@@ -158,7 +319,7 @@
 	 */
 	async function copy(label: string, text: string): Promise<void> {
 		try {
-			await navigator.clipboard.writeText(text);
+			await copyText(text);
 			copied = label;
 			if (copiedTimer !== null) clearTimeout(copiedTimer);
 			copiedTimer = setTimeout(() => {
@@ -212,6 +373,8 @@
 		syncDraft();
 		await loadStages();
 		await loadMcp();
+		await loadAutostart();
+		await loadAbout();
 	}
 
 	async function loadStages(): Promise<void> {
@@ -294,6 +457,14 @@
 					/>
 				</div>
 				<span class="hint">Both are set when the daemon starts and are shown here for reference.</span>
+				<Checkbox
+					label="Start Atlas at login"
+					checked={autostart}
+					disabled={!inTauri() || autostartBusy}
+					title={inTauri() ? undefined : 'Only available in the desktop app'}
+					data-testid="settings-autostart"
+					onchange={() => toggleAutostart(!autostart)}
+				/>
 			</div>
 		</section>
 
@@ -579,6 +750,154 @@
 			</div>
 		</section>
 
+		<section class="card" id="shortcuts">
+			<div class="card-head"><span class="card-title">Shortcuts</span></div>
+			<div class="card-body">
+				<div class="group">
+					<span class="group-heading">Global shortcut</span>
+					<span class="hint">
+						Works from anywhere, even when Atlas is not the focused app: shows the window
+						and opens the command palette.
+					</span>
+					<div class="recorder-row">
+						<button
+							type="button"
+							class="recorder"
+							data-testid="shortcut-recorder"
+							disabled={!inTauri()}
+							title={inTauri() ? 'Click, then press a key combination' : 'Only available in the desktop app'}
+							onclick={startRecording}
+							onkeydown={onRecorderKeydown}
+							onblur={stopRecording}
+						>
+							{#if recording && !capturedAccelerator}
+								Press a key combination…
+							{:else if recorderCombo}
+								<KeyHint combo={recorderCombo} />
+							{:else}
+								No shortcut set
+							{/if}
+						</button>
+						<Button
+							variant="primary"
+							size="sm"
+							data-testid="shortcut-apply"
+							disabled={!capturedAccelerator || applyingShortcut}
+							onclick={applyShortcut}
+						>
+							{applyingShortcut ? 'Applying…' : 'Apply'}
+						</Button>
+					</div>
+					{#if shortcutError}
+						<p class="bad" role="alert" data-testid="shortcut-error">{shortcutError}</p>
+					{/if}
+				</div>
+
+				<div class="group">
+					<span class="group-heading">In-app shortcuts</span>
+					<div class="shortcut-list">
+						{#each inAppShortcuts as s (s.combo)}
+							<div class="shortcut-row">
+								<span>{s.label}</span>
+								<KeyHint combo={s.combo} plain />
+							</div>
+						{/each}
+					</div>
+				</div>
+			</div>
+		</section>
+
+		<section class="card" id="notifications">
+			<div class="card-head">
+				<span class="card-title">Notifications</span>
+				<span class="spacer"></span>
+				<Button
+					variant="ghost"
+					size="sm"
+					data-testid="settings-test-notification"
+					disabled={sendingTestNotification}
+					onclick={sendTestNotification}
+				>
+					{sendingTestNotification ? 'Sending…' : 'Send test notification'}
+				</Button>
+			</div>
+			<div class="card-body">
+				<Checkbox
+					label="Memories waiting for review"
+					checked={notifyFlag('ui.notify.review_pending')}
+					data-testid="settings-notify-review-pending"
+					onchange={() => setNotifyFlag('ui.notify.review_pending', !notifyFlag('ui.notify.review_pending'))}
+				/>
+				<Checkbox
+					label="Workflow runs finished or failed"
+					checked={notifyFlag('ui.notify.workflow_runs')}
+					data-testid="settings-notify-workflow-runs"
+					onchange={() => setNotifyFlag('ui.notify.workflow_runs', !notifyFlag('ui.notify.workflow_runs'))}
+				/>
+				<Checkbox
+					label="Daemon unreachable"
+					checked={notifyFlag('ui.notify.daemon_errors')}
+					data-testid="settings-notify-daemon-errors"
+					onchange={() => setNotifyFlag('ui.notify.daemon_errors', !notifyFlag('ui.notify.daemon_errors'))}
+				/>
+				<span class="hint">
+					A background check every 30 seconds; each kind is off until you turn it on.
+				</span>
+			</div>
+		</section>
+
+		<section class="card" id="about">
+			<div class="card-head">
+				<span class="card-title">About</span>
+				<span class="spacer"></span>
+				<Button
+					variant="ghost"
+					size="sm"
+					data-testid="settings-copy-diagnostics"
+					disabled={!about}
+					onclick={() => copy('diagnostics', diagnostics)}
+				>
+					{copied === 'diagnostics' ? 'Copied' : 'Copy diagnostics'}
+				</Button>
+				<Button
+					variant="ghost"
+					size="sm"
+					data-testid="settings-open-log-folder"
+					disabled={!inTauri()}
+					title={inTauri() ? 'Reveal the log folder' : 'Only available in the desktop app'}
+					onclick={openLogFolder}
+				>
+					Open log folder
+				</Button>
+			</div>
+			<div class="card-body">
+				{#if aboutError}
+					<p class="bad" role="alert" data-testid="about-error">{aboutError}</p>
+				{:else if about}
+					<dl class="about-list" data-testid="about-info">
+						<dt>App version</dt>
+						<dd class="mono">{about.app_version}</dd>
+						<dt>Tauri version</dt>
+						<dd class="mono">{about.tauri_version}</dd>
+						<dt>Daemon version</dt>
+						<dd class="mono">{status.report?.version ?? '…'}</dd>
+						<dt>OS</dt>
+						<dd class="mono">{about.os_type} {about.os_version} ({about.arch})</dd>
+						<dt>Locale</dt>
+						<dd class="mono">{about.locale ?? NOTHING}</dd>
+						<dt>Database</dt>
+						<dd class="mono">{status.report?.db_path ?? '…'}</dd>
+						<dt>Log folder</dt>
+						<dd class="mono">{about.log_dir}</dd>
+						<dt>Data folder</dt>
+						<dd class="mono">{about.data_dir}</dd>
+					</dl>
+				{:else}
+					<p class="hint">Loading…</p>
+				{/if}
+			</div>
+		</section>
+
 		<div class="foot">
 			<Button variant="primary" data-testid="settings-save" disabled={saving} onclick={save}>
 				{saving ? 'Saving…' : 'Save'}
@@ -791,5 +1110,67 @@
 		gap: 8px;
 		flex: 0 0 auto;
 		padding-bottom: 4px;
+	}
+
+	.recorder-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.recorder {
+		flex: 1;
+		height: 28px;
+		padding: 0 10px;
+		display: flex;
+		align-items: center;
+		border: 1px solid var(--border-default);
+		border-radius: 3px;
+		background: var(--bg-base);
+		color: var(--text-secondary);
+		font-size: 12px;
+		text-align: left;
+		cursor: pointer;
+	}
+
+	.recorder:disabled {
+		cursor: default;
+		opacity: 0.5;
+	}
+
+	.recorder:focus-visible {
+		outline: 2px solid var(--accent);
+		outline-offset: -1px;
+	}
+
+	.shortcut-list {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
+	.shortcut-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		height: 22px;
+		color: var(--text-secondary);
+	}
+
+	.about-list {
+		display: grid;
+		grid-template-columns: 140px 1fr;
+		row-gap: 6px;
+		column-gap: 12px;
+	}
+
+	.about-list dt {
+		color: var(--text-tertiary);
+	}
+
+	.about-list dd {
+		margin: 0;
+		color: var(--text-primary);
+		word-break: break-all;
 	}
 </style>
