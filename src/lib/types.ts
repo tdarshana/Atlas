@@ -465,7 +465,7 @@ export interface Workflow {
 	last_status: RunStatus | null;
 }
 
-/** A workflow's shape without its graph, the way `list_workflows` (MCP) and
+/** A workflow's shape without its graph, the way `workflow_list` (MCP) and
  * `ProjectContext.workflows` answer. */
 export interface WorkflowSummary {
 	id: Uuid;
