@@ -11,12 +11,14 @@
 	import { setStatusItems } from '$lib/shell';
 	import { openProject, project, remove, setHeaderActions } from '$lib/stores/project.svelte';
 	import AgentAccessCard from '$lib/components/project/settings/AgentAccessCard.svelte';
+	import RemoveProjectDialog from '$lib/components/project/RemoveProjectDialog.svelte';
 	import DangerCard from '$lib/components/project/settings/DangerCard.svelte';
 	import ExtractionCard from '$lib/components/project/settings/ExtractionCard.svelte';
 	import ProjectCard from '$lib/components/project/settings/ProjectCard.svelte';
 	import {
 		accessChecked,
 		accessIsSplit,
+		boardKeyBase,
 		extractionForm,
 		type ExtractionForm,
 		KEY_PREFIX_RE,
@@ -197,8 +199,12 @@
 		// before it is sent rather than reported afterwards. `taskCounts` covers every stage
 		// of the effective list, done stages included; a task parked on a stage name the
 		// list no longer holds is renamed but not counted here.
-		const from = p.board_key ?? '';
-		if (key && from && key !== from) {
+		//
+		// A project connected before migration 3 has no stored key, and the daemon renames
+		// from the one it derives from the name, so the confirm has to name that rather than
+		// wave the rename through unannounced.
+		const from = p.board_key ?? boardKeyBase(p.name);
+		if (key && key !== from) {
 			try {
 				const counts = await api().taskCounts(p.id);
 				const total = counts.reduce((n, c) => n + c.count, 0);
@@ -222,13 +228,15 @@
 		if (!f || !p) return;
 		renaming = null;
 		saving = true;
-		let landed = false;
+		let sent = 0;
+		const landed = { project: false, access: false, extraction: false };
 		const failed: string[] = [];
 
-		const write = async (what: string, fn: () => Promise<unknown>) => {
+		const write = async (what: string, part: keyof typeof landed, fn: () => Promise<unknown>) => {
+			sent++;
 			try {
 				await fn();
-				landed = true;
+				landed[part] = true;
 			} catch (e) {
 				failed.push(`${what}: ${errorMessage(e)}`);
 			}
@@ -236,33 +244,93 @@
 
 		const patch = patchOf(f, p);
 		if (Object.keys(patch).length > 0) {
-			await write('Project', () => api().patchProject(p.id, patch));
+			await write('Project', 'project', () => api().patchProject(p.id, patch));
 		}
 
 		// A label added by hand is only stored if the lists are written out in full: a pair
 		// of nulls says "any actor" and forgets the label the moment the save lands.
 		const access = toAgentAccess(f.actors, f.memoryWriters, f.taskMovers, f.requireReview, f.manual);
 		if (JSON.stringify(access) !== JSON.stringify(p.agent_access)) {
-			await write('Agent access', () => api().setAgentAccess(p.id, access));
+			await write('Agent access', 'access', () => api().setAgentAccess(p.id, access));
 		}
 
 		if (JSON.stringify(f.extraction) !== JSON.stringify(extractionForm(p.extraction))) {
-			await write('Extraction', () =>
+			await write('Extraction', 'extraction', () =>
 				api().setProjectExtraction(p.id, toProjectExtraction(f.extraction))
 			);
 		}
 
-		if (landed) {
-			await reload();
+		if (Object.values(landed).some(Boolean)) {
+			await reloadKeeping(landed);
 			savedAt = clockNow();
 		}
 		saving = false;
+		// A Save with nothing to send made no request; saying it saved would be a claim
+		// about a write that never happened.
 		if (failed.length > 0) push('error', failed.join('; '));
-		else push('success', 'Settings saved');
+		else if (sent > 0) push('success', 'Settings saved');
 	}
 
+	/**
+	 * Re-reads the project after a save and takes the stored values for the cards that
+	 * landed, leaving the ones that failed exactly as the user typed them. `loaded` always
+	 * becomes the stored truth, so the failed card alone stays dirty and Save can retry it.
+	 */
+	async function reloadKeeping(landed: {
+		project: boolean;
+		access: boolean;
+		extraction: boolean;
+	}): Promise<void> {
+		const before = form;
+		try {
+			await openProject(id, true);
+		} catch (e) {
+			push('error', errorMessage(e));
+		}
+		const p = project.current;
+		if (!p || !before) return;
+		const stored = formFrom(p, sources);
+		form = {
+			...stored,
+			...(landed.project ? {} : { name: before.name, boardKey: before.boardKey, remote: before.remote }),
+			...(landed.access
+				? {}
+				: {
+						actors: before.actors,
+						memoryWriters: before.memoryWriters,
+						taskMovers: before.taskMovers,
+						requireReview: before.requireReview,
+						manual: before.manual
+					}),
+			...(landed.extraction ? {} : { extraction: before.extraction })
+		};
+		loaded = formFrom(p, sources);
+		split = accessIsSplit(p.agent_access);
+		builtFor = p.id;
+		testResult = null;
+	}
+
+	/**
+	 * The daemon tests the *stored* override, so an edited endpoint has to land before the
+	 * test means anything. Saves the extraction card first when it differs, exactly as the
+	 * global settings screen does, and gives up if that write fails.
+	 */
 	async function onTest() {
-		if (!id || testing) return;
+		if (!id || testing || saving) return;
+		const f = form;
+		const p = current;
+		if (f && p && JSON.stringify(f.extraction) !== JSON.stringify(extractionForm(p.extraction))) {
+			saving = true;
+			try {
+				await api().setProjectExtraction(p.id, toProjectExtraction(f.extraction));
+			} catch (e) {
+				saving = false;
+				push('error', `Extraction: ${errorMessage(e)}`);
+				return;
+			}
+			saving = false;
+			await reloadKeeping({ project: false, access: false, extraction: true });
+		}
 		testing = true;
 		testResult = null;
 		try {
@@ -299,28 +367,13 @@
 	{/snippet}
 </Dialog>
 
-<Dialog
+<RemoveProjectDialog
 	open={confirmingRemove}
-	title="Remove this project?"
+	{name}
+	testid="settings-remove-confirm"
 	onclose={() => (confirmingRemove = false)}
->
-	<p class="prose">
-		Atlas forgets <strong>{name}</strong> and stops offering it as a scope. Its memories are kept,
-		its tasks are deleted, and connecting the same root again re-adds it. Nothing on disk is
-		touched.
-	</p>
-	{#snippet footer()}
-		<Button onclick={() => (confirmingRemove = false)}>Cancel</Button>
-		<Button
-			variant="danger"
-			data-testid="settings-remove-confirm"
-			disabled={project.removing}
-			onclick={confirmRemove}
-		>
-			{project.removing ? 'Removing…' : 'Remove'}
-		</Button>
-	{/snippet}
-</Dialog>
+	onconfirm={confirmRemove}
+/>
 
 {#if form && current}
 	<div class="stack">

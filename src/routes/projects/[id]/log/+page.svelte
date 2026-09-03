@@ -52,7 +52,7 @@
 		{ key: 'source', label: 'Source', width: '180px' },
 		{ key: 'event', label: 'Event', width: '120px' },
 		{ key: 'detail', label: 'Detail' },
-		{ key: 'ref', label: 'Ref', width: '110px', align: 'right' }
+		{ key: 'ref', label: 'Ref', width: '120px', align: 'right' }
 	];
 
 	// Only the route id belongs in this effect's dependencies. `loadLog` reads every filter
@@ -91,7 +91,12 @@
 			const filename = exportFilename(name);
 			if (inTauri()) {
 				const { save } = await import('@tauri-apps/plugin-dialog');
-				const path = await save({ defaultPath: filename });
+				// The app may only write into Downloads, Documents and the Desktop, so the
+				// dialog opens where the export can actually land rather than in a folder the
+				// capability would refuse.
+				const { downloadDir } = await import('@tauri-apps/api/path');
+				const dir = await downloadDir().catch(() => null);
+				const path = await save({ defaultPath: dir ? `${dir}/${filename}` : filename });
 				if (!path) return;
 				const { writeTextFile } = await import('@tauri-apps/plugin-fs');
 				await writeTextFile(path, text);

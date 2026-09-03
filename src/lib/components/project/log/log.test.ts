@@ -176,8 +176,17 @@ describe('refs', () => {
 		expect(refLabel(entry())).toBe('');
 	});
 
-	it('shortens an id when the ref carries no key', () => {
-		expect(refLabel(ref('memory', 'ea6af936-6170-4fb3-8d2b-622c1160e224'))).toBe('ea6af936');
+	it('names a memory rather than showing a bare id', () => {
+		expect(refLabel(ref('memory', 'ea6af936-6170-4fb3-8d2b-622c1160e224'))).toBe('mem ea6af936');
+	});
+
+	it('shortens the id of anything else that carries no key', () => {
+		expect(refLabel(ref('job', 'ea6af936-6170-4fb3-8d2b-622c1160e224'))).toBe('ea6af936');
+	});
+
+	it('prefers the key: a task shows its key, a project its name', () => {
+		expect(refLabel({ ...ref('task', 't1'), ref: { type: 'task', id: 't1', key: 'ATL-7' } })).toBe('ATL-7');
+		expect(refLabel({ ...ref('project', 'p1'), ref: { type: 'project', id: 'p1', key: 'atlas' } })).toBe('atlas');
 	});
 });
 

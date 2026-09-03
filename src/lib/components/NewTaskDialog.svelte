@@ -43,6 +43,9 @@
 	let blockedBy = $state('');
 	let creating = $state(false);
 
+	/** The textarea is not a ds component, so its label is tied to it by hand. */
+	const descriptionId = $props.id();
+
 	const splitList = (text: string) =>
 		text
 			.split(',')
@@ -93,37 +96,39 @@
 	<div class="form" data-testid="task-new">
 		<p class="target" data-testid="new-task-target">{target}</p>
 
-		<label class="field">
-			<span>Title</span>
-			<Input bind:value={title} data-testid="new-task-title" placeholder="What needs doing" />
-		</label>
+		<Input
+			label="Title"
+			bind:value={title}
+			data-testid="new-task-title"
+			placeholder="What needs doing"
+		/>
 
-		<label class="field">
-			<span>Description</span>
-			<Textarea bind:value={description} rows={4} data-testid="new-task-description" />
-		</label>
+		<!-- The design system has no textarea of its own, so the shared one wears the
+		     system's field classes rather than a second set of labels. -->
+		<span class="dbm-field">
+			<label class="dbm-field__label" for={descriptionId}>Description</label>
+			<Textarea id={descriptionId} bind:value={description} rows={4} data-testid="new-task-description" />
+		</span>
 
 		<div class="pair">
-			<label class="field">
-				<span>Kind</span>
-				<Select bind:value={kind} options={kindOptions} data-testid="new-task-kind" />
-			</label>
-			<label class="field">
-				<span>Priority</span>
-				<Select bind:value={priority} options={priorityOptions} data-testid="new-task-priority" />
-			</label>
+			<Select label="Kind" bind:value={kind} options={kindOptions} data-testid="new-task-kind" />
+			<Select
+				label="Priority"
+				bind:value={priority}
+				options={priorityOptions}
+				data-testid="new-task-priority"
+			/>
 		</div>
 
-		<label class="field">
-			<span>Labels</span>
-			<Input bind:value={labels} data-testid="new-task-labels" placeholder="api, ui" />
-		</label>
+		<Input label="Labels" bind:value={labels} data-testid="new-task-labels" placeholder="api, ui" />
 
-		<label class="field">
-			<span>Blocked by</span>
-			<Input bind:value={blockedBy} data-testid="new-task-blockers" placeholder="ATL-3, ATL-7" />
-			<span class="hint">Task keys, separated by commas.</span>
-		</label>
+		<Input
+			label="Blocked by"
+			hint="Task keys, separated by commas."
+			bind:value={blockedBy}
+			data-testid="new-task-blockers"
+			placeholder="ATL-3, ATL-7"
+		/>
 	</div>
 
 	{#snippet footer()}
@@ -146,31 +151,15 @@
 		gap: var(--space-3);
 	}
 
-	.field {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-1);
-	}
-
-	.field > span {
-		font-size: 13px;
-		color: var(--text-secondary);
-	}
-
 	.pair {
 		display: grid;
 		grid-template-columns: 1fr 1fr;
 		gap: var(--space-3);
 	}
 
-	.hint {
-		color: var(--text-secondary);
-		font-size: 12px;
-	}
-
 	.target {
 		margin: 0;
 		color: var(--text-secondary);
-		font-size: 13px;
+		font-size: var(--text-sm);
 	}
 </style>

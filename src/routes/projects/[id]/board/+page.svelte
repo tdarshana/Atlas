@@ -7,6 +7,7 @@
 	// The layout owns the header and the tabs, so this page lends the header its actions
 	// and the side panel its filters rather than drawing either itself.
 	import { onMount, tick, untrack } from 'svelte';
+	import { replaceState } from '$app/navigation';
 	import { page } from '$app/state';
 	import NewTaskDialog from '$lib/components/NewTaskDialog.svelte';
 	import StageEditor from '$lib/components/StageEditor.svelte';
@@ -73,6 +74,12 @@
 		const id = projectId;
 		const q = page.url.searchParams.get('q') ?? '';
 		untrack(() => {
+			// The column and unassigned filters live in module state, so another project's
+			// board would otherwise open already narrowed with only the side panel saying so.
+			if (board.filters.projectId !== id) {
+				board.filters.stage = null;
+				board.filters.unassigned = false;
+			}
 			board.filters.projectId = id;
 			board.filters.query = q;
 			// Re-read on every URL change, not only when the project does: the widths for a
@@ -126,6 +133,13 @@
 	async function dismiss() {
 		const key = board.selected;
 		closeTask();
+		// `?task=` is re-read on every URL change, so a dismissed task would dock again the
+		// moment anything else touched the URL. Strip it rather than leave it lying there.
+		if (page.url.searchParams.has('task')) {
+			const url = new URL(page.url);
+			url.searchParams.delete('task');
+			replaceState(url, page.state);
+		}
 		if (!key) return;
 		// The focused close button unmounts with the panel, which would drop focus on
 		// the body and restart the tab order at the top of the page.

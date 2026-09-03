@@ -4,6 +4,8 @@ import type { AgentAccess } from '$lib/types';
 import {
 	accessChecked,
 	accessIsSplit,
+	alwaysAllowed,
+	boardKeyBase,
 	DEFAULT_ACTORS,
 	extractionForm,
 	KEY_PREFIX_RE,
@@ -11,6 +13,7 @@ import {
 	keyWillDrop,
 	knownActors,
 	MASKED_KEY,
+	SYSTEM_ACTORS,
 	toAgentAccess,
 	toProjectExtraction
 } from './settings';
@@ -22,9 +25,15 @@ describe('knownActors', () => {
 		expect(knownActors([], OPEN)).toEqual([...DEFAULT_ACTORS].sort());
 	});
 
-	it('adds the actors seen in the log', () => {
-		expect(knownActors(['workflow', 'desktop'], OPEN)).toContain('workflow');
-		expect(knownActors(['workflow'], OPEN).filter((a) => a === 'desktop')).toHaveLength(1);
+	it('adds the agent labels seen in the log', () => {
+		expect(knownActors(['codex/fixer'], OPEN)).toContain('codex/fixer');
+		expect(knownActors(['cli/claude-code'], OPEN).filter((a) => a === 'cli/claude-code')).toHaveLength(1);
+	});
+
+	it('hides Atlas own system labels, however often they write', () => {
+		const actors = knownActors(['api', 'cli', 'sync', 'desktop', 'workflow', 'codex'], OPEN);
+		for (const system of SYSTEM_ACTORS) expect(actors).not.toContain(system);
+		expect(actors).toContain('codex');
 	});
 
 	it('keeps an allow-listed actor that has not written yet', () => {
@@ -254,5 +263,29 @@ describe('key prefix', () => {
 		expect(keyPrefixConfirm(12, 'ATL', 'ZED')).toBe('Rename 12 tasks from ATL- to ZED-?');
 		expect(keyPrefixConfirm(1, 'ATL', 'ZED')).toBe('Rename 1 task from ATL- to ZED-?');
 		expect(keyPrefixConfirm(0, 'ATL', 'ZED')).toBe('Rename 0 tasks from ATL- to ZED-?');
+	});
+});
+
+describe('alwaysAllowed', () => {
+	it('names the actors the daemon exempts, and only those', () => {
+		for (const actor of ['desktop', 'api', 'cli', 'cli/ann', 'cli/claude-code']) {
+			expect(alwaysAllowed(actor)).toBe(true);
+		}
+		for (const actor of ['cline', 'codex', 'claude-code/reviewer', 'workflow']) {
+			expect(alwaysAllowed(actor)).toBe(false);
+		}
+	});
+});
+
+describe('boardKeyBase', () => {
+	it('mirrors the daemon: three alphanumerics, uppercased and padded', () => {
+		expect(boardKeyBase('atlas')).toBe('ATL');
+		expect(boardKeyBase('my-app')).toBe('MYA');
+		expect(boardKeyBase('go')).toBe('GOX');
+		expect(boardKeyBase('a1-b2')).toBe('A1B');
+	});
+
+	it('falls back to the global board key when the name has nothing to take', () => {
+		expect(boardKeyBase('---')).toBe('ATLAS');
 	});
 });

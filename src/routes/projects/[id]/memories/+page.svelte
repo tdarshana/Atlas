@@ -63,7 +63,7 @@
 					query: q,
 					limit: SEARCH_LIMIT,
 					project_id: id,
-					scope: 'project_only'
+					list_scope: 'project_only'
 				});
 				rows = results.map((r) => r.memory);
 			} else {

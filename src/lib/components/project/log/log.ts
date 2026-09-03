@@ -44,11 +44,17 @@ function shortId(id: string): string {
 	return id.length > 8 ? id.slice(0, 8) : id;
 }
 
-/** What the Ref column prints: a task key where there is one, else a short id. */
+/**
+ * What the Ref column prints. A task shows its key and a project its name, both of which
+ * the daemon sends as the ref's `key`; a memory has neither, so it is named for what it
+ * is rather than shown as eight characters of a uuid on their own.
+ */
 export function refLabel(entry: LogEntry): string {
 	const ref = entry.ref;
 	if (!ref) return '';
-	return ref.key || shortId(ref.id);
+	if (ref.key) return ref.key;
+	if (!ref.id) return '';
+	return ref.type === 'memory' ? `mem ${shortId(ref.id)}` : shortId(ref.id);
 }
 
 /**

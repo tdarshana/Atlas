@@ -43,10 +43,20 @@ export interface RecallHit {
 	score: number;
 }
 
+/**
+ * A request-time narrowing, not a value of a memory's own `scope` column (that is
+ * `MemoryScope`). `project_only` asks `GET /memories` and `POST /memories/search` for
+ * exactly one project's own memories, nothing global; `all` is the default, where a
+ * project widens to its own memories plus every global one.
+ */
+export type MemoryListScope = 'all' | 'project_only';
+
 export interface RecallQuery {
 	query: string;
 	limit?: number;
 	scope?: MemoryScope | null;
+	/** How `project_id` is read. Defaults to `all` on the daemon. */
+	list_scope?: MemoryListScope | null;
 	project_id?: Uuid | null;
 	kinds?: MemoryKind[];
 	tags?: string[];

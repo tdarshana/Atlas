@@ -7,6 +7,7 @@
 	// project's two rules already differ, the card draws both rather than flatten the one
 	// it is not showing.
 	import { Button, Checkbox, Input } from '$lib/ds';
+	import { alwaysAllowed } from './settings';
 
 	interface Props {
 		/** The labels offered a tick, already sorted. */
@@ -66,7 +67,10 @@
 				<span class="group-heading">Memories</span>
 				<span class="group-heading">Tasks</span>
 				{#each actors as actor (actor)}
-					<span class="mono label">{actor}</span>
+					<span class="mono label">
+						{actor}
+						{#if alwaysAllowed(actor)}<span class="always">always allowed</span>{/if}
+					</span>
 					<Checkbox
 						aria-label="{actor} may write memories"
 						checked={memoryWriters[actor] ?? false}
@@ -82,11 +86,16 @@
 		{:else}
 			<div class="ticks">
 				{#each actors as actor (actor)}
-					<Checkbox
-						label={actor}
-						checked={memoryWriters[actor] ?? false}
-						onchange={(e) => set(actor, e.currentTarget.checked, 'both')}
-					/>
+					<div class="tick">
+						<Checkbox
+							label={actor}
+							checked={memoryWriters[actor] ?? false}
+							onchange={(e) => set(actor, e.currentTarget.checked, 'both')}
+						/>
+						<!-- The daemon exempts the user's own hands from both lists, so a tick
+						     against one of them changes nothing; say so rather than imply a rule. -->
+						{#if alwaysAllowed(actor)}<span class="always">always allowed</span>{/if}
+					</div>
 				{/each}
 			</div>
 		{/if}
@@ -100,7 +109,7 @@
 					if (e.key === 'Enter') add();
 				}}
 			/>
-			<Button data-testid="access-add" disabled={!canAdd} onclick={add}>Add label</Button>
+			<Button size="sm" data-testid="access-add" disabled={!canAdd} onclick={add}>Add</Button>
 		</div>
 		<Checkbox
 			label="Require review for memories proposed by agents"
@@ -110,10 +119,12 @@
 </section>
 
 <style>
+	/* The pane scrolls, not the card: a card that shrank would clip the row the user
+	   came here to change. */
 	.card {
 		display: flex;
 		flex-direction: column;
-		overflow: hidden;
+		flex: 0 0 auto;
 	}
 
 	header {
@@ -151,6 +162,17 @@
 		gap: 6px;
 	}
 
+	.tick {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.always {
+		font-size: 11px;
+		color: var(--text-tertiary);
+	}
+
 	.grid {
 		display: grid;
 		grid-template-columns: 220px 80px 80px;
@@ -162,10 +184,14 @@
 		color: var(--text-secondary);
 	}
 
+	/* An input and a button, not a bar: the button is its own width. */
 	.add {
-		display: grid;
-		grid-template-columns: 220px auto;
-		gap: 8px;
+		display: flex;
 		align-items: center;
+		gap: 8px;
+	}
+
+	.add :global(.dbm-input) {
+		width: 220px;
 	}
 </style>

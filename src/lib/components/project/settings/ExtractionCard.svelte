@@ -100,10 +100,11 @@
 </section>
 
 <style>
+	/* The pane scrolls, not the card: a card that shrank would clip its own fields. */
 	.card {
 		display: flex;
 		flex-direction: column;
-		overflow: hidden;
+		flex: 0 0 auto;
 	}
 
 	header {

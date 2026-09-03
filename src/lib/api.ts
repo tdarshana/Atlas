@@ -13,7 +13,7 @@ import type {
 	LogEntry,
 	LogFilter,
 	Memory,
-	MemoryScope,
+	MemoryListScope,
 	MemoryStatus,
 	NewAgent,
 	NewDoc,
@@ -42,12 +42,7 @@ import type {
 	Uuid
 } from './types';
 
-/**
- * A request-time narrowing, not a value of a memory's own `scope` column (that is
- * `MemoryScope`). `project_only` asks `GET /memories` and `POST /memories/search` for
- * exactly one project's own memories, nothing global.
- */
-export type MemoryListScope = 'project_only';
+export type { MemoryListScope } from '$lib/types';
 
 /** A non-2xx response, carrying the daemon's `error` string as the message. */
 export class ApiError extends Error {
@@ -85,8 +80,7 @@ export class AtlasApi {
 
 	/**
 	 * `scope: 'project_only'` (paired with `projectId`) narrows to that project's own
-	 * memories, dropping the global ones a bare `project_id` still widens in. Fix round 1:
-	 * the daemon gains this on `GET /memories` in a parallel fix; see `MemoryListScope`.
+	 * memories, dropping the global ones a bare `project_id` still widens in.
 	 */
 	listMemories(
 		status?: MemoryStatus,
@@ -99,8 +93,11 @@ export class AtlasApi {
 		);
 	}
 
-	/** Same `project_only` scope as `listMemories`, for the search route. */
-	search(q: Omit<RecallQuery, 'scope'> & { scope?: MemoryScope | MemoryListScope | null }): Promise<RecallHit[]> {
+	/**
+	 * `list_scope` is the same narrowing `listMemories` takes; `scope` stays the memory's
+	 * own scope, and the daemon reads the two independently.
+	 */
+	search(q: RecallQuery): Promise<RecallHit[]> {
 		return this.req('POST', '/api/v1/memories/search', q);
 	}
 

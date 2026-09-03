@@ -2,6 +2,7 @@
 	// The Danger zone card of frame 02.7. The confirm and the delete itself stay with the
 	// page, which is the piece that has somewhere to navigate afterwards.
 	import { Button } from '$lib/ds';
+	import { REMOVE_PROJECT_COPY } from '../RemoveProjectDialog.svelte';
 
 	interface Props {
 		disabled: boolean;
@@ -14,10 +15,7 @@
 <section class="card" data-testid="settings-danger">
 	<header><span class="title">Danger zone</span></header>
 	<div class="body">
-		<span class="sentence">
-			Removing the project forgets its root, tasks, and project-scoped memories. Files on disk
-			are not touched.
-		</span>
+		<span class="sentence">{REMOVE_PROJECT_COPY}</span>
 		<Button variant="danger" data-testid="settings-remove" {disabled} onclick={onremove}>
 			Remove project…
 		</Button>
@@ -25,10 +23,11 @@
 </section>
 
 <style>
+	/* The pane scrolls, not the card: a card that shrank would clip its own fields. */
 	.card {
 		display: flex;
 		flex-direction: column;
-		overflow: hidden;
+		flex: 0 0 auto;
 	}
 
 	header {

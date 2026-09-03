@@ -4,7 +4,7 @@
 
 import { api } from '$lib/daemon.svelte';
 import { errorLogPath, errorMessage } from '$lib/errors';
-import type { Project, ProjectContext, Uuid } from '$lib/types';
+import type { Project, Uuid } from '$lib/types';
 
 export const projects = $state({
 	items: [] as Project[],
@@ -16,7 +16,6 @@ export const projects = $state({
 
 export const projectDetail = $state({
 	project: null as Project | null,
-	context: null as ProjectContext | null,
 	loading: false,
 	error: null as string | null,
 	errorLogPath: null as string | null,
@@ -76,18 +75,17 @@ export async function loadProject(id: Uuid): Promise<void> {
 	const g = ++detailGeneration;
 	projectDetail.loading = true;
 	try {
+		// `getProject` reads the stored row and nothing more. The context route would
+		// upsert the project and write an audit row, so visiting a tab would look like
+		// an edit; only the header's Refresh rebuilds anything.
 		const project = await api().getProject(id);
-		// The context route keys on the root path, not the id.
-		const context = await api().projectContext(project.root_path);
 		if (g !== detailGeneration) return;
 		projectDetail.project = project;
-		projectDetail.context = context;
 		projectDetail.error = null;
 		projectDetail.errorLogPath = null;
 	} catch (e) {
 		if (g !== detailGeneration) return;
 		projectDetail.project = null;
-		projectDetail.context = null;
 		projectDetail.error = errorMessage(e);
 		projectDetail.errorLogPath = errorLogPath(e);
 	} finally {
@@ -106,7 +104,6 @@ export async function deleteProject(id: Uuid): Promise<void> {
 		await api().deleteProject(id);
 		detailGeneration++;
 		projectDetail.project = null;
-		projectDetail.context = null;
 		await loadProjects();
 	} finally {
 		projectDetail.removing = false;

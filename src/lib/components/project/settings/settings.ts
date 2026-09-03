@@ -11,13 +11,35 @@ export const KEY_PREFIX_RE = /^[A-Z][A-Z0-9]{1,5}$/;
 /** What the daemon sends in place of a stored key, and what means "leave it alone". */
 export const MASKED_KEY = '***';
 
-/** The three actors that exist before a project has a log to learn from. */
-export const DEFAULT_ACTORS = ['cli/codex', 'cli/claude-code', 'desktop'];
+/**
+ * The two agent labels the card offers before a project has a log to learn from. They
+ * are `cli/*`, so the daemon exempts them either way, but the frame lists them and a
+ * card that offered nothing on a fresh project would read as broken.
+ */
+export const DEFAULT_ACTORS = ['cli/claude-code', 'cli/codex'];
 
 /**
- * The labels the Agent access card offers a checkbox for: the defaults, whatever has
+ * Labels that are Atlas itself rather than an agent: the daemon's own HTTP default, the
+ * bare CLI, the sync writer, the desktop and the workflow runner. They all write to the
+ * log, and none of them is something a rule can usefully name, so the card hides them.
+ */
+export const SYSTEM_ACTORS = ['api', 'cli', 'sync', 'desktop', 'workflow'];
+
+/**
+ * Whether the daemon exempts this label from both allowlists and from `require_review`.
+ * Mirrors `atlas_core::projects::actor_is_user`: the user's own hands, matched exactly
+ * so `cline` is still an agent.
+ */
+export function alwaysAllowed(actor: string): boolean {
+	const a = actor.trim();
+	return a === 'desktop' || a === 'api' || a === 'cli' || a.startsWith('cli/');
+}
+
+/**
+ * The labels the Agent access card offers a checkbox for: the two defaults, whatever has
  * written to this project's log, and anything already on either allowlist, so a rule the
- * user set from the CLI is still visible here.
+ * user set from the CLI is still visible here. Atlas's own system labels are dropped:
+ * ticking `api` would say nothing, since the daemon never checks it.
  */
 export function knownActors(sources: string[], access: AgentAccess | null): string[] {
 	const all = [
@@ -26,7 +48,21 @@ export function knownActors(sources: string[], access: AgentAccess | null): stri
 		...(access?.memory_writers ?? []),
 		...(access?.task_movers ?? [])
 	];
-	return [...new Set(all.map((a) => a.trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+	return [...new Set(all.map((a) => a.trim()).filter(Boolean))]
+		.filter((a) => !SYSTEM_ACTORS.includes(a))
+		.sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * The key prefix a project's tasks carry today. Mirrors `board_key_base`: the first three
+ * alphanumerics of the name, uppercased and padded, which is what the daemon renames
+ * *from* when the stored `board_key` is null (a project connected before migration 3).
+ * A name with nothing to take falls back to the global board's key.
+ */
+export function boardKeyBase(name: string): string {
+	const letters = (name.match(/[a-zA-Z0-9]/g) ?? []).slice(0, 3).join('').toUpperCase();
+	if (!letters) return 'ATLAS';
+	return letters.padEnd(3, 'X');
 }
 
 /**

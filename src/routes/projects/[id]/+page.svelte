@@ -19,7 +19,7 @@
 	} from '$lib/stores/project.svelte';
 	import { projects } from '$lib/stores/projects.svelte';
 	import type { Task } from '$lib/types';
-	import Dialog from '$lib/ui/Dialog.svelte';
+	import RemoveProjectDialog from '$lib/components/project/RemoveProjectDialog.svelte';
 	import { push } from '$lib/ui/toasts.svelte';
 
 	let tasks = $state<Task[]>([]);
@@ -106,24 +106,13 @@
 	</div>
 {/snippet}
 
-<Dialog open={confirming} title="Remove this project?" onclose={() => (confirming = false)}>
-	<p class="prose">
-		Atlas forgets <strong>{current?.name ?? 'this project'}</strong> and stops offering it as a
-		scope. Its memories are kept, its tasks are deleted, and connecting the same root again
-		re-adds it. Nothing on disk is touched.
-	</p>
-	{#snippet footer()}
-		<Button onclick={() => (confirming = false)}>Cancel</Button>
-		<Button
-			variant="danger"
-			data-testid="project-remove-confirm"
-			disabled={project.removing}
-			onclick={confirmRemove}
-		>
-			{project.removing ? 'Removing…' : 'Remove'}
-		</Button>
-	{/snippet}
-</Dialog>
+<RemoveProjectDialog
+	open={confirming}
+	name={current?.name ?? 'this project'}
+	testid="project-remove-confirm"
+	onclose={() => (confirming = false)}
+	onconfirm={confirmRemove}
+/>
 
 <div class="cards">
 	<div class="card pad" data-testid="project-profile">
@@ -369,8 +358,4 @@
 		color: var(--text-tertiary);
 	}
 
-	.prose {
-		margin: 0;
-		max-width: 80ch;
-	}
 </style>
