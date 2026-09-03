@@ -13,3 +13,4 @@ src-tauri/binaries/
 references/**/uploads/
 references/**/.thumbnail
 references/**/.DS_Store
+.playwright-mcp/
