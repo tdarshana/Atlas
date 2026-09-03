@@ -45,7 +45,7 @@ describe('Table', () => {
 			props: { id: 'test-sort', columns, rows, rowKey }
 		});
 
-		const header = container.querySelector('.header-cell.sortable')!;
+		const header = container.querySelector('.header-cell.sortable .header-button')!;
 
 		await fireEvent.click(header);
 		let names = [...container.querySelectorAll('.row')].map((r) => r.querySelector('.cell')!.textContent);
@@ -76,16 +76,22 @@ describe('Table', () => {
 		expect(getByText('No rows.')).toBeTruthy();
 	});
 
-	it('carries grid semantics: grid, row, columnheader, gridcell', () => {
+	it('carries grid semantics: grid, rowgroup, row, columnheader, gridcell', () => {
 		const { container } = render(Table, {
 			props: { id: 'test-grid', columns, rows, rowKey }
 		});
 
 		expect(container.querySelector('.table')!.getAttribute('role')).toBe('grid');
-		expect(container.querySelector('.header')!.getAttribute('role')).toBe('row');
+		// Both the header row and the data rows sit inside a rowgroup, so the grid owns
+		// nothing but rows and rowgroups.
+		expect(container.querySelector('.header')!.getAttribute('role')).toBe('rowgroup');
+		expect(container.querySelector('.body')!.getAttribute('role')).toBe('rowgroup');
+		expect(container.querySelector('.header-row')!.getAttribute('role')).toBe('row');
 		expect(container.querySelectorAll('.header-cell').length).toBeGreaterThan(0);
 		for (const header of container.querySelectorAll('.header-cell')) {
 			expect(header.getAttribute('role')).toBe('columnheader');
+			// The activator inside it stays a real button.
+			expect(header.querySelector('button.header-button')).toBeTruthy();
 		}
 		const row = container.querySelector('.row')!;
 		expect(row.getAttribute('role')).toBe('row');
@@ -100,12 +106,13 @@ describe('Table', () => {
 		});
 
 		const sortableHeader = container.querySelector('.header-cell.sortable')!;
+		const sortButton = sortableHeader.querySelector('.header-button')!;
 		expect(sortableHeader.getAttribute('aria-sort')).toBe('none');
 
-		await fireEvent.click(sortableHeader);
+		await fireEvent.click(sortButton);
 		expect(sortableHeader.getAttribute('aria-sort')).toBe('ascending');
 
-		await fireEvent.click(sortableHeader);
+		await fireEvent.click(sortButton);
 		expect(sortableHeader.getAttribute('aria-sort')).toBe('descending');
 
 		// The Id column is not sortable, so it carries no aria-sort at all.
@@ -133,7 +140,28 @@ describe('Table', () => {
 
 		const sortableHeader = container.querySelector('.header-cell.sortable')!;
 		expect(sortableHeader.getAttribute('aria-sort')).toBe('ascending');
-		expect(sortableHeader.querySelector('svg')).toBeTruthy();
+		expect(sortableHeader.querySelector('svg')!.classList.contains('lucide-arrow-up')).toBe(
+			true
+		);
+	});
+
+	it('flips the indicator icon between ascending and descending', async () => {
+		const { container } = render(Table, {
+			props: { id: 'test-indicator', columns, rows, rowKey }
+		});
+
+		const sortableHeader = container.querySelector('.header-cell.sortable')!;
+		const sortButton = sortableHeader.querySelector('.header-button')!;
+
+		await fireEvent.click(sortButton);
+		expect(sortableHeader.querySelector('svg')!.classList.contains('lucide-arrow-up')).toBe(
+			true
+		);
+
+		await fireEvent.click(sortButton);
+		expect(sortableHeader.querySelector('svg')!.classList.contains('lucide-arrow-down')).toBe(
+			true
+		);
 	});
 
 	it('lets a persisted sort win over defaultSort', () => {
@@ -166,7 +194,10 @@ describe('Table', () => {
 		const nameHeader = container.querySelector('.header-cell.sortable')!;
 		expect([...container.querySelectorAll('.header-cell')].indexOf(nameHeader)).toBe(0);
 
-		await fireEvent.keyDown(nameHeader, { key: 'ArrowRight', altKey: true });
+		await fireEvent.keyDown(nameHeader.querySelector('.header-button')!, {
+			key: 'ArrowRight',
+			altKey: true
+		});
 
 		const headersAfter = [...container.querySelectorAll('.header-cell')];
 		expect(headersAfter.map((h) => h.textContent?.trim())).toEqual(['Id', 'Name']);

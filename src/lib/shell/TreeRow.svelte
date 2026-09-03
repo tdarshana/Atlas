@@ -12,10 +12,21 @@
 		meta?: number | string;
 		selected?: boolean;
 		iconColor?: string;
+		/** For a row that is a destination; `onclick` is for a row that is an action. */
+		href?: string;
 		onclick?: () => void;
 	}
 
-	let { icon, label, mono = false, meta, selected = false, iconColor, onclick }: Props = $props();
+	let {
+		icon,
+		label,
+		mono = false,
+		meta,
+		selected = false,
+		iconColor,
+		href,
+		onclick
+	}: Props = $props();
 </script>
 
 {#snippet body()}
@@ -29,7 +40,11 @@
 	{#if meta !== undefined}<span class="meta">{meta}</span>{/if}
 {/snippet}
 
-{#if onclick}
+{#if href}
+	<a class="row" class:selected {href} aria-current={selected ? 'true' : undefined}>
+		{@render body()}
+	</a>
+{:else if onclick}
 	<button class="row" class:selected type="button" aria-current={selected ? 'true' : undefined} {onclick}>
 		{@render body()}
 	</button>
@@ -53,6 +68,7 @@
 		font-family: inherit;
 		font-size: 12px;
 		text-align: left;
+		text-decoration: none;
 		cursor: default;
 		transition: var(--transition-hover);
 	}

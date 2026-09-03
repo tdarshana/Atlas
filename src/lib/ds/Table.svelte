@@ -159,30 +159,44 @@
 </script>
 
 <div class="table" role="grid">
-	<div class="header" role="row" style:grid-template-columns={gridTemplate}>
-		{#each visibleColumns as column (column.key)}
-			<button
-				type="button"
-				role="columnheader"
-				aria-sort={ariaSort(column)}
-				title="Drag, or focus and press Alt+Left or Alt+Right, to move this column"
-				class="header-cell group-heading"
-				class:sortable={column.sortable}
-				class:drop-before={dropKey === column.key && dropBefore}
-				class:drop-after={dropKey === column.key && !dropBefore}
-				style:justify-content={column.align === 'right' ? 'flex-end' : 'flex-start'}
-				draggable="true"
-				ondragstart={(e) => onDragStart(column.key, e)}
-				ondragover={(e) => onDragOver(column.key, e)}
-				ondrop={(e) => onDrop(column.key, e)}
-				ondragend={resetDrag}
-				onclick={() => onHeaderClick(column)}
-				onkeydown={(e) => onHeaderKeydown(e, column)}
-			>
-				{#if sort?.key === column.key}<Icon name="arrow-down" size={11} />{/if}
-				<span>{column.label}</span>
-			</button>
-		{/each}
+	<!-- A grid owns rows and rowgroups only, so the header row and the body each sit in
+	     one; a plain generic in between drops the rows out of the grid's ownership. The
+	     columnheader is the cell, with a real button inside it, so the header still
+	     announces that pressing it sorts. -->
+	<div class="header" role="rowgroup">
+		<div class="header-row" role="row" style:grid-template-columns={gridTemplate}>
+			{#each visibleColumns as column (column.key)}
+				<div
+					role="columnheader"
+					aria-sort={ariaSort(column)}
+					class="header-cell"
+					class:sortable={column.sortable}
+					class:drop-before={dropKey === column.key && dropBefore}
+					class:drop-after={dropKey === column.key && !dropBefore}
+				>
+					<!-- The button fills the cell, so dragging and sorting both work anywhere
+					     in the header; the cell itself stays a plain columnheader. -->
+					<button
+						type="button"
+						class="header-button group-heading"
+						title="Drag, or focus and press Alt+Left or Alt+Right, to move this column"
+						style:justify-content={column.align === 'right' ? 'flex-end' : 'flex-start'}
+						draggable="true"
+						ondragstart={(e) => onDragStart(column.key, e)}
+						ondragover={(e) => onDragOver(column.key, e)}
+						ondrop={(e) => onDrop(column.key, e)}
+						ondragend={resetDrag}
+						onclick={() => onHeaderClick(column)}
+						onkeydown={(e) => onHeaderKeydown(e, column)}
+					>
+						{#if sort?.key === column.key}
+							<Icon name={sort.dir === 'asc' ? 'arrow-up' : 'arrow-down'} size={11} />
+						{/if}
+						<span>{column.label}</span>
+					</button>
+				</div>
+			{/each}
+		</div>
 	</div>
 
 	{#snippet rowCells(row: T)}
@@ -203,7 +217,7 @@
 			{#if empty}{@render empty()}{:else}<p>{emptyText}</p>{/if}
 		</div>
 	{:else}
-		<div class="body">
+		<div class="body" role="rowgroup">
 			{#each sortedRows as row (rowKey(row))}
 				{#if onRowClick}
 					<div
@@ -240,29 +254,26 @@
 	}
 
 	.header {
+		flex: 0 0 28px;
+		user-select: none;
+	}
+
+	.header-row {
 		display: grid;
 		align-items: center;
 		height: 28px;
-		flex: 0 0 28px;
 		padding: 0 12px;
 		column-gap: 12px;
 		border-bottom: 1px solid var(--border-subtle);
-		user-select: none;
 	}
 
 	.header-cell {
 		display: flex;
 		align-items: center;
-		gap: 4px;
 		height: 100%;
 		padding: 0 8px 0 0;
-		margin: 0;
-		border: 0;
 		border-right: 1px solid var(--border-subtle);
-		background: transparent;
 		cursor: default;
-		font: inherit;
-		text-align: inherit;
 	}
 
 	.header-cell:last-child {
@@ -270,7 +281,24 @@
 		padding-right: 0;
 	}
 
-	.header-cell.sortable {
+	.header-button {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		width: 100%;
+		height: 100%;
+		padding: 0;
+		margin: 0;
+		border: 0;
+		background: transparent;
+		color: inherit;
+		cursor: default;
+		font: inherit;
+		text-align: inherit;
+	}
+
+	.header-cell.sortable,
+	.header-cell.sortable .header-button {
 		cursor: pointer;
 	}
 

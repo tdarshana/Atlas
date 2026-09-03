@@ -1,11 +1,13 @@
 /* Font stacks, unchanged from the DBMan design system. The upstream file pulled Inter and
    JetBrains Mono from Google Fonts; the desktop app bundles them instead, because the
-   webview runs under a `default-src 'self'` CSP and must work offline. */
-@import '@fontsource/inter/400.css';
-@import '@fontsource/inter/500.css';
-@import '@fontsource/inter/600.css';
-@import '@fontsource/inter/700.css';
-@import '@fontsource/jetbrains-mono/400.css';
-@import '@fontsource/jetbrains-mono/500.css';
-@import '@fontsource/jetbrains-mono/700.css';
+   webview runs under a `default-src 'self'` CSP and must work offline.
+   Latin only: the full stylesheets pull every unicode subset, which bundled 83 font files
+   into the app for a UI that ships in English. */
+@import '@fontsource/inter/latin-400.css';
+@import '@fontsource/inter/latin-500.css';
+@import '@fontsource/inter/latin-600.css';
+@import '@fontsource/inter/latin-700.css';
+@import '@fontsource/jetbrains-mono/latin-400.css';
+@import '@fontsource/jetbrains-mono/latin-500.css';
+@import '@fontsource/jetbrains-mono/latin-700.css';
 :root{--font-ui:-apple-system,"Segoe UI Variable Text","Segoe UI",Inter,system-ui,sans-serif;--font-mono:"JetBrains Mono","SF Mono","Cascadia Code",Menlo,Consolas,monospace}

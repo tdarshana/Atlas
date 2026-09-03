@@ -52,7 +52,13 @@
 		flex: 1;
 	}
 
+	/* A count is short, but the Config group puts a filesystem path here. It ellipses
+	   rather than pushing the panel into a horizontal scrollbar. */
 	.count {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 		font-family: var(--font-mono);
 		font-size: 11px;
 		color: var(--text-tertiary);

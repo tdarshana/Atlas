@@ -37,14 +37,14 @@
 			{#if checked}<span class="dbm-radio__dot"></span>{/if}
 		{:else if indeterminate}
 			<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-				<path d="M2 5h6" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round" />
+				<path d="M2 5h6" fill="none" stroke="var(--text-on-accent)" stroke-width="1.6" stroke-linecap="round" />
 			</svg>
 		{:else if checked}
 			<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
 				<path
 					d="M1.5 5.2 3.8 7.5 8.5 2.5"
 					fill="none"
-					stroke="#fff"
+					stroke="var(--text-on-accent)"
 					stroke-width="1.6"
 					stroke-linecap="round"
 					stroke-linejoin="round"

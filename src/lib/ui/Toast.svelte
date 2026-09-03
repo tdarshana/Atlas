@@ -38,7 +38,6 @@
 		border-radius: var(--radius-md);
 		background: var(--bg-raised);
 		color: var(--text-primary);
-		font: var(--type-ui);
 		font-size: 12px;
 		text-align: left;
 		box-shadow: var(--shadow-md);
