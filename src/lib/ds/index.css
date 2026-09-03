@@ -1,0 +1,93 @@
+/* The single entry point for the Atlas design system: DBMan tokens, the component CSS
+   extracted from the DBMan bundle, then the few app-level classes the Atlas screens need
+   that the design system does not ship (requirements section 6, "Not used from the DS"). */
+
+@import './tokens/fonts.css';
+@import './tokens/colors.css';
+@import './tokens/typography.css';
+@import './tokens/spacing.css';
+@import './tokens/layout.css';
+@import './tokens/motion.css';
+@import './tokens/engines.css';
+@import './tokens/base.css';
+@import './dbman.css';
+
+/* A panel is the region container: surface layer, subtle edge, its own scroll context. */
+.panel {
+	background: var(--bg-surface);
+	border: 1px solid var(--border-subtle);
+	border-radius: var(--radius-md);
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+}
+
+/* A card is raised on top of a panel and carries the default border weight. */
+.card {
+	background: var(--bg-raised);
+	border: 1px solid var(--border-default);
+	border-radius: 5px;
+}
+
+/* Uppercase group heading. One of the two places the system is not sentence case. */
+.group-heading {
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	color: var(--text-tertiary);
+}
+
+/* Anything the system or the user's data produced: keys, paths, counts, durations. */
+.mono {
+	font-family: var(--font-mono);
+	font-variant-numeric: var(--tabular);
+}
+
+/* View tab strip: 34px, active tab carries a 2px inset accent underline. */
+.tab-strip {
+	display: flex;
+	align-items: stretch;
+	height: var(--h-tabbar);
+	flex: 0 0 var(--h-tabbar);
+	gap: 0;
+	border-bottom: 1px solid var(--border-subtle);
+	background: var(--bg-surface);
+}
+
+.tab-strip__item {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--space-1);
+	height: 100%;
+	padding: 0 var(--space-3);
+	border: 0;
+	background: transparent;
+	color: var(--text-secondary);
+	font: var(--type-ui);
+	cursor: pointer;
+	box-shadow: inset 0 -2px 0 transparent;
+	transition: var(--transition-hover);
+}
+
+.tab-strip__item:hover {
+	background: var(--bg-hover);
+	color: var(--text-primary);
+}
+
+.tab-strip__item[aria-selected='true'] {
+	background: var(--bg-base);
+	color: var(--text-primary);
+	box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+/* Tree, menu and list rows are 22px. */
+.row-22 {
+	display: flex;
+	align-items: center;
+	gap: var(--space-1);
+	height: 22px;
+	flex: 0 0 22px;
+	padding: 0 var(--space-2);
+}

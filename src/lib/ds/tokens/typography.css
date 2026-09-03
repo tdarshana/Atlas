@@ -1,0 +1,23 @@
+:root{
+  /* size / line-height pairs - sizes are literal, never scaled */
+  --text-xs:11px;   --text-xs-lh:16px;   --text-xs-weight:500;
+  --text-sm:12px;   --text-sm-lh:18px;   --text-sm-weight:400;
+  --text-base:13px; --text-base-lh:20px; --text-base-weight:400;
+  --text-lg:15px;   --text-lg-lh:22px;   --text-lg-weight:600;
+  --mono-sm:12px;   --mono-sm-lh:18px;
+  --mono-base:13px; --mono-base-lh:20px;
+
+  --weight-regular:400;
+  --weight-medium:500;
+  --weight-semibold:600;
+  --weight-bold:700;
+
+  --tabular:tabular-nums; /* @kind other */
+
+  /* semantic aliases */
+  --type-ui:var(--text-sm)/var(--text-sm-lh) var(--font-ui);
+  --type-cell:var(--mono-sm)/var(--mono-sm-lh) var(--font-mono);
+  --type-editor:var(--mono-base)/var(--mono-base-lh) var(--font-mono);
+  --type-dialog-title:var(--weight-semibold) var(--text-lg)/var(--text-lg-lh) var(--font-ui);
+  --type-status:var(--weight-medium) var(--text-xs)/var(--text-xs-lh) var(--font-ui);
+}

@@ -1,0 +1,13 @@
+/* Minimal global baseline. Density-first: nothing here adds whitespace. */
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+body{margin:0;background:var(--bg-base);color:var(--text-primary);font:var(--type-ui);font-variant-numeric:var(--tabular)}
+a{color:var(--accent);text-decoration:none}
+a:hover{color:var(--accent-hover);text-decoration:underline}
+:focus-visible{outline:var(--focus-ring-width) solid var(--focus-ring);outline-offset:var(--focus-ring-offset)}
+code,kbd,pre,samp{font-family:var(--font-mono)}
+::selection{background:var(--accent-muted);color:var(--text-primary)}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border-default);border-radius:5px;border:2px solid transparent;background-clip:content-box}
+::-webkit-scrollbar-thumb:hover{background:var(--border-strong);background-clip:content-box}

@@ -1,0 +1,14 @@
+/* Engine identity hues. Small dots and icon tints only - never large fills.
+   These are the engine vendors' own brand colours, used as identification only. */
+:root{
+  --engine-postgresql:#336791;
+  --engine-mysql:#00758F;
+  --engine-mariadb:#C0765A;
+  --engine-oracle:#C74634;
+  --engine-sqlite:#7A8FA6;
+  --engine-mongodb:#47A248;
+  --engine-redis:#DC382D;
+  --engine-dynamodb:#4053D6;
+  --engine-couchbase:#EA2328;
+  --engine-influxdb:#22ADF6;
+}

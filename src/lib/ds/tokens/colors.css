@@ -1,0 +1,160 @@
+/* DBMan colour system. Dark is the default theme - it is what this audience uses.
+   Light is a rebuilt ramp, never an inversion.
+   Every value is checked against WCAG 2.1 AA: 4.5:1 for body text, 3:1 for UI boundaries
+   and large text. Where the source spec value failed AA it is corrected here and the
+   original is kept in a comment. */
+:root,[data-theme="dark"]{
+  color-scheme:dark;
+
+  /* surfaces */
+  --bg-base:#0F1115;
+  --bg-surface:#151821;
+  --bg-raised:#1C2029;
+  --bg-overlay:#232834;
+  --bg-hover:#252A36;
+  --bg-active:#2D3444;
+  --bg-inset:#0B0D11;
+
+  /* borders */
+  --border-subtle:#232833;
+  --border-default:#2F3644;
+  --border-strong:#3D4557;
+
+  /* text */
+  --text-primary:#E4E8F0;
+  --text-secondary:#9AA4B8;
+  --text-tertiary:#737E94;  /* AA fix: spec #646E82 = 3.70:1 on --bg-base */
+  --text-null:#7B87A0;      /* AA fix: spec #5A6478 = 2.9:1 - italic NULL sentinel */
+  --text-inverse:#0F1115;
+  --text-on-accent:#FFFFFF;
+
+  /* accent */
+  --accent:#4C8DF6;
+  --accent-hover:#6BA1F8;
+  --accent-press:#3C7AE0;
+  --accent-muted:#1E3252;
+  --accent-ring:#4C8DF6;
+
+  /* semantics - fills */
+  --success:#3FBF7F;
+  --warning:#E8A33D;
+  --danger:#E5484D;
+  --info:#5CC2E8;
+  --danger-hover:#EC5F63;
+  --danger-press:#CE3B40;
+
+  /* semantics - text on raised/overlay surfaces (AA at 4.5:1) */
+  --success-text:#4FD293;
+  --warning-text:#F0B156;
+  --danger-text:#FF6369;
+  --info-text:#6ECDF0;
+
+  /* semantics - tints for fills behind text */
+  --success-muted:#12301F;
+  --warning-muted:#33260D;
+  --danger-muted:#361417;
+  --info-muted:#12303B;
+
+  /* environment safety */
+  --env-development:#3FBF7F;
+  --env-staging:#E8A33D;
+  --env-production:#E5484D;
+
+  /* elevation */
+  --shadow-sm:0 1px 2px rgba(0,0,0,0.24);
+  --shadow-md:0 4px 12px rgba(0,0,0,0.32);
+  --shadow-lg:0 12px 32px rgba(0,0,0,0.44);
+
+  /* aliases - always prefer these in components */
+  --surface-window:var(--bg-base);
+  --surface-panel:var(--bg-surface);
+  --surface-toolbar:var(--bg-raised);
+  --surface-card:var(--bg-raised);
+  --surface-overlay:var(--bg-overlay);
+  --surface-selected:var(--bg-active);
+  --text-body:var(--text-primary);
+  --text-label:var(--text-secondary);
+  --text-hint:var(--text-tertiary);
+  --grid-line:var(--border-subtle);
+  --focus-ring:var(--accent);
+}
+
+[data-theme="light"]{
+  color-scheme:light;
+
+  --bg-base:#FFFFFF;
+  --bg-surface:#F7F8FA;
+  --bg-raised:#EFF1F5;
+  --bg-overlay:#FFFFFF;
+  --bg-hover:#E8EBF0;
+  --bg-active:#DCE3F1;
+  --bg-inset:#F2F4F8;
+
+  --border-subtle:#E3E6EC;
+  --border-default:#D2D7E0;
+  --border-strong:#A9B1C1;
+
+  --text-primary:#12151C;
+  --text-secondary:#5A6478;
+  --text-tertiary:#6B7488;  /* AA: 5.2:1 on --bg-base */
+  --text-null:#71798D;
+  --text-inverse:#FFFFFF;
+  --text-on-accent:#FFFFFF;
+
+  --accent:#2563EB;
+  --accent-hover:#1D57D6;
+  --accent-press:#1A4CBD;
+  --accent-muted:#DBE6FE;
+  --accent-ring:#2563EB;
+
+  --success:#1A9E63;
+  --warning:#B57312;
+  --danger:#CE2C31;
+  --info:#0B6E8C;
+  --danger-hover:#B92126;
+  --danger-press:#A11B20;
+
+  --success-text:#0F7A48;
+  --warning-text:#8A5300;
+  --danger-text:#BE2126;
+  --info-text:#0A6180;
+
+  --success-muted:#DDF3E7;
+  --warning-muted:#FBEED6;
+  --danger-muted:#FBE1E2;
+  --info-muted:#DCEFF7;
+
+  --env-development:#1A9E63;
+  --env-staging:#B57312;
+  --env-production:#CE2C31;
+
+  --shadow-sm:0 1px 2px rgba(18,21,28,0.08);
+  --shadow-md:0 4px 12px rgba(18,21,28,0.12);
+  --shadow-lg:0 12px 32px rgba(18,21,28,0.18);
+}
+
+/* Atlas override. The design file rebuilds the dark ramp as neutral greys instead of the
+   design system's blue-tinted ones (requirements section 6, "Dark (default) - neutral
+   ramp"). Applied under :root:not([data-theme="light"]) as well so dark stays the default
+   with no attribute set, and the light ramp above applies only with data-theme="light". */
+[data-theme="dark"],:root:not([data-theme="light"]){
+  --bg-base:#121212;
+  --bg-surface:#181818;
+  --bg-raised:#1F1F1F;
+  --bg-overlay:#262626;
+  --bg-hover:#262626;
+  --bg-active:#2E2E2E;
+  --bg-inset:#0E0E0E;
+
+  --border-subtle:#262626;
+  --border-default:#333333;
+  --border-strong:#454545;
+
+  --text-primary:#E8E8E8;
+  --text-secondary:#A3A3A3;
+  --text-tertiary:#7D7D7D;
+  --text-null:#858585;
+  --text-inverse:#121212;
+
+  --accent-muted:#1F2E47;
+}

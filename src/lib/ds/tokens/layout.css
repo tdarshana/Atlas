@@ -1,0 +1,22 @@
+:root{
+  --h-titlebar:38px;
+  --w-rail:44px;
+  --w-sidebar:260px;
+  --w-sidebar-min:180px;
+  --w-sidebar-max:480px;
+  --h-tabbar:34px;
+  --h-results-toolbar:32px;
+  --h-grid-row:28px;
+  --h-grid-header:32px;
+  --h-statusbar:24px;
+  --h-control:28px;
+  --h-control-sm:22px;
+  --split-editor:40%;
+
+  --w-command-palette:560px;
+  --h-command-palette-max:400px;
+  --command-palette-top:20%;
+
+  --env-bar-height:2px;
+  --state-bar-width:3px;
+}

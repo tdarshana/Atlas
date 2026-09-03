@@ -1,0 +1,15 @@
+:root{
+  --dur-hover:80ms;    /* @kind other */
+  --dur-popover:120ms; /* @kind other */
+  --dur-modal:160ms;   /* @kind other */
+  /* pane resize must track the cursor exactly; grid scroll is native, never JS-animated */
+  --dur-resize:0ms;    /* @kind other */
+  --dur-scroll:0ms;    /* @kind other */
+
+  --ease-hover:ease-out; /* @kind other */
+  --ease-overlay:cubic-bezier(0.16,1,0.3,1); /* @kind other */
+
+  --transition-hover:background-color var(--dur-hover) var(--ease-hover),color var(--dur-hover) var(--ease-hover),border-color var(--dur-hover) var(--ease-hover);
+  --transition-overlay:opacity var(--dur-popover) var(--ease-overlay),transform var(--dur-popover) var(--ease-overlay);
+}
+@media (prefers-reduced-motion:reduce){:root{--dur-hover:0ms; /* @kind other */--dur-popover:0ms; /* @kind other */--dur-modal:0ms; /* @kind other */}}
