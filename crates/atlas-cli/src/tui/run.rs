@@ -4,7 +4,7 @@
 //! talks to the daemon lives in [`super::data`]. This file only owns the
 //! terminal, and it must hand it back however it leaves.
 
-use super::data::perform;
+use super::data::{perform, ACTOR};
 use super::state::{initial_effects, note_effects_started, reduce, Action, App, Effect};
 use super::ui::draw;
 use crate::remote::RemoteBackend;
@@ -21,7 +21,10 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 const TICK: Duration = Duration::from_millis(250);
 
 pub async fn run(port: u16) -> anyhow::Result<()> {
-    let backend = Arc::new(RemoteBackend::new(port));
+    let mut client = RemoteBackend::new(port);
+    // Board routes read the actor from a header, so it belongs on the client.
+    client.actor = ACTOR.to_string();
+    let backend = Arc::new(client);
     let cwd = std::env::current_dir()?;
 
     // The hook goes in before the terminal changes modes: a panic in between

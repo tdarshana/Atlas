@@ -5,12 +5,13 @@
 use super::state::{Action, Effect};
 use crate::remote::RemoteBackend;
 use atlas_core::backend::Backend;
-use atlas_core::models::{MemoryStatus, RecallHit, RecallQuery, SyncRequest};
+use atlas_core::models::{MemoryStatus, NewTask, RecallHit, RecallQuery, SyncRequest, TaskFilter};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// The actor every write from the TUI is recorded under.
-const ACTOR: &str = "tui";
+/// The actor every write from the TUI is recorded under. Board reads carry it in
+/// a header rather than an argument, so `run` puts it on the client as well.
+pub const ACTOR: &str = "tui";
 
 pub async fn perform(effect: Effect, backend: Arc<RemoteBackend>, cwd: PathBuf) -> Action {
     match run(effect, backend, cwd).await {
@@ -50,6 +51,26 @@ async fn run(effect: Effect, backend: Arc<RemoteBackend>, cwd: PathBuf) -> atlas
         }
         Effect::ListDocs(kind) => Ok(Action::DocsLoaded(kind, backend.list_docs(kind, None).await?)),
         Effect::ListPending => Ok(Action::PendingLoaded(backend.list_memories(MemoryStatus::Pending, None).await?)),
+        Effect::LoadBoard(project_id) => {
+            let stages = backend.board_stages(project_id).await?.stages;
+            let tasks = backend.list_tasks(TaskFilter { project_id, ..Default::default() }).await?;
+            Ok(Action::BoardLoaded(stages, tasks))
+        }
+        Effect::LoadTaskDetail(key) => Ok(Action::TaskDetailLoaded(Box::new(backend.get_task(&key).await?))),
+        // A move or a new task changes which column a card is in, so the reducer
+        // has to reload; a comment does not, so it answers with the task itself.
+        Effect::MoveTask { key, stage } => {
+            backend.move_task(&key, &stage, None, ACTOR).await?;
+            Ok(Action::BoardChanged)
+        }
+        Effect::CommentTask { key, body } => {
+            backend.comment_task(&key, &body, ACTOR).await?;
+            Ok(Action::TaskDetailLoaded(Box::new(backend.get_task(&key).await?)))
+        }
+        Effect::CreateTask { title, project_id } => {
+            backend.create_task(NewTask { project_id, title, ..Default::default() }, ACTOR).await?;
+            Ok(Action::BoardChanged)
+        }
         Effect::Status => Ok(Action::StatusLoaded(backend.status().await?)),
         Effect::Forget(id) => {
             let memory = backend.forget(id, None, ACTOR).await?;

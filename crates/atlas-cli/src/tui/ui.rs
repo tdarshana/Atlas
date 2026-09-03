@@ -4,8 +4,8 @@
 //! message line, and the key legend. Bodies that have a selection are a list on
 //! the left and the selected item's detail on the right.
 
-use super::state::{App, Focus, Tab};
-use atlas_core::models::{Agent, Doc, Memory, Project, RecallHit};
+use super::state::{App, BoardMode, Focus, Tab};
+use atlas_core::models::{Agent, Doc, Memory, Project, RecallHit, Task, TaskDetail};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
@@ -36,6 +36,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Tab::Agents => agents(f, app, body),
         Tab::Practices => docs(f, "Practices", &app.practices, app.practices_sel, body),
         Tab::Workflows => docs(f, "Workflows", &app.workflows, app.workflows_sel, body),
+        Tab::Board => board(f, app, body),
         Tab::Review => review(f, app, body),
         Tab::Status => status(f, app, body),
     }
@@ -64,6 +65,7 @@ fn help(tab: Tab) -> &'static str {
         Tab::Projects => "Tab switch  j/k move  Enter open  c connect  r refresh  q/Ctrl+C quit",
         Tab::Agents => "Tab switch  j/k move  s sync  r refresh  q/Ctrl+C quit",
         Tab::Practices | Tab::Workflows => "Tab switch  j/k move  r refresh  q/Ctrl+C quit",
+        Tab::Board => "Tab switch  h/l column  j/k move  Enter detail  m move  c comment  n new  r refresh  q quit",
         Tab::Review => "Tab switch  j/k move  a accept  x reject  r refresh  q/Ctrl+C quit",
         Tab::Status => "Tab switch  r refresh  q/Ctrl+C quit",
     }
@@ -76,7 +78,7 @@ fn memories(f: &mut Frame, app: &App, area: Rect) {
     // The query stays in the title once focus leaves Search, so the list
     // still shows what it is a result of.
     let suffix = if app.query.is_empty() { String::new() } else { format!("/{}", app.query) };
-    list_pane_with_suffix(f, left, "Memories", &rows, app.memories_sel, &suffix);
+    list_pane_with_suffix(f, left, "Memories", &rows, Some(app.memories_sel), &suffix);
     let lines = match app.memories.get(app.memories_sel) {
         Some(hit) => memory_detail(hit),
         None => vec![Line::from("no memories")],
@@ -228,6 +230,98 @@ fn doc_detail(d: &Doc) -> Vec<Line<'static>> {
     lines
 }
 
+/// One column per stage, plus whatever the tab is in the middle of: a picker or
+/// a prompt above the columns, an open task's detail to their right.
+fn board(f: &mut Frame, app: &App, area: Rect) {
+    let area = prompt_box(f, app, area);
+    let area = match &app.board.detail {
+        Some(open) => {
+            let [left, right] = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area);
+            detail(f, right, "Task", task_detail(open));
+            left
+        }
+        None => area,
+    };
+    let count = app.board.stages.len();
+    if count == 0 {
+        detail(f, area, "Board", vec![Line::from("no board loaded; press r to refresh")]);
+        return;
+    }
+    let ratio = u32::try_from(count).unwrap_or(1);
+    let columns = Layout::horizontal(vec![Constraint::Ratio(1, ratio); count]).split(area);
+    for (i, stage) in app.board.stages.iter().enumerate() {
+        let rows: Vec<String> = app.board.columns.get(i).map(|c| c.iter().map(card).collect()).unwrap_or_default();
+        // Only the focused column carries the cursor, so the board shows one.
+        let sel = (i == app.board.col).then_some(app.board.row);
+        list_pane_with_suffix(f, columns[i], &stage.name, &rows, sel, "");
+    }
+}
+
+/// Draws the open picker or prompt above the board and returns what is left for
+/// the columns. With nothing open the whole area is left alone.
+fn prompt_box(f: &mut Frame, app: &App, area: Rect) -> Rect {
+    let (title, text) = match &app.board.mode {
+        BoardMode::Normal => return area,
+        BoardMode::MovePicker => (
+            "Move to (a digit picks, Esc cancels)",
+            app.board
+                .stages
+                .iter()
+                .enumerate()
+                .map(|(i, s)| format!("{} {}", i + 1, s.name))
+                .collect::<Vec<_>>()
+                .join("   "),
+        ),
+        BoardMode::CommentPrompt(text) => ("Comment (Enter sends, Esc cancels)", text.clone()),
+        BoardMode::NewTaskPrompt(text) => ("New task (Enter creates, Esc cancels)", text.clone()),
+    };
+    let [top, rest] = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(area);
+    f.render_widget(Paragraph::new(text).block(Block::bordered().title(title)), top);
+    rest
+}
+
+fn card(t: &Task) -> String {
+    match &t.assignee {
+        Some(who) => format!("{}  {} [{who}]", t.key, one_line(&t.title)),
+        None => format!("{}  {}", t.key, one_line(&t.title)),
+    }
+}
+
+fn task_detail(d: &TaskDetail) -> Vec<Line<'static>> {
+    let t = &d.task;
+    let mut lines = vec![
+        Line::styled(format!("{}  {}", t.key, t.title), bold()),
+        Line::from(""),
+        Line::from(format!("stage       {}", t.stage)),
+        Line::from(format!("kind        {}   priority {}", t.kind, t.priority)),
+        Line::from(format!("assignee    {}", t.assignee.clone().unwrap_or_else(|| "-".into()))),
+        Line::from(format!(
+            "ready       {}",
+            if t.ready { "yes".to_string() } else { format!("no  ({})", t.blocked_reason.clone().unwrap_or_else(|| "blocked".into())) }
+        )),
+    ];
+    if !t.description.trim().is_empty() {
+        lines.push(Line::from(""));
+        lines.extend(body_lines(&t.description));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(format!("blockers    {}", list_or_dash(&t.blocked_by))));
+    if !d.children.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::styled("children", bold()));
+        lines.extend(d.children.iter().map(|c| indented(format!("{}  {}  {}", c.key, c.stage, one_line(&c.title)))));
+    }
+    if !d.events.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::styled("events", bold()));
+        // The newest ten: an old task's log is longer than any pane.
+        lines.extend(d.events.iter().rev().take(10).map(|e| {
+            indented(format!("{}  {}  {}  {}", e.created_at.format("%m-%d %H:%M"), e.actor, e.kind, one_line(&e.body)))
+        }));
+    }
+    lines
+}
+
 fn review(f: &mut Frame, app: &App, area: Rect) {
     let [left, right] = Layout::horizontal(SPLIT).areas(area);
     let rows: Vec<String> = app
@@ -267,12 +361,13 @@ fn status(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn list_pane(f: &mut Frame, area: Rect, title: &str, rows: &[String], sel: usize) {
-    list_pane_with_suffix(f, area, title, rows, sel, "");
+    list_pane_with_suffix(f, area, title, rows, Some(sel), "");
 }
 
 /// Like [`list_pane`], but with `suffix` appended to the title after the
-/// count, e.g. `Memories (3) /duckdb`.
-fn list_pane_with_suffix(f: &mut Frame, area: Rect, title: &str, rows: &[String], sel: usize, suffix: &str) {
+/// count, e.g. `Memories (3) /duckdb`. `sel` is `None` for a list that is on
+/// screen without the cursor in it, which only the board has.
+fn list_pane_with_suffix(f: &mut Frame, area: Rect, title: &str, rows: &[String], sel: Option<usize>, suffix: &str) {
     let width = usize::from(area.width.saturating_sub(2));
     let items: Vec<ListItem> = rows.iter().map(|r| ListItem::new(truncate(r, width))).collect();
     let title = if suffix.is_empty() {
@@ -283,7 +378,7 @@ fn list_pane_with_suffix(f: &mut Frame, area: Rect, title: &str, rows: &[String]
     let list = List::new(items)
         .block(Block::bordered().title(title))
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
-    let mut state = ListState::default().with_selected((!rows.is_empty()).then_some(sel));
+    let mut state = ListState::default().with_selected(sel.filter(|_| !rows.is_empty()));
     f.render_stateful_widget(list, area, &mut state);
 }
 
@@ -522,6 +617,99 @@ mod tests {
         };
         let out = render(&app, 80, 24);
         assert!(out.contains("release"), "{out}");
+    }
+
+    fn board_state(mode: crate::tui::state::BoardMode) -> App {
+        let stages: Vec<Stage> = [("Backlog", false), ("In Progress", false), ("Testing", false), ("Done", true)]
+            .into_iter()
+            .map(|(name, done)| Stage { name: name.into(), done })
+            .collect();
+        let mut card = task("ATL-1", "Backlog");
+        card.assignee = Some("codex".into());
+        let columns = vec![vec![card], vec![], vec![task("ATL-2", "Testing")], vec![]];
+        App {
+            tab: Tab::Board,
+            board: crate::tui::state::Board { stages, columns, col: 0, row: 0, detail: None, mode },
+            ..Default::default()
+        }
+    }
+
+    fn task(key: &str, stage: &str) -> Task {
+        Task {
+            id: Uuid::new_v4(),
+            key: key.into(),
+            project_id: None,
+            seq: 1,
+            title: format!("{key} needs doing"),
+            description: "the long form".into(),
+            stage: stage.into(),
+            kind: TaskKind::Task,
+            priority: TaskPriority::High,
+            assignee: None,
+            labels: vec![],
+            parent_id: None,
+            created_by: "test".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            closed_at: None,
+            blocked_by: vec!["ATL-9".into()],
+            ready: false,
+            blocked_reason: Some("waiting on ATL-9".into()),
+        }
+    }
+
+    #[test]
+    fn board_tab_renders_a_column_per_stage() {
+        use crate::tui::state::BoardMode;
+        // Wide enough that a card is not cut off: four columns share the width.
+        let out = render(&board_state(BoardMode::Normal), 160, 24);
+        for stage in ["Backlog", "In Progress", "Testing", "Done"] {
+            assert!(out.contains(stage), "the board should show the {stage} column: {out}");
+        }
+        assert!(out.contains("ATL-1"), "cards carry their key: {out}");
+        assert!(out.contains("codex"), "cards carry the assignee: {out}");
+        assert!(out.contains("m move"), "{out}");
+    }
+
+    #[test]
+    fn board_tab_renders_the_picker_the_prompts_and_the_detail() {
+        use crate::tui::state::BoardMode;
+        let out = render(&board_state(BoardMode::MovePicker), 120, 24);
+        assert!(out.contains("1 Backlog"), "the picker numbers the stages: {out}");
+
+        let out = render(&board_state(BoardMode::CommentPrompt("looks good".into())), 120, 24);
+        assert!(out.contains("looks good"), "{out}");
+
+        let out = render(&board_state(BoardMode::NewTaskPrompt("ship it".into())), 120, 24);
+        assert!(out.contains("ship it"), "{out}");
+
+        let mut app = board_state(BoardMode::Normal);
+        app.board.detail = Some(TaskDetail {
+            task: task("ATL-1", "Backlog"),
+            children: vec![task("ATL-3", "Backlog")],
+            events: vec![TaskEvent {
+                id: Uuid::new_v4(),
+                task_id: Uuid::new_v4(),
+                actor: "codex".into(),
+                kind: "commented".into(),
+                body: "verified by hand".into(),
+                detail: None,
+                created_at: Utc::now(),
+            }],
+        });
+        let out = render(&app, 120, 24);
+        assert!(out.contains("the long form"), "the detail shows the description: {out}");
+        assert!(out.contains("ATL-3"), "the detail lists the children: {out}");
+        assert!(out.contains("verified"), "the detail lists the events: {out}");
+    }
+
+    #[test]
+    fn board_tab_survives_a_narrow_terminal_and_an_empty_board() {
+        use crate::tui::state::BoardMode;
+        render(&board_state(BoardMode::Normal), 40, 12);
+        render(&board_state(BoardMode::MovePicker), 20, 6);
+        let out = render(&App { tab: Tab::Board, ..Default::default() }, 80, 24);
+        assert!(out.contains("press r to refresh"), "{out}");
     }
 
     #[test]

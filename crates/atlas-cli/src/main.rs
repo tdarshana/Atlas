@@ -28,6 +28,18 @@ enum Cmd {
     Project { #[command(subcommand)] action: commands::project::ProjectCmd },
     /// Manage the agents Atlas exports to Claude Code and Codex
     Agent { #[command(subcommand)] action: commands::agent::AgentCmd },
+    /// Work with the task board
+    Task {
+        /// Record this command's writes as `cli/NAME` instead of `cli`
+        #[arg(long = "as", global = true)] actor: Option<String>,
+        #[command(subcommand)] action: commands::board::TaskCmd,
+    },
+    /// Inspect and set the board's stages
+    Board {
+        /// Record this command's writes as `cli/NAME` instead of `cli`
+        #[arg(long = "as", global = true)] actor: Option<String>,
+        #[command(subcommand)] action: commands::board::BoardCmd,
+    },
     /// Manage practices
     Practice { #[command(subcommand)] action: commands::doc::DocCmd },
     /// Manage workflows
@@ -55,6 +67,14 @@ enum DaemonCmd { Start, Stop, Status }
 /// Starts the daemon if it is not already up and returns a client for it.
 async fn backend(paths: &AtlasPaths, port: u16) -> anyhow::Result<RemoteBackend> {
     Ok(RemoteBackend::new(daemon_ctl::ensure_daemon(paths, port).await?))
+}
+
+/// A client for the board commands, whose reads and writes are both recorded
+/// under `--as`.
+async fn board_backend(paths: &AtlasPaths, port: u16, actor: Option<String>) -> anyhow::Result<RemoteBackend> {
+    let mut backend = backend(paths, port).await?;
+    backend.actor = commands::board::actor(actor.as_deref());
+    Ok(backend)
 }
 
 #[tokio::main]
@@ -94,6 +114,10 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Project { action } => commands::project::run(action, &backend(&paths, cli.port).await?).await?,
         Cmd::Agent { action } => commands::agent::run(action, &backend(&paths, cli.port).await?).await?,
+        // Board reads carry the actor too: it travels in a header, not a per-call
+        // argument, so it has to be on the client before the first call.
+        Cmd::Task { actor, action } => commands::board::run_task(action, &board_backend(&paths, cli.port, actor).await?).await?,
+        Cmd::Board { actor, action } => commands::board::run_board(action, &board_backend(&paths, cli.port, actor).await?).await?,
         Cmd::Practice { action } => commands::doc::run(DocKind::Practice, action, &backend(&paths, cli.port).await?).await?,
         Cmd::Workflow { action } => commands::doc::run(DocKind::Workflow, action, &backend(&paths, cli.port).await?).await?,
         Cmd::Sync(args) => commands::sync::run(args, &backend(&paths, cli.port).await?).await?,

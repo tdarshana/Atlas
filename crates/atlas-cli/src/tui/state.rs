@@ -5,8 +5,8 @@
 //! and runs whatever [`Effect`]s come back.
 
 use atlas_core::models::{
-    Agent, Doc, DocKind, Memory, MemoryStatus, Project, ProjectContext, RecallHit, StatusReport,
-    SyncReport,
+    Agent, Doc, DocKind, Memory, MemoryStatus, Project, ProjectContext, RecallHit, Stage,
+    StatusReport, SyncReport, Task, TaskDetail,
 };
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::path::PathBuf;
@@ -19,17 +19,19 @@ pub enum Tab {
     Agents,
     Practices,
     Workflows,
+    Board,
     Review,
     Status,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 7] = [
+    pub const ALL: [Tab; 8] = [
         Tab::Memories,
         Tab::Projects,
         Tab::Agents,
         Tab::Practices,
         Tab::Workflows,
+        Tab::Board,
         Tab::Review,
         Tab::Status,
     ];
@@ -41,6 +43,7 @@ impl Tab {
             Tab::Agents => "Agents",
             Tab::Practices => "Practices",
             Tab::Workflows => "Workflows",
+            Tab::Board => "Board",
             Tab::Review => "Review",
             Tab::Status => "Status",
         }
@@ -69,6 +72,49 @@ pub enum Focus {
     Search,
 }
 
+/// What the Board tab is waiting for. Every mode but `Normal` swallows keys, so
+/// typing a comment cannot also quit the TUI or move a task.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum BoardMode {
+    #[default]
+    Normal,
+    /// The stages, numbered 1..n; a digit picks one.
+    MovePicker,
+    CommentPrompt(String),
+    NewTaskPrompt(String),
+}
+
+/// The Board tab: the stage list, its tasks bucketed one vector per stage, the
+/// cursor, and whatever the tab is in the middle of.
+#[derive(Debug, Clone, Default)]
+pub struct Board {
+    pub stages: Vec<Stage>,
+    pub columns: Vec<Vec<Task>>,
+    pub col: usize,
+    pub row: usize,
+    pub detail: Option<TaskDetail>,
+    pub mode: BoardMode,
+}
+
+impl Board {
+    /// The task under the cursor, if the board has one.
+    pub fn selected(&self) -> Option<&Task> {
+        self.columns.get(self.col)?.get(self.row)
+    }
+
+    /// Buckets `tasks` into one column per stage and pulls the cursor back inside
+    /// a board that may have fewer stages or fewer rows than it did.
+    fn load(&mut self, stages: Vec<Stage>, tasks: Vec<Task>) {
+        self.columns = stages
+            .iter()
+            .map(|s| tasks.iter().filter(|t| t.stage == s.name).cloned().collect())
+            .collect();
+        self.stages = stages;
+        clamp(&mut self.col, self.stages.len());
+        clamp(&mut self.row, self.columns.get(self.col).map(Vec::len).unwrap_or(0));
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct App {
     pub tab: Tab,
@@ -89,6 +135,7 @@ pub struct App {
     pub practices_sel: usize,
     pub workflows: Vec<Doc>,
     pub workflows_sel: usize,
+    pub board: Board,
     pub pending: Vec<Memory>,
     pub pending_sel: usize,
     pub status: Option<StatusReport>,
@@ -126,6 +173,7 @@ impl Default for App {
             practices_sel: 0,
             workflows: vec![],
             workflows_sel: 0,
+            board: Board::default(),
             pending: vec![],
             pending_sel: 0,
             status: None,
@@ -147,6 +195,13 @@ pub enum Action {
     SyncDone(SyncReport),
     DocsLoaded(DocKind, Vec<Doc>),
     PendingLoaded(Vec<Memory>),
+    /// The board's stages and every task on it, still to be bucketed.
+    BoardLoaded(Vec<Stage>, Vec<Task>),
+    /// Boxed for the same reason as `ProjectContextLoaded`: a `TaskDetail` carries
+    /// a task, its children and its whole event log.
+    TaskDetailLoaded(Box<TaskDetail>),
+    /// A board write landed, so the columns are stale.
+    BoardChanged,
     StatusLoaded(StatusReport),
     MemoryForgotten(Uuid),
     MemoryStatusChanged(Memory),
@@ -163,6 +218,12 @@ pub enum Effect {
     Sync(Option<PathBuf>),
     ListDocs(DocKind),
     ListPending,
+    /// The stages and tasks of one project's board, or the global board.
+    LoadBoard(Option<Uuid>),
+    LoadTaskDetail(String),
+    MoveTask { key: String, stage: String },
+    CommentTask { key: String, body: String },
+    CreateTask { title: String, project_id: Option<Uuid> },
     Status,
     Forget(Uuid),
     SetStatus(Uuid, MemoryStatus),
@@ -202,7 +263,9 @@ pub fn reduce(app: &mut App, action: Action) -> Vec<Effect> {
             app.in_flight = app.in_flight.saturating_sub(1);
             app.projects = projects;
             clamp(&mut app.projects_sel, app.projects.len());
-            vec![]
+            // The board follows the Projects tab's selection, so it cannot load
+            // until the projects have; this is where it finds out which one.
+            vec![Effect::LoadBoard(selected_project_id(app))]
         }
         Action::ProjectContextLoaded(ctx) => {
             app.in_flight = app.in_flight.saturating_sub(1);
@@ -237,6 +300,20 @@ pub fn reduce(app: &mut App, action: Action) -> Vec<Effect> {
             app.pending = pending;
             clamp(&mut app.pending_sel, app.pending.len());
             vec![]
+        }
+        Action::BoardLoaded(stages, tasks) => {
+            app.in_flight = app.in_flight.saturating_sub(1);
+            app.board.load(stages, tasks);
+            vec![]
+        }
+        Action::TaskDetailLoaded(detail) => {
+            app.in_flight = app.in_flight.saturating_sub(1);
+            app.board.detail = Some(*detail);
+            vec![]
+        }
+        Action::BoardChanged => {
+            app.in_flight = app.in_flight.saturating_sub(1);
+            vec![Effect::LoadBoard(selected_project_id(app))]
         }
         Action::StatusLoaded(status) => {
             app.in_flight = app.in_flight.saturating_sub(1);
@@ -287,6 +364,10 @@ fn on_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Vec<Effect> {
     if app.focus == Focus::Search {
         return search_key(app, code);
     }
+    // A picker or a prompt owns every key while it is open, quit included.
+    if app.tab == Tab::Board && app.board.mode != BoardMode::Normal {
+        return board_prompt_key(app, code);
+    }
     // The confirmation swallows the next key whatever it is: `y` forgets, the rest cancel.
     if app.confirm_forget {
         app.confirm_forget = false;
@@ -301,6 +382,9 @@ fn on_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Vec<Effect> {
         KeyCode::Char('q') => app.quit = true,
         KeyCode::Char('j') | KeyCode::Down => move_sel(app, 1),
         KeyCode::Char('k') | KeyCode::Up => move_sel(app, -1),
+        // On the Board tab Esc backs out of the detail pane first; there is
+        // nothing else it could mean while one is open.
+        KeyCode::Esc if app.tab == Tab::Board && app.board.detail.is_some() => app.board.detail = None,
         KeyCode::Esc => app.message = None,
         KeyCode::Char('r') => return vec![load_effect(app)],
         _ => return tab_key(app, code),
@@ -341,10 +425,127 @@ fn tab_key(app: &mut App, code: KeyCode) -> Vec<Effect> {
             None => vec![],
         },
         (Tab::Agents, KeyCode::Char('s')) => vec![Effect::Sync(selected_project_root(app))],
+        (Tab::Board, KeyCode::Char('h') | KeyCode::Left) => {
+            move_col(app, -1);
+            vec![]
+        }
+        (Tab::Board, KeyCode::Char('l') | KeyCode::Right) => {
+            move_col(app, 1);
+            vec![]
+        }
+        (Tab::Board, KeyCode::Enter) => match app.board.selected() {
+            Some(t) => vec![Effect::LoadTaskDetail(t.key.clone())],
+            None => vec![],
+        },
+        (Tab::Board, KeyCode::Char('m')) => {
+            // Nothing to move and nothing to move it to are both "no picker".
+            if app.board.selected().is_some() && !app.board.stages.is_empty() {
+                app.board.mode = BoardMode::MovePicker;
+            }
+            vec![]
+        }
+        (Tab::Board, KeyCode::Char('c')) => {
+            if app.board.selected().is_some() {
+                app.board.mode = BoardMode::CommentPrompt(String::new());
+            }
+            vec![]
+        }
+        (Tab::Board, KeyCode::Char('n')) => {
+            app.board.mode = BoardMode::NewTaskPrompt(String::new());
+            vec![]
+        }
         (Tab::Review, KeyCode::Char('a')) => set_status(app, MemoryStatus::Active),
         (Tab::Review, KeyCode::Char('x')) => set_status(app, MemoryStatus::Rejected),
         _ => vec![],
     }
+}
+
+/// The Board tab while a picker or a prompt is open. Esc always backs out, and
+/// the mode is left behind whenever a key finishes it.
+fn board_prompt_key(app: &mut App, code: KeyCode) -> Vec<Effect> {
+    if code == KeyCode::Esc {
+        app.board.mode = BoardMode::Normal;
+        return vec![];
+    }
+    match app.board.mode.clone() {
+        BoardMode::Normal => vec![],
+        BoardMode::MovePicker => {
+            // The stages are numbered from 1, so 0 picks nothing.
+            let KeyCode::Char(c) = code else { return vec![] };
+            let Some(n) = c.to_digit(10).filter(|n| *n > 0) else { return vec![] };
+            let (Some(stage), Some(task)) = (app.board.stages.get(n as usize - 1), app.board.selected()) else {
+                return vec![];
+            };
+            let effect = Effect::MoveTask { key: task.key.clone(), stage: stage.name.clone() };
+            app.board.mode = BoardMode::Normal;
+            vec![effect]
+        }
+        BoardMode::CommentPrompt(text) => match typed(code, text) {
+            Typed::Editing(text) => {
+                app.board.mode = BoardMode::CommentPrompt(text);
+                vec![]
+            }
+            Typed::Submitted(body) => {
+                app.board.mode = BoardMode::Normal;
+                match (body.trim().is_empty(), app.board.selected()) {
+                    (false, Some(task)) => vec![Effect::CommentTask { key: task.key.clone(), body }],
+                    _ => vec![],
+                }
+            }
+        },
+        BoardMode::NewTaskPrompt(text) => match typed(code, text) {
+            Typed::Editing(text) => {
+                app.board.mode = BoardMode::NewTaskPrompt(text);
+                vec![]
+            }
+            Typed::Submitted(title) => {
+                app.board.mode = BoardMode::Normal;
+                if title.trim().is_empty() {
+                    return vec![];
+                }
+                vec![Effect::CreateTask { title, project_id: selected_project_id(app) }]
+            }
+        },
+    }
+}
+
+enum Typed {
+    Editing(String),
+    Submitted(String),
+}
+
+/// One key of a text prompt. Anything that is not a character, a backspace or
+/// Enter leaves the text as it was.
+fn typed(code: KeyCode, mut text: String) -> Typed {
+    match code {
+        KeyCode::Char(c) => text.push(c),
+        KeyCode::Backspace => {
+            text.pop();
+        }
+        KeyCode::Enter => return Typed::Submitted(text),
+        _ => {}
+    }
+    Typed::Editing(text)
+}
+
+/// Moves the board cursor a column left or right and pulls the row back inside
+/// the column it lands in.
+fn move_col(app: &mut App, delta: isize) {
+    let len = app.board.stages.len();
+    if len == 0 {
+        app.board.col = 0;
+    } else if delta > 0 {
+        app.board.col = (app.board.col + 1).min(len - 1);
+    } else {
+        app.board.col = app.board.col.saturating_sub(1);
+    }
+    clamp(&mut app.board.row, app.board.columns.get(app.board.col).map(Vec::len).unwrap_or(0));
+}
+
+/// The board shows the project the Projects tab has selected; with no projects
+/// at all it shows the global board.
+fn selected_project_id(app: &App) -> Option<Uuid> {
+    app.projects.get(app.projects_sel).map(|p| p.id)
 }
 
 fn set_status(app: &App, status: MemoryStatus) -> Vec<Effect> {
@@ -368,6 +569,7 @@ fn load_effect(app: &App) -> Effect {
         Tab::Agents => Effect::ListAgents,
         Tab::Practices => Effect::ListDocs(DocKind::Practice),
         Tab::Workflows => Effect::ListDocs(DocKind::Workflow),
+        Tab::Board => Effect::LoadBoard(selected_project_id(app)),
         Tab::Review => Effect::ListPending,
         Tab::Status => Effect::Status,
     }
@@ -380,6 +582,7 @@ fn move_sel(app: &mut App, delta: isize) {
         Tab::Agents => app.agents.len(),
         Tab::Practices => app.practices.len(),
         Tab::Workflows => app.workflows.len(),
+        Tab::Board => app.board.columns.get(app.board.col).map(Vec::len).unwrap_or(0),
         Tab::Review => app.pending.len(),
         Tab::Status => 0,
     };
@@ -389,6 +592,7 @@ fn move_sel(app: &mut App, delta: isize) {
         Tab::Agents => &mut app.agents_sel,
         Tab::Practices => &mut app.practices_sel,
         Tab::Workflows => &mut app.workflows_sel,
+        Tab::Board => &mut app.board.row,
         Tab::Review => &mut app.pending_sel,
         Tab::Status => return,
     };
@@ -446,10 +650,51 @@ mod tests {
         }
     }
 
+    fn stage(name: &str, done: bool) -> Stage {
+        Stage { name: name.into(), done }
+    }
+
+    fn task(key: &str, stage: &str) -> Task {
+        Task {
+            id: Uuid::new_v4(),
+            key: key.into(),
+            project_id: None,
+            seq: 1,
+            title: format!("{key} title"),
+            description: String::new(),
+            stage: stage.into(),
+            kind: TaskKind::Task,
+            priority: TaskPriority::Medium,
+            assignee: None,
+            labels: vec![],
+            parent_id: None,
+            created_by: "test".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            closed_at: None,
+            blocked_by: vec![],
+            ready: true,
+            blocked_reason: None,
+        }
+    }
+
+    /// Three stages, two cards in the first column and none in the others.
+    fn board_app() -> App {
+        let mut a = App { tab: Tab::Board, ..Default::default() };
+        reduce(
+            &mut a,
+            Action::BoardLoaded(
+                vec![stage("Backlog", false), stage("Testing", false), stage("Done", true)],
+                vec![task("ATL-1", "Backlog"), task("ATL-2", "Backlog")],
+            ),
+        );
+        a
+    }
+
     #[test]
     fn tab_cycles_and_wraps() {
         let mut a = App::default();
-        for _ in 0..7 {
+        for _ in 0..8 {
             reduce(&mut a, code(KeyCode::Tab));
         }
         assert_eq!(a.tab, Tab::Memories);
@@ -518,7 +763,7 @@ mod tests {
     #[test]
     fn movement_is_safe_on_empty_lists() {
         let mut a = App::default();
-        for _ in 0..7 {
+        for _ in 0..8 {
             assert!(reduce(&mut a, key('j')).is_empty());
             assert!(reduce(&mut a, key('k')).is_empty());
             assert!(reduce(&mut a, code(KeyCode::Enter)).is_empty());
@@ -590,6 +835,7 @@ mod tests {
             (Tab::Agents, Effect::ListAgents),
             (Tab::Practices, Effect::ListDocs(DocKind::Practice)),
             (Tab::Workflows, Effect::ListDocs(DocKind::Workflow)),
+            (Tab::Board, Effect::LoadBoard(None)),
             (Tab::Review, Effect::ListPending),
             (Tab::Status, Effect::Status),
         ];
@@ -645,6 +891,146 @@ mod tests {
         reduce(&mut a, key('q'));
         assert!(!a.quit);
         assert_eq!(a.query, "q");
+    }
+
+    #[test]
+    fn board_columns_clamp_at_both_edges() {
+        let mut a = board_app();
+        assert_eq!(a.board.columns.iter().map(Vec::len).collect::<Vec<_>>(), [2, 0, 0]);
+        reduce(&mut a, key('h'));
+        assert_eq!(a.board.col, 0, "h at the first stage stays there");
+        for _ in 0..5 {
+            reduce(&mut a, key('l'));
+        }
+        assert_eq!(a.board.col, 2, "l stops at the last stage");
+        reduce(&mut a, key('h'));
+        assert_eq!(a.board.col, 1);
+    }
+
+    #[test]
+    fn board_rows_clamp_inside_their_column() {
+        let mut a = board_app();
+        reduce(&mut a, key('k'));
+        assert_eq!(a.board.row, 0, "k at the top stays there");
+        reduce(&mut a, key('j'));
+        assert_eq!(a.board.row, 1);
+        reduce(&mut a, key('j'));
+        assert_eq!(a.board.row, 1, "j stops at the last card");
+        // The second column is empty, so the row has to come back with the cursor.
+        reduce(&mut a, key('l'));
+        assert_eq!(a.board.row, 0);
+        assert!(reduce(&mut a, key('j')).is_empty());
+        assert_eq!(a.board.row, 0);
+    }
+
+    #[test]
+    fn board_move_picker_yields_the_numbered_stage() {
+        let mut a = board_app();
+        assert!(reduce(&mut a, key('m')).is_empty());
+        assert_eq!(a.board.mode, BoardMode::MovePicker);
+        let eff = reduce(&mut a, key('2'));
+        assert_eq!(eff, vec![Effect::MoveTask { key: "ATL-1".into(), stage: "Testing".into() }]);
+        assert_eq!(a.board.mode, BoardMode::Normal);
+    }
+
+    #[test]
+    fn board_move_picker_ignores_a_number_with_no_stage() {
+        let mut a = board_app();
+        reduce(&mut a, key('m'));
+        assert!(reduce(&mut a, key('9')).is_empty());
+        assert!(reduce(&mut a, key('0')).is_empty());
+        assert_eq!(a.board.mode, BoardMode::MovePicker, "a miss leaves the picker open");
+    }
+
+    #[test]
+    fn board_comment_prompt_yields_a_comment() {
+        let mut a = board_app();
+        reduce(&mut a, key('c'));
+        for ch in "looks good".chars() {
+            reduce(&mut a, key(ch));
+        }
+        assert_eq!(a.board.mode, BoardMode::CommentPrompt("looks good".into()));
+        reduce(&mut a, code(KeyCode::Backspace));
+        let eff = reduce(&mut a, code(KeyCode::Enter));
+        assert_eq!(eff, vec![Effect::CommentTask { key: "ATL-1".into(), body: "looks goo".into() }]);
+        assert_eq!(a.board.mode, BoardMode::Normal);
+    }
+
+    #[test]
+    fn board_new_task_prompt_yields_a_task_and_swallows_quit() {
+        let mut a = board_app();
+        reduce(&mut a, key('n'));
+        for ch in "ship the board".chars() {
+            reduce(&mut a, key(ch));
+        }
+        assert!(!a.quit, "q typed into a prompt is a letter, not a quit");
+        let eff = reduce(&mut a, code(KeyCode::Enter));
+        assert_eq!(eff, vec![Effect::CreateTask { title: "ship the board".into(), project_id: None }]);
+        assert_eq!(a.board.mode, BoardMode::Normal);
+    }
+
+    #[test]
+    fn board_empty_prompts_produce_nothing() {
+        for open in ['c', 'n'] {
+            let mut a = board_app();
+            reduce(&mut a, key(open));
+            assert!(reduce(&mut a, code(KeyCode::Enter)).is_empty(), "{open}");
+            assert_eq!(a.board.mode, BoardMode::Normal);
+        }
+    }
+
+    #[test]
+    fn board_escape_cancels_every_prompt() {
+        for open in ['m', 'c', 'n'] {
+            let mut a = board_app();
+            reduce(&mut a, key(open));
+            assert_ne!(a.board.mode, BoardMode::Normal, "{open} should have opened something");
+            assert!(reduce(&mut a, code(KeyCode::Esc)).is_empty());
+            assert_eq!(a.board.mode, BoardMode::Normal, "Esc should have cancelled {open}");
+        }
+    }
+
+    #[test]
+    fn board_enter_opens_the_detail_and_escape_closes_it() {
+        let mut a = board_app();
+        let eff = reduce(&mut a, code(KeyCode::Enter));
+        assert_eq!(eff, vec![Effect::LoadTaskDetail("ATL-1".into())]);
+        reduce(
+            &mut a,
+            Action::TaskDetailLoaded(Box::new(TaskDetail {
+                task: task("ATL-1", "Backlog"),
+                children: vec![],
+                events: vec![],
+            })),
+        );
+        assert!(a.board.detail.is_some());
+        reduce(&mut a, code(KeyCode::Esc));
+        assert!(a.board.detail.is_none());
+    }
+
+    #[test]
+    fn board_follows_the_project_the_projects_tab_has_selected() {
+        let mut a = App { tab: Tab::Board, ..Default::default() };
+        let eff = reduce(&mut a, Action::ProjectsLoaded(vec![project("/tmp/one"), project("/tmp/two")]));
+        let first = a.projects[0].id;
+        assert_eq!(eff, vec![Effect::LoadBoard(Some(first))], "the board loads once the projects have");
+        assert_eq!(reduce(&mut a, key('r')), vec![Effect::LoadBoard(Some(first))]);
+
+        // A board write reloads the same project's board.
+        assert_eq!(reduce(&mut a, Action::BoardChanged), vec![Effect::LoadBoard(Some(first))]);
+    }
+
+    #[test]
+    fn board_load_pulls_a_stale_cursor_back_inside() {
+        let mut a = board_app();
+        reduce(&mut a, key('l'));
+        reduce(&mut a, key('l'));
+        reduce(&mut a, key('j'));
+        reduce(
+            &mut a,
+            Action::BoardLoaded(vec![stage("Only", false), stage("Done", true)], vec![]),
+        );
+        assert_eq!((a.board.col, a.board.row), (1, 0));
     }
 
     #[test]

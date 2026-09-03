@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod board;
 pub mod doc;
 pub mod export;
 pub mod import;
