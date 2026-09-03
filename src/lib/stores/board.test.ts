@@ -46,6 +46,7 @@ function task(key: string, stage: string): Task {
 		updated_at: '2026-09-03T10:00:00Z',
 		closed_at: null,
 		blocked_by: [],
+		open_blockers: 0,
 		ready: true,
 		blocked_reason: null
 	};

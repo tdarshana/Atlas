@@ -15,11 +15,18 @@
 		open: boolean;
 		/** The board's project filter; null creates a task with no project. */
 		projectId: Uuid | null;
+		/** That project's name, for the line naming where the task will land. */
+		projectName: string | null;
 		onclose: () => void;
 		oncreated: () => void | Promise<void>;
 	}
 
-	let { open, projectId, onclose, oncreated }: Props = $props();
+	let { open, projectId, projectName, onclose, oncreated }: Props = $props();
+
+	// The board filter decides which board this files on, and the filter bar is
+	// behind the dialog, so say which board it is rather than leaving it to be found
+	// out after the task is created.
+	const target = $derived(projectName ? `Project: ${projectName}` : 'Global board');
 
 	const kindOptions = (['task', 'bug', 'feature', 'chore'] as TaskKind[]).map((k) => ({
 		value: k,
@@ -86,6 +93,8 @@
 
 <Dialog {open} title="New task" onclose={cancel}>
 	<div class="form" data-testid="task-new">
+		<p class="target" data-testid="new-task-target">{target}</p>
+
 		<label class="field">
 			<span>Title</span>
 			<Input bind:value={title} data-testid="new-task-title" placeholder="What needs doing" />
@@ -159,5 +168,11 @@
 	.hint {
 		color: var(--muted);
 		font-size: 12px;
+	}
+
+	.target {
+		margin: 0;
+		color: var(--muted);
+		font-size: 13px;
 	}
 </style>

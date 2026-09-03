@@ -113,7 +113,9 @@
 		<p class="metric" data-testid="count-agents">{counts.agents ?? '—'}</p>
 	</Card>
 
-	<Card title="Open tasks" data-testid="dashboard-tasks">
+	<!-- This page names no project, so the counts come back for the global board.
+	     The title says so rather than reading as every board's open work. -->
+	<Card title="Open tasks (global)" data-testid="dashboard-tasks">
 		{#if tasksError}
 			<p class="bad" role="alert" data-testid="dashboard-tasks-error">
 				The board could not be read. {tasksError}

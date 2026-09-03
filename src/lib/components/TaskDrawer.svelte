@@ -85,14 +85,19 @@
 			assignee: t.assignee ?? '',
 			labels: t.labels.join(', ')
 		};
+		// Trimmed on both sides: Save sends `title.trim()`, `assignee.trim()` and a
+		// trimmed label list, so a field the user left padded comes back from the
+		// daemon trimmed and would otherwise look edited from here on and stop
+		// following the server.
+		const same = (a: string, b: string) => a.trim() === b.trim();
 		untrack(() => {
 			const other = next.id !== base.id;
-			if (other || title === base.title) title = next.title;
-			if (other || description === base.description) description = next.description;
-			if (other || kind === base.kind) kind = next.kind;
-			if (other || priority === base.priority) priority = next.priority;
-			if (other || assignee === base.assignee) assignee = next.assignee;
-			if (other || labels === base.labels) labels = next.labels;
+			if (other || same(title, base.title)) title = next.title;
+			if (other || same(description, base.description)) description = next.description;
+			if (other || same(kind, base.kind)) kind = next.kind;
+			if (other || same(priority, base.priority)) priority = next.priority;
+			if (other || same(assignee, base.assignee)) assignee = next.assignee;
+			if (other || same(labels, base.labels)) labels = next.labels;
 			if (other) titleError = null;
 			base = next;
 		});

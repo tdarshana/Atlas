@@ -26,7 +26,10 @@
 				]
 	);
 
-	const blockers = $derived(task.blocked_by.length);
+	// Only the blockers that are not themselves done, which is what the ready rule
+	// counts. Counting every link would put a red badge on a task an agent is free to
+	// claim, and the drawer, which reads `ready`, would disagree with the card.
+	const blockers = $derived(task.open_blockers);
 </script>
 
 <div class="card" data-testid="task-card-{task.key}">

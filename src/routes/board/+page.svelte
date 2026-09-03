@@ -29,6 +29,11 @@
 	]);
 
 	const stageColumns = $derived(columns());
+	// The dialog creates on whatever board the filter names, which is not visible from
+	// inside the dialog, so hand it the name to say so.
+	const targetProject = $derived(
+		projects.items.find((p) => p.id === board.filters.projectId)?.name ?? null
+	);
 	let creating = $state(false);
 
 	/** Closes the drawer and hands focus back to the card it came from. */
@@ -162,24 +167,30 @@
 <NewTaskDialog
 	open={creating}
 	projectId={board.filters.projectId}
+	projectName={targetProject}
 	onclose={() => (creating = false)}
 	oncreated={refresh}
 />
 
 <style>
+	/* Wraps rather than squeezing: at a narrow width the four controls compressed
+	   into unusable slivers, so they drop onto a second row and keep a floor. */
 	.filters {
 		display: flex;
+		flex-wrap: wrap;
 		align-items: center;
 		gap: var(--space-3);
 		margin-bottom: var(--space-4);
 	}
 
 	.pick {
-		width: 180px;
+		flex: 0 1 180px;
+		min-width: 140px;
 	}
 
 	.search {
-		flex: 1;
+		flex: 1 1 200px;
+		min-width: 160px;
 	}
 
 	.toggle {

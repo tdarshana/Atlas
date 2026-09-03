@@ -228,6 +228,12 @@ export interface Task {
 	closed_at: Timestamp | null;
 	/** Keys of the tasks this one waits on. */
 	blocked_by: string[];
+	/**
+	 * How many of `blocked_by` are not themselves done. This is the count the ready
+	 * rule uses, so a badge drawn from it agrees with `ready`; `blocked_by.length`
+	 * counts finished blockers too.
+	 */
+	open_blockers: number;
 	/** Computed on read: open, every blocker done, and no open subtask. */
 	ready: boolean;
 	blocked_reason: string | null;
