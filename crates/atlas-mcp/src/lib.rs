@@ -307,7 +307,7 @@ impl<B: Backend> AtlasMcp<B> {
     }
 
     /// The docs that apply where this call is coming from: the project's plus the
-    /// global ones, or — when no project resolves — only the global ones. The store's
+    /// global ones, or, when no project resolves, only the global ones. The store's
     /// unfiltered listing spans every project, which is right for a resource listing
     /// but not for a tool that says it lists what applies here.
     async fn docs_here(&self, kind: DocKind, project_root: Option<PathBuf>) -> Result<Vec<Doc>, McpError> {
@@ -338,7 +338,7 @@ impl<B: Backend> AtlasMcp<B> {
     /// Resolves `project_root` to the project scope a board tool should use. The
     /// literal value "global" names the project-less board explicitly; otherwise the
     /// usual precedence applies (the argument, then `ATLAS_PROJECT_ROOT`, then the
-    /// root this server was started in) — but unlike `remember`, which is content to
+    /// root this server was started in). Unlike `remember`, which is content to
     /// stay unscoped, a board tool errors when none of those resolves: a task's key
     /// is a project prefix, so there is nowhere to file it without one.
     async fn board_project_id(&self, project_root: Option<PathBuf>) -> Result<Option<Uuid>, McpError> {
@@ -576,7 +576,7 @@ const WORKFLOWS: &str = "atlas://workflows/";
 const PROJECTS: &str = "atlas://projects/";
 const BOARD: &str = "atlas://board/";
 
-/// Everything but alphanumerics and `/ - _ . ~` — enough to escape a space or other
+/// Everything but alphanumerics and `/ - _ . ~`: enough to escape a space or other
 /// reserved character in a project root path so the `{project}` segment of an
 /// `atlas://board/{project}` URI stays a single legal path component, while leaving
 /// the path itself readable.
@@ -970,7 +970,7 @@ mod tests {
         let detail: TaskDetail = serde_json::from_str(&text_of(&detail)).unwrap();
         // Claim emits both an `assigned` event and, because the task started in the
         // board's first stage, an implicit `moved` event; the explicit task_move adds
-        // a second `moved`; the comment adds `commented` — four, in that order.
+        // a second `moved`; the comment adds `commented`: four, in that order.
         let agent_x_kinds: Vec<&str> = detail.events.iter().filter(|e| e.actor == "test/agent-x").map(|e| e.kind.as_str()).collect();
         assert_eq!(agent_x_kinds, vec!["assigned", "moved", "moved", "commented"], "{:?}", detail.events);
 
