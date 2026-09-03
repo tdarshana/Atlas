@@ -568,6 +568,7 @@ dependencies = [
  "async-trait",
  "atlas-core",
  "chrono",
+ "percent-encoding",
  "rmcp",
  "schemars 1.2.2",
  "serde",

@@ -8,6 +8,7 @@ use atlas_core::board::render::render_board_markdown;
 use atlas_core::export::claude_agent_md;
 use atlas_core::models::*;
 use chrono::{DateTime, Utc};
+use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -125,10 +126,10 @@ pub struct TaskKeyArgs {
 pub struct TaskCreateArgs {
     pub title: String,
     pub description: Option<String>,
-    /// One of task, bug, feature, chore. Default task.
-    pub kind: Option<String>,
-    /// One of low, medium, high, urgent. Default medium.
-    pub priority: Option<String>,
+    /// Default task.
+    pub kind: Option<TaskKind>,
+    /// Default medium.
+    pub priority: Option<TaskPriority>,
     pub labels: Option<Vec<String>>,
     /// Parent task, by id or key.
     pub parent: Option<String>,
@@ -146,8 +147,10 @@ pub struct TaskUpdateArgs {
     pub key: String,
     pub title: Option<String>,
     pub description: Option<String>,
-    pub kind: Option<String>,
-    pub priority: Option<String>,
+    pub kind: Option<TaskKind>,
+    pub priority: Option<TaskPriority>,
+    /// New assignee. An empty string clears the assignee; leave this field out
+    /// entirely to leave the assignee unchanged.
     pub assignee: Option<String>,
     pub labels: Option<Vec<String>>,
     /// The `updated_at` you last read for this task. A mismatch fails the call
@@ -364,14 +367,12 @@ impl<B: Backend> AtlasMcp<B> {
     #[tool(description = "Create a task on the board. Pass project_root to name a project other than the one this server was started in, or \"global\" for a task with no project.")]
     async fn task_create(&self, Parameters(a): Parameters<TaskCreateArgs>) -> Result<CallToolResult, McpError> {
         let project_id = self.board_project_id(a.project_root).await?;
-        let kind = a.kind.as_deref().map(str::parse::<TaskKind>).transpose().map_err(err)?;
-        let priority = a.priority.as_deref().map(str::parse::<TaskPriority>).transpose().map_err(err)?;
         let new = NewTask {
             project_id,
             title: a.title,
             description: a.description,
-            kind,
-            priority,
+            kind: a.kind,
+            priority: a.priority,
             assignee: None,
             labels: a.labels,
             parent: a.parent,
@@ -384,14 +385,14 @@ impl<B: Backend> AtlasMcp<B> {
 
     #[tool(description = "Edit a task's title, description, kind, priority, assignee or labels. Pass expected_updated_at, from a prior task_get or task_list, to fail with a conflict instead of overwriting a concurrent change.")]
     async fn task_update(&self, Parameters(a): Parameters<TaskUpdateArgs>) -> Result<CallToolResult, McpError> {
-        let kind = a.kind.as_deref().map(str::parse::<TaskKind>).transpose().map_err(err)?;
-        let priority = a.priority.as_deref().map(str::parse::<TaskPriority>).transpose().map_err(err)?;
         let upd = TaskUpdate {
             title: a.title,
             description: a.description,
-            kind,
-            priority,
-            assignee: a.assignee.map(Some),
+            kind: a.kind,
+            priority: a.priority,
+            // An empty string clears the assignee (`Some(None)`); absent leaves it
+            // alone (`None`); anything else sets it (`Some(Some(v))`).
+            assignee: a.assignee.map(|v| if v.is_empty() { None } else { Some(v) }),
             labels: a.labels,
             parent: None,
             expected_updated_at: a.expected_updated_at,
@@ -426,18 +427,22 @@ impl<B: Backend> AtlasMcp<B> {
 
     /// Resolves the `{project}` segment of an `atlas://board/{project}` resource URI
     /// to a project scope: "global" names the project-less board, otherwise `raw` may
-    /// be a board key (`ATL`) or a project root path, matched against whatever
-    /// `list_projects` already has on file. Read-only: unlike a tool argument, a
-    /// resource read never connects a project that is not already known.
+    /// be a board key (`ATL`) or a percent-encoded project root path, matched against
+    /// whatever `list_projects` already has on file. Read-only: unlike a tool
+    /// argument, a resource read never connects a project that is not already known.
     async fn board_resource_project(&self, raw: &str) -> Result<Option<Uuid>, atlas_core::AtlasError> {
-        if raw == "global" {
+        let decoded = percent_decode_str(raw)
+            .decode_utf8()
+            .map_err(|e| atlas_core::AtlasError::Invalid(format!("board URI segment is not valid UTF-8: {e}")))?
+            .into_owned();
+        if decoded == "global" {
             return Ok(None);
         }
         let projects = self.backend.list_projects().await?;
-        if let Some(p) = projects.iter().find(|p| p.board_key.as_deref().map(|k| k.eq_ignore_ascii_case(raw)).unwrap_or(false)) {
+        if let Some(p) = projects.iter().find(|p| p.board_key.as_deref().map(|k| k.eq_ignore_ascii_case(&decoded)).unwrap_or(false)) {
             return Ok(Some(p.id));
         }
-        let wanted = std::path::Path::new(raw);
+        let wanted = std::path::Path::new(&decoded);
         let canon = wanted.canonicalize();
         if let Some(p) = projects.iter().find(|p| {
             let root = std::path::Path::new(&p.root_path);
@@ -445,7 +450,7 @@ impl<B: Backend> AtlasMcp<B> {
         }) {
             return Ok(Some(p.id));
         }
-        Err(atlas_core::AtlasError::NotFound(format!("board {raw}")))
+        Err(atlas_core::AtlasError::NotFound(format!("board {decoded}")))
     }
 
     #[tool(description = "Store a memory shared with every agent. Use for facts about the project, decisions and their reasons, user preferences, and insights worth keeping.")]
@@ -556,6 +561,12 @@ const WORKFLOWS: &str = "atlas://workflows/";
 const PROJECTS: &str = "atlas://projects/";
 const BOARD: &str = "atlas://board/";
 
+/// Everything but alphanumerics and `/ - _ . ~` — enough to escape a space or other
+/// reserved character in a project root path so the `{project}` segment of an
+/// `atlas://board/{project}` URI stays a single legal path component, while leaving
+/// the path itself readable.
+const BOARD_URI_PATH: &AsciiSet = &NON_ALPHANUMERIC.remove(b'/').remove(b'-').remove(b'_').remove(b'.').remove(b'~');
+
 const MARKDOWN: &str = "text/markdown";
 const JSON: &str = "application/json";
 
@@ -591,7 +602,7 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
             out.push(Resource::new(format!("{PROJECTS}{}/context", p.id), p.name.clone())
                 .with_description(format!("Profile, practices, workflows and top memories for {}", p.root_path))
                 .with_mime_type(JSON));
-            out.push(Resource::new(format!("{BOARD}{}", p.root_path), format!("{} board", p.name))
+            out.push(Resource::new(format!("{BOARD}{}", utf8_percent_encode(&p.root_path, BOARD_URI_PATH)), format!("{} board", p.name))
                 .with_description(format!("Task board for {}, as Markdown", p.root_path))
                 .with_mime_type(MARKDOWN));
         }
@@ -631,7 +642,7 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
             BOARD_WORKFLOW_PROMPT,
             Some("Work the task board: pick a ready task, claim it, move it through the stages, and comment as you go."),
             Some(vec![PromptArgument::new("project_root")
-                .with_description("Absolute path to the project whose board to work. Defaults to the root this server was started in.")
+                .with_description("Absolute path to the project whose board to work, or \"global\" for the project-less board. Defaults to the root this server was started in.")
                 .with_required(false)]),
         )];
         prompts.extend(self.backend.list_agents().await.map_err(err)?.into_iter().map(|a| Prompt::new(a.name, Some(a.description), None)));
@@ -641,7 +652,7 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
     async fn get_prompt(&self, request: GetPromptRequestParams, _context: RequestContext<RoleServer>) -> Result<GetPromptResponse, McpError> {
         if request.name == BOARD_WORKFLOW_PROMPT {
             let project_root = request.arguments.as_ref().and_then(|a| a.get("project_root")).and_then(|v| v.as_str()).map(PathBuf::from);
-            let project_id = self.resolve_project(project_root).await?.map(|p| p.id);
+            let project_id = self.board_project_id(project_root).await?;
             let stages = self.backend.board_stages(project_id).await.map_err(err)?.stages;
             let names = stages.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ");
             let text = format!("{BOARD_WORKFLOW_TEXT}\n\nStages for this project: {names}");
@@ -889,8 +900,11 @@ mod tests {
 
         let detail = s.task_get(Parameters(TaskKeyArgs { key: key.clone(), agent: None })).await.unwrap();
         let detail: TaskDetail = serde_json::from_str(&text_of(&detail)).unwrap();
-        let agent_x_events = detail.events.iter().filter(|e| e.actor == "test/agent-x").count();
-        assert!(agent_x_events >= 3, "expected claim, move and comment events from test/agent-x, got {:?}", detail.events);
+        // Claim emits both an `assigned` event and, because the task started in the
+        // board's first stage, an implicit `moved` event; the explicit task_move adds
+        // a second `moved`; the comment adds `commented` — four, in that order.
+        let agent_x_kinds: Vec<&str> = detail.events.iter().filter(|e| e.actor == "test/agent-x").map(|e| e.kind.as_str()).collect();
+        assert_eq!(agent_x_kinds, vec!["assigned", "moved", "moved", "commented"], "{:?}", detail.events);
 
         let bad = s
             .task_move(Parameters(TaskMoveArgs { key: key.clone(), stage: "Nope".into(), expected_updated_at: None, agent: None }))
@@ -976,5 +990,117 @@ mod tests {
         assert!(prompt_text.contains("Testing"), "{prompt_text}");
 
         client.cancel().await.unwrap();
+    }
+
+    /// `board-workflow` resolves `project_root: "global"` through the same
+    /// `board_project_id()` helper the tools use: it must answer with the global
+    /// board's stages and must not connect (or create) a project for the literal
+    /// "global".
+    #[tokio::test]
+    async fn board_workflow_prompt_resolves_global_like_the_tools_do() {
+        let home = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        let s = AtlasMcp::new(backend.clone()).with_env_project_root(false);
+
+        let (server_io, client_io) = tokio::io::duplex(16 * 1024);
+        tokio::spawn(async move {
+            let running = s.serve(server_io).await.unwrap();
+            running.waiting().await.unwrap();
+        });
+        let client: rmcp::service::RunningService<rmcp::RoleClient, ()> = ().serve(client_io).await.unwrap();
+
+        let mut params = GetPromptRequestParams::new(BOARD_WORKFLOW_PROMPT);
+        let mut args = serde_json::Map::new();
+        args.insert("project_root".into(), serde_json::Value::String("global".into()));
+        params.arguments = Some(args);
+        let prompt = client.get_prompt(params).await.unwrap();
+        let text: String = prompt.messages.iter().filter_map(|m| m.content.as_text().map(|t| t.text.clone())).collect();
+        assert!(text.contains("Backlog") && text.contains("Done"), "{text}");
+
+        client.cancel().await.unwrap();
+        assert!(backend.list_projects().await.unwrap().is_empty(), "the global board prompt should not have connected a project");
+    }
+
+    /// A project root with a space round-trips through the resource listing: the
+    /// listed `atlas://board/{project}` URI is percent-encoded, and reading it back
+    /// decodes to the same root and finds the board.
+    #[tokio::test]
+    async fn board_resource_uri_round_trips_a_root_with_a_space() {
+        let home = tempfile::tempdir().unwrap();
+        let outer = tempfile::tempdir().unwrap();
+        let repo = outer.path().join("my project");
+        std::fs::create_dir(&repo).unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        let s = AtlasMcp::new(backend.clone()).with_env_project_root(false).with_project_root(repo.clone());
+
+        let created = s
+            .task_create(Parameters(TaskCreateArgs {
+                title: "spacey task".into(), description: None, kind: None, priority: None,
+                labels: None, parent: None, blocked_by: None, project_root: None, agent: None,
+            }))
+            .await
+            .unwrap();
+        let task: atlas_core::models::Task = serde_json::from_str(&text_of(&created)).unwrap();
+
+        let (server_io, client_io) = tokio::io::duplex(16 * 1024);
+        tokio::spawn(async move {
+            let running = s.serve(server_io).await.unwrap();
+            running.waiting().await.unwrap();
+        });
+        let client: rmcp::service::RunningService<rmcp::RoleClient, ()> = ().serve(client_io).await.unwrap();
+
+        let listed = client.list_resources(None).await.unwrap();
+        let board_uri = listed.resources.iter().map(|r| r.uri.clone()).find(|u| u.contains("%20")).expect("a board URI with an encoded space");
+
+        let resource = client.read_resource(ReadResourceRequestParams::new(board_uri)).await.unwrap();
+        let text: String = resource
+            .contents
+            .iter()
+            .filter_map(|c| match c {
+                ResourceContents::TextResourceContents { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(text.contains(&task.key), "{text}");
+
+        client.cancel().await.unwrap();
+    }
+
+    /// `task_update`'s `assignee`: an empty string clears it, an absent field leaves
+    /// it alone, and a non-empty string sets it.
+    #[tokio::test]
+    async fn task_update_assignee_empty_string_clears_it_absent_leaves_it() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        let s = AtlasMcp::new(backend.clone()).with_env_project_root(false).with_project_root(repo.path().to_path_buf());
+
+        let created = s
+            .task_create(Parameters(TaskCreateArgs {
+                title: "assignee task".into(), description: None, kind: None, priority: None,
+                labels: None, parent: None, blocked_by: None, project_root: None, agent: None,
+            }))
+            .await
+            .unwrap();
+        let task: atlas_core::models::Task = serde_json::from_str(&text_of(&created)).unwrap();
+
+        let update = |assignee: Option<String>, title: Option<String>| TaskUpdateArgs {
+            key: task.key.clone(), title, description: None, kind: None, priority: None,
+            assignee, labels: None, expected_updated_at: None, agent: None,
+        };
+
+        let assigned = s.task_update(Parameters(update(Some("ann".into()), None))).await.unwrap();
+        let assigned: atlas_core::models::Task = serde_json::from_str(&text_of(&assigned)).unwrap();
+        assert_eq!(assigned.assignee.as_deref(), Some("ann"));
+
+        let cleared = s.task_update(Parameters(update(Some(String::new()), None))).await.unwrap();
+        let cleared: atlas_core::models::Task = serde_json::from_str(&text_of(&cleared)).unwrap();
+        assert_eq!(cleared.assignee, None);
+
+        // Absent leaves it alone: renaming the task must not resurrect the assignee.
+        let untouched = s.task_update(Parameters(update(None, Some("renamed".into())))).await.unwrap();
+        let untouched: atlas_core::models::Task = serde_json::from_str(&text_of(&untouched)).unwrap();
+        assert_eq!(untouched.assignee, None);
+        assert_eq!(untouched.title, "renamed");
     }
 }
