@@ -34,12 +34,20 @@ pub fn normalize_board_key(raw: &str) -> Result<String> {
     Ok(key)
 }
 
-/// Whether `actor` is the user's own hands rather than an agent. The desktop and the
-/// CLI (`cli`, `cli/NAME`) are the user driving Atlas directly, so a project's
-/// `agent_access` allow-lists never apply to them.
+/// Whether `actor` is the user's own hands rather than an agent, and so exempt from a
+/// project's `agent_access` rules.
+///
+/// Those are the desktop (`desktop`), the CLI (`cli`, or `cli/NAME` for `atlas task
+/// --as NAME`) and the daemon's own default label for an HTTP caller that sent no
+/// `X-Atlas-Actor` header (`api`), which is the desktop and every hand-driven request.
+/// The rules exist to fence off *agents*, which always announce themselves.
+///
+/// Matched exactly rather than by prefix: `cli` alone would also exempt `cline`, a real
+/// coding agent, along with anything else that happens to start with those letters, and
+/// such an actor would silently pass every allow-list and `require_review`.
 pub fn actor_is_user(actor: &str) -> bool {
     let a = actor.trim();
-    a == "desktop" || a.starts_with("cli")
+    a == "desktop" || a == "api" || a == "cli" || a.starts_with("cli/")
 }
 
 /// Whether `actor` is on `allowed`. A `None` list means any actor. A list matches the
@@ -282,69 +290,87 @@ impl<'a> ProjectRepo<'a> {
     /// sequence alone and `NEW-8` follows `OLD-7`.
     pub fn update(&self, id: Uuid, patch: &ProjectPatch, actor: &str) -> Result<Project> {
         let current = self.get(id)?;
-        let mut renamed: Option<(String, String, i64)> = None;
 
-        if let Some(raw) = &patch.board_key {
-            let key = normalize_board_key(raw)?;
-            let old = current.board_key.clone().unwrap_or_else(|| crate::board::board_key_base(&current.name));
-            if key != old || current.board_key.is_none() {
-                if key == crate::board::GLOBAL_BOARD_KEY {
-                    return Err(AtlasError::Invalid(format!("board key '{key}' is reserved for the global board")));
+        // The new board key, when this patch moves it. Validated and checked for
+        // uniqueness before the transaction opens, so a bad key is a plain `Invalid`
+        // rather than a rollback.
+        let rename = match &patch.board_key {
+            None => None,
+            Some(raw) => {
+                let key = normalize_board_key(raw)?;
+                let old = current.board_key.clone().unwrap_or_else(|| crate::board::board_key_base(&current.name));
+                if key == old && current.board_key.is_some() {
+                    None
+                } else {
+                    if key == crate::board::GLOBAL_BOARD_KEY {
+                        return Err(AtlasError::Invalid(format!("board key '{key}' is reserved for the global board")));
+                    }
+                    Some((old, key))
                 }
-                let tasks = self.db.with_conn(|c| {
-                    let taken: i64 = c.query_row(
-                        "select count(*) from projects where board_key = ? and id::text <> ?",
-                        params![key, id.to_string()],
-                        |r| r.get(0),
-                    )?;
-                    if taken > 0 {
-                        return Err(AtlasError::Invalid(format!("board key '{key}' is already used by another project")));
-                    }
-                    c.execute_batch("begin transaction")?;
-                    let applied = (|| -> Result<i64> {
-                        let n: i64 = c.query_row("select count(*) from tasks where project_id = ?", params![id.to_string()], |r| r.get(0))?;
-                        c.execute("update projects set board_key = ? where id = ?", params![key, id.to_string()])?;
-                        // A task's key is always `<board key>-<seq>`, and `seq` is the stored
-                        // column the key was built from, so rebuilding it is exact.
-                        c.execute("update tasks set key = ? || '-' || seq where project_id = ?", params![key, id.to_string()])?;
-                        Ok(n)
-                    })();
-                    match applied {
-                        Ok(n) => {
-                            c.execute_batch("commit")?;
-                            Ok(n)
-                        }
-                        Err(e) => {
-                            c.execute_batch("rollback")?;
-                            Err(e)
-                        }
-                    }
-                })?;
-                renamed = Some((old, key, tasks));
             }
-        }
-
-        self.db.with_conn(|c| {
-            if let Some(name) = &patch.name {
+        };
+        let name = match &patch.name {
+            None => None,
+            Some(name) => {
                 let name = name.trim();
                 if name.is_empty() {
                     return Err(AtlasError::Invalid("a project needs a name".into()));
                 }
-                c.execute("update projects set name = ? where id = ?", params![name, id.to_string()])?;
+                Some(name.to_string())
             }
-            if let Some(remote) = &patch.git_remote {
-                let remote = remote.as_deref().map(str::trim).filter(|r| !r.is_empty());
-                c.execute("update projects set git_remote = ? where id = ?", params![remote, id.to_string()])?;
+        };
+
+        // One transaction for the whole patch, not one for the rename and a bare write
+        // after it: a failure between the two would otherwise leave the board renamed
+        // and the name untouched.
+        let renamed_tasks = self.db.with_conn(|c| {
+            if let Some((_, key)) = &rename {
+                let taken: i64 = c.query_row(
+                    "select count(*) from projects where board_key = ? and id::text <> ?",
+                    params![key, id.to_string()],
+                    |r| r.get(0),
+                )?;
+                if taken > 0 {
+                    return Err(AtlasError::Invalid(format!("board key '{key}' is already used by another project")));
+                }
             }
-            Ok(())
+            c.execute_batch("begin transaction")?;
+            let applied = (|| -> Result<i64> {
+                let mut tasks = 0;
+                if let Some((_, key)) = &rename {
+                    tasks = c.query_row("select count(*) from tasks where project_id = ?", params![id.to_string()], |r| r.get(0))?;
+                    c.execute("update projects set board_key = ? where id = ?", params![key, id.to_string()])?;
+                    // A task's key is always `<board key>-<seq>`, and `seq` is the stored
+                    // column the key was built from, so rebuilding it is exact.
+                    c.execute("update tasks set key = ? || '-' || seq where project_id = ?", params![key, id.to_string()])?;
+                }
+                if let Some(name) = &name {
+                    c.execute("update projects set name = ? where id = ?", params![name, id.to_string()])?;
+                }
+                if let Some(remote) = &patch.git_remote {
+                    let remote = remote.as_deref().map(str::trim).filter(|r| !r.is_empty());
+                    c.execute("update projects set git_remote = ? where id = ?", params![remote, id.to_string()])?;
+                }
+                Ok(tasks)
+            })();
+            match applied {
+                Ok(tasks) => {
+                    c.execute_batch("commit")?;
+                    Ok(tasks)
+                }
+                Err(e) => {
+                    c.execute_batch("rollback")?;
+                    Err(e)
+                }
+            }
         })?;
 
         let repo = crate::memories::MemoryRepo::new(self.db);
-        if let Some((from, to, tasks)) = renamed {
-            repo.audit(actor, "board_key_rename", "project", Some(id), serde_json::json!({"from": from, "to": to, "tasks": tasks}))?;
+        if let Some((from, to)) = rename {
+            repo.audit(actor, "board_key_rename", "project", Some(id), serde_json::json!({"from": from, "to": to, "tasks": renamed_tasks}))?;
         }
-        if patch.name.is_some() || patch.git_remote.is_some() {
-            repo.audit(actor, "update", "project", Some(id), serde_json::json!({"name": patch.name, "git_remote": patch.git_remote}))?;
+        if name.is_some() || patch.git_remote.is_some() {
+            repo.audit(actor, "update", "project", Some(id), serde_json::json!({"name": name, "git_remote": patch.git_remote}))?;
         }
         self.get(id)
     }
@@ -682,9 +708,14 @@ mod tests {
         assert!(matches!(check_task_move("codex", &p), Err(AtlasError::Conflict(_))));
         assert!(check_task_move("claude-code", &p).is_ok());
         assert!(check_task_move("claude-code/reviewer", &p).is_ok(), "a sub-agent inherits its tool's permission");
-        assert!(check_task_move("desktop", &p).is_ok());
-        assert!(check_task_move("cli", &p).is_ok());
-        assert!(check_task_move("cli/anything", &p).is_ok());
+        for exempt in ["desktop", "api", "cli", "cli/anything"] {
+            assert!(check_task_move(exempt, &p).is_ok(), "{exempt} is the user's own hands");
+        }
+        // The exemption is an exact set, not a prefix: `cline` is a real coding agent,
+        // and `clippy` and `client-x` are not the CLI either.
+        for agent in ["cline", "clippy", "client-x", "cli-bot", "desktop-agent"] {
+            assert!(matches!(check_task_move(agent, &p), Err(AtlasError::Conflict(_))), "{agent} must be checked");
+        }
         assert!(matches!(check_memory_write("codex", &p), Err(AtlasError::Conflict(_))));
         assert!(check_memory_write("cli", &p).is_ok());
     }

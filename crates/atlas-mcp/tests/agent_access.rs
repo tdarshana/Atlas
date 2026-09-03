@@ -68,9 +68,12 @@ async fn task_move_obeys_the_projects_task_movers() {
         .call_tool(call("task_move", serde_json::json!({"key": task.key, "stage": "In Progress"})))
         .await
         .expect_err("codex is not on task_movers");
+    // The exact sentence, not just its shape: clients read this text.
     let text = err.to_string();
-    assert!(text.contains("conflict:"), "{text}");
-    assert!(text.contains("codex"), "{text}");
+    assert!(
+        text.contains(&format!("conflict: actor 'codex' may not move tasks in project {}", project.name)),
+        "{text}"
+    );
     refused.cancel().await.unwrap();
 
     // The named tool moves it, and a sub-agent of that tool inherits the permission.
@@ -104,10 +107,10 @@ async fn require_review_lands_an_mcp_memory_as_pending() {
     assert!(!stored.is_error.unwrap_or(false), "{stored:?}");
     client.cancel().await.unwrap();
 
-    let pending = backend.list_memories(MemoryStatus::Pending, Some(project.id)).await.unwrap();
+    let pending = backend.list_memories(MemoryStatus::Pending, Some(project.id), MemoryScopeFilter::All).await.unwrap();
     assert_eq!(pending.len(), 1, "{pending:?}");
     assert_eq!(pending[0].text, "the deploy target is fly.io");
-    assert!(backend.list_memories(MemoryStatus::Active, Some(project.id)).await.unwrap().is_empty());
+    assert!(backend.list_memories(MemoryStatus::Active, Some(project.id), MemoryScopeFilter::All).await.unwrap().is_empty());
 }
 
 /// `memory_writers` is the same allow-list for the memory path, and the CLI is exempt
@@ -131,7 +134,11 @@ async fn memory_writers_refuses_an_unnamed_tool_but_never_the_cli() {
         .call_tool(call("remember", serde_json::json!({"text": "codex was here"})))
         .await
         .expect_err("codex is not on memory_writers");
-    assert!(err.to_string().contains("conflict:"), "{err}");
+    let text = err.to_string();
+    assert!(
+        text.contains(&format!("conflict: actor 'codex' may not write memories in project {}", project.name)),
+        "{text}"
+    );
     client.cancel().await.unwrap();
 
     let mine = NewMemory {

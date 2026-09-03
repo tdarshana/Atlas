@@ -71,6 +71,10 @@ pub fn resolve_extraction(db: &Db, project_id: Option<Uuid>) -> Result<Extractio
     let global_text = |key: &str| -> Result<Option<String>> {
         Ok(settings.get_raw(key)?.and_then(|v| v.as_str().map(str::to_string)).filter(|s| !s.trim().is_empty()))
     };
+    fn field(value: Option<&String>) -> Option<&str> {
+        value.map(|s| s.trim()).filter(|s| !s.is_empty())
+    }
+
     let enabled = match over.as_ref().and_then(|o| o.enabled) {
         Some(v) => v,
         None => settings.get_raw("extraction.enabled")?.and_then(|v| v.as_bool()) == Some(true),
@@ -78,26 +82,41 @@ pub fn resolve_extraction(db: &Db, project_id: Option<Uuid>) -> Result<Extractio
     if !enabled {
         return Err(disabled());
     }
-    let text = |value: Option<&String>, key: &str| -> Result<String> {
-        match value.map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            Some(v) => Ok(v.to_string()),
-            None => global_text(key)?.ok_or_else(disabled),
-        }
-    };
-    let api_key = match over.as_ref().and_then(|o| o.api_key.as_deref()).filter(|k| !k.is_empty()) {
+
+    let global_base = global_text("extraction.base_url")?;
+    let project_base = field(over.as_ref().and_then(|o| o.base_url.as_ref())).map(str::to_string);
+    let base_url = project_base.clone().or_else(|| global_base.clone()).ok_or_else(disabled)?;
+
+    // An api key belongs to the endpoint it was entered against. `SettingsRepo` and
+    // `ProjectRepo::set_project_extraction` each enforce that within their own scope;
+    // this is the same rule *across* scopes. A project that points somewhere else and
+    // leaves its key blank (a local endpoint asks for none) must not have the global
+    // key sent to that host on its behalf. Inheriting is only right while the project
+    // is still talking to the global endpoint.
+    let same_endpoint_as_global =
+        project_base.is_none() || global_base.as_deref().is_some_and(|g| crate::settings::same_endpoint(&base_url, g));
+    let api_key = match field(over.as_ref().and_then(|o| o.api_key.as_ref())) {
         Some(k) => k.to_string(),
-        None => settings.get_raw("extraction.api_key")?.and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default(),
+        None if same_endpoint_as_global => {
+            settings.get_raw("extraction.api_key")?.and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()
+        }
+        None => String::new(),
     };
+
     Ok(ExtractionConfig {
-        base_url: text(over.as_ref().and_then(|o| o.base_url.as_ref()), "extraction.base_url")?,
-        model: text(over.as_ref().and_then(|o| o.model.as_ref()), "extraction.model")?,
+        base_url,
+        model: match field(over.as_ref().and_then(|o| o.model.as_ref())) {
+            Some(v) => v.to_string(),
+            None => global_text("extraction.model")?.ok_or_else(disabled)?,
+        },
         api_key,
-        // Defaulting to 1.0 means nothing is auto-accepted until the user lowers it.
-        auto_accept_min_confidence: over
-            .as_ref()
-            .and_then(|o| o.auto_accept_min_confidence)
-            .or_else(|| settings.get_raw("extraction.auto_accept_min_confidence").ok().flatten().and_then(|v| v.as_f64()))
-            .unwrap_or(1.0),
+        // Defaulting to 1.0 means nothing is auto-accepted until the user lowers it. A
+        // failed settings read is an error, not that default: silently stopping
+        // auto-accept would hide the fault.
+        auto_accept_min_confidence: match over.as_ref().and_then(|o| o.auto_accept_min_confidence) {
+            Some(v) => v,
+            None => settings.get_raw("extraction.auto_accept_min_confidence")?.and_then(|v| v.as_f64()).unwrap_or(1.0),
+        },
     })
 }
 
@@ -289,7 +308,13 @@ pub fn dedupe(candidates: Vec<Candidate>, memories: &MemoryService, project_id: 
 /// The project an ingest is scoped to. An unknown root is not an error: the
 /// memories simply land global, which is what a transcript from a directory
 /// Atlas has never connected deserves.
-fn project_for(db: &Db, root: Option<PathBuf>) -> Result<Option<Uuid>> {
+///
+/// `Backend::ingest_transcript` calls this once, at the gate, and records the answer
+/// in the job payload; `run_ingest` reads it back rather than resolving again. The
+/// two used to resolve separately and disagreed: a root inside a repository resolved
+/// to the project here but missed an exact-match lookup at the gate, so the access
+/// check and the extraction override both looked at the wrong scope.
+pub fn project_for(db: &Db, root: Option<PathBuf>) -> Result<Option<Uuid>> {
     let Some(root) = root else { return Ok(None) };
     // Resolve the way `connect_project` does, so a path inside a repository finds
     // the row stored under the repository root; an unresolvable path is looked up
@@ -317,10 +342,13 @@ pub async fn run_ingest(job: &Job, backend: &LocalBackend) -> Result<Value> {
     let source_tool = job.payload["source_tool"].as_str().unwrap_or("ingest").to_string();
     let root = job.payload["project_root"].as_str().map(PathBuf::from);
 
-    // The project is resolved before the settings are read, because the project may
-    // override them: an ingest for a project with its own endpoint must not go to the
-    // global one.
-    let project_id = project_for(&backend.db, root)?;
+    // The project was resolved when the job was queued, and the gate that admitted the
+    // caller used that same answer; re-resolving here could disagree with it. An older
+    // job, queued before the payload carried the id, still falls back to the root.
+    let project_id = match job.payload["project_id"].as_str() {
+        Some(id) => Some(Uuid::parse_str(id).map_err(|e| AtlasError::Invalid(format!("ingest job has a malformed project_id: {e}")))?),
+        None => project_for(&backend.db, root)?,
+    };
     let cfg = resolve_extraction(&backend.db, project_id)?;
     let client = build_client(&cfg)?;
     let candidates = extract_candidates(text, &client).await?;
@@ -465,6 +493,38 @@ mod tests {
         assert_eq!(merged.auto_accept_min_confidence, 0.5);
         // The global scope never sees the project's values.
         assert_eq!(resolve_extraction(&db, None).unwrap().model, "global-model");
+
+        // A project that points somewhere else keeps its own key, or none: the global
+        // key belongs to the global endpoint and must not follow the project to a host
+        // the user never entered it against.
+        projects
+            .set_project_extraction(
+                p.id,
+                Some(ProjectExtraction { base_url: Some("http://192.168.1.9:1234/v1".into()), ..Default::default() }),
+                "t",
+            )
+            .unwrap();
+        let moved = resolve_extraction(&db, Some(p.id)).unwrap();
+        assert_eq!(moved.base_url, "http://192.168.1.9:1234/v1");
+        assert_eq!(moved.api_key, "", "the global key must not follow the project to another endpoint");
+        assert_eq!(moved.model, "global-model", "the other fields still inherit");
+
+        // Naming the same endpoint the global settings name is not a move, so the key
+        // is still the right one to use.
+        projects
+            .set_project_extraction(
+                p.id,
+                Some(ProjectExtraction { base_url: Some("https://global.example/v1/".into()), ..Default::default() }),
+                "t",
+            )
+            .unwrap();
+        assert_eq!(resolve_extraction(&db, Some(p.id)).unwrap().api_key, "sk-global");
+
+        // And a project that names no endpoint of its own inherits both.
+        projects.set_project_extraction(p.id, None, "t").unwrap();
+        let inherited = resolve_extraction(&db, Some(p.id)).unwrap();
+        assert_eq!(inherited.base_url, "https://global.example/v1");
+        assert_eq!(inherited.api_key, "sk-global");
 
         // The global switch off, the project's own switch on.
         settings.set_many(&serde_json::Map::from_iter([("extraction.enabled".to_string(), serde_json::Value::from(false))]), "t").unwrap();

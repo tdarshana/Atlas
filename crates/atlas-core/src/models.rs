@@ -27,6 +27,16 @@ str_enum!(MemoryScope { Global => "global", Project => "project" });
 str_enum!(MemoryKind { Fact => "fact", Decision => "decision", Preference => "preference", Insight => "insight", Todo => "todo" });
 str_enum!(MemoryStatus { Active => "active", Pending => "pending", Rejected => "rejected", Superseded => "superseded" });
 
+// How a memory listing treats the project it was given. `All` is the store's own
+// rule, where a project widens rather than narrows: that project's memories *plus*
+// every global one, which is what an agent starting work wants. `ProjectOnly` narrows
+// to the project's own rows, for a screen that has already said whose memories it is
+// showing and would be lying to mix the global ones in.
+// `All` is the default wherever one is needed; it is spelled out at each call site
+// rather than through `Default`, since `str_enum!` builds the enum and a derived
+// default would have to be threaded through the macro for one use.
+str_enum!(MemoryScopeFilter { All => "all", ProjectOnly => "project_only" });
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NewMemory {
     pub scope: MemoryScope,

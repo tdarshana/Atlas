@@ -119,11 +119,31 @@ impl<'a> MemoryRepo<'a> {
     /// Newest first. `project_id` widens rather than narrows: it matches that
     /// project's memories plus every global one, as `list_active` does.
     pub fn list_by_status(&self, status: MemoryStatus, scope: Option<MemoryScope>, project_id: Option<Uuid>) -> Result<Vec<Memory>> {
+        self.list_by_status_scoped(status, scope, project_id, MemoryScopeFilter::All)
+    }
+
+    /// [`list_by_status`](Self::list_by_status) with a say in how `project_id` is read:
+    /// `All` widens to that project plus the global memories, `ProjectOnly` keeps just
+    /// the rows that belong to the project. With no `project_id` the two agree, since
+    /// there is no project to narrow to.
+    pub fn list_by_status_scoped(
+        &self,
+        status: MemoryStatus,
+        scope: Option<MemoryScope>,
+        project_id: Option<Uuid>,
+        only: MemoryScopeFilter,
+    ) -> Result<Vec<Memory>> {
         self.db.with_conn(|c| {
             let mut sql = format!("select {} from memories where status = ?", select_cols());
             let mut args: Vec<String> = vec![status.as_str().to_string()];
             if let Some(s) = scope { sql.push_str(" and scope = ?"); args.push(s.as_str().to_string()); }
-            if let Some(p) = project_id { sql.push_str(" and (project_id = ? or scope = 'global')"); args.push(p.to_string()); }
+            if let Some(p) = project_id {
+                match only {
+                    MemoryScopeFilter::All => sql.push_str(" and (project_id = ? or scope = 'global')"),
+                    MemoryScopeFilter::ProjectOnly => sql.push_str(" and project_id = ?"),
+                }
+                args.push(p.to_string());
+            }
             sql.push_str(" order by created_at desc");
             let mut st = c.prepare(&sql)?;
             let rows = st.query_map(duckdb::params_from_iter(args.iter()), row_to_memory)?;

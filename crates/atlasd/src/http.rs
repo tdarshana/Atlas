@@ -162,7 +162,7 @@ pub fn cors_layer() -> CorsLayer {
 #[derive(Deserialize)] pub struct RootBody { pub root: std::path::PathBuf }
 #[derive(Deserialize)] pub struct StatusBody { pub status: String }
 #[derive(Deserialize)] pub struct ProjectQ { pub project_id: Option<Uuid> }
-#[derive(Deserialize)] pub struct ListMemoriesQ { pub status: Option<String>, pub project_id: Option<Uuid> }
+#[derive(Deserialize)] pub struct ListMemoriesQ { pub status: Option<String>, pub project_id: Option<Uuid>, pub scope: Option<String> }
 #[derive(Deserialize)] pub struct LogQ {
     #[serde(default)] pub source: Option<String>,
     #[serde(default)] pub kind: Option<String>,
@@ -257,9 +257,11 @@ async fn create_memory(State(s): State<AppState>, ApiQuery(q): ApiQuery<ActorQ>,
     Ok((StatusCode::CREATED, Json(s.backend.remember(m, actor(&q)).await?)))
 }
 async fn list_memories(State(s): State<AppState>, ApiQuery(q): ApiQuery<ListMemoriesQ>) -> Result<Json<Vec<Memory>>, ApiError> {
-    // An empty `?status=` is a caller who left the filter blank, not a bad status.
+    // An empty `?status=` is a caller who left the filter blank, not a bad status; the
+    // same reading applies to `?scope=`, which defaults to the widening `all`.
     let status = match q.status.as_deref().filter(|v| !v.is_empty()) { Some(v) => v.parse()?, None => MemoryStatus::Active };
-    Ok(Json(s.backend.list_memories(status, q.project_id).await?))
+    let scope = match q.scope.as_deref().filter(|v| !v.is_empty()) { Some(v) => v.parse()?, None => MemoryScopeFilter::All };
+    Ok(Json(s.backend.list_memories(status, q.project_id, scope).await?))
 }
 async fn set_memory_status(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, ApiQuery(q): ApiQuery<ActorQ>, ApiJson(b): ApiJson<StatusBody>) -> Result<Json<Memory>, ApiError> {
     Ok(Json(s.backend.set_memory_status(id, b.status.parse()?, actor(&q)).await?))

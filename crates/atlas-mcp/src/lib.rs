@@ -794,7 +794,7 @@ mod tests {
             project_id: None, project_root: None, source_agent: None,
         })).await.unwrap();
 
-        let stored = backend.list_memories(MemoryStatus::Active, None).await.unwrap();
+        let stored = backend.list_memories(MemoryStatus::Active, None, MemoryScopeFilter::All).await.unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].scope, MemoryScope::Project);
         let project_id = stored[0].project_id.expect("the seeded root should have scoped the memory");
@@ -833,7 +833,7 @@ mod tests {
             text: "bun is the runtime".into(), kind: None, tags: None, scope: None,
             project_id: None, project_root: None, source_agent: None,
         })).await.unwrap();
-        let stored = backend.list_memories(MemoryStatus::Active, None).await.unwrap();
+        let stored = backend.list_memories(MemoryStatus::Active, None, MemoryScopeFilter::All).await.unwrap();
         assert_eq!(stored[0].scope, MemoryScope::Global);
         assert!(stored[0].project_id.is_none());
         assert!(backend.list_projects().await.unwrap().is_empty(), "a global remember connected a project");

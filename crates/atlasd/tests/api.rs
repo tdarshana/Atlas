@@ -1356,12 +1356,16 @@ async fn project_log_merges_sources_and_exports_json_lines() {
         "scope": "project", "project_id": id, "kind": "fact", "text": "the deploy target is fly.io"
     })).send().await.unwrap();
 
+    // A real sync leaves the `sync` audit row the log reads as its `synced` entry.
+    let synced = c.post(format!("{base}/sync")).json(&serde_json::json!({"root": dir.path()})).send().await.unwrap();
+    assert_eq!(synced.status(), 200);
+
     let log = c.get(format!("{base}/projects/{id}/log")).send().await.unwrap();
     assert_eq!(log.status(), 200);
     let log: serde_json::Value = log.json().await.unwrap();
     let entries = log.as_array().unwrap();
     let kinds: Vec<&str> = entries.iter().map(|e| e["kind"].as_str().unwrap()).collect();
-    for want in ["connected", "created", "commented", "remembered"] {
+    for want in ["connected", "created", "commented", "remembered", "synced"] {
         assert!(kinds.contains(&want), "missing {want} in {kinds:?}");
     }
     let commented = entries.iter().find(|e| e["kind"] == "commented").unwrap();
@@ -1391,4 +1395,101 @@ async fn project_log_merges_sources_and_exports_json_lines() {
     assert_eq!(missing.status(), 404);
     // A bad `after` is a 400 naming the parameter, not a silently dropped filter.
     assert_eq!(c.get(format!("{base}/projects/{id}/log?after=yesterday")).send().await.unwrap().status(), 400);
+}
+
+
+/// The gate and the worker resolve one project from one root. A `project_root` naming
+/// a subdirectory of the repository is still that project: its override decides which
+/// endpoint the transcript goes to (the global settings stay off throughout), and its
+/// `memory_writers` decides who may queue one at all.
+#[tokio::test]
+async fn ingest_resolves_the_project_from_a_subdirectory_for_both_the_gate_and_the_worker() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    let dir = repo_free_tempdir();
+    fixture_repo(dir.path());
+    let subdir = dir.path().join("src");
+    let llm = stub_llm().await;
+
+    let project: serde_json::Value = c.post(format!("{base}/projects/connect")).json(&serde_json::json!({"root": dir.path()})).send().await.unwrap().json().await.unwrap();
+    let id = project["id"].as_str().unwrap().to_string();
+    c.put(format!("{base}/projects/{id}/extraction")).header("X-Atlas-Actor", "desktop")
+        .json(&serde_json::json!({"enabled": true, "base_url": llm, "model": "project-model", "api_key": "sk-project"}))
+        .send().await.unwrap();
+
+    // The global settings are off, so a transcript from a directory Atlas does not know
+    // has nowhere to go: this is the control for the case below.
+    let elsewhere = repo_free_tempdir();
+    let unknown = c.post(format!("{base}/ingest")).json(&serde_json::json!({
+        "text": "we chose bun", "source_tool": "codex", "project_root": elsewhere.path()
+    })).send().await.unwrap();
+    assert_eq!(unknown.status(), 409, "no project, and the global settings are off");
+
+    // The same transcript from inside the repository resolves to the project, so the
+    // project's own endpoint runs it.
+    let queued = c.post(format!("{base}/ingest")).json(&serde_json::json!({
+        "text": "we chose bun", "source_tool": "codex", "project_root": subdir
+    })).send().await.unwrap();
+    assert_eq!(queued.status(), 202, "a subdirectory is still the project");
+    let job_id = queued.json::<serde_json::Value>().await.unwrap()["job_id"].as_str().unwrap().to_string();
+    let job = wait_for_job(&c, &base, &job_id).await;
+    assert_eq!(job["status"], "done", "{job}");
+    // The gate recorded the same project the worker then used, so the memories are the
+    // project's, not global.
+    let mine: serde_json::Value = c.get(format!("{base}/memories?status=pending&project_id={id}&scope=project_only")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(mine.as_array().unwrap().len(), 2, "{mine}");
+
+    // And the allow-list is checked against that same project, from a subdirectory too.
+    c.put(format!("{base}/projects/{id}/agent-access")).header("X-Atlas-Actor", "desktop")
+        .json(&serde_json::json!({"memory_writers": ["claude-code"]})).send().await.unwrap();
+    let refused = c.post(format!("{base}/ingest")).json(&serde_json::json!({
+        "text": "another transcript", "source_tool": "codex", "project_root": subdir
+    })).send().await.unwrap();
+    assert_eq!(refused.status(), 409);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("may not write memories"), "{body}");
+}
+
+/// `scope=project_only` narrows a listing to the project's own memories; the default
+/// still widens to the global ones, and asking to narrow with no project is a 400.
+#[tokio::test]
+async fn memories_can_be_listed_for_one_project_only() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    let dir = repo_free_tempdir();
+    fixture_repo(dir.path());
+
+    let project: serde_json::Value = c.post(format!("{base}/projects/connect")).json(&serde_json::json!({"root": dir.path()})).send().await.unwrap().json().await.unwrap();
+    let id = project["id"].as_str().unwrap().to_string();
+    c.post(format!("{base}/memories?actor=desktop")).json(&serde_json::json!({
+        "scope": "global", "kind": "fact", "text": "a global memory"
+    })).send().await.unwrap();
+    c.post(format!("{base}/memories?actor=desktop")).json(&serde_json::json!({
+        "scope": "project", "project_id": id, "kind": "fact", "text": "a project memory"
+    })).send().await.unwrap();
+
+    let widened: serde_json::Value = c.get(format!("{base}/memories?project_id={id}")).send().await.unwrap().json().await.unwrap();
+    let texts: Vec<&str> = widened.as_array().unwrap().iter().map(|m| m["text"].as_str().unwrap()).collect();
+    assert!(texts.contains(&"a global memory") && texts.contains(&"a project memory"), "{texts:?}");
+    // The absent, blank and explicit `all` spellings all mean the same thing.
+    for query in ["", "&scope=", "&scope=all"] {
+        let all: serde_json::Value = c.get(format!("{base}/memories?project_id={id}{query}")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(all.as_array().unwrap().len(), 2, "'{query}': {all}");
+    }
+
+    let narrowed = c.get(format!("{base}/memories?project_id={id}&scope=project_only")).send().await.unwrap();
+    assert_eq!(narrowed.status(), 200);
+    let narrowed: serde_json::Value = narrowed.json().await.unwrap();
+    let texts: Vec<&str> = narrowed.as_array().unwrap().iter().map(|m| m["text"].as_str().unwrap()).collect();
+    assert_eq!(texts, vec!["a project memory"], "the global memory must be excluded");
+
+    let no_project = c.get(format!("{base}/memories?scope=project_only")).send().await.unwrap();
+    assert_eq!(no_project.status(), 400);
+    let body: serde_json::Value = no_project.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("project_id"), "{body}");
+
+    let bad = c.get(format!("{base}/memories?project_id={id}&scope=nonsense")).send().await.unwrap();
+    assert_eq!(bad.status(), 400);
 }

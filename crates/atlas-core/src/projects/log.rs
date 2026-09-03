@@ -3,9 +3,25 @@
 //!
 //! Task events, the audit rows of the project's memories, the project's own audit
 //! rows (and its sync targets'), and the extraction jobs run against it are read
-//! separately, mapped onto one `LogEntry`, merged and sorted newest first. The
-//! filters then run in Rust rather than SQL, because a filter over the merged list
-//! is the only one that means the same thing for all four sources.
+//! separately, mapped onto one `LogEntry`, merged and sorted newest first.
+//!
+//! Each source is narrowed in SQL, not in Rust: by the project, by the page's upper
+//! time bound, and by a row cap, so a table that only ever grows cannot turn a
+//! twenty-line first paint into a full-history scan while the single connection
+//! mutex is held. `source`, `kind` and `q` then run over the merged list, because a
+//! filter over the merge is the only one that means the same thing for all four.
+//!
+//! ## Time
+//!
+//! Every source is ordered and paged by `epoch_us`, microseconds since the Unix
+//! epoch. `task_events.created_at` is a `timestamptz`, so that is its true UTC
+//! instant; `audit."at"` and `jobs.created_at` are naive `timestamp` columns
+//! defaulted from `now()`, and `epoch_us` reads those as UTC. That is the whole
+//! rule: naive columns are UTC. It holds because nothing in the daemon sets a
+//! session `TimeZone` or loads DuckDB's ICU extension, so `now()` lands in a
+//! `timestamp` column as UTC. Were that ever to change, the naive columns would
+//! shift by the offset and the merge would interleave wrongly, so the assumption is
+//! named here rather than left to be rediscovered.
 
 use crate::db::Db;
 use crate::models::{LogEntry, LogFilter, LogRef};
@@ -13,35 +29,79 @@ use crate::Result;
 use duckdb::params;
 use uuid::Uuid;
 
-/// Entries a filtered read answers with when the caller names no limit.
+/// Entries a filtered read answers with when the caller names no limit. An explicit
+/// `limit` of 0 reads as "unspecified" and lands here too, rather than as an empty
+/// page: a client paging to exhaustion stops on an empty result, not on a zero it
+/// asked for.
 pub const DEFAULT_LIMIT: usize = 100;
 /// The most a filtered read will answer with, whatever the caller asks for.
 pub const MAX_LIMIT: usize = 500;
+/// Entries an export pulls per round trip before asking for the next page.
+const EXPORT_PAGE: usize = 500;
+
+/// The upper bound on a page of the log, in epoch microseconds. `inclusive` is what
+/// lets the export walk a run of entries that share one microsecond: it re-asks from
+/// the boundary and drops what it has already written, where a strictly-older cursor
+/// would step over the rest of that run.
+#[derive(Clone, Copy)]
+struct Before {
+    us: i64,
+    inclusive: bool,
+}
+
+impl Before {
+    fn older_than(us: i64) -> Self {
+        Self { us, inclusive: false }
+    }
+    fn at_or_older_than(us: i64) -> Self {
+        Self { us, inclusive: true }
+    }
+    fn op(&self) -> &'static str {
+        if self.inclusive { "<=" } else { "<" }
+    }
+}
 
 fn ts(us: i64) -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::from_timestamp_micros(us).unwrap_or_default()
 }
 
-fn task_ref(id: Option<Uuid>, key: Option<String>) -> Option<LogRef> {
-    Some(LogRef { kind: "task".into(), id, key })
+/// `base` with the page bound appended when there is one, then ordered newest first
+/// and capped. `cap` is a `usize` this module computes, never caller text, so it is
+/// formatted in rather than bound.
+fn paged(base: &str, time_expr: &str, before: Option<Before>, cap: usize) -> String {
+    let mut sql = base.to_string();
+    if let Some(b) = before {
+        sql.push_str(&format!(" and {time_expr} {} ?", b.op()));
+    }
+    sql.push_str(&format!(" order by 1 desc limit {cap}"));
+    sql
 }
 
-/// Every entry for `project_id`, newest first, before any filter.
+/// Up to `cap` entries per source for `project_id`, at or before `before`, merged and
+/// sorted newest first and then cut back to `cap` overall.
 ///
-/// `root_path` is what an extraction job is matched by: the job payload records the
-/// root it was queued from, not a project id.
-fn collect(db: &Db, project_id: Uuid, root_path: &str) -> Result<Vec<LogEntry>> {
+/// `root_path` is the second way an extraction job is matched: older job payloads
+/// record only the root they were queued from, not a project id.
+fn collect(db: &Db, project_id: Uuid, root_path: &str, before: Option<Before>, cap: usize) -> Result<Vec<LogEntry>> {
     let pid = project_id.to_string();
+    let bound = before.map(|b| b.us);
     let mut out: Vec<LogEntry> = Vec::new();
 
     db.with_conn(|c| {
         // Task events: the actor is the source, the event kind is the kind, and the
         // body is the detail. Joined to `tasks` so the entry can carry the task key.
-        let mut st = c.prepare(
+        let sql = paged(
             "select epoch_us(e.created_at), e.actor, e.kind, e.body, e.task_id::text, t.key \
              from task_events e join tasks t on e.task_id = t.id where t.project_id = ?",
-        )?;
-        let mut rows = st.query(params![pid])?;
+            "epoch_us(e.created_at)",
+            before,
+            cap,
+        );
+        let mut st = c.prepare(&sql)?;
+        let mut rows = match bound {
+            Some(us) => st.query(params![pid, us])?,
+            None => st.query(params![pid])?,
+        };
         while let Some(r) = rows.next()? {
             let task_id = Uuid::parse_str(&r.get::<_, String>(4)?).ok();
             let key: String = r.get(5)?;
@@ -54,7 +114,7 @@ fn collect(db: &Db, project_id: Uuid, root_path: &str) -> Result<Vec<LogEntry>> 
                 // "moved" plus the task key is still the sentence the user wants.
                 detail: if body.trim().is_empty() { format!("{kind} {key}") } else { body },
                 kind,
-                reference: task_ref(task_id, Some(key)),
+                reference: Some(LogRef { kind: "task".into(), id: task_id, key: Some(key) }),
             });
         }
         Ok(())
@@ -64,12 +124,19 @@ fn collect(db: &Db, project_id: Uuid, root_path: &str) -> Result<Vec<LogEntry>> 
         // Memory audit rows, restricted to this project's memories. `forget_reason` is
         // deliberately left out: `forget` writes it alongside `supersede`, and one act
         // should be one line.
-        let mut st = c.prepare(
+        let sql = paged(
             "select epoch_us(a.\"at\"), a.actor, a.action, m.text, m.id::text \
              from audit a join memories m on a.entity_id = m.id \
              where a.entity = 'memory' and m.project_id = ? and a.action in ('insert', 'supersede', 'set_status')",
-        )?;
-        let mut rows = st.query(params![pid])?;
+            "epoch_us(a.\"at\")",
+            before,
+            cap,
+        );
+        let mut st = c.prepare(&sql)?;
+        let mut rows = match bound {
+            Some(us) => st.query(params![pid, us])?,
+            None => st.query(params![pid])?,
+        };
         while let Some(r) = rows.next()? {
             let action: String = r.get(2)?;
             let kind = match action.as_str() {
@@ -89,12 +156,20 @@ fn collect(db: &Db, project_id: Uuid, root_path: &str) -> Result<Vec<LogEntry>> 
     })?;
 
     db.with_conn(|c| {
-        // The project's own audit rows, plus any written against a sync target of it.
-        let mut st = c.prepare(
+        // The project's own audit rows, plus the one `sync` writes when it has finished
+        // writing a project's files.
+        let sql = paged(
             "select epoch_us(a.\"at\"), a.actor, a.action, a.entity, a.detail::text \
              from audit a where a.entity in ('project', 'sync') and a.entity_id = ?",
-        )?;
-        let mut rows = st.query(params![pid])?;
+            "epoch_us(a.\"at\")",
+            before,
+            cap,
+        );
+        let mut st = c.prepare(&sql)?;
+        let mut rows = match bound {
+            Some(us) => st.query(params![pid, us])?,
+            None => st.query(params![pid])?,
+        };
         while let Some(r) = rows.next()? {
             let action: String = r.get(2)?;
             let entity: String = r.get(3)?;
@@ -120,22 +195,27 @@ fn collect(db: &Db, project_id: Uuid, root_path: &str) -> Result<Vec<LogEntry>> 
     })?;
 
     db.with_conn(|c| {
-        // Extraction jobs. The transcript itself is never selected: an ingest payload
-        // can be a million characters, and none of them belong in a log line.
-        let mut st = c.prepare(
+        // Extraction jobs, matched in SQL rather than row by row in Rust: a machine that
+        // has been ingesting for months holds tens of thousands of finished jobs across
+        // every project, and scanning them all to answer one project's first page would
+        // hold the connection mutex against every other request. The transcript itself is
+        // never selected either: an ingest payload can be a million characters, and none
+        // of them belong in a log line.
+        let sql = paged(
             "select epoch_us(created_at), id::text, status, error, result::text, \
-             json_extract_string(payload, '$.source_tool'), \
-             json_extract_string(payload, '$.project_root'), \
-             json_extract_string(payload, '$.project_id') \
-             from jobs where kind = 'ingest' and status in ('done', 'failed')",
-        )?;
-        let mut rows = st.query([])?;
+             json_extract_string(payload, '$.source_tool') \
+             from jobs where kind = 'ingest' and status in ('done', 'failed') \
+             and (json_extract_string(payload, '$.project_id') = ? or json_extract_string(payload, '$.project_root') = ?)",
+            "epoch_us(created_at)",
+            before,
+            cap,
+        );
+        let mut st = c.prepare(&sql)?;
+        let mut rows = match bound {
+            Some(us) => st.query(params![pid, root_path, us])?,
+            None => st.query(params![pid, root_path])?,
+        };
         while let Some(r) = rows.next()? {
-            let job_root: Option<String> = r.get(6)?;
-            let job_project: Option<String> = r.get(7)?;
-            if job_root.as_deref() != Some(root_path) && job_project.as_deref() != Some(pid.as_str()) {
-                continue;
-            }
             let status: String = r.get(2)?;
             let error: Option<String> = r.get(3)?;
             let result: Option<String> = r.get(4)?;
@@ -151,34 +231,68 @@ fn collect(db: &Db, project_id: Uuid, root_path: &str) -> Result<Vec<LogEntry>> 
     })?;
 
     out.sort_by(|a, b| b.time.cmp(&a.time));
+    out.truncate(cap);
     Ok(out)
 }
 
 /// The project's log, narrowed by `f` and capped. `after` pages: pass the `time` of
 /// the last entry you saw to get the ones strictly older than it.
+///
+/// With no text filter each source is asked for exactly `limit` rows, which is all the
+/// merge can need. With one, the sources are read to `MAX_LIMIT` instead, since the
+/// filter runs after the merge and a narrow `q` would otherwise return a short page
+/// while matching entries sat just past the cut.
 pub fn project_log(db: &Db, project_id: Uuid, f: &LogFilter) -> Result<Vec<LogEntry>> {
     let project = super::ProjectRepo::new(db).get(project_id)?;
-    let all = collect(db, project_id, &project.root_path)?;
     let q = f.q.as_deref().map(str::to_lowercase).filter(|q| !q.is_empty());
-    let limit = f.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
-    Ok(all
+    let source = f.source.as_deref().filter(|s| !s.is_empty());
+    let kind = f.kind.as_deref().filter(|k| !k.is_empty());
+    let limit = f.limit.filter(|l| *l > 0).unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
+    let cap = if q.is_some() || source.is_some() || kind.is_some() { MAX_LIMIT } else { limit };
+    let before = f.after.map(|a| Before::older_than(a.timestamp_micros()));
+    Ok(collect(db, project_id, &project.root_path, before, cap)?
         .into_iter()
-        .filter(|e| f.source.as_deref().filter(|s| !s.is_empty()).is_none_or(|s| s == e.source))
-        .filter(|e| f.kind.as_deref().filter(|k| !k.is_empty()).is_none_or(|k| k == e.kind))
+        .filter(|e| source.is_none_or(|s| s == e.source))
+        .filter(|e| kind.is_none_or(|k| k == e.kind))
         .filter(|e| q.as_deref().is_none_or(|q| e.detail.to_lowercase().contains(q)))
-        .filter(|e| f.after.is_none_or(|after| e.time < after))
         .take(limit)
         .collect())
 }
 
 /// The whole log as JSON lines, one entry per line, newest first and uncapped: an
-/// export the user asked for is the one read that should not be paged.
+/// export the user asked for is the one read that should not be paged away.
+///
+/// It is still paged underneath, [`EXPORT_PAGE`] entries at a time, so a long history
+/// is never held in the database's own result set all at once. Each page re-asks from
+/// the last entry's timestamp inclusively and skips what it has already written, so a
+/// run of entries sharing one microsecond is not stepped over at a page boundary.
 pub fn project_log_export(db: &Db, project_id: Uuid) -> Result<String> {
     let project = super::ProjectRepo::new(db).get(project_id)?;
     let mut out = String::new();
-    for entry in collect(db, project_id, &project.root_path)? {
-        out.push_str(&serde_json::to_string(&entry)?);
-        out.push('\n');
+    let mut before: Option<Before> = None;
+    // The lines already written whose time equals the current page bound.
+    let mut written_at_bound: Vec<String> = Vec::new();
+    loop {
+        let page = collect(db, project_id, &project.root_path, before, EXPORT_PAGE)?;
+        let full = page.len() == EXPORT_PAGE;
+        let mut fresh: Vec<(chrono::DateTime<chrono::Utc>, String)> = Vec::new();
+        for entry in page {
+            let line = serde_json::to_string(&entry)?;
+            if written_at_bound.contains(&line) {
+                continue;
+            }
+            fresh.push((entry.time, line));
+        }
+        let Some((last_time, _)) = fresh.last().map(|(t, l)| (*t, l.clone())) else { break };
+        for (_, line) in &fresh {
+            out.push_str(line);
+            out.push('\n');
+        }
+        if !full {
+            break;
+        }
+        written_at_bound = fresh.iter().filter(|(t, _)| *t == last_time).map(|(_, l)| l.clone()).collect();
+        before = Some(Before::at_or_older_than(last_time.timestamp_micros()));
     }
     Ok(out)
 }
@@ -191,8 +305,8 @@ mod tests {
     use std::sync::Arc;
 
     /// A project with one of everything the log reads: a task and its events, a
-    /// remembered and then forgotten memory, the project's own audit rows, and a
-    /// finished ingest job.
+    /// remembered and then forgotten memory, the project's own audit rows, a sync row
+    /// and a finished ingest job.
     fn fixture() -> (Arc<crate::db::Db>, Uuid, String) {
         let db = Arc::new(crate::db::Db::open_in_memory().unwrap());
         let root = "/tmp/logged";
@@ -224,9 +338,15 @@ mod tests {
             )
             .unwrap();
         memories.supersede(memory.id, None, "desktop").unwrap();
+        memories.audit("sync", "apply", "sync", Some(project.id), serde_json::json!({"created": 2})).unwrap();
 
         let jobs = crate::jobs::JobRepo::new(db.clone());
-        let job = jobs.enqueue("ingest", serde_json::json!({"text": "a transcript", "source_tool": "claude-code", "project_root": root})).unwrap();
+        let job = jobs
+            .enqueue(
+                "ingest",
+                serde_json::json!({"text": "a transcript", "source_tool": "claude-code", "project_root": root, "project_id": project.id}),
+            )
+            .unwrap();
         jobs.mark_done(job, serde_json::json!({"inserted": 2})).unwrap();
 
         (db, project.id, task.key)
@@ -238,7 +358,7 @@ mod tests {
         let entries = project_log(&db, project_id, &LogFilter::default()).unwrap();
 
         let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
-        for want in ["created", "commented", "remembered", "forgotten", "connected", "ingested"] {
+        for want in ["created", "commented", "remembered", "forgotten", "connected", "synced", "ingested"] {
             assert!(kinds.contains(&want), "missing {want} in {kinds:?}");
         }
         for pair in entries.windows(2) {
@@ -261,8 +381,31 @@ mod tests {
         assert!(ingested.detail.contains("inserted"), "{}", ingested.detail);
         assert_eq!(ingested.reference.as_ref().unwrap().kind, "job");
 
+        let synced = entries.iter().find(|e| e.kind == "synced").unwrap();
+        assert_eq!(synced.reference.as_ref().unwrap().kind, "sync");
+
         let connected = entries.iter().find(|e| e.kind == "connected").unwrap();
         assert_eq!(connected.reference.as_ref().unwrap().id, Some(project_id));
+    }
+
+    /// Another project's ingest job never reaches this project's log, and the match is
+    /// made in SQL rather than by reading every job.
+    #[test]
+    fn an_ingest_job_belongs_only_to_its_own_project() {
+        let (db, project_id, _) = fixture();
+        let other = ProjectRepo::new(&db).upsert(&Detected { root: "/tmp/elsewhere".into(), remote: None }, None, "cli").unwrap();
+        let jobs = crate::jobs::JobRepo::new(db.clone());
+        let job = jobs
+            .enqueue("ingest", serde_json::json!({"text": "not mine", "source_tool": "codex", "project_root": "/tmp/elsewhere", "project_id": other.id}))
+            .unwrap();
+        jobs.mark_done(job, serde_json::json!({"inserted": 9})).unwrap();
+
+        let mine = project_log(&db, project_id, &LogFilter { kind: Some("ingested".into()), ..Default::default() }).unwrap();
+        assert_eq!(mine.len(), 1, "{mine:?}");
+        assert_eq!(mine[0].source, "claude-code");
+        let theirs = project_log(&db, other.id, &LogFilter { kind: Some("ingested".into()), ..Default::default() }).unwrap();
+        assert_eq!(theirs.len(), 1);
+        assert_eq!(theirs[0].source, "codex");
     }
 
     #[test]
@@ -294,6 +437,13 @@ mod tests {
         // An empty string is a filter left off, not a filter that matches nothing.
         let blank = project_log(&db, project_id, &LogFilter { source: Some(String::new()), q: Some(String::new()), ..Default::default() }).unwrap();
         assert_eq!(blank.len(), all.len());
+
+        // An explicit zero is "unspecified", not an empty page.
+        let zero = project_log(&db, project_id, &LogFilter { limit: Some(0), ..Default::default() }).unwrap();
+        assert_eq!(zero.len(), all.len());
+        // And the cap holds however much is asked for.
+        let over = project_log(&db, project_id, &LogFilter { limit: Some(10_000), ..Default::default() }).unwrap();
+        assert_eq!(over.len(), all.len());
     }
 
     #[test]
@@ -307,6 +457,31 @@ mod tests {
             let v: serde_json::Value = serde_json::from_str(line).unwrap();
             assert!(v["time"].is_string() && v["source"].is_string() && v["kind"].is_string(), "{line}");
             assert!(v.get("ref").is_some(), "{line}");
+        }
+    }
+
+    /// The export pages underneath, so a log longer than one page comes back whole, in
+    /// order, with nothing repeated and nothing skipped at a page boundary.
+    #[test]
+    fn the_export_pages_past_its_own_page_size() {
+        let (db, project_id, task_key) = fixture();
+        let board = crate::board::TaskRepo::new(db.clone(), Default::default());
+        for n in 0..EXPORT_PAGE + 20 {
+            board.comment(&task_key, &format!("note {n}"), "codex").unwrap();
+        }
+
+        let text = project_log_export(&db, project_id).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines.len() > EXPORT_PAGE, "the export must not stop at one page: {}", lines.len());
+
+        let entries: Vec<LogEntry> = lines.iter().map(|l| serde_json::from_str(l).unwrap()).collect();
+        for pair in entries.windows(2) {
+            assert!(pair[0].time >= pair[1].time, "the export must stay newest first");
+        }
+        let unique: std::collections::HashSet<&str> = lines.iter().copied().collect();
+        assert_eq!(unique.len(), lines.len(), "the export must not repeat a line across pages");
+        for n in 0..EXPORT_PAGE + 20 {
+            assert!(entries.iter().any(|e| e.detail == format!("note {n}")), "note {n} was skipped");
         }
     }
 

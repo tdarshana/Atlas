@@ -172,6 +172,18 @@ impl MemoryService {
         self.repo().list_by_status(status, scope, project_id)
     }
 
+    /// [`list`](Self::list) with a say in whether a `project_id` widens to the global
+    /// memories or narrows to the project's own.
+    pub fn list_scoped(
+        &self,
+        status: MemoryStatus,
+        scope: Option<MemoryScope>,
+        project_id: Option<Uuid>,
+        only: MemoryScopeFilter,
+    ) -> Result<Vec<Memory>> {
+        self.repo().list_by_status_scoped(status, scope, project_id, only)
+    }
+
     /// Moves a memory between statuses, keeping the search index in step: becoming
     /// active makes it searchable, leaving active takes it back out.
     pub fn set_status(&self, id: Uuid, status: MemoryStatus, actor: &str) -> Result<Memory> {

@@ -66,6 +66,16 @@ fn check_project_root(root: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// `ProjectOnly` needs a project to narrow to. Refusing here rather than quietly
+/// listing every memory means a caller who asked for one project's own rows never gets
+/// another project's back.
+pub fn check_scope(project_id: Option<Uuid>, scope: MemoryScopeFilter) -> Result<()> {
+    if scope == MemoryScopeFilter::ProjectOnly && project_id.is_none() {
+        return Err(AtlasError::Invalid("scope=project_only needs a project_id".into()));
+    }
+    Ok(())
+}
+
 #[async_trait::async_trait]
 pub trait Backend: Send + Sync + 'static {
     async fn status(&self) -> Result<StatusReport>;
@@ -75,7 +85,10 @@ pub trait Backend: Send + Sync + 'static {
     async fn recall(&self, q: RecallQuery) -> Result<Vec<RecallHit>>;
     async fn forget(&self, id: Uuid, reason: Option<String>, actor: &str) -> Result<Memory>;
     async fn get_memory(&self, id: Uuid) -> Result<Memory>;
-    async fn list_memories(&self, status: MemoryStatus, project_id: Option<Uuid>) -> Result<Vec<Memory>>;
+    /// `scope` decides how `project_id` is read: `All` widens to that project plus the
+    /// global memories, `ProjectOnly` keeps only the project's own rows. `ProjectOnly`
+    /// without a `project_id` is `Invalid`: there is no project to narrow to.
+    async fn list_memories(&self, status: MemoryStatus, project_id: Option<Uuid>, scope: MemoryScopeFilter) -> Result<Vec<Memory>>;
     async fn set_memory_status(&self, id: Uuid, status: MemoryStatus, actor: &str) -> Result<Memory>;
 
     // ---- projects ----
@@ -258,7 +271,10 @@ impl Backend for LocalBackend {
     async fn recall(&self, q: RecallQuery) -> Result<Vec<RecallHit>> { self.memories.recall(&q) }
     async fn forget(&self, id: Uuid, reason: Option<String>, actor: &str) -> Result<Memory> { self.memories.forget(id, reason, actor) }
     async fn get_memory(&self, id: Uuid) -> Result<Memory> { self.memories.get(id) }
-    async fn list_memories(&self, status: MemoryStatus, project_id: Option<Uuid>) -> Result<Vec<Memory>> { self.memories.list(status, None, project_id) }
+    async fn list_memories(&self, status: MemoryStatus, project_id: Option<Uuid>, scope: MemoryScopeFilter) -> Result<Vec<Memory>> {
+        check_scope(project_id, scope)?;
+        self.memories.list_scoped(status, None, project_id, scope)
+    }
     async fn set_memory_status(&self, id: Uuid, status: MemoryStatus, actor: &str) -> Result<Memory> { self.memories.set_status(id, status, actor) }
 
     /// Detects the project at `root` and records it, building a profile when the
@@ -424,7 +440,22 @@ impl Backend for LocalBackend {
             board_tasks: &board_tasks,
         })?;
         ops.extend(skipped);
-        if req.check_only { Ok(sync::summarize(&ops)) } else { sync::apply(&ops) }
+        if req.check_only {
+            return Ok(sync::summarize(&ops));
+        }
+        let report = sync::apply(&ops)?;
+        // The project log reads this row as its `synced` entry. A check-only pass writes
+        // nothing and so records nothing, and a global sync belongs to no project.
+        if let Some(project_id) = project_id {
+            self.memories.audit(
+                "sync",
+                "apply",
+                "sync",
+                Some(project_id),
+                serde_json::json!({"created": report.created, "updated": report.updated, "unchanged": report.unchanged, "skipped": report.skipped}),
+            )?;
+        }
+        Ok(report)
     }
 
     async fn get_settings(&self) -> Result<serde_json::Map<String, serde_json::Value>> { self.settings().get_all() }
@@ -447,12 +478,12 @@ impl Backend for LocalBackend {
     /// transcript, which would spend a model call on nothing; and the character cap,
     /// which bounds how much any one caller can push into a single model call.
     async fn ingest_transcript(&self, text: String, source_tool: String, project_root: Option<PathBuf>) -> Result<Uuid> {
-        // The project is resolved first: it decides both which endpoint the transcript
-        // would go to and whether this caller may write memories here at all.
-        let project_id = match &project_root {
-            Some(root) => self.projects().by_root(std::path::Path::new(root))?.map(|p| p.id),
-            None => None,
-        };
+        // Resolved once, here, through the same `project_for` the worker used to call:
+        // a root inside a repository has to mean the same project at the gate as it does
+        // when the job runs, or the access check and the extraction override both look at
+        // the wrong scope. The answer travels in the payload so the worker never has to
+        // ask again.
+        let project_id = crate::extract::project_for(&self.db, project_root.clone())?;
         self.memory_gate(project_id, &source_tool)?;
         crate::extract::resolve_extraction(&self.db, project_id)?;
         if text.trim().is_empty() {
@@ -462,7 +493,7 @@ impl Backend for LocalBackend {
             return Err(AtlasError::TooLarge("transcript too large".into()));
         }
         let id = self.jobs.enqueue("ingest", serde_json::json!({
-            "text": text, "source_tool": source_tool, "project_root": project_root,
+            "text": text, "source_tool": source_tool, "project_root": project_root, "project_id": project_id,
         }))?;
         self.queue.notify.notify_one();
         Ok(id)
