@@ -17,6 +17,7 @@ pub const SETTING_KEYS: &[&str] = &[
     "board.stages",
     "board.mirror_tasks_md",
     "ui.theme",
+    "workflows.docs_migrated",
 ];
 
 const API_KEY: &str = "extraction.api_key";
@@ -62,7 +63,9 @@ fn check_type(key: &str, value: &Value) -> Result<()> {
         // The board refuses a stage list the repository could not use, before it is
         // stored, so a bad list can never reach a task move.
         "board.stages" => crate::board::parse_stages(value.clone()).map(|_| ())?,
-        "board.mirror_tasks_md" => {
+        // A latch, not a preference: `workflow::migrate_docs` sets it once the Markdown
+        // workflow documents have become workflows, and reads it to know not to run again.
+        "board.mirror_tasks_md" | "workflows.docs_migrated" => {
             if !value.is_boolean() {
                 return wrong("a boolean");
             }

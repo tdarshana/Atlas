@@ -87,7 +87,64 @@ create table if not exists board_counters (scope text primary key, next_seq bigi
 -- a no-op rather than an error.
 alter table projects add column if not exists agent_access json;
 alter table projects add column if not exists extraction json;
+"#), (6, r#"
+-- Phase 9 gives the name `workflows` to real, graph-shaped workflows. The table
+-- migration 1 created under that name held Markdown documents, so it is renamed and
+-- `library::DocRepo` follows it. `workflow::migrate_docs` turns each surviving row
+-- into a single-action workflow at daemon start and then empties the table; it is
+-- kept rather than dropped so that migration can read it. The rename itself is done
+-- in `rename_workflow_docs` rather than here, because DuckDB has no
+-- `alter table if exists` and replaying this batch has to stay a no-op.
+create table if not exists workflows (
+  id uuid primary key,
+  name text not null unique,
+  project_id uuid,
+  description text not null default '',
+  "trigger" json not null,
+  graph json not null,
+  enabled boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  last_run_at timestamptz,
+  last_status text);
+create table if not exists workflow_runs (
+  id uuid primary key,
+  workflow_id uuid not null,
+  number bigint not null,
+  "trigger" text not null check ("trigger" in ('manual','schedule','prompt')),
+  status text not null default 'queued' check (status in ('queued','running','success','failed','cancelled')),
+  started_at timestamptz not null default now(),
+  finished_at timestamptz,
+  summary json);
+create table if not exists workflow_steps (
+  id uuid primary key,
+  run_id uuid not null,
+  "position" integer not null,
+  action_id text not null,
+  name text not null,
+  agent text not null,
+  status text not null default 'running' check (status in ('queued','running','success','failed','skipped','cancelled')),
+  started_at timestamptz not null default now(),
+  finished_at timestamptz,
+  output text,
+  log json not null default '[]');
 "#)];
+
+/// Moves the Markdown workflow documents aside so migration 6 can give the name
+/// `workflows` to the real workflow table. Guarded on `body`, a column only the doc
+/// table has, so replaying migration 6 over an already-migrated database does nothing
+/// instead of failing on a name that is already taken.
+fn rename_workflow_docs(c: &Connection) -> Result<()> {
+    let is_doc_table: i64 = c.query_row(
+        "select count(*) from information_schema.columns where table_name = 'workflows' and column_name = 'body'",
+        [],
+        |r| r.get(0),
+    )?;
+    if is_doc_table == 1 {
+        c.execute_batch("alter table workflows rename to workflow_docs;")?;
+    }
+    Ok(())
+}
 
 impl Db {
     pub fn open(path: &Path) -> Result<Db> {
@@ -118,6 +175,7 @@ impl Db {
         let current = self.schema_version()?;
         self.with_conn(|c| {
             for (v, sql) in MIGRATIONS { if *v > current {
+                if *v == 6 { rename_workflow_docs(c)?; }
                 c.execute_batch(sql)?;
                 c.execute("insert into schema_version values (?)", [v])?;
             } }
@@ -132,18 +190,46 @@ mod tests {
     #[test]
     fn migrate_creates_tables_and_is_idempotent() {
         let db = Db::open_in_memory().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 5);
+        assert_eq!(db.schema_version().unwrap(), 6);
         let n: i64 = db.with_conn(|c| Ok(c.query_row(
-            "select count(*) from information_schema.tables where table_name in ('memories','memory_embeddings','audit','settings','projects','agents','practices','workflows','sync_targets','jobs','tasks','task_blockers','task_events','board_counters')",
+            "select count(*) from information_schema.tables where table_name in ('memories','memory_embeddings','audit','settings','projects','agents','practices','workflow_docs','sync_targets','jobs','tasks','task_blockers','task_events','board_counters','workflows','workflow_runs','workflow_steps')",
             [], |r| r.get(0))?)).unwrap();
-        assert_eq!(n, 14);
+        assert_eq!(n, 17);
         // Migrations 3 and 5 widen `projects` in place.
         let cols: i64 = db.with_conn(|c| Ok(c.query_row(
             "select count(*) from information_schema.columns where table_name='projects' and column_name in ('board_key','board_stages','agent_access','extraction')",
             [], |r| r.get(0))?)).unwrap();
         assert_eq!(cols, 4);
         db.migrate().unwrap(); // second run is a no-op
-        assert_eq!(db.schema_version().unwrap(), 5);
+        assert_eq!(db.schema_version().unwrap(), 6);
+    }
+
+    /// Migration 6 renames the Markdown doc table out of the way and puts the real
+    /// workflow tables in its place, so a database that predates Phase 9 keeps its
+    /// workflow documents where `DocRepo` can still read them.
+    #[test]
+    fn migration_6_moves_the_workflow_docs_aside() {
+        let db = Db::open_in_memory().unwrap();
+        let cols: i64 = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "select count(*) from information_schema.columns where table_name = 'workflows' and column_name in ('trigger','graph','enabled','last_run_at','last_status')",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(cols, 5);
+        let body: i64 = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "select count(*) from information_schema.columns where table_name = 'workflow_docs' and column_name = 'body'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(body, 1);
     }
 
     /// Migration 5 adds its columns with `if not exists`, so replaying it over a
@@ -152,13 +238,13 @@ mod tests {
     fn migration_5_is_a_no_op_on_a_database_that_already_has_the_columns() {
         let db = Db::open_in_memory().unwrap();
         db.with_conn(|c| {
-            c.execute_batch("delete from schema_version where version = 5;")?;
+            c.execute_batch("delete from schema_version where version >= 5;")?;
             Ok(())
         })
         .unwrap();
         assert_eq!(db.schema_version().unwrap(), 4);
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 5);
+        assert_eq!(db.schema_version().unwrap(), 6);
     }
 
     /// A database stamped 3 by the build that shipped migration 3 without
@@ -175,7 +261,7 @@ mod tests {
         assert_eq!(db.schema_version().unwrap(), 3);
 
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 5);
+        assert_eq!(db.schema_version().unwrap(), 6);
         let n: i64 = db
             .with_conn(|c| {
                 Ok(c.query_row("select count(*) from information_schema.tables where table_name = 'board_counters'", [], |r| r.get(0))?)

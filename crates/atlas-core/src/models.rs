@@ -426,6 +426,186 @@ pub struct TaskFilter {
     #[serde(default)] pub include_done: bool,
 }
 
+// ---- workflows ----
+
+str_enum!(TriggerKind { Manual => "manual", Schedule => "schedule", Prompt => "prompt" });
+str_enum!(NodeKind { Trigger => "trigger", Action => "action", Output => "output" });
+str_enum!(RunStatus { Queued => "queued", Running => "running", Success => "success", Failed => "failed", Cancelled => "cancelled" });
+str_enum!(StepStatus {
+    Queued => "queued", Running => "running", Success => "success",
+    Failed => "failed", Skipped => "skipped", Cancelled => "cancelled",
+});
+// Upper case on the wire because the log lines are read as text in the run view, where
+// `INFO`/`WARN`/`ERR` line up in a fixed-width gutter.
+// `Error` rather than `Err`: a variant named `Err` shadows the `Err` associated type
+// `str_enum!`'s own `FromStr` impl names.
+str_enum!(LogLevel { Info => "INFO", Warn => "WARN", Error => "ERR" });
+
+impl RunStatus {
+    /// Whether the run has stopped for good. A terminal status is the one moment
+    /// `finished_at` is stamped and the only status `cancel_run` refuses to move.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, RunStatus::Success | RunStatus::Failed | RunStatus::Cancelled)
+    }
+}
+
+/// What starts a workflow. `cron` is read only when `kind` is `schedule` and `prompt`
+/// only when it is `prompt`; both are carried on every trigger so the editor can keep
+/// a half-typed value while the user switches kinds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Trigger {
+    pub kind: TriggerKind,
+    #[serde(default)] pub cron: Option<String>,
+    #[serde(default)] pub prompt: Option<String>,
+}
+
+impl Trigger {
+    pub fn manual() -> Self {
+        Trigger { kind: TriggerKind::Manual, cron: None, prompt: None }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Position {
+    pub x: f64,
+    pub y: f64,
+}
+
+/// Which memories an action is given. Empty `kinds` or `tags` mean "no filter on
+/// that axis", not "match nothing".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct MemorySource {
+    #[serde(default)] pub kinds: Vec<String>,
+    #[serde(default)] pub tags: Vec<String>,
+    #[serde(default = "twenty")] pub limit: u32,
+    #[serde(default)] pub project_id: Option<Uuid>,
+}
+fn twenty() -> u32 { 20 }
+
+/// The body of a node, shaped by the node's `kind`. Untagged rather than tagged: the
+/// three shapes have disjoint required fields (`kind` / `name` / `propose_memories`),
+/// the editor sends the plain object the GUI holds, and `graph::validate` is what
+/// checks the variant against the node's declared `kind`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum NodeData {
+    Trigger(Trigger),
+    Action {
+        name: String,
+        instructions: String,
+        agent: String,
+        #[serde(default)] practices: Vec<String>,
+        #[serde(default)] memories: Option<MemorySource>,
+    },
+    Output {
+        propose_memories: bool,
+        file_tasks: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Node {
+    pub id: String,
+    pub kind: NodeKind,
+    pub position: Position,
+    pub data: NodeData,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Edge {
+    pub id: String,
+    pub source: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct Graph {
+    #[serde(default)] pub nodes: Vec<Node>,
+    #[serde(default)] pub edges: Vec<Edge>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Workflow {
+    pub id: Uuid,
+    pub name: String,
+    pub project_id: Option<Uuid>,
+    pub description: String,
+    pub trigger: Trigger,
+    pub graph: Graph,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_run_at: Option<DateTime<Utc>>,
+    pub last_status: Option<RunStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct NewWorkflow {
+    pub name: String,
+    #[serde(default)] pub project_id: Option<Uuid>,
+    #[serde(default)] pub description: String,
+    pub trigger: Trigger,
+    #[serde(default)] pub graph: Graph,
+    #[serde(default = "yes")] pub enabled: bool,
+}
+fn yes() -> bool { true }
+
+/// A patch. `project_id` is a double option so a caller can tell "leave the project
+/// alone" from "make this workflow global", the same distinction `TaskUpdate` draws.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct WorkflowPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub name: Option<String>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<Option<Uuid>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub trigger: Option<Trigger>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub graph: Option<Graph>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkflowRun {
+    pub id: Uuid,
+    pub workflow_id: Uuid,
+    /// Per-workflow, starting at 1: the number a run is known by in the GUI and CLI.
+    pub number: i64,
+    pub trigger: TriggerKind,
+    pub status: RunStatus,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub summary: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LogLine {
+    pub ts: DateTime<Utc>,
+    pub level: LogLevel,
+    pub text: String,
+}
+
+impl LogLine {
+    pub fn now(level: LogLevel, text: impl Into<String>) -> Self {
+        LogLine { ts: Utc::now(), level, text: text.into() }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkflowStep {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    /// Zero-based index in the run's execution order.
+    pub position: i32,
+    /// The graph node this step ran, so a step can be traced back to the canvas.
+    pub action_id: String,
+    pub name: String,
+    pub agent: String,
+    pub status: StepStatus,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub output: Option<String>,
+    pub log: Vec<LogLine>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

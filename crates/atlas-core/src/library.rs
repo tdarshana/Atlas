@@ -176,7 +176,10 @@ pub struct DocRepo<'a> {
 fn table_for(kind: DocKind) -> &'static str {
     match kind {
         DocKind::Practice => "practices",
-        DocKind::Workflow => "workflows",
+        // Migration 6 gave `workflows` to the real workflow table and moved the
+        // Markdown documents to `workflow_docs`, where they wait for
+        // `workflow::migrate_docs` to turn each into a single-action workflow.
+        DocKind::Workflow => "workflow_docs",
     }
 }
 

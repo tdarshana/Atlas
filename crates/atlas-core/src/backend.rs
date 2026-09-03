@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
 use crate::board::TaskRepo;
+use crate::workflow::WorkflowRepo;
 use crate::db::Db;
 use crate::export::BlockContext;
 use crate::jobs::{Job, JobQueue, JobRepo};
@@ -167,6 +168,7 @@ pub struct LocalBackend {
     /// Wakes the daemon's worker the moment a job is queued.
     pub queue: Arc<JobQueue>,
     pub tasks: Arc<TaskRepo>,
+    pub workflows: Arc<WorkflowRepo>,
 }
 
 impl LocalBackend {
@@ -195,7 +197,8 @@ impl LocalBackend {
             });
         }
         let tasks = Arc::new(TaskRepo::new(db.clone(), memories.gate_handle()));
-        Ok(Self { jobs: Arc::new(JobRepo::new(db.clone())), queue: Arc::new(JobQueue::new()), memories, db, paths: paths.clone(), port, tasks })
+        let workflows = Arc::new(WorkflowRepo::new(db.clone(), memories.gate_handle()));
+        Ok(Self { jobs: Arc::new(JobRepo::new(db.clone())), queue: Arc::new(JobQueue::new()), memories, db, paths: paths.clone(), port, tasks, workflows })
     }
 
     fn projects(&self) -> ProjectRepo<'_> { ProjectRepo::new(&self.db) }
