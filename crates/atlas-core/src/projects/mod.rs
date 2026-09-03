@@ -175,20 +175,44 @@ impl<'a> ProjectRepo<'a> {
         self.get(id)
     }
 
-    /// Removes the project row and the `sync_targets` that point at it, and audits the
-    /// removal. Memories scoped to the project are deliberately left alone: nothing is
+    /// Removes the project row, the `sync_targets` that point at it, and its whole
+    /// board: the tasks, their blocker links in both directions, and their events.
+    ///
+    /// The board cascades because a task belongs to its project the way a column belongs
+    /// to a board. An orphaned task keeps a `project_id` no row answers to: it is judged
+    /// against the global stage list on read but sits outside the scope of a global stage
+    /// rename, so it can end up parked in a column no board shows, invisible to
+    /// `counts_by_stage` and open forever. Tasks are also not memories: nothing else
+    /// reads a task by id after its board is gone, so there is no audit value in keeping
+    /// the rows. One `task_delete_cascade` audit row records how many went, when any did.
+    ///
+    /// Memories scoped to the project are still deliberately left alone: nothing is
     /// ever hard-deleted from `memories`, so they stay readable through the audit trail
     /// and through a re-connect of the same root, which restores the id's meaning only
     /// if the project is added again. Errors with `NotFound` when the id is unknown, so
     /// a repeat call is not a silent success.
     pub fn delete(&self, id: Uuid, actor: &str) -> Result<()> {
         let p = self.get(id)?;
-        self.db.with_conn(|c| {
-            c.execute("delete from sync_targets where project_id = ?", params![id.to_string()])?;
-            c.execute("delete from projects where id = ?", params![id.to_string()])?;
-            Ok(())
+        let tasks = self.db.with_conn(|c| {
+            let pid = id.to_string();
+            let tasks: i64 = c.query_row("select count(*) from tasks where project_id = ?", params![pid], |r| r.get(0))?;
+            c.execute(
+                "delete from task_blockers where task_id in (select id from tasks where project_id = ?) \
+                 or blocked_by in (select id from tasks where project_id = ?)",
+                params![pid, pid],
+            )?;
+            c.execute("delete from task_events where task_id in (select id from tasks where project_id = ?)", params![pid])?;
+            c.execute("delete from tasks where project_id = ?", params![pid])?;
+            c.execute("delete from board_counters where scope = ?", params![pid])?;
+            c.execute("delete from sync_targets where project_id = ?", params![pid])?;
+            c.execute("delete from projects where id = ?", params![pid])?;
+            Ok(tasks)
         })?;
-        crate::memories::MemoryRepo::new(self.db).audit(actor, "delete", "project", Some(id), serde_json::json!({"root": p.root_path, "name": p.name}))
+        let repo = crate::memories::MemoryRepo::new(self.db);
+        if tasks > 0 {
+            repo.audit(actor, "task_delete_cascade", "project", Some(id), serde_json::json!({"tasks": tasks}))?;
+        }
+        repo.audit(actor, "delete", "project", Some(id), serde_json::json!({"root": p.root_path, "name": p.name}))
     }
 
     /// True when the project has no profile yet, or its profile is more than

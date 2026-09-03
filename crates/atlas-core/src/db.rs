@@ -71,6 +71,7 @@ create table if not exists task_events (
   id uuid primary key, task_id uuid not null, actor text not null, kind text not null,
   body text not null default '', detail json,
   created_at timestamptz not null default now());
+create table if not exists board_counters (scope text primary key, next_seq bigint not null);
 alter table projects add column if not exists board_key text;
 alter table projects add column if not exists board_stages json;
 "#)];
@@ -120,9 +121,9 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         assert_eq!(db.schema_version().unwrap(), 3);
         let n: i64 = db.with_conn(|c| Ok(c.query_row(
-            "select count(*) from information_schema.tables where table_name in ('memories','memory_embeddings','audit','settings','projects','agents','practices','workflows','sync_targets','jobs','tasks','task_blockers','task_events')",
+            "select count(*) from information_schema.tables where table_name in ('memories','memory_embeddings','audit','settings','projects','agents','practices','workflows','sync_targets','jobs','tasks','task_blockers','task_events','board_counters')",
             [], |r| r.get(0))?)).unwrap();
-        assert_eq!(n, 13);
+        assert_eq!(n, 14);
         // Migration 3 widens `projects` in place.
         let cols: i64 = db.with_conn(|c| Ok(c.query_row(
             "select count(*) from information_schema.columns where table_name='projects' and column_name in ('board_key','board_stages')",

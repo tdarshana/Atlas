@@ -232,15 +232,38 @@ impl TaskRepo {
                 }
             }
         };
-        let seq: i64 = match project_id {
-            Some(pid) => c.query_row(
-                "select coalesce(max(seq), 0) + 1 from tasks where project_id = ?",
-                params![pid.to_string()],
-                |r| r.get(0),
-            )?,
-            None => c.query_row("select coalesce(max(seq), 0) + 1 from tasks where project_id is null", [], |r| r.get(0))?,
-        };
+        let seq = self.take_seq(c, project_id)?;
         Ok((format!("{prefix}-{seq}"), seq))
+    }
+
+    /// Claims the next sequence number for a board from `board_counters` and moves the
+    /// counter on. Deleting the highest-numbered task must not free its key for reuse:
+    /// a key is a task's public identity, quoted in commit messages, memories and agent
+    /// notes, so `ATL-3` must never name two different pieces of work. A missing counter
+    /// row is seeded from `max(seq) + 1` over the live rows, which is both the right
+    /// answer for a board created before this table and a safe floor if a row is ever
+    /// lost. Callers must already hold the gate.
+    fn take_seq(&self, c: &Connection, project_id: Option<Uuid>) -> Result<i64> {
+        let scope = project_id.map(|p| p.to_string()).unwrap_or_else(|| "global".to_string());
+        let mut st = c.prepare("select next_seq from board_counters where scope = ?")?;
+        let mut rows = st.query(params![scope])?;
+        let seq: i64 = match rows.next()? {
+            Some(r) => r.get(0)?,
+            None => {
+                let floor: i64 = match project_id {
+                    Some(pid) => c.query_row(
+                        "select coalesce(max(seq), 0) + 1 from tasks where project_id = ?",
+                        params![pid.to_string()],
+                        |r| r.get(0),
+                    )?,
+                    None => c.query_row("select coalesce(max(seq), 0) + 1 from tasks where project_id is null", [], |r| r.get(0))?,
+                };
+                c.execute("insert into board_counters (scope, next_seq) values (?, ?)", params![scope, floor])?;
+                floor
+            }
+        };
+        c.execute("update board_counters set next_seq = ? where scope = ?", params![seq + 1, scope])?;
+        Ok(seq)
     }
 
     // -- reads -------------------------------------------------------------
@@ -341,6 +364,9 @@ impl TaskRepo {
             let mut keys: Vec<String> = Vec::new();
             let mut open_blockers: Vec<String> = Vec::new();
             for b in links.get(&t.id).into_iter().flatten() {
+                // A link whose target row is gone is ignored rather than treated as an
+                // open blocker, so a broken link cannot wedge a task as never-ready.
+                // `sweep_dangling_blockers` removes it on the next write.
                 if let Some((key, stage, project)) = blockers.get(b) {
                     keys.push(key.clone());
                     if !index.is_done(*project, stage) {
@@ -395,7 +421,8 @@ impl TaskRepo {
         })
     }
 
-    /// Newest first. `ready` and `include_done` are applied after the rows are
+    /// Grouped by project and ordered by each task's sequence number, so the order is
+    /// stable across calls. `ready` and `include_done` are applied after the rows are
     /// decorated, because both depend on the stage list rather than on the row.
     pub fn list(&self, f: &TaskFilter) -> Result<Vec<Task>> {
         self.db.with_conn(|c| {
@@ -410,7 +437,9 @@ impl TaskRepo {
                 args.push(s.clone());
             }
             if let Some(a) = &f.assignee {
-                sql.push_str(" and assignee = ?");
+                // Case-insensitive like the stage and text filters: a task claimed by
+                // `codex` must be found by `Codex`.
+                sql.push_str(" and lower(assignee) = lower(?)");
                 args.push(a.clone());
             }
             if let Some(q) = &f.query {
@@ -420,7 +449,10 @@ impl TaskRepo {
                 let q = q.trim().to_lowercase();
                 args.extend([q.clone(), q.clone(), q]);
             }
-            sql.push_str(" order by created_at desc, key");
+            // By project, then by the numeric sequence. Ordering by the key text would
+            // interleave `ATL-10` between `ATL-1` and `ATL-2`, and ordering by
+            // `created_at` alone has no tie-break inside one microsecond.
+            sql.push_str(" order by project_id nulls first, seq");
             let mut st = c.prepare(&sql)?;
             let mut tasks: Vec<Task> = st.query_map(params_from_iter(args.iter()), row_to_task)?.collect::<duckdb::Result<Vec<_>>>()?;
             let done = self.decorate(c, &mut tasks)?;
@@ -474,9 +506,15 @@ impl TaskRepo {
         }
     }
 
+    /// Compared at millisecond resolution. `updated_at` is stored and read back in
+    /// microseconds, but a JavaScript `Date` truncates to milliseconds, so a value the
+    /// desktop app read and sent straight back would never match a microsecond
+    /// comparison and every optimistic update from the GUI would be a phantom conflict.
+    /// A concurrent writer that lands inside the same millisecond is not detected; the
+    /// gate serializes board writes, so the loser sees the winner's row either way.
     fn check_expected(task: &Task, expected: Option<DateTime<Utc>>) -> Result<()> {
         match expected {
-            Some(e) if e != task.updated_at => Err(AtlasError::Conflict(format!(
+            Some(e) if e.timestamp_millis() != task.updated_at.timestamp_millis() => Err(AtlasError::Conflict(format!(
                 "{} changed since you read it (expected {}, found {})",
                 task.key,
                 e.to_rfc3339(),
@@ -542,6 +580,17 @@ impl TaskRepo {
                 params![task.to_string(), b.to_string()],
             )?;
         }
+        self.sweep_dangling_blockers(c)
+    }
+
+    /// Drops blocker links whose task or target row no longer exists. `delete` already
+    /// clears the links it can see, so this is a self-healing sweep for a row removed
+    /// by some other path, such as a project cascade.
+    fn sweep_dangling_blockers(&self, c: &Connection) -> Result<()> {
+        c.execute(
+            "delete from task_blockers where task_id not in (select id from tasks) or blocked_by not in (select id from tasks)",
+            [],
+        )?;
         Ok(())
     }
 
@@ -791,6 +840,7 @@ impl TaskRepo {
             c.execute("update tasks set parent_id = null, updated_at = now() where parent_id = ?", params![id.to_string()])?;
             self.event(c, id, actor, "deleted", &format!("deleted {}", task.key), Some(json!({"title": task.title})))?;
             c.execute("delete from tasks where id = ?", params![id.to_string()])?;
+            self.sweep_dangling_blockers(c)?;
             Ok((id, task.key, task.title))
         })?;
         MemoryRepo::new(&self.db).audit(actor, "task_delete", "task", Some(id), json!({"key": key, "title": title}))
@@ -817,26 +867,59 @@ impl TaskRepo {
         Ok(())
     }
 
-    /// Applies `renames` to the tasks in scope, recording a `moved` event for each.
+    /// Applies `renames` to the tasks in scope in a single pass, recording a `moved`
+    /// event for each task that changes column.
+    ///
+    /// Each task's new stage is computed from the stage it was already in, never from
+    /// one this call just wrote. `{Testing: Done, Done: Archive}` therefore leaves a
+    /// task that was in `Testing` in `Done`, and a swap `{A: B, B: A}` exchanges the two
+    /// columns instead of collapsing them. Applying the map entry by entry would make
+    /// the result depend on `HashMap` iteration order, which is not defined.
     fn apply_renames(&self, c: &Connection, scope_sql: &str, args: &[String], renames: &HashMap<String, String>, actor: &str) -> Result<()> {
-        for (from, to) in renames {
-            if from.trim().eq_ignore_ascii_case(to.trim()) {
+        if renames.is_empty() {
+            return Ok(());
+        }
+        // Read every task in scope first, so no write can feed the next lookup.
+        let mut rows: Vec<(String, String, String)> = Vec::new();
+        {
+            let mut st = c.prepare(&format!("select id::text, key, stage from tasks where {scope_sql} order by project_id nulls first, seq"))?;
+            let mut r = st.query(params_from_iter(args.iter()))?;
+            while let Some(row) = r.next()? {
+                rows.push((row.get(0)?, row.get(1)?, row.get(2)?));
+            }
+        }
+        for (id, key, from) in rows {
+            let Some(to) = rename_of(renames, &from) else { continue };
+            if to.eq_ignore_ascii_case(from.trim()) {
                 continue;
             }
-            let mut ids: Vec<(String, String)> = Vec::new();
-            {
-                let mut st = c.prepare(&format!("select id::text, key from tasks where {scope_sql} and lower(stage) = lower(?)"))?;
-                let mut a: Vec<String> = args.to_vec();
-                a.push(from.clone());
-                let mut rows = st.query(params_from_iter(a.iter()))?;
-                while let Some(r) = rows.next()? {
-                    ids.push((r.get(0)?, r.get(1)?));
-                }
+            c.execute("update tasks set stage = ?, updated_at = now() where id = ?", params![to, id])?;
+            let uid = Uuid::parse_str(&id).map_err(|e| conv_err(0, Type::Text, e))?;
+            self.event(
+                c,
+                uid,
+                actor,
+                "moved",
+                &format!("moved {key} from {from} to {to}"),
+                Some(json!({"from": from, "to": to, "reason": "stage renamed"})),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Refuses a rename map that cannot be applied in one pass: two sources that differ
+    /// only in case would be picked between by `HashMap` order, and a target that is not
+    /// on the new board would move tasks into a column nothing can show.
+    fn check_renames(renames: &HashMap<String, String>, target: &[Stage]) -> Result<()> {
+        let mut seen: Vec<String> = Vec::with_capacity(renames.len());
+        for (from, to) in renames {
+            let folded = from.trim().to_lowercase();
+            if seen.contains(&folded) {
+                return Err(AtlasError::Invalid(format!("stage '{}' is renamed twice", from.trim())));
             }
-            for (id, key) in ids {
-                c.execute("update tasks set stage = ?, updated_at = now() where id = ?", params![to.trim(), id])?;
-                let uid = Uuid::parse_str(&id).map_err(|e| conv_err(0, Type::Text, e))?;
-                self.event(c, uid, actor, "moved", &format!("moved {key} from {from} to {}", to.trim()), Some(json!({"from": from, "to": to.trim(), "reason": "stage renamed"})))?;
+            seen.push(folded);
+            if find_stage(target, to).is_none() {
+                return Err(unknown_stage(to, target));
             }
         }
         Ok(())
@@ -852,6 +935,7 @@ impl TaskRepo {
             // Tasks judged against the global list: global ones, plus every project
             // without its own override.
             let scope = "(project_id is null or project_id in (select id from projects where board_stages is null))";
+            Self::check_renames(renames, &stages)?;
             self.check_stage_removals(c, scope, &[], &stages, renames)?;
             self.apply_renames(c, scope, &[], renames, actor)?;
             Ok(stages)
@@ -879,6 +963,7 @@ impl TaskRepo {
             };
             let scope = "project_id = ?";
             let args = vec![project_id.to_string()];
+            Self::check_renames(renames, &target)?;
             self.check_stage_removals(c, scope, &args, &target, renames)?;
             self.apply_renames(c, scope, &args, renames, actor)?;
             match &stages {

@@ -474,3 +474,260 @@ fn a_project_override_governs_its_own_tasks_only() {
     assert_eq!(repo.get(&a.key).unwrap().task.stage, "Design");
     assert_eq!(repo.get(&b.key).unwrap().task.stage, "Todo");
 }
+
+// -- fix round 1 ------------------------------------------------------------
+
+/// A key names one piece of work for good. Recycling the highest sequence number
+/// after a delete would point old commit messages and memories at new work.
+#[test]
+fn a_deleted_key_is_never_issued_again() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    for _ in 0..3 {
+        repo.create(&new_task(Some(p.id), "a"), "t").unwrap();
+    }
+    repo.delete("ATL-3", "t").unwrap();
+    assert_eq!(repo.create(&new_task(Some(p.id), "next"), "t").unwrap().key, "ATL-4");
+    // Deleting from the middle does not shuffle the run either.
+    repo.delete("ATL-2", "t").unwrap();
+    assert_eq!(repo.create(&new_task(Some(p.id), "later"), "t").unwrap().key, "ATL-5");
+    // The global board keeps its own counter.
+    repo.create(&new_task(None, "g"), "t").unwrap();
+    repo.delete("ATLAS-1", "t").unwrap();
+    assert_eq!(repo.create(&new_task(None, "g2"), "t").unwrap().key, "ATLAS-2");
+}
+
+/// A board written before `board_counters` existed carries on from its live rows.
+#[test]
+fn a_missing_counter_row_is_seeded_from_the_live_tasks() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    repo.create(&new_task(Some(p.id), "a"), "t").unwrap();
+    repo.create(&new_task(Some(p.id), "b"), "t").unwrap();
+    db.with_conn(|c| {
+        c.execute("delete from board_counters", [])?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(repo.create(&new_task(Some(p.id), "c"), "t").unwrap().key, "ATL-3");
+}
+
+/// A chained map is applied once against each task's original stage, so a task in
+/// `Testing` lands in `Done` and stops there rather than falling on to `Archive`.
+#[test]
+fn a_chained_rename_moves_each_task_exactly_one_hop() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    let backlog = repo.create(&new_task(Some(p.id), "still queued"), "t").unwrap();
+    let testing = repo.create(&new_task(Some(p.id), "under test"), "t").unwrap();
+    repo.move_stage(&testing.key, "Testing", None, "t").unwrap();
+    let done = repo.create(&new_task(Some(p.id), "finished"), "t").unwrap();
+    repo.move_stage(&done.key, "Done", None, "t").unwrap();
+
+    let renames = HashMap::from([("Testing".to_string(), "Done".to_string()), ("Done".to_string(), "Archive".to_string())]);
+    let stages = vec![stage("Backlog", false), stage("Done", false), stage("Archive", true)];
+    repo.set_global_stages(stages, &renames, "t").unwrap();
+
+    assert_eq!(repo.get(&backlog.key).unwrap().task.stage, "Backlog");
+    assert_eq!(repo.get(&testing.key).unwrap().task.stage, "Done", "one hop, not two");
+    assert_eq!(repo.get(&done.key).unwrap().task.stage, "Archive");
+}
+
+/// A swap exchanges two columns instead of collapsing both into one.
+#[test]
+fn a_swapped_rename_exchanges_the_two_columns() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    let a = repo.create(&new_task(Some(p.id), "a"), "t").unwrap();
+    let b = repo.create(&new_task(Some(p.id), "b"), "t").unwrap();
+    repo.move_stage(&b.key, "Testing", None, "t").unwrap();
+
+    let renames = HashMap::from([("Backlog".to_string(), "Testing".to_string()), ("Testing".to_string(), "Backlog".to_string())]);
+    repo.set_global_stages(default_stages(), &renames, "t").unwrap();
+
+    assert_eq!(repo.get(&a.key).unwrap().task.stage, "Testing");
+    assert_eq!(repo.get(&b.key).unwrap().task.stage, "Backlog");
+}
+
+#[test]
+fn a_rename_map_that_cannot_be_applied_in_one_pass_is_refused() {
+    let (db, repo) = repo();
+    let _p = project(&db, "/tmp/atlas");
+    // The same source twice, differing only in case: which one wins would depend on
+    // HashMap order.
+    let twice = HashMap::from([("Backlog".to_string(), "Todo".to_string()), ("backlog".to_string(), "Later".to_string())]);
+    let stages = vec![stage("Todo", false), stage("Later", false), stage("Done", true)];
+    let err = repo.set_global_stages(stages, &twice, "t").unwrap_err();
+    assert!(err.to_string().contains("renamed twice"), "{err}");
+
+    // A target that is not on the new board would park tasks off the board.
+    let stray = HashMap::from([("Backlog".to_string(), "Nowhere".to_string())]);
+    let err = repo.set_global_stages(default_stages(), &stray, "t").unwrap_err();
+    assert!(err.to_string().contains("unknown stage 'Nowhere'"), "{err}");
+    assert_eq!(repo.effective_stages(None).unwrap().stages, default_stages());
+}
+
+/// A JavaScript `Date` truncates to milliseconds, so a value the GUI read back and
+/// sent straight on must still match.
+#[test]
+fn expected_updated_at_is_compared_at_millisecond_resolution() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    let t = repo.create(&new_task(Some(p.id), "first"), "t").unwrap();
+
+    let truncated = DateTime::from_timestamp_millis(t.updated_at.timestamp_millis()).unwrap();
+    assert_ne!(truncated, t.updated_at, "the fixture needs sub-millisecond precision to be a real test");
+    let patch = TaskUpdate { title: Some("renamed".into()), expected_updated_at: Some(truncated), ..Default::default() };
+    assert_eq!(repo.update(&t.key, &patch, "t").unwrap().title, "renamed");
+
+    let stale = truncated - chrono::Duration::seconds(1);
+    let patch = TaskUpdate { title: Some("again".into()), expected_updated_at: Some(stale), ..Default::default() };
+    assert!(matches!(repo.update(&t.key, &patch, "t"), Err(AtlasError::Conflict(_))));
+}
+
+/// Deleting a project takes its board with it: an orphaned task would be judged
+/// against the global stage list on read but skipped by a global rename.
+#[test]
+fn deleting_a_project_cascades_to_its_board() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    let q = project(&db, "/tmp/other");
+    let a = repo.create(&new_task(Some(p.id), "a"), "t").unwrap();
+    repo.create(&new_task(Some(p.id), "b"), "t").unwrap();
+    repo.comment(&a.key, "note", "t").unwrap();
+    let kept = repo.create(&new_task(Some(q.id), "kept"), "t").unwrap();
+    let global = repo.create(&new_task(None, "global"), "t").unwrap();
+    // A task in another project waits on one that is about to be cascaded away.
+    repo.set_blockers(&kept.key, vec![a.key.clone()], "t").unwrap();
+
+    ProjectRepo::new(&db).delete(p.id, "remover").unwrap();
+
+    let count = |sql: &str| -> i64 { db.with_conn(|c| Ok(c.query_row(sql, [], |r| r.get(0))?)).unwrap() };
+    assert_eq!(count("select count(*) from tasks where project_id is not null"), 1);
+    assert_eq!(count("select count(*) from task_blockers"), 0, "links in both directions go");
+    // kept: created + blocked; global: created. The cascaded board's events are gone.
+    assert_eq!(count("select count(*) from task_events"), 3, "only the surviving tasks keep their history");
+    assert_eq!(count("select count(*) from audit where action = 'task_delete_cascade'"), 1);
+
+    // The survivors are untouched and no longer blocked by a row that is gone.
+    let kept = repo.get(&kept.key).unwrap().task;
+    assert!(kept.blocked_by.is_empty());
+    assert!(kept.ready);
+    assert_eq!(repo.get(&global.key).unwrap().task.stage, "Backlog");
+    // A global rename now sees every task there is.
+    repo.set_global_stages(
+        vec![stage("Todo", false), stage("Done", true)],
+        &HashMap::from([("Backlog".to_string(), "Todo".to_string())]),
+        "t",
+    )
+    .unwrap();
+    assert_eq!(repo.get(&global.key).unwrap().task.stage, "Todo");
+}
+
+#[test]
+fn a_project_with_no_tasks_records_no_cascade() {
+    let (db, _repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    ProjectRepo::new(&db).delete(p.id, "t").unwrap();
+    let n: i64 = db
+        .with_conn(|c| Ok(c.query_row("select count(*) from audit where action = 'task_delete_cascade'", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(n, 0);
+}
+
+/// A link pointing at a row that is gone must not wedge the waiting task as
+/// never-ready, and the next write cleans it up.
+#[test]
+fn a_dangling_blocker_link_is_ignored_and_then_swept() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    let t = repo.create(&new_task(Some(p.id), "waiter"), "t").unwrap();
+    db.with_conn(|c| {
+        c.execute(
+            "insert into task_blockers (task_id, blocked_by) values (?, ?)",
+            params![t.id.to_string(), Uuid::new_v4().to_string()],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let seen = repo.get(&t.key).unwrap().task;
+    assert!(seen.blocked_by.is_empty());
+    assert!(seen.ready, "a broken link must not hold a task open forever");
+
+    repo.set_blockers(&t.key, vec![], "t").unwrap();
+    let left: i64 = db.with_conn(|c| Ok(c.query_row("select count(*) from task_blockers", [], |r| r.get(0))?)).unwrap();
+    assert_eq!(left, 0);
+}
+
+#[test]
+fn a_transitive_cycle_is_refused() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    let a = repo.create(&new_task(Some(p.id), "a"), "t").unwrap();
+    let b = repo.create(&new_task(Some(p.id), "b"), "t").unwrap();
+    let c = repo.create(&new_task(Some(p.id), "c"), "t").unwrap();
+    repo.set_blockers(&a.key, vec![b.key.clone()], "t").unwrap();
+    repo.set_blockers(&b.key, vec![c.key.clone()], "t").unwrap();
+    // A -> B -> C, so C waiting on A closes the loop.
+    let err = repo.set_blockers(&c.key, vec![a.key.clone()], "t").unwrap_err();
+    assert!(err.to_string().contains("cycle"), "{err}");
+    assert!(repo.get(&c.key).unwrap().task.blocked_by.is_empty());
+}
+
+/// Claim moves a task to the second stage of the list its own project uses, not
+/// the second stage of the global one.
+#[test]
+fn claim_follows_a_project_override() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    repo.set_project_stages(
+        p.id,
+        Some(vec![stage("Ideas", false), stage("Building", false), stage("Shipped", true)]),
+        &HashMap::from([("Backlog".to_string(), "Ideas".to_string())]),
+        "t",
+    )
+    .unwrap();
+    let t = repo.create(&new_task(Some(p.id), "first"), "t").unwrap();
+    assert_eq!(t.stage, "Ideas");
+    assert_eq!(repo.claim(&t.key, false, "codex").unwrap().stage, "Building");
+
+    // A global task still follows the global list.
+    let g = repo.create(&new_task(None, "global"), "t").unwrap();
+    assert_eq!(repo.claim(&g.key, false, "codex").unwrap().stage, "In Progress");
+}
+
+#[test]
+fn list_orders_by_project_then_sequence() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    let mut made = Vec::new();
+    for i in 0..11 {
+        made.push(repo.create(&new_task(Some(p.id), &format!("task {i}")), "t").unwrap().key);
+    }
+    let got: Vec<String> = repo.list(&TaskFilter { project_id: Some(p.id), ..Default::default() }).unwrap().into_iter().map(|t| t.key).collect();
+    assert_eq!(got, made, "ATL-10 sorts after ATL-9, not between ATL-1 and ATL-2");
+}
+
+#[test]
+fn the_assignee_filter_ignores_case() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    let t = repo.create(&new_task(Some(p.id), "first"), "t").unwrap();
+    repo.claim(&t.key, false, "codex").unwrap();
+    let hits = repo.list(&TaskFilter { assignee: Some("Codex".into()), ..Default::default() }).unwrap();
+    assert_eq!(hits.len(), 1);
+}
+
+/// Writing `null` to `board.stages` restores the built-in board.
+#[test]
+fn clearing_the_stages_setting_restores_the_defaults() {
+    let (db, repo) = repo();
+    let stages = vec![stage("Todo", false), stage("Done", true)];
+    repo.set_global_stages(stages.clone(), &HashMap::new(), "t").unwrap();
+    assert_eq!(repo.effective_stages(None).unwrap().stages, stages);
+
+    let cleared = serde_json::Map::from_iter([(STAGES_SETTING.to_string(), serde_json::Value::Null)]);
+    SettingsRepo::new(&db).set_many(&cleared, "t").unwrap();
+    assert_eq!(repo.effective_stages(None).unwrap().stages, default_stages());
+}
