@@ -20,6 +20,7 @@
 	import { applyDaemonTheme, initShell, setView, shell } from '$lib/shell/shell.svelte';
 	import { installShortcuts, PALETTE_EVENT } from '$lib/shell/shortcuts';
 	import { viewForPath, viewLabel } from '$lib/shell/views';
+	import { hubTitle, project } from '$lib/stores/project.svelte';
 
 	let { children }: { children: Snippet } = $props();
 
@@ -54,11 +55,17 @@
 
 	/** The title bar's command box, handed to the palette as its anchor. */
 	let commandRef = $state<HTMLElement | null>(null);
+
+	// Inside the project hub the command box names the project and the open tab, so the
+	// box says where you are rather than repeating the rail label eight times.
+	const title = $derived(
+		hubTitle(page.url.pathname, project.current) ?? viewLabel(shell.view)
+	);
 </script>
 
 <TitleBar
 	platform={shell.platform}
-	title={viewLabel(shell.view)}
+	{title}
 	oncommand={openPalette}
 	bind:commandRef
 />

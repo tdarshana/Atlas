@@ -16,6 +16,8 @@ export {
 	setTheme,
 	setView,
 	setStatusItems,
+	setSidePanelOverride,
+	clearSidePanelOverride,
 	toggleRail,
 	toggleSidePanel,
 	initShell,
@@ -25,7 +27,8 @@ export {
 	THEME_KEY,
 	type Theme,
 	type StatusItem,
-	type StatusItems
+	type StatusItems,
+	type SidePanelOverride
 } from './shell.svelte';
 export { installShortcuts, PALETTE_EVENT } from './shortcuts';
 export { resolvePlatform, inTauri } from './platform';

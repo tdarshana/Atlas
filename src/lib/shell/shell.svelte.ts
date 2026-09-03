@@ -4,6 +4,7 @@
 // second client agrees. Every storage touch is guarded: a webview with site data blocked
 // throws on access, and losing a preference must never take the window down.
 
+import type { Component } from 'svelte';
 import { api } from '$lib/daemon.svelte';
 import type { Platform } from '$lib/ds';
 import { UI_THEME_KEY } from '$lib/types';
@@ -21,6 +22,15 @@ export interface StatusItem {
 export interface StatusItems {
 	left: string[];
 	right: StatusItem[];
+}
+
+/**
+ * A page can lend the side panel its own body: the Board tab replaces the Projects list
+ * with its filters. The panel keeps its own title while the override stands.
+ */
+export interface SidePanelOverride {
+	title: string;
+	component: Component;
 }
 
 export const RAIL_KEY = 'atlas.rail';
@@ -53,6 +63,8 @@ export const shell = $state({
 	platform: 'mac' as Platform,
 	view: 'dashboard' as ViewId,
 	sidePanelTitle: '',
+	/** Set by the page that wants its own side panel body; null is the view's own. */
+	sidePanelOverride: null as SidePanelOverride | null,
 	/** Written by the active page; the status bar renders whatever it finds. */
 	statusItems: { left: [], right: [] } as StatusItems
 });
@@ -115,4 +127,17 @@ export function setView(view: ViewId): void {
 /** Pages call this to fill the right-hand end of the status bar. */
 export function setStatusItems(items: Partial<StatusItems>): void {
 	shell.statusItems = { left: items.left ?? [], right: items.right ?? [] };
+}
+
+/**
+ * Lends the side panel a body. Unlike the status items this is not dropped by `setView`:
+ * the page that set it clears it when it is torn down, which happens after the incoming
+ * page has already claimed the panel on a move between two boards.
+ */
+export function setSidePanelOverride(override: SidePanelOverride): void {
+	shell.sidePanelOverride = override;
+}
+
+export function clearSidePanelOverride(): void {
+	shell.sidePanelOverride = null;
 }

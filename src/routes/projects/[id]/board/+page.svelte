@@ -4,20 +4,21 @@
 	// route, so there is no project picker here; `/projects/global/board` is the same
 	// screen with no project filter at all.
 	//
-	// This is the Phase 4 board moved under the project route so the palette's task hits
-	// have somewhere to land. Phase 8 replaces it with the frame's version.
+	// This is the Phase 4 board moved under the project hub's layout, which now owns the
+	// header and the tabs. Phase 8 task 3 replaces the body with the frame's version.
 	import { onMount, tick, untrack } from 'svelte';
 	import { page } from '$app/state';
 	import NewTaskDialog from '$lib/components/NewTaskDialog.svelte';
 	import TaskCard from '$lib/components/TaskCard.svelte';
 	import TaskDrawer from '$lib/components/TaskDrawer.svelte';
 	import { plural } from '$lib/format';
-	import { setStatusItems, shell, TabStrip, type Tab } from '$lib/shell';
+	import { clearSidePanelOverride, setSidePanelOverride, setStatusItems } from '$lib/shell';
+	import BoardFilters from '$lib/shell/sidepanels/BoardFilters.svelte';
 	import {
 		board,
 		cancelRefresh,
 		closeTask,
-		columns,
+		deriveColumns,
 		move,
 		openTask,
 		refresh,
@@ -35,27 +36,17 @@
 	const projectId = $derived(routeId === 'global' ? null : routeId);
 	const project = $derived(projects.items.find((p) => p.id === projectId) ?? null);
 	const name = $derived(projectId ? (project?.name ?? 'Project') : 'Global');
-	const root = $derived(project?.root_path ?? '');
 
-	// Global has no profile page to tab back to, so its first tab is the project list.
-	const tabs: Tab[] = $derived(
-		projectId
-			? [
-					{ id: 'profile', label: 'Profile', icon: 'folder', href: `/projects/${projectId}` },
-					{
-						id: 'board',
-						label: 'Board',
-						icon: 'columns-3',
-						href: `/projects/${projectId}/board`
-					}
-				]
-			: [
-					{ id: 'profile', label: 'Projects', icon: 'folder', href: '/projects' },
-					{ id: 'board', label: 'Board', icon: 'columns-3', href: '/projects/global/board' }
-				]
+	// The filters panel sets a column and an unassigned toggle; both narrow what is drawn
+	// rather than what is fetched, so the panel's counts stay whole.
+	const visible = $derived(
+		board.filters.unassigned ? board.tasks.filter((t) => !t.assignee) : board.tasks
 	);
-
-	const stageColumns = $derived(columns());
+	const stageColumns = $derived(
+		deriveColumns(board.stages, visible).filter(
+			(c) => !board.filters.stage || c.stage.name === board.filters.stage
+		)
+	);
 	let creating = $state(false);
 
 	/**
@@ -91,9 +82,10 @@
 		});
 	});
 
-	// The side panel otherwise reads "Projects"; naming the open board is more useful.
+	// The Board tab lends the side panel its own body for as long as it is open.
 	$effect(() => {
-		shell.sidePanelTitle = projectId ? (project?.name ?? 'Projects') : 'Projects';
+		setSidePanelOverride({ title: 'Board filters', component: BoardFilters });
+		return clearSidePanelOverride;
 	});
 
 	$effect(() => {
@@ -117,14 +109,6 @@
 		return cancelRefresh;
 	});
 </script>
-
-<div class="head">
-	<div class="ident">
-		<span class="name">{name}</span>
-		{#if root}<code class="root">{root}</code>{/if}
-	</div>
-	<TabStrip items={tabs} active="board" />
-</div>
 
 <div class="filters">
 	<div class="pick">
@@ -226,36 +210,6 @@
 />
 
 <style>
-	.head {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: var(--space-4);
-		height: 28px;
-		flex: 0 0 28px;
-	}
-
-	.ident {
-		display: flex;
-		align-items: baseline;
-		gap: var(--space-2);
-		min-width: 0;
-	}
-
-	.name {
-		font-family: var(--font-mono);
-		font-size: 15px;
-		font-weight: 600;
-	}
-
-	.root {
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		color: var(--text-secondary);
-		font-size: 12px;
-	}
-
 	/* Wraps rather than squeezing: at a narrow width the controls compressed into
 	   unusable slivers, so they drop onto a second row and keep a floor. */
 	.filters {

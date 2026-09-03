@@ -15,17 +15,24 @@
 
 	const failed = $derived(!!daemon.error || !!status.error);
 	const footer = $derived(failed ? (daemon.error ?? status.error ?? '') : statusLabel());
+
+	// A page can lend the panel its own body, as the Board tab does with its filters.
+	const override = $derived(shell.sidePanelOverride);
+	const title = $derived(override?.title ?? shell.sidePanelTitle);
 </script>
 
-<aside class="panel side" aria-label={shell.sidePanelTitle}>
+<aside class="panel side" aria-label={title}>
 	<div class="head">
-		<span class="title">{shell.sidePanelTitle}</span>
+		<span class="title">{title}</span>
 		<span class="spacer"></span>
 		<Icon name="ellipsis" size={13} color="var(--text-tertiary)" />
 	</div>
 
 	<div class="body">
-		{#if shell.view === 'projects'}
+		{#if override}
+			{@const Body = override.component}
+			<Body />
+		{:else if shell.view === 'projects'}
 			<Projects />
 		{:else if shell.view === 'memories'}
 			<Memories />

@@ -19,6 +19,16 @@ export function relativeAge(ts: Timestamp): string {
 	return `${Math.floor(days / 365)}y`;
 }
 
+/** What a reading with no value prints. The design's null sentinel is a middle dot. */
+export const NOTHING = '·';
+
+/** Absolute date and time in the user's locale, e.g. `03/09/2026, 3:15:46 PM`. */
+export function dateTime(ts: Timestamp | null | undefined): string {
+	if (!ts) return NOTHING;
+	const d = new Date(ts);
+	return Number.isNaN(d.getTime()) ? NOTHING : d.toLocaleString();
+}
+
 /**
  * `1 result`, `2 results`. Counts printed in the palette and the status bar go through
  * here so a single row never reads as "1 results". `plural(1, 'memory', 'memories')`

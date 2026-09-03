@@ -39,7 +39,15 @@ export const board = $state({
 		projectId: null as Uuid | null,
 		assignee: '',
 		query: '',
-		showDone: false
+		showDone: false,
+		/**
+		 * One column, or null for all of them. Applied on the screen rather than in the
+		 * request: the filters panel counts every column from the same list, and a stage
+		 * sent to the daemon would empty the counts it is drawn from.
+		 */
+		stage: null as string | null,
+		/** Keep only the tasks nobody has claimed. Local, for the same reason. */
+		unassigned: false
 	},
 	stages: [] as Stage[],
 	/** True when the chosen project overrides the global stage list. */
