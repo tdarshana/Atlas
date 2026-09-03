@@ -268,7 +268,10 @@ impl Backend for LocalBackend {
         }
         self.memories.remember(m, actor)
     }
-    async fn recall(&self, q: RecallQuery) -> Result<Vec<RecallHit>> { self.memories.recall(&q) }
+    async fn recall(&self, q: RecallQuery) -> Result<Vec<RecallHit>> {
+        check_scope(q.project_id, q.list_scope)?;
+        self.memories.recall(&q)
+    }
     async fn forget(&self, id: Uuid, reason: Option<String>, actor: &str) -> Result<Memory> { self.memories.forget(id, reason, actor) }
     async fn get_memory(&self, id: Uuid) -> Result<Memory> { self.memories.get(id) }
     async fn list_memories(&self, status: MemoryStatus, project_id: Option<Uuid>, scope: MemoryScopeFilter) -> Result<Vec<Memory>> {
@@ -298,7 +301,7 @@ impl Backend for LocalBackend {
             None => project.name.clone(),
         };
         let mut memories = self.memories.recall(&RecallQuery {
-            query, limit: 20, scope: None, project_id: Some(project.id), kinds: vec![], tags: vec![],
+            query, limit: 20, scope: None, list_scope: MemoryScopeFilter::All, project_id: Some(project.id), kinds: vec![], tags: vec![],
         })?;
         // Recall is a search, so a project whose memories don't happen to match its own
         // name would come back empty. Top it up with the newest project-scoped memories
@@ -552,7 +555,7 @@ mod tests {
         let paths = crate::paths::AtlasPaths::at(dir.path());
         let b = LocalBackend::open(&paths, Some(1), false).unwrap();
         let m = b.remember(crate::models::NewMemory { scope: crate::models::MemoryScope::Global, project_id: None, kind: crate::models::MemoryKind::Fact, text: "bun is the runtime".into(), tags: vec![], source_agent: None, source_tool: None, confidence: 1.0, status: crate::models::MemoryStatus::Active }, "t").await.unwrap();
-        let hits = b.recall(crate::models::RecallQuery { query: "runtime".into(), limit: 5, scope: None, project_id: None, kinds: vec![], tags: vec![] }).await.unwrap();
+        let hits = b.recall(crate::models::RecallQuery { query: "runtime".into(), limit: 5, scope: None, list_scope: MemoryScopeFilter::All, project_id: None, kinds: vec![], tags: vec![] }).await.unwrap();
         assert_eq!(hits[0].memory.id, m.id);
         let st = b.status().await.unwrap();
         assert!(st.db_path.ends_with("atlas.duckdb"));

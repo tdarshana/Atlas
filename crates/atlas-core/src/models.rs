@@ -230,11 +230,15 @@ pub struct RecallQuery {
     pub query: String,
     #[serde(default = "ten")] pub limit: usize,
     #[serde(default)] pub scope: Option<MemoryScope>,
+    /// How `project_id` is read, the same narrowing `GET /memories` takes: `All` widens
+    /// to the project plus every global memory, `ProjectOnly` keeps the project's own.
+    #[serde(default = "scope_all")] pub list_scope: MemoryScopeFilter,
     #[serde(default)] pub project_id: Option<Uuid>,
     #[serde(default)] pub kinds: Vec<MemoryKind>,
     #[serde(default)] pub tags: Vec<String>,
 }
 fn ten() -> usize { 10 }
+fn scope_all() -> MemoryScopeFilter { MemoryScopeFilter::All }
 
 str_enum!(SyncKind {
     Claude => "claude",

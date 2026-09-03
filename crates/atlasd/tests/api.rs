@@ -1273,6 +1273,9 @@ async fn agent_access_is_stored_and_enforced() {
     let refused = c.post(format!("{base}/tasks/{key}/move")).header("X-Atlas-Actor", "codex")
         .json(&serde_json::json!({"stage": "In Progress"})).send().await.unwrap();
     assert_eq!(refused.status(), 409);
+    let refused: serde_json::Value = refused.json().await.unwrap();
+    let name = project["name"].as_str().unwrap();
+    assert_eq!(refused["error"], format!("actor 'codex' may not move tasks in project {name}"), "{refused}");
 
     let allowed = c.post(format!("{base}/tasks/{key}/move")).header("X-Atlas-Actor", "claude-code/reviewer")
         .json(&serde_json::json!({"stage": "In Progress"})).send().await.unwrap();
@@ -1283,6 +1286,8 @@ async fn agent_access_is_stored_and_enforced() {
         "scope": "project", "project_id": id, "kind": "fact", "text": "held for review"
     })).send().await.unwrap();
     assert_eq!(held.status(), 409, "codex is not on memory_writers either");
+    let held: serde_json::Value = held.json().await.unwrap();
+    assert_eq!(held["error"], format!("actor 'codex' may not write memories in project {name}"), "{held}");
     let reviewed: serde_json::Value = c.post(format!("{base}/memories?actor=claude-code")).json(&serde_json::json!({
         "scope": "project", "project_id": id, "kind": "fact", "text": "held for review"
     })).send().await.unwrap().json().await.unwrap();
@@ -1492,4 +1497,122 @@ async fn memories_can_be_listed_for_one_project_only() {
 
     let bad = c.get(format!("{base}/memories?project_id={id}&scope=nonsense")).send().await.unwrap();
     assert_eq!(bad.status(), 400);
+}
+
+/// `require_review` reaches the extraction worker, not just `POST /memories`: a
+/// transcript an agent ingests into a project that requires review lands `pending`
+/// however confident the model was, while the user's own hands still auto-accept.
+#[tokio::test]
+async fn require_review_holds_back_extracted_memories() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    let dir = repo_free_tempdir();
+    fixture_repo(dir.path());
+
+    // One candidate per stub, each well above the auto-accept bar, and each a
+    // different sentence so the worker's duplicate check never skips one.
+    let candidate = |text: &str| format!(r#"[{{"text":"{text}","kind":"fact","tags":[],"confidence":0.95}}]"#);
+    let before = stub_llm_with_reply(&candidate("the runtime here is bun")).await;
+    let after = stub_llm_with_reply(&candidate("the deploy target here is fly.io")).await;
+    let by_hand = stub_llm_with_reply(&candidate("the package manager here is bun")).await;
+
+    let project: serde_json::Value = c.post(format!("{base}/projects/connect")).json(&serde_json::json!({"root": dir.path()})).send().await.unwrap().json().await.unwrap();
+    let id = project["id"].as_str().unwrap().to_string();
+
+    let configure = |url: &str| c.put(format!("{base}/settings")).header("X-Atlas-Actor", "desktop").json(&serde_json::json!({
+        "extraction.enabled": true, "extraction.base_url": url, "extraction.model": "stub",
+        "extraction.auto_accept_min_confidence": 0.5,
+    })).send();
+    let ingest = |tool: &str| c.post(format!("{base}/ingest")).json(&serde_json::json!({
+        "text": "user: a transcript", "source_tool": tool, "project_root": dir.path()
+    })).send();
+    let run = |c: &reqwest::Client, base: String, queued: reqwest::Response| {
+        let c = c.clone();
+        async move {
+            assert_eq!(queued.status(), 202);
+            let job_id = queued.json::<serde_json::Value>().await.unwrap()["job_id"].as_str().unwrap().to_string();
+            let job = wait_for_job(&c, &base, &job_id).await;
+            assert_eq!(job["status"], "done", "{job}");
+        }
+    };
+    let statuses = |status: &str| {
+        let (c, base, id, status) = (c.clone(), base.clone(), id.clone(), status.to_string());
+        async move {
+            let rows: serde_json::Value = c.get(format!("{base}/memories?status={status}&project_id={id}&scope=project_only"))
+                .send().await.unwrap().json().await.unwrap();
+            rows.as_array().unwrap().iter().map(|m| m["text"].as_str().unwrap().to_string()).collect::<Vec<_>>()
+        }
+    };
+
+    // Control: with review off, an agent's confident candidate goes straight in.
+    configure(&before).await.unwrap();
+    run(&c, base.clone(), ingest("codex").await.unwrap()).await;
+    assert_eq!(statuses("active").await, vec!["the runtime here is bun"]);
+
+    // With review on, the same agent's candidate waits, whatever its confidence.
+    c.put(format!("{base}/projects/{id}/agent-access")).header("X-Atlas-Actor", "desktop")
+        .json(&serde_json::json!({"require_review": true})).send().await.unwrap();
+    configure(&after).await.unwrap();
+    run(&c, base.clone(), ingest("codex").await.unwrap()).await;
+    assert_eq!(statuses("pending").await, vec!["the deploy target here is fly.io"]);
+    assert_eq!(statuses("active").await, vec!["the runtime here is bun"], "the earlier memory is untouched");
+
+    // The desktop is not an agent, so review does not hold its transcript back.
+    configure(&by_hand).await.unwrap();
+    run(&c, base.clone(), ingest("desktop").await.unwrap()).await;
+    let mut active = statuses("active").await;
+    active.sort();
+    assert_eq!(active, vec!["the package manager here is bun", "the runtime here is bun"]);
+}
+
+/// `POST /memories/search` takes the same narrowing the listing does, under
+/// `list_scope`: the project Memories tab's search box must not mix the global
+/// memories back in, and the field must not collide with `scope`, which still names
+/// the memory's own scope.
+#[tokio::test]
+async fn memory_search_can_be_narrowed_to_one_project() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    let dir = repo_free_tempdir();
+    fixture_repo(dir.path());
+
+    let project: serde_json::Value = c.post(format!("{base}/projects/connect")).json(&serde_json::json!({"root": dir.path()})).send().await.unwrap().json().await.unwrap();
+    let id = project["id"].as_str().unwrap().to_string();
+    c.post(format!("{base}/memories?actor=desktop")).json(&serde_json::json!({
+        "scope": "global", "kind": "fact", "text": "the global runtime is bun"
+    })).send().await.unwrap();
+    c.post(format!("{base}/memories?actor=desktop")).json(&serde_json::json!({
+        "scope": "project", "project_id": id, "kind": "fact", "text": "the project runtime is bun"
+    })).send().await.unwrap();
+
+    let search = |body: serde_json::Value| c.post(format!("{base}/memories/search")).json(&body).send();
+
+    // Absent, and the explicit `all`, both widen to the project plus the global rows.
+    for list_scope in [serde_json::Value::Null, serde_json::Value::String("all".into())] {
+        let mut body = serde_json::json!({"query": "runtime", "project_id": id});
+        if !list_scope.is_null() { body["list_scope"] = list_scope.clone(); }
+        let r = search(body).await.unwrap();
+        assert_eq!(r.status(), 200);
+        let hits: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(hits.as_array().unwrap().len(), 2, "{list_scope:?}: {hits}");
+    }
+
+    let narrowed = search(serde_json::json!({"query": "runtime", "project_id": id, "list_scope": "project_only"})).await.unwrap();
+    assert_eq!(narrowed.status(), 200, "the search route must accept project_only");
+    let narrowed: serde_json::Value = narrowed.json().await.unwrap();
+    let texts: Vec<&str> = narrowed.as_array().unwrap().iter().map(|h| h["memory"]["text"].as_str().unwrap()).collect();
+    assert_eq!(texts, vec!["the project runtime is bun"], "the global memory must be excluded");
+
+    let no_project = search(serde_json::json!({"query": "runtime", "list_scope": "project_only"})).await.unwrap();
+    assert_eq!(no_project.status(), 400);
+    let body: serde_json::Value = no_project.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("project_id"), "{body}");
+
+    // `scope` still means the memory's own scope, and the two are independent.
+    let globals = search(serde_json::json!({"query": "runtime", "scope": "global"})).await.unwrap();
+    assert_eq!(globals.status(), 200);
+    let globals: serde_json::Value = globals.json().await.unwrap();
+    assert_eq!(globals.as_array().unwrap().len(), 1, "{globals}");
 }

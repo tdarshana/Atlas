@@ -63,9 +63,9 @@ pub struct ProjectRootArgs {
 pub struct IngestTranscriptArgs {
     /// The conversation transcript to extract durable memories from.
     pub text: String,
-    /// The tool the transcript came from, recorded on every memory extracted from
-    /// it. Defaults to this server's source_tool label.
-    pub source_tool: Option<String>,
+    /// The agent inside this tool, appended to this server's own label to form the
+    /// actor recorded on every memory extracted from the transcript.
+    pub agent: Option<String>,
     /// Absolute path to the project this transcript belongs to. Defaults to the
     /// root this server was started in.
     pub project_root: Option<PathBuf>,
@@ -490,7 +490,7 @@ impl<B: Backend> AtlasMcp<B> {
         // A project id widens rather than narrows: the store returns that project's
         // memories alongside the global ones.
         let project_id = match scope { Some(MemoryScope::Global) => None, _ => self.scope_id(a.project_id, a.project_root).await? };
-        let q = RecallQuery { query: a.query, limit: a.limit.unwrap_or(10), scope, project_id, kinds, tags: a.tags.unwrap_or_default() };
+        let q = RecallQuery { query: a.query, limit: a.limit.unwrap_or(10), scope, list_scope: MemoryScopeFilter::All, project_id, kinds, tags: a.tags.unwrap_or_default() };
         json_result(&self.backend.recall(q).await.map_err(err)?)
     }
 
@@ -560,7 +560,10 @@ impl<B: Backend> AtlasMcp<B> {
 
     #[tool(description = "Queue a conversation transcript for opt-in LLM extraction of durable memories. Returns a job id to poll; fails if extraction is not enabled and configured on the daemon.")]
     async fn ingest_transcript(&self, Parameters(a): Parameters<IngestTranscriptArgs>) -> Result<CallToolResult, McpError> {
-        let source_tool = a.source_tool.unwrap_or_else(|| self.source_tool.clone());
+        // The actor is always this server's own label (plus the agent the caller names),
+        // never a string the caller writes: the project's agent-access gate checks it,
+        // and an exempt label like `desktop` must not be nameable from a tool call.
+        let source_tool = self.actor(&a.agent);
         let root = self.root_for(a.project_root);
         let job_id = self.backend.ingest_transcript(a.text, source_tool, root).await.map_err(|e| match e {
             // Extraction being off is a request the caller made in good faith against
@@ -728,7 +731,7 @@ mod tests {
         let s = AtlasMcp::new(backend);
 
         let err = s
-            .ingest_transcript(Parameters(IngestTranscriptArgs { text: "user: we use bun".into(), source_tool: None, project_root: None }))
+            .ingest_transcript(Parameters(IngestTranscriptArgs { text: "user: we use bun".into(), agent: None, project_root: None }))
             .await
             .unwrap_err();
         assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
@@ -760,7 +763,7 @@ mod tests {
         let s = AtlasMcp::new(backend);
         let ingest = |text: String| {
             let s = &s;
-            async move { s.ingest_transcript(Parameters(IngestTranscriptArgs { text, source_tool: None, project_root: None })).await }
+            async move { s.ingest_transcript(Parameters(IngestTranscriptArgs { text, agent: None, project_root: None })).await }
         };
 
         for blank in ["", "   \n\t "] {

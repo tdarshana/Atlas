@@ -218,7 +218,12 @@ fn ingest_from_a_pipe_fails_when_extraction_is_off() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(b"user: we deploy to fly.io\n").unwrap();
+    // The child can refuse and exit before the parent finishes writing, which closes
+    // the pipe: that is the very outcome being asserted, so a broken pipe here is not
+    // a failure. Every other write error still is.
+    if let Err(e) = child.stdin.take().unwrap().write_all(b"user: we deploy to fly.io\n") {
+        assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe, "unexpected stdin write error: {e}");
+    }
     let out = child.wait_with_output().unwrap();
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "an interactive ingest should fail: {err}");

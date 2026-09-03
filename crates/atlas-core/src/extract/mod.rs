@@ -349,6 +349,15 @@ pub async fn run_ingest(job: &Job, backend: &LocalBackend) -> Result<Value> {
         Some(id) => Some(Uuid::parse_str(id).map_err(|e| AtlasError::Invalid(format!("ingest job has a malformed project_id: {e}")))?),
         None => project_for(&backend.db, root)?,
     };
+    // `require_review` is the project's, not the model's: an agent writing here has
+    // every memory land `pending` whatever the confidence, the same rule
+    // `Backend::remember` applies. The actor the gate admitted is the payload's
+    // `source_tool`; the user's own hands (`desktop`, `cli`, `cli/*`, `api`) are exempt
+    // here exactly as they are at the gate.
+    let require_review = match project_id.filter(|_| !crate::projects::actor_is_user(&source_tool)) {
+        Some(pid) => ProjectRepo::new(&backend.db).get(pid)?.agent_access.require_review,
+        None => false,
+    };
     let cfg = resolve_extraction(&backend.db, project_id)?;
     let client = build_client(&cfg)?;
     let candidates = extract_candidates(text, &client).await?;
@@ -373,7 +382,7 @@ pub async fn run_ingest(job: &Job, backend: &LocalBackend) -> Result<Value> {
                 source_agent: Some(EXTRACTOR.to_string()),
                 source_tool: Some(source_tool.clone()),
                 confidence: c.confidence,
-                status: status_for(c.confidence, cfg.auto_accept_min_confidence),
+                status: if require_review { MemoryStatus::Pending } else { status_for(c.confidence, cfg.auto_accept_min_confidence) },
             },
             EXTRACTOR,
         );

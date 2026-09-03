@@ -208,7 +208,7 @@ impl MemoryService {
     }
 
     pub fn recall(&self, q: &RecallQuery) -> Result<Vec<RecallHit>> {
-        let candidates = self.repo().list_active(q.scope, q.project_id)?;
+        let candidates = self.repo().list_by_status_scoped(MemoryStatus::Active, q.scope, q.project_id, q.list_scope)?;
         let candidates: Vec<Memory> = candidates.into_iter().filter(|m| {
             (q.kinds.is_empty() || q.kinds.contains(&m.kind)) && (q.tags.is_empty() || q.tags.iter().any(|t| m.tags.contains(t)))
         }).collect();
@@ -336,7 +336,7 @@ mod tests {
         let s = svc();
         s.remember(nm("the repo uses bun instead of pnpm"), "t").unwrap();
         s.remember(nm("dark mode is a class on html"), "t").unwrap();
-        let hits = s.recall(&RecallQuery { query: "package manager bun".into(), limit: 5, scope: None, project_id: None, kinds: vec![], tags: vec![] }).unwrap();
+        let hits = s.recall(&RecallQuery { query: "package manager bun".into(), limit: 5, scope: None, list_scope: MemoryScopeFilter::All, project_id: None, kinds: vec![], tags: vec![] }).unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].memory.text.contains("bun"));
         assert!(hits[0].score > 0.0);
@@ -347,7 +347,7 @@ mod tests {
         let s = svc();
         let m = s.remember(nm("convex listens on 3210"), "t").unwrap();
         s.forget(m.id, Some("moved".into()), "t").unwrap();
-        assert!(s.recall(&RecallQuery { query: "convex port".into(), limit: 5, scope: None, project_id: None, kinds: vec![], tags: vec![] }).unwrap().is_empty());
+        assert!(s.recall(&RecallQuery { query: "convex port".into(), limit: 5, scope: None, list_scope: MemoryScopeFilter::All, project_id: None, kinds: vec![], tags: vec![] }).unwrap().is_empty());
         assert_eq!(s.get(m.id).unwrap().status, MemoryStatus::Superseded);
     }
 
@@ -358,7 +358,7 @@ mod tests {
         let mut a = nm("prefer tabs"); a.kind = MemoryKind::Preference; a.tags = vec!["style".into()];
         let mut b = nm("prefer spaces in yaml"); b.scope = MemoryScope::Project; b.project_id = Some(p);
         s.remember(a, "t").unwrap(); s.remember(b, "t").unwrap();
-        let q = |kinds: Vec<MemoryKind>, tags: Vec<String>, project: Option<uuid::Uuid>| s.recall(&RecallQuery { query: "prefer".into(), limit: 10, scope: None, project_id: project, kinds, tags }).unwrap().len();
+        let q = |kinds: Vec<MemoryKind>, tags: Vec<String>, project: Option<uuid::Uuid>| s.recall(&RecallQuery { query: "prefer".into(), limit: 10, scope: None, list_scope: MemoryScopeFilter::All, project_id: project, kinds, tags }).unwrap().len();
         assert_eq!(q(vec![MemoryKind::Preference], vec![], None), 1);
         assert_eq!(q(vec![], vec!["style".into()], None), 1);
         assert_eq!(q(vec![], vec![], Some(p)), 2);        // project + global
@@ -380,7 +380,7 @@ mod tests {
         let s = MemoryService::new(Arc::new(Db::open_in_memory().unwrap()), Arc::new(FakeEmbedder)).unwrap();
         s.remember(nm("bun is the javascript runtime here"), "t").unwrap();
         s.remember(nm("the api listens on port 3210"), "t").unwrap();
-        let hits = s.recall(&RecallQuery { query: "which runtime do we use".into(), limit: 5, scope: None, project_id: None, kinds: vec![], tags: vec![] }).unwrap();
+        let hits = s.recall(&RecallQuery { query: "which runtime do we use".into(), limit: 5, scope: None, list_scope: MemoryScopeFilter::All, project_id: None, kinds: vec![], tags: vec![] }).unwrap();
         assert!(!hits.is_empty());
         assert!(hits[0].memory.text.contains("bun"));
         assert!(hits[0].score > 0.35);
@@ -394,7 +394,7 @@ mod tests {
         s1.remember(nm("bun is the javascript runtime here"), "t").unwrap();
         s1.remember(nm("the api listens on port 3210"), "t").unwrap();
         let s2 = MemoryService::new(db.clone(), Arc::new(FakeEmbedder)).unwrap();
-        let q = RecallQuery { query: "which runtime do we use".into(), limit: 5, scope: None, project_id: None, kinds: vec![], tags: vec![] };
+        let q = RecallQuery { query: "which runtime do we use".into(), limit: 5, scope: None, list_scope: MemoryScopeFilter::All, project_id: None, kinds: vec![], tags: vec![] };
         let hits1 = s1.recall(&q).unwrap();
         let hits2 = s2.recall(&q).unwrap();
         assert!(!hits1.is_empty());
@@ -412,7 +412,7 @@ mod tests {
         s.set_embedder(Arc::new(FakeEmbedder)).unwrap();
         let count: i64 = s.db.with_conn(|c| Ok(c.query_row("select count(*) from memory_embeddings", [], |r| r.get(0))?)).unwrap();
         assert_eq!(count, 2);
-        let hits = s.recall(&RecallQuery { query: "which runtime do we use".into(), limit: 5, scope: None, project_id: None, kinds: vec![], tags: vec![] }).unwrap();
+        let hits = s.recall(&RecallQuery { query: "which runtime do we use".into(), limit: 5, scope: None, list_scope: MemoryScopeFilter::All, project_id: None, kinds: vec![], tags: vec![] }).unwrap();
         assert!(!hits.is_empty());
         assert!(hits[0].memory.text.contains("bun"));
         assert_eq!(s.status(None).unwrap().embedding, "ready");
@@ -455,7 +455,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         MemoryRepo::new(&db).insert(&nm("legacy memory about redis cache"), "t").unwrap();
         let s = MemoryService::new(Arc::new(db), Arc::new(FakeEmbedder)).unwrap();
-        let hits = s.recall(&RecallQuery { query: "redis cache".into(), limit: 5, scope: None, project_id: None, kinds: vec![], tags: vec![] }).unwrap();
+        let hits = s.recall(&RecallQuery { query: "redis cache".into(), limit: 5, scope: None, list_scope: MemoryScopeFilter::All, project_id: None, kinds: vec![], tags: vec![] }).unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].memory.text.contains("redis"));
     }

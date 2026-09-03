@@ -109,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Recall { query, limit, kinds, tags, project_id } => {
             let mut ks = vec![]; for k in kinds { ks.push(k.parse::<MemoryKind>()?); }
-            let hits = backend(&paths, cli.port).await?.recall(RecallQuery { query, limit, scope: None, project_id, kinds: ks, tags }).await?;
+            let hits = backend(&paths, cli.port).await?.recall(RecallQuery { query, limit, scope: None, list_scope: atlas_core::models::MemoryScopeFilter::All, project_id, kinds: ks, tags }).await?;
             for h in hits { println!("{:.2}  [{}] {}  {}", h.score, h.memory.kind, h.memory.text, if h.memory.tags.is_empty() { String::new() } else { format!("#{}", h.memory.tags.join(" #")) }); }
         }
         Cmd::Project { action } => commands::project::run(action, &backend(&paths, cli.port).await?).await?,

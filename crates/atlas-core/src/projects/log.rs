@@ -81,17 +81,23 @@ fn paged(base: &str, time_expr: &str, before: Option<Before>, cap: usize) -> Str
 /// sorted newest first and then cut back to `cap` overall.
 ///
 /// `root_path` is the second way an extraction job is matched: older job payloads
-/// record only the root they were queued from, not a project id.
-fn collect(db: &Db, project_id: Uuid, root_path: &str, before: Option<Before>, cap: usize) -> Result<Vec<LogEntry>> {
+/// record only the root they were queued from, not a project id. `name` is the
+/// project's, carried onto its own log entries so the Ref column can name it.
+///
+/// Each entry is paired with the primary key of the row it came from. Every source
+/// table keys on a uuid, so that pair is a stable identity for one log line, which is
+/// what the export pages on: two genuinely distinct entries can serialize to the same
+/// JSON, and dropping one of those as a duplicate would lose it.
+fn collect(db: &Db, project_id: Uuid, root_path: &str, name: &str, before: Option<Before>, cap: usize) -> Result<Vec<(Uuid, LogEntry)>> {
     let pid = project_id.to_string();
     let bound = before.map(|b| b.us);
-    let mut out: Vec<LogEntry> = Vec::new();
+    let mut out: Vec<(Uuid, LogEntry)> = Vec::new();
 
     db.with_conn(|c| {
         // Task events: the actor is the source, the event kind is the kind, and the
         // body is the detail. Joined to `tasks` so the entry can carry the task key.
         let sql = paged(
-            "select epoch_us(e.created_at), e.actor, e.kind, e.body, e.task_id::text, t.key \
+            "select epoch_us(e.created_at), e.actor, e.kind, e.body, e.task_id::text, t.key, e.id::text \
              from task_events e join tasks t on e.task_id = t.id where t.project_id = ?",
             "epoch_us(e.created_at)",
             before,
@@ -107,7 +113,8 @@ fn collect(db: &Db, project_id: Uuid, root_path: &str, before: Option<Before>, c
             let key: String = r.get(5)?;
             let body: String = r.get(3)?;
             let kind: String = r.get(2)?;
-            out.push(LogEntry {
+            let row_id = Uuid::parse_str(&r.get::<_, String>(6)?).unwrap_or_else(|_| Uuid::new_v4());
+            out.push((row_id, LogEntry {
                 time: ts(r.get(0)?),
                 source: r.get(1)?,
                 // A move or a claim carries no body, so the entry would read blank;
@@ -115,7 +122,7 @@ fn collect(db: &Db, project_id: Uuid, root_path: &str, before: Option<Before>, c
                 detail: if body.trim().is_empty() { format!("{kind} {key}") } else { body },
                 kind,
                 reference: Some(LogRef { kind: "task".into(), id: task_id, key: Some(key) }),
-            });
+            }));
         }
         Ok(())
     })?;
@@ -125,7 +132,7 @@ fn collect(db: &Db, project_id: Uuid, root_path: &str, before: Option<Before>, c
         // deliberately left out: `forget` writes it alongside `supersede`, and one act
         // should be one line.
         let sql = paged(
-            "select epoch_us(a.\"at\"), a.actor, a.action, m.text, m.id::text \
+            "select epoch_us(a.\"at\"), a.actor, a.action, m.text, m.id::text, a.id::text \
              from audit a join memories m on a.entity_id = m.id \
              where a.entity = 'memory' and m.project_id = ? and a.action in ('insert', 'supersede', 'set_status')",
             "epoch_us(a.\"at\")",
@@ -144,13 +151,14 @@ fn collect(db: &Db, project_id: Uuid, root_path: &str, before: Option<Before>, c
                 "supersede" => "forgotten",
                 _ => "reviewed",
             };
-            out.push(LogEntry {
+            let row_id = Uuid::parse_str(&r.get::<_, String>(5)?).unwrap_or_else(|_| Uuid::new_v4());
+            out.push((row_id, LogEntry {
                 time: ts(r.get(0)?),
                 source: r.get(1)?,
                 kind: kind.into(),
                 detail: r.get(3)?,
                 reference: Some(LogRef { kind: "memory".into(), id: Uuid::parse_str(&r.get::<_, String>(4)?).ok(), key: None }),
-            });
+            }));
         }
         Ok(())
     })?;
@@ -159,7 +167,7 @@ fn collect(db: &Db, project_id: Uuid, root_path: &str, before: Option<Before>, c
         // The project's own audit rows, plus the one `sync` writes when it has finished
         // writing a project's files.
         let sql = paged(
-            "select epoch_us(a.\"at\"), a.actor, a.action, a.entity, a.detail::text \
+            "select epoch_us(a.\"at\"), a.actor, a.action, a.entity, a.detail::text, a.id::text \
              from audit a where a.entity in ('project', 'sync') and a.entity_id = ?",
             "epoch_us(a.\"at\")",
             before,
@@ -183,13 +191,16 @@ fn collect(db: &Db, project_id: Uuid, root_path: &str, before: Option<Before>, c
             } else {
                 "updated"
             };
-            out.push(LogEntry {
+            let row_id = Uuid::parse_str(&r.get::<_, String>(5)?).unwrap_or_else(|_| Uuid::new_v4());
+            out.push((row_id, LogEntry {
                 time: ts(r.get(0)?),
                 source: r.get(1)?,
                 kind: kind.into(),
-                detail: detail.filter(|d| d != "null").unwrap_or(action),
-                reference: Some(LogRef { kind: entity, id: Some(project_id), key: None }),
-            });
+                detail: detail.filter(|d| d != "null").map(|d| humanise(&d)).unwrap_or(action),
+                // The project's own rows carry its name, so the Ref column reads
+                // "atlas" rather than the first eight characters of a uuid.
+                reference: Some(LogRef { kind: entity, id: Some(project_id), key: Some(name.to_string()) }),
+            }));
         }
         Ok(())
     })?;
@@ -219,20 +230,57 @@ fn collect(db: &Db, project_id: Uuid, root_path: &str, before: Option<Before>, c
             let status: String = r.get(2)?;
             let error: Option<String> = r.get(3)?;
             let result: Option<String> = r.get(4)?;
-            out.push(LogEntry {
+            let job_id = Uuid::parse_str(&r.get::<_, String>(1)?).ok();
+            out.push((job_id.unwrap_or_else(Uuid::new_v4), LogEntry {
                 time: ts(r.get(0)?),
                 source: r.get::<_, Option<String>>(5)?.unwrap_or_else(|| "extractor".into()),
                 kind: if status == "done" { "ingested".into() } else { "failed".into() },
                 detail: error.or(result).unwrap_or(status),
-                reference: Some(LogRef { kind: "job".into(), id: Uuid::parse_str(&r.get::<_, String>(1)?).ok(), key: None }),
-            });
+                reference: Some(LogRef { kind: "job".into(), id: job_id, key: None }),
+            }));
         }
         Ok(())
     })?;
 
-    out.sort_by(|a, b| b.time.cmp(&a.time));
+    out.sort_by(|a, b| b.1.time.cmp(&a.1.time));
     out.truncate(cap);
     Ok(out)
+}
+
+/// Turns an audit row's JSON payload into a sentence for the Detail column. The
+/// shapes the project's own rows actually take get a phrase each; anything else falls
+/// back to `key: value` pairs, so a payload nobody anticipated is still a line of
+/// prose rather than a brace.
+fn humanise(detail: &str) -> String {
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(detail) else {
+        return detail.to_string();
+    };
+    if map.contains_key("stages") {
+        return "changed stages".into();
+    }
+    if map.len() == 1 {
+        if map.get("profile").and_then(serde_json::Value::as_bool) == Some(true) {
+            return "the profile".into();
+        }
+        if let Some(root) = map.get("root").and_then(serde_json::Value::as_str) {
+            return format!("root {root}");
+        }
+    }
+    if let (Some(from), Some(to)) = (map.get("from").and_then(serde_json::Value::as_str), map.get("to").and_then(serde_json::Value::as_str)) {
+        return format!("board key {from} to {to}");
+    }
+    let parts: Vec<String> = map.iter().filter(|(_, v)| !v.is_null()).map(|(k, v)| format!("{k}: {}", scalar(v))).collect();
+    if parts.is_empty() { detail.to_string() } else { parts.join(", ") }
+}
+
+/// One JSON value as the plain text a sentence wants: a string without its quotes,
+/// a list flattened, anything else as itself.
+fn scalar(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(a) => a.iter().map(scalar).collect::<Vec<_>>().join(", "),
+        other => other.to_string(),
+    }
 }
 
 /// The project's log, narrowed by `f` and capped. `after` pages: pass the `time` of
@@ -250,11 +298,16 @@ pub fn project_log(db: &Db, project_id: Uuid, f: &LogFilter) -> Result<Vec<LogEn
     let limit = f.limit.filter(|l| *l > 0).unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
     let cap = if q.is_some() || source.is_some() || kind.is_some() { MAX_LIMIT } else { limit };
     let before = f.after.map(|a| Before::older_than(a.timestamp_micros()));
-    Ok(collect(db, project_id, &project.root_path, before, cap)?
+    Ok(collect(db, project_id, &project.root_path, &project.name, before, cap)?
         .into_iter()
+        .map(|(_, e)| e)
         .filter(|e| source.is_none_or(|s| s == e.source))
         .filter(|e| kind.is_none_or(|k| k == e.kind))
-        .filter(|e| q.as_deref().is_none_or(|q| e.detail.to_lowercase().contains(q)))
+        // `q` is the box labelled "Filter log", so it reads the whole line: an actor
+        // name and an event name are both on screen and both worth typing.
+        .filter(|e| q.as_deref().is_none_or(|q| {
+            e.detail.to_lowercase().contains(q) || e.source.to_lowercase().contains(q) || e.kind.to_lowercase().contains(q)
+        }))
         .take(limit)
         .collect())
 }
@@ -270,28 +323,34 @@ pub fn project_log_export(db: &Db, project_id: Uuid) -> Result<String> {
     let project = super::ProjectRepo::new(db).get(project_id)?;
     let mut out = String::new();
     let mut before: Option<Before> = None;
-    // The lines already written whose time equals the current page bound.
-    let mut written_at_bound: Vec<String> = Vec::new();
+    // The rows already written whose time equals the current page bound, by their own
+    // primary key: two distinct entries can serialize identically, and skipping one of
+    // those would drop it from the export.
+    let mut written_at_bound: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
     loop {
-        let page = collect(db, project_id, &project.root_path, before, EXPORT_PAGE)?;
+        let page = collect(db, project_id, &project.root_path, &project.name, before, EXPORT_PAGE)?;
         let full = page.len() == EXPORT_PAGE;
-        let mut fresh: Vec<(chrono::DateTime<chrono::Utc>, String)> = Vec::new();
-        for entry in page {
-            let line = serde_json::to_string(&entry)?;
-            if written_at_bound.contains(&line) {
+        let mut fresh: Vec<(chrono::DateTime<chrono::Utc>, Uuid, String)> = Vec::new();
+        for (row_id, entry) in page {
+            if written_at_bound.contains(&row_id) {
                 continue;
             }
-            fresh.push((entry.time, line));
+            fresh.push((entry.time, row_id, serde_json::to_string(&entry)?));
         }
-        let Some((last_time, _)) = fresh.last().map(|(t, l)| (*t, l.clone())) else { break };
-        for (_, line) in &fresh {
+        let Some(last_time) = fresh.last().map(|(t, _, _)| *t) else { break };
+        for (_, _, line) in &fresh {
             out.push_str(line);
             out.push('\n');
         }
         if !full {
             break;
         }
-        written_at_bound = fresh.iter().filter(|(t, _)| *t == last_time).map(|(_, l)| l.clone()).collect();
+        // Only rows at the new bound can come back on the next page, so the set is
+        // rebuilt whenever the bound moves and only grown when it stands still.
+        if before.map(|b| b.us) != Some(last_time.timestamp_micros()) {
+            written_at_bound.clear();
+        }
+        written_at_bound.extend(fresh.iter().filter(|(t, _, _)| *t == last_time).map(|(_, id, _)| *id));
         before = Some(Before::at_or_older_than(last_time.timestamp_micros()));
     }
     Ok(out)

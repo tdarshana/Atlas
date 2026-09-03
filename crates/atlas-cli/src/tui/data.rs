@@ -33,7 +33,7 @@ async fn run(effect: Effect, backend: Arc<RemoteBackend>, cwd: PathBuf) -> atlas
         }
         Effect::Recall(query) => {
             let hits = backend
-                .recall(RecallQuery { query, limit: 50, scope: None, project_id: None, kinds: vec![], tags: vec![] })
+                .recall(RecallQuery { query, limit: 50, scope: None, list_scope: atlas_core::models::MemoryScopeFilter::All, project_id: None, kinds: vec![], tags: vec![] })
                 .await?;
             Ok(Action::MemoriesLoaded(hits))
         }

@@ -154,3 +154,54 @@ async fn memory_writers_refuses_an_unnamed_tool_but_never_the_cli() {
     };
     assert_eq!(backend.remember(mine, "cli/ann").await.unwrap().status, MemoryStatus::Active);
 }
+
+/// The actor `ingest_transcript` is checked against is this server's own label, never
+/// a string the caller sends. The tool no longer offers a `source_tool` argument at
+/// all, and one sent anyway is ignored rather than believed: an agent must not be able
+/// to name an exempt actor like `desktop` and walk past `memory_writers`.
+#[tokio::test]
+async fn ingest_transcript_takes_its_actor_from_the_server_not_the_caller() {
+    let home = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let (backend, project) = backend(home.path(), root.path()).await;
+    backend
+        .set_agent_access(
+            project.id,
+            AgentAccess { memory_writers: Some(vec!["claude-code".into()]), task_movers: None, require_review: false },
+            "cli",
+        )
+        .await
+        .unwrap();
+
+    let client = session(backend.clone(), root.path(), "codex").await;
+
+    // The schema is the first line of the fix: there is nothing to send.
+    let tools = client.list_all_tools().await.unwrap();
+    let ingest = tools.iter().find(|t| t.name == "ingest_transcript").expect("the tool is served");
+    let props = ingest.input_schema.get("properties").and_then(|p| p.as_object()).expect("an object schema");
+    assert!(!props.contains_key("source_tool"), "the caller may not name the actor: {props:?}");
+    assert!(props.contains_key("agent"), "the agent inside the tool is still nameable: {props:?}");
+
+    // Sent anyway, it is ignored: the gate still sees this server's own label.
+    let err = client
+        .call_tool(call("ingest_transcript", serde_json::json!({"text": "user: we use bun", "source_tool": "desktop"})))
+        .await
+        .expect_err("codex is not on memory_writers, whatever it calls itself");
+    let text = err.to_string();
+    assert!(
+        text.contains(&format!("actor 'codex' may not write memories in project {}", project.name)),
+        "{text}"
+    );
+
+    // `agent` only ever appends to that label, exactly as `remember` does.
+    let err = client
+        .call_tool(call("ingest_transcript", serde_json::json!({"text": "user: we use bun", "agent": "worker"})))
+        .await
+        .expect_err("a sub-agent of codex is still codex");
+    let text = err.to_string();
+    assert!(
+        text.contains(&format!("actor 'codex/worker' may not write memories in project {}", project.name)),
+        "{text}"
+    );
+    client.cancel().await.unwrap();
+}
