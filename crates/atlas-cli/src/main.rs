@@ -77,6 +77,26 @@ async fn board_backend(paths: &AtlasPaths, port: u16, actor: Option<String>) -> 
     Ok(backend)
 }
 
+/// Best-effort name of the process that launched this one, for a stdio MCP client
+/// registration whose `initialize` handshake carried no client name and whose
+/// environment carries no `CLAUDE_CODE` hint either. Shells out to `ps` twice (own pid
+/// to parent pid, then parent pid to its command name) since there is no portable std
+/// API for a parent's name; `None` on any failure, for the caller to fall back further.
+#[cfg(unix)]
+fn parent_process_name() -> Option<String> {
+    let ppid_out = std::process::Command::new("ps").args(["-o", "ppid=", "-p", &std::process::id().to_string()]).output().ok()?;
+    let ppid = String::from_utf8_lossy(&ppid_out.stdout).trim().to_string();
+    if ppid.is_empty() { return None; }
+    let comm_out = std::process::Command::new("ps").args(["-o", "comm=", "-p", &ppid]).output().ok()?;
+    let comm = String::from_utf8_lossy(&comm_out.stdout).trim().to_string();
+    // `comm=` reports the full launch path on macOS; keep just the file name for a
+    // readable client label.
+    let name = std::path::Path::new(&comm).file_name().and_then(|s| s.to_str()).unwrap_or(&comm).to_string();
+    (!name.is_empty()).then_some(name)
+}
+#[cfg(not(unix))]
+fn parent_process_name() -> Option<String> { None }
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).with_writer(std::io::stderr).init();
@@ -91,15 +111,56 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Mcp => {
             let port = daemon_ctl::ensure_daemon(&paths, cli.port).await?;
-            let mut server = AtlasMcp::new(Arc::new(RemoteBackend::new(port)))
-                .with_source_tool(std::env::var("ATLAS_SOURCE_TOOL").unwrap_or_else(|_| "stdio".into()));
+            let remote = Arc::new(RemoteBackend::new(port));
+            // Counts this session's tool calls locally rather than reaching the daemon
+            // on every one: the heartbeat task below reports the running total every
+            // 60 s, which is precise enough for a status display and costs nothing on
+            // the tool-call path itself.
+            let tool_calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let hook_calls = tool_calls.clone();
+            let mut server = AtlasMcp::new(remote.clone())
+                .with_source_tool(std::env::var("ATLAS_SOURCE_TOOL").unwrap_or_else(|_| "stdio".into()))
+                .with_on_tool_call(Arc::new(move |_session_id, _client_info, _protocol_version| {
+                    hook_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }));
             // The client launches the shim in the repository it is working in, so the cwd
             // names the project. Handed over rather than exported: writing an env var is
             // unsound once the process is multi-threaded, which it already is here.
             if let Ok(cwd) = std::env::current_dir() { server = server.with_project_root(cwd); }
             use rmcp::ServiceExt;
             let running = server.serve(rmcp::transport::stdio()).await?;
+
+            // Registers with the daemon so `GET /api/v1/mcp/status` can show this
+            // session. Best effort throughout: a client this shim serves must keep
+            // working even when the daemon's registry route is unreachable.
+            let client_id = uuid::Uuid::new_v4().to_string();
+            let peer_info = running.peer_info();
+            let client_name = peer_info.as_ref()
+                .map(|info| info.client_info.name.clone())
+                .filter(|n| !n.is_empty())
+                .or_else(|| std::env::var("CLAUDE_CODE").is_ok().then(|| "claude-code".to_string()))
+                .or_else(parent_process_name)
+                .unwrap_or_else(|| "unknown".to_string());
+            let client_version = peer_info.and_then(|info| (!info.client_info.version.is_empty()).then(|| info.client_info.version.clone()));
+            if let Err(e) = remote.register_mcp_client(&client_id, "stdio", &client_name, client_version.as_deref()).await {
+                tracing::debug!("mcp client registration failed: {e}");
+            }
+            let heartbeat = {
+                let remote = remote.clone();
+                let client_id = client_id.clone();
+                tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                    interval.tick().await; // the first tick fires immediately; skip it
+                    loop {
+                        interval.tick().await;
+                        let _ = remote.heartbeat_mcp_client(&client_id, tool_calls.load(std::sync::atomic::Ordering::Relaxed)).await;
+                    }
+                })
+            };
+
             running.waiting().await?;
+            heartbeat.abort();
+            let _ = remote.unregister_mcp_client(&client_id).await;
         }
         Cmd::Remember { text, kind, tags, project_id, agent } => {
             let scope = if project_id.is_some() { MemoryScope::Project } else { MemoryScope::Global };

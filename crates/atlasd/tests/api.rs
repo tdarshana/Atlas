@@ -213,6 +213,88 @@ async fn mcp_over_http_lists_and_calls_tools() {
     assert!(frameworks.iter().any(|f| f == "next"), "profile missing the framework from package.json: {frameworks:?}");
 }
 
+/// `GET /api/v1/mcp/status` before any client has connected: the static parts (the
+/// transports, the 29-row tools table with the two defaults disabled, resources and
+/// prompts) are already there, and no client has registered yet. Then one HTTP
+/// `tools/call` over the same session `mcp_over_http_lists_and_calls_tools` drives
+/// registers that session and counts the call.
+#[tokio::test]
+async fn mcp_status_reports_transports_counts_and_an_http_client_after_a_call() {
+    let d = start().await;
+    let url = format!("http://127.0.0.1:{}/mcp", d.port);
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+
+    let status: serde_json::Value = c.get(format!("{base}/mcp/status")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(status["transports"]["stdio"]["command"], "atlas mcp", "{status}");
+    assert!(status["transports"]["http"]["url"].as_str().unwrap().ends_with("/mcp"), "{status}");
+    assert!(!status["transports"]["http"]["protocol_version"].as_str().unwrap().is_empty(), "{status}");
+    let tools = status["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 29, "{tools:?}");
+    let disabled: Vec<&str> = tools.iter().filter(|t| t["enabled"].as_bool() == Some(false)).map(|t| t["name"].as_str().unwrap()).collect();
+    assert_eq!(disabled.len(), 2, "{disabled:?}");
+    assert!(disabled.contains(&"project_connect") && disabled.contains(&"memory_review"), "{disabled:?}");
+    assert_eq!(status["counts"]["tools"], 29, "{status}");
+    assert_eq!(status["counts"]["resources"].as_u64().unwrap(), status["resources"].as_array().unwrap().len() as u64, "{status}");
+    assert_eq!(status["counts"]["prompts"].as_u64().unwrap(), status["prompts"].as_array().unwrap().len() as u64, "{status}");
+    assert!(status["clients"].as_array().unwrap().is_empty(), "{status}");
+
+    let init = c.post(&url).header("Accept", "application/json, text/event-stream").header("Content-Type", "application/json")
+        .json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"status-test","version":"9.9"}}}))
+        .send().await.unwrap();
+    let session = init.headers().get("mcp-session-id").map(|v| v.to_str().unwrap().to_string());
+    let _ = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})).await;
+    let _ = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"status","arguments":{}}})).await;
+
+    let status: serde_json::Value = c.get(format!("{base}/mcp/status")).send().await.unwrap().json().await.unwrap();
+    let clients = status["clients"].as_array().unwrap();
+    assert_eq!(clients.len(), 1, "{clients:?}");
+    assert_eq!(clients[0]["transport"], "http", "{clients:?}");
+    assert_eq!(clients[0]["client_name"], "status-test", "{clients:?}");
+    assert_eq!(clients[0]["client_version"], "9.9", "{clients:?}");
+    assert_eq!(clients[0]["tool_calls"], 1, "{clients:?}");
+    assert_eq!(status["counts"]["clients"], 1, "{status}");
+}
+
+/// The stdio shim's own registration routes, exercised directly rather than through a
+/// real `atlas mcp` process (the CLI test `stdio_shim_registers_with_the_daemon_and_
+/// appears_in_mcp_status` covers that end to end): register, heartbeat with a reported
+/// call count, a heartbeat for an unknown id is a 404, an unknown transport is a 400,
+/// and unregister drops the entry immediately.
+#[tokio::test]
+async fn mcp_clients_route_registers_heartbeats_and_unregisters() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+
+    let created: serde_json::Value = c.post(format!("{base}/mcp/clients"))
+        .json(&serde_json::json!({"id": "test-id", "transport": "stdio", "client_name": "claude-code", "client_version": "1.0"}))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(created["id"], "test-id", "{created}");
+    assert_eq!(created["tool_calls"], 0, "{created}");
+
+    let status: serde_json::Value = c.get(format!("{base}/mcp/status")).send().await.unwrap().json().await.unwrap();
+    let clients = status["clients"].as_array().unwrap();
+    assert_eq!(clients.len(), 1, "{clients:?}");
+    assert_eq!(clients[0]["transport"], "stdio", "{clients:?}");
+
+    let heartbeat = c.put(format!("{base}/mcp/clients/test-id")).json(&serde_json::json!({"tool_calls": 5})).send().await.unwrap();
+    assert_eq!(heartbeat.status(), 200);
+    let heartbeat_body: serde_json::Value = heartbeat.json().await.unwrap();
+    assert_eq!(heartbeat_body["tool_calls"], 5, "{heartbeat_body}");
+
+    let missing = c.put(format!("{base}/mcp/clients/no-such-id")).json(&serde_json::json!({"tool_calls": 1})).send().await.unwrap();
+    assert_eq!(missing.status(), 404);
+
+    let bad_transport = c.post(format!("{base}/mcp/clients")).json(&serde_json::json!({"id": "x", "transport": "carrier-pigeon", "client_name": "y"})).send().await.unwrap();
+    assert_eq!(bad_transport.status(), 400);
+
+    let deleted = c.delete(format!("{base}/mcp/clients/test-id")).send().await.unwrap();
+    assert_eq!(deleted.status(), 204);
+    let status: serde_json::Value = c.get(format!("{base}/mcp/status")).send().await.unwrap().json().await.unwrap();
+    assert!(status["clients"].as_array().unwrap().is_empty(), "{status}");
+}
+
 /// The daemon has no authentication, so a page open in the user's browser must not be able
 /// to reach it, on the JSON API or on /mcp.
 #[tokio::test]

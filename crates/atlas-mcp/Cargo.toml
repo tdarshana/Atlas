@@ -7,6 +7,10 @@ license.workspace = true
 [dependencies]
 atlas-core = { path = "../atlas-core" }
 rmcp = { version = "3.2", features = ["server", "macros", "schemars", "transport-io", "transport-streamable-http-server"] }
+# Only for `http::request::Parts`, which the streamable HTTP transport injects into a
+# request's `RequestContext::extensions` and is the only way to read the
+# `Mcp-Session-Id` header from inside `call_tool` (rmcp exposes no session hook).
+http = "1"
 chrono.workspace = true
 percent-encoding = "2.3"
 serde.workspace = true

@@ -29,3 +29,7 @@ futures-util = "0.3"
 
 [dev-dependencies]
 tempfile.workspace = true
+reqwest.workspace = true
+# Test-only: the MCP client half plus the child-process transport, so a test can
+# spawn `atlas mcp` and speak the real handshake to it, which the shim never needs.
+rmcp = { version = "3.2", features = ["client", "transport-child-process"] }

@@ -1,4 +1,5 @@
 mod http;
+mod mcp_clients;
 mod scheduler;
 mod state;
 mod worker;
@@ -62,7 +63,8 @@ async fn main() -> anyhow::Result<()> {
     let addr = listener.local_addr()?;
     backend.port = Some(addr.port());
     let backend = Arc::new(backend);
-    let state = AppState { backend: backend.clone() };
+    let mcp_clients = Arc::new(mcp_clients::ClientRegistry::new());
+    let state = AppState { backend: backend.clone(), mcp_clients: mcp_clients.clone() };
 
     // One worker, in this process: it drains the `jobs` table the API writes into,
     // and it is the only consumer, so a job is never claimed twice.
@@ -76,7 +78,20 @@ async fn main() -> anyhow::Result<()> {
         // The daemon serves every project at once, so ATLAS_PROJECT_ROOT in its own
         // environment says nothing about the repository a client is working in and must
         // not scope anyone. HTTP clients name their project in the tool arguments.
-        move || Ok(AtlasMcp::new(mcp_backend.clone()).with_env_project_root(false)),
+        move || {
+            let clients = mcp_clients.clone();
+            // rmcp exposes no clean `initialize` hook on the streamable HTTP service, so
+            // the client registry picks up an HTTP session on its first tool call
+            // instead, keyed by the `Mcp-Session-Id` header `AtlasMcp` reads out of the
+            // request's injected `http::request::Parts`.
+            let on_tool_call: atlas_mcp::OnToolCall = Arc::new(move |session_id, client_info, _protocol_version| {
+                let Some(session_id) = session_id else { return };
+                let name = client_info.as_ref().map(|i| i.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| "unknown".into());
+                let version = client_info.map(|i| i.version).filter(|v| !v.is_empty());
+                clients.record_http_call(session_id, name, version);
+            });
+            Ok(AtlasMcp::new(mcp_backend.clone()).with_env_project_root(false).with_on_tool_call(on_tool_call))
+        },
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default(),
     );

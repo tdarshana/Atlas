@@ -300,6 +300,14 @@ pub const TOOL_TABLE: &[ToolMeta] = &[
     ToolMeta { name: "status", description: "Report Atlas daemon status: version, database path, active memory count, embedding availability.", args: "none", scope: ToolScope::Read },
 ];
 
+/// Called on every accepted `call_tool`, so the daemon and the stdio shim can each
+/// track connected MCP clients (`atlasd::mcp_clients`) without this crate knowing
+/// anything about that registry. `session_id` is the `Mcp-Session-Id` header read out
+/// of the streamable HTTP transport's injected request parts (there is no clean
+/// `initialize` hook in rmcp's streamable HTTP service), `None` for the stdio shim,
+/// which has no such header and registers itself explicitly over the API instead.
+pub type OnToolCall = Arc<dyn Fn(Option<String>, Option<Implementation>, Option<ProtocolVersion>) + Send + Sync>;
+
 #[derive(Clone)]
 pub struct AtlasMcp<B: Backend> {
     backend: Arc<B>,
@@ -314,6 +322,7 @@ pub struct AtlasMcp<B: Backend> {
     /// Roots already connected by this server, so a read never writes. Shared across
     /// clones because rmcp builds one handler per session from a shared factory.
     projects: Arc<Mutex<HashMap<PathBuf, Project>>>,
+    on_tool_call: Option<OnToolCall>,
     pub tool_router: ToolRouter<Self>,
 }
 
@@ -358,8 +367,11 @@ fn json_result<T: serde::Serialize>(v: &T) -> Result<CallToolResult, McpError> {
 #[tool_router]
 impl<B: Backend> AtlasMcp<B> {
     pub fn new(backend: Arc<B>) -> Self {
-        Self { backend, source_tool: source_tool_label(), project_root: None, env_project_root: true, projects: Arc::default(), tool_router: Self::tool_router() }
+        Self { backend, source_tool: source_tool_label(), project_root: None, env_project_root: true, projects: Arc::default(), on_tool_call: None, tool_router: Self::tool_router() }
     }
+
+    /// Registers a hook run on every accepted `call_tool`. See [`OnToolCall`].
+    pub fn with_on_tool_call(mut self, hook: OnToolCall) -> Self { self.on_tool_call = Some(hook); self }
 
     /// Override the label stamped on `source_tool`. Set this at construction time: the
     /// process may already be multi-threaded, so a transport cannot announce itself by
@@ -481,12 +493,7 @@ impl<B: Backend> AtlasMcp<B> {
     /// read-live-not-cached pattern the backend's own settings reads use, so a change
     /// takes effect on the next call rather than after a restart.
     async fn disabled_tools(&self) -> Result<std::collections::HashSet<String>, McpError> {
-        let settings = self.backend.get_settings().await.map_err(err)?;
-        let names = match settings.get("mcp.disabled_tools").and_then(|v| v.as_array()) {
-            Some(arr) => arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
-            None => atlas_core::settings::DEFAULT_DISABLED_MCP_TOOLS.iter().map(|s| s.to_string()).collect(),
-        };
-        Ok(names)
+        disabled_tool_names(&*self.backend).await.map_err(err)
     }
 
     #[tool(description = "List board tasks for the current project. Pass ready=true to get work whose blockers are done and is safe to start; pass stage or assignee to narrow further.")]
@@ -887,6 +894,77 @@ fn workflow_markdown(w: &Workflow) -> String {
     out
 }
 
+/// Every MCP tool name currently in `mcp.disabled_tools`, or the built-in default
+/// (`project_connect`, `memory_review`) when the setting has never been written. Free
+/// of `self` so `GET /api/v1/mcp/status` (`atlasd`) can compute the tools table's
+/// `enabled` flags without a live session, from the same read [`AtlasMcp::disabled_tools`]
+/// wraps for the router itself.
+pub async fn disabled_tool_names<B: Backend>(backend: &B) -> atlas_core::Result<std::collections::HashSet<String>> {
+    let settings = backend.get_settings().await?;
+    let names = match settings.get("mcp.disabled_tools").and_then(|v| v.as_array()) {
+        Some(arr) => arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
+        None => atlas_core::settings::DEFAULT_DISABLED_MCP_TOOLS.iter().map(|s| s.to_string()).collect(),
+    };
+    Ok(names)
+}
+
+/// Every resource `list_resources` would return, from the same backend calls the
+/// router itself makes. Free of `self` so `GET /api/v1/mcp/status` can count them
+/// without a live session.
+pub async fn resources_for<B: Backend>(backend: &B) -> atlas_core::Result<Vec<Resource>> {
+    let mut out = vec![];
+    for a in backend.list_agents().await? {
+        out.push(Resource::new(format!("{AGENTS}{}", a.name), a.name.clone()).with_description(a.description).with_mime_type(MARKDOWN));
+    }
+    for d in backend.list_docs(DocKind::Practice, None).await? {
+        out.push(Resource::new(format!("{PRACTICES}{}", d.name), d.name.clone()).with_mime_type(MARKDOWN));
+    }
+    for w in backend.list_workflows(None).await? {
+        out.push(Resource::new(format!("{WORKFLOWS}{}", w.name), w.name.clone()).with_description(w.description.clone()).with_mime_type(MARKDOWN));
+    }
+    for p in backend.list_projects().await? {
+        let seg = utf8_percent_encode(&p.name, PROJECT_URI_SEGMENT).to_string();
+        out.push(Resource::new(format!("{PROJECTS}{}/context", p.id), p.name.clone())
+            .with_description(format!("Profile, practices, workflows and top memories for {}", p.root_path))
+            .with_mime_type(JSON));
+        out.push(Resource::new(format!("{PROJECTS}{seg}/practices"), format!("{} practices", p.name))
+            .with_description(format!("Global and project practices for {}, as Markdown", p.root_path))
+            .with_mime_type(MARKDOWN));
+        out.push(Resource::new(format!("{PROJECTS}{seg}/board"), format!("{} board", p.name))
+            .with_description(format!("Task board for {}, as Markdown", p.root_path))
+            .with_mime_type(MARKDOWN));
+    }
+    out.push(Resource::new(format!("{PROJECTS}global/practices"), "Global practices".to_string())
+        .with_description("Practices with no project, as Markdown")
+        .with_mime_type(MARKDOWN));
+    out.push(Resource::new(format!("{PROJECTS}global/board"), "Global board".to_string())
+        .with_description("Tasks with no project, as Markdown")
+        .with_mime_type(MARKDOWN));
+    out.push(Resource::new(MEMORIES_RECENT, "Recent memories".to_string())
+        .with_description(format!("The last {MEMORIES_RECENT_LIMIT} active memories, as Markdown"))
+        .with_mime_type(MARKDOWN));
+    Ok(out)
+}
+
+/// Every prompt `list_prompts` would return, from the same backend call the router
+/// itself makes. Free of `self` so `GET /api/v1/mcp/status` can count them without a
+/// live session.
+pub async fn prompts_for<B: Backend>(backend: &B) -> atlas_core::Result<Vec<Prompt>> {
+    let mut prompts = vec![
+        Prompt::new(BOOTSTRAP_PROMPT, Some(BOOTSTRAP_DESCRIPTION), None),
+        Prompt::new(HANDOFF_PROMPT, Some(HANDOFF_DESCRIPTION), None),
+        Prompt::new(
+            BOARD_WORKFLOW_PROMPT,
+            Some("Work the task board: pick a ready task, claim it, move it through the stages, and comment as you go."),
+            Some(vec![PromptArgument::new("project_root")
+                .with_description("Absolute path to the project whose board to work, or \"global\" for the project-less board. Defaults to the root this server was started in.")
+                .with_required(false)]),
+        ),
+    ];
+    prompts.extend(backend.list_agents().await?.into_iter().map(|a| Prompt::new(a.name, Some(a.description), None)));
+    Ok(prompts)
+}
+
 /// Resources and prompts are written by hand rather than by the static macros: both
 /// lists come from the database, so they change while the server is running.
 /// `list_tools` and `call_tool` are also written by hand (`#[tool_handler]` only
@@ -919,43 +997,25 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
         if disabled.contains(request.name.as_ref()) {
             return Err(McpError::method_not_found::<CallToolRequestMethod>());
         }
+        if let Some(hook) = &self.on_tool_call {
+            // The streamable HTTP transport injects the raw `http::request::Parts` into
+            // the request's extensions; the stdio shim never does, so `session_id` is
+            // `None` there and the hook (if any) knows not to treat the call as an HTTP
+            // session.
+            let session_id = context
+                .extensions
+                .get::<http::request::Parts>()
+                .and_then(|p| p.headers.get("mcp-session-id"))
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            hook(session_id, context.client_info(), context.protocol_version());
+        }
         let tcc = ToolCallContext::new(self, request, context);
         self.tool_router.call(tcc).await
     }
 
     async fn list_resources(&self, _request: Option<PaginatedRequestParams>, _context: RequestContext<RoleServer>) -> Result<ListResourcesResult, McpError> {
-        let mut out = vec![];
-        for a in self.backend.list_agents().await.map_err(err)? {
-            out.push(Resource::new(format!("{AGENTS}{}", a.name), a.name.clone()).with_description(a.description).with_mime_type(MARKDOWN));
-        }
-        for d in self.backend.list_docs(DocKind::Practice, None).await.map_err(err)? {
-            out.push(Resource::new(format!("{PRACTICES}{}", d.name), d.name.clone()).with_mime_type(MARKDOWN));
-        }
-        for w in self.backend.list_workflows(None).await.map_err(err)? {
-            out.push(Resource::new(format!("{WORKFLOWS}{}", w.name), w.name.clone()).with_description(w.description.clone()).with_mime_type(MARKDOWN));
-        }
-        for p in self.backend.list_projects().await.map_err(err)? {
-            let seg = utf8_percent_encode(&p.name, PROJECT_URI_SEGMENT).to_string();
-            out.push(Resource::new(format!("{PROJECTS}{}/context", p.id), p.name.clone())
-                .with_description(format!("Profile, practices, workflows and top memories for {}", p.root_path))
-                .with_mime_type(JSON));
-            out.push(Resource::new(format!("{PROJECTS}{seg}/practices"), format!("{} practices", p.name))
-                .with_description(format!("Global and project practices for {}, as Markdown", p.root_path))
-                .with_mime_type(MARKDOWN));
-            out.push(Resource::new(format!("{PROJECTS}{seg}/board"), format!("{} board", p.name))
-                .with_description(format!("Task board for {}, as Markdown", p.root_path))
-                .with_mime_type(MARKDOWN));
-        }
-        out.push(Resource::new(format!("{PROJECTS}global/practices"), "Global practices".to_string())
-            .with_description("Practices with no project, as Markdown")
-            .with_mime_type(MARKDOWN));
-        out.push(Resource::new(format!("{PROJECTS}global/board"), "Global board".to_string())
-            .with_description("Tasks with no project, as Markdown")
-            .with_mime_type(MARKDOWN));
-        out.push(Resource::new(MEMORIES_RECENT, "Recent memories".to_string())
-            .with_description(format!("The last {MEMORIES_RECENT_LIMIT} active memories, as Markdown"))
-            .with_mime_type(MARKDOWN));
-        Ok(ListResourcesResult::with_all_items(out))
+        Ok(ListResourcesResult::with_all_items(resources_for(&*self.backend).await.map_err(err)?))
     }
 
     async fn read_resource(&self, request: ReadResourceRequestParams, _context: RequestContext<RoleServer>) -> Result<ReadResourceResponse, McpError> {
@@ -1005,19 +1065,7 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
     }
 
     async fn list_prompts(&self, _request: Option<PaginatedRequestParams>, _context: RequestContext<RoleServer>) -> Result<ListPromptsResult, McpError> {
-        let mut prompts = vec![
-            Prompt::new(BOOTSTRAP_PROMPT, Some(BOOTSTRAP_DESCRIPTION), None),
-            Prompt::new(HANDOFF_PROMPT, Some(HANDOFF_DESCRIPTION), None),
-            Prompt::new(
-                BOARD_WORKFLOW_PROMPT,
-                Some("Work the task board: pick a ready task, claim it, move it through the stages, and comment as you go."),
-                Some(vec![PromptArgument::new("project_root")
-                    .with_description("Absolute path to the project whose board to work, or \"global\" for the project-less board. Defaults to the root this server was started in.")
-                    .with_required(false)]),
-            ),
-        ];
-        prompts.extend(self.backend.list_agents().await.map_err(err)?.into_iter().map(|a| Prompt::new(a.name, Some(a.description), None)));
-        Ok(ListPromptsResult::with_all_items(prompts))
+        Ok(ListPromptsResult::with_all_items(prompts_for(&*self.backend).await.map_err(err)?))
     }
 
     async fn get_prompt(&self, request: GetPromptRequestParams, _context: RequestContext<RoleServer>) -> Result<GetPromptResponse, McpError> {

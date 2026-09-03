@@ -1,10 +1,12 @@
 use axum::{body::Bytes, extract::{FromRequest, FromRequestParts, Path, Query, Request, State}, http::{header, request::Parts, HeaderMap, Method, StatusCode}, middleware::{self, Next}, response::{IntoResponse, Response}, routing::{get, post, put}, Json, Router};
 use atlas_core::{backend::Backend, jobs::Job, models::*, search::global::{SearchKind, SearchQuery, SearchResult, DEFAULT_LIMIT}, AtlasError};
+use atlas_mcp::{ToolScope, TOOL_TABLE};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
+use crate::mcp_clients::{McpClient, Transport};
 use crate::state::AppState;
 
 pub struct ApiError(AtlasError);
@@ -172,6 +174,24 @@ pub fn cors_layer() -> CorsLayer {
 }
 #[derive(Deserialize)] pub struct IngestBody { pub text: String, pub source_tool: String, #[serde(default)] pub project_root: Option<std::path::PathBuf> }
 
+// ---- MCP (Phase 10) ----
+
+#[derive(Deserialize)] pub struct RegisterMcpClientBody { pub id: String, pub transport: String, pub client_name: String, #[serde(default)] pub client_version: Option<String> }
+#[derive(Deserialize)] pub struct McpHeartbeatBody { pub tool_calls: u64 }
+#[derive(Serialize)] pub struct McpToolRow { pub name: &'static str, pub description: &'static str, pub args: &'static str, pub scope: ToolScope, pub enabled: bool }
+#[derive(Serialize)] pub struct McpStdioTransport { pub command: &'static str }
+#[derive(Serialize)] pub struct McpHttpTransport { pub url: String, pub protocol_version: String }
+#[derive(Serialize)] pub struct McpTransports { pub stdio: McpStdioTransport, pub http: McpHttpTransport }
+#[derive(Serialize)] pub struct McpCounts { pub tools: usize, pub resources: usize, pub prompts: usize, pub clients: usize }
+#[derive(Serialize)] pub struct McpStatusReport {
+    pub transports: McpTransports,
+    pub counts: McpCounts,
+    pub tools: Vec<McpToolRow>,
+    pub resources: Vec<rmcp::model::Resource>,
+    pub prompts: Vec<rmcp::model::Prompt>,
+    pub clients: Vec<McpClient>,
+}
+
 fn actor(q: &ActorQ) -> &str { q.actor.as_deref().unwrap_or("api") }
 
 // ---- board ----
@@ -263,6 +283,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/board/stages", get(get_board_stages).put(put_board_stages))
         .route("/api/v1/projects/{id}/stages", put(put_project_stages))
         .route("/api/v1/search", get(global_search))
+        .route("/api/v1/mcp/status", get(mcp_status))
+        .route("/api/v1/mcp/clients", post(register_mcp_client))
+        .route("/api/v1/mcp/clients/{id}", put(heartbeat_mcp_client).delete(unregister_mcp_client))
         .with_state(state)
 }
 
@@ -522,4 +545,57 @@ async fn global_search(State(s): State<AppState>, ApiQuery(q): ApiQuery<SearchQ>
     };
     let query = SearchQuery { q: q.q.unwrap_or_default(), project_id: q.project_id, kinds, limit: q.limit.unwrap_or(DEFAULT_LIMIT) };
     Ok(Json(s.backend.search(query).await?))
+}
+
+// ---- MCP (Phase 10) ----
+
+/// The stdio shim's registration on start. Idempotent on `id`, so a retry from the
+/// shim never produces two entries for the one process.
+async fn register_mcp_client(State(s): State<AppState>, ApiJson(b): ApiJson<RegisterMcpClientBody>) -> Result<(StatusCode, Json<McpClient>), ApiError> {
+    let transport = b.transport.parse::<Transport>()
+        .map_err(|_| ApiError(AtlasError::Invalid(format!("transport must be \"stdio\" or \"http\", got \"{}\"", b.transport))))?;
+    let record = s.mcp_clients.register(b.id, transport, b.client_name, b.client_version);
+    Ok((StatusCode::CREATED, Json(record)))
+}
+
+/// The stdio shim's 60 s heartbeat. 404 for an id nobody registered: most likely the
+/// daemon restarted since, and the shim's own next registration attempt (it does not
+/// retry one) is the recovery, not this route.
+async fn heartbeat_mcp_client(State(s): State<AppState>, ApiPath(id): ApiPath<String>, ApiJson(b): ApiJson<McpHeartbeatBody>) -> Result<Json<McpClient>, ApiError> {
+    s.mcp_clients.heartbeat(&id, b.tool_calls).map(Json).ok_or_else(|| ApiError(AtlasError::NotFound(format!("mcp client {id}"))))
+}
+
+/// The stdio shim's best-effort unregister on exit. Always 204: the caller cannot
+/// tell an id that was never registered from one that already expired, and neither
+/// is an error worth reporting on the way out.
+async fn unregister_mcp_client(State(s): State<AppState>, ApiPath(id): ApiPath<String>) -> StatusCode {
+    s.mcp_clients.unregister(&id);
+    StatusCode::NO_CONTENT
+}
+
+/// `GET /api/v1/mcp/status`: everything the desktop Settings card (Task 3) and `atlas
+/// mcp status` need to render the MCP server. The tools table, resources and prompts
+/// come from the same sources the router itself uses (`atlas_mcp::{TOOL_TABLE,
+/// disabled_tool_names, resources_for, prompts_for}`), not a count hand-maintained
+/// here, so the two cannot drift.
+async fn mcp_status(State(s): State<AppState>) -> Result<Json<McpStatusReport>, ApiError> {
+    let disabled = atlas_mcp::disabled_tool_names(&*s.backend).await?;
+    let tools: Vec<McpToolRow> = TOOL_TABLE.iter()
+        .map(|m| McpToolRow { name: m.name, description: m.description, args: m.args, scope: m.scope, enabled: !disabled.contains(m.name) })
+        .collect();
+    let resources = atlas_mcp::resources_for(&*s.backend).await?;
+    let prompts = atlas_mcp::prompts_for(&*s.backend).await?;
+    let clients = s.mcp_clients.live();
+    let port = s.backend.port.unwrap_or(0);
+    Ok(Json(McpStatusReport {
+        transports: McpTransports {
+            stdio: McpStdioTransport { command: "atlas mcp" },
+            http: McpHttpTransport { url: format!("http://127.0.0.1:{port}/mcp"), protocol_version: rmcp::model::ProtocolVersion::LATEST.to_string() },
+        },
+        counts: McpCounts { tools: tools.len(), resources: resources.len(), prompts: prompts.len(), clients: clients.len() },
+        tools,
+        resources,
+        prompts,
+        clients,
+    }))
 }
