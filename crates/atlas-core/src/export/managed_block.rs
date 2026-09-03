@@ -22,7 +22,7 @@ pub fn render_block(ctx: &BlockContext) -> String {
         None => format!("Atlas is available as the MCP server `atlas` (`{command}`)."),
     };
     lines.push(sentence);
-    lines.push("Call `recall` before starting a task and `remember` when you learn a durable fact, make a decision, or notice a preference.".to_string());
+    lines.push("Call `memory_search` before starting a task and `memory_remember` when you learn a durable fact, make a decision, or notice a preference.".to_string());
     if !ctx.agents.is_empty() {
         lines.push(String::new());
         lines.push("### Agents".to_string());

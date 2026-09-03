@@ -409,9 +409,27 @@ impl<B: Backend> AtlasMcp<B> {
     /// writes an audit entry, which a recall or a doc listing has no business doing on
     /// every call. `project_connect` and `project_context` are explicit connects and
     /// refresh the entry instead.
+    ///
+    /// When `project_connect` is in `mcp.disabled_tools`, this never connects: it only
+    /// matches `root` against a project Atlas already knows (the same read-only match
+    /// `resolve_project_segment` gives a resource read) and fails with
+    /// [`PROJECT_CONNECT_DISABLED`] otherwise. Disabling the one tool that registers a
+    /// repository must actually stop every other tool from doing it implicitly through
+    /// a `project_root` argument.
     async fn resolve_project(&self, project_root: Option<PathBuf>) -> Result<Option<Project>, McpError> {
         let Some(root) = self.root_for(project_root) else { return Ok(None) };
         if let Some(p) = self.cached(&root) { return Ok(Some(p)); }
+        if self.disabled_tools().await?.contains("project_connect") {
+            return match self.resolve_project_segment(&root.to_string_lossy()).await {
+                Ok(Some(id)) => {
+                    let project = self.backend.get_project(id).await.map_err(err)?;
+                    self.cache(root, &project);
+                    Ok(Some(project))
+                }
+                Ok(None) | Err(atlas_core::AtlasError::NotFound(_)) => Err(McpError::invalid_params(PROJECT_CONNECT_DISABLED, None)),
+                Err(e) => Err(err(e)),
+            };
+        }
         let project = self.backend.connect_project(root.clone(), "mcp").await.map_err(err)?;
         self.cache(root, &project);
         Ok(Some(project))
@@ -584,10 +602,10 @@ impl<B: Backend> AtlasMcp<B> {
 
     /// Resolves the `{name}` segment of an `atlas://projects/{name}/...` resource URI
     /// to a project scope: "global" names the project-less scope, otherwise `raw` is
-    /// tried, in order, as a project name (case-insensitive), a board key (`ATL`), or a
-    /// percent-encoded project root path, against whatever `list_projects` already has
-    /// on file. Read-only: unlike a tool argument, a resource read never connects a
-    /// project that is not already known.
+    /// tried, in order, as a project id, a project name (case-insensitive), a board key
+    /// (`ATL`), or a percent-encoded project root path, against whatever `list_projects`
+    /// already has on file. Read-only: unlike a tool argument, a resource read never
+    /// connects a project that is not already known.
     async fn resolve_project_segment(&self, raw: &str) -> Result<Option<Uuid>, atlas_core::AtlasError> {
         let decoded = percent_decode_str(raw)
             .decode_utf8()
@@ -597,6 +615,11 @@ impl<B: Backend> AtlasMcp<B> {
             return Ok(None);
         }
         let projects = self.backend.list_projects().await?;
+        if let Ok(id) = decoded.parse::<Uuid>() {
+            if let Some(p) = projects.iter().find(|p| p.id == id) {
+                return Ok(Some(p.id));
+            }
+        }
         if let Some(p) = projects.iter().find(|p| p.name.eq_ignore_ascii_case(&decoded)) {
             return Ok(Some(p.id));
         }
@@ -612,6 +635,31 @@ impl<B: Backend> AtlasMcp<B> {
             return Ok(Some(p.id));
         }
         Err(atlas_core::AtlasError::NotFound(format!("project {decoded}")))
+    }
+
+    /// Assembles a project's `ProjectContext` (profile, practices, workflows, top
+    /// memories) without connecting it or refreshing its profile: the read-only
+    /// counterpart to the `project_context` tool, for the `atlas://projects/{name}/context`
+    /// resource. Mirrors `LocalBackend::project_context`'s memory query (a search plus a
+    /// top-up of the newest project-scoped memories) using only read calls.
+    async fn project_context_readonly(&self, project_id: Uuid) -> Result<ProjectContext, atlas_core::AtlasError> {
+        let project = self.backend.get_project(project_id).await?;
+        let query = match &project.profile {
+            Some(p) => format!("{} {}", p.name, p.frameworks.join(" ")),
+            None => project.name.clone(),
+        };
+        let mut memories = self.backend.recall(RecallQuery {
+            query, limit: 20, scope: None, list_scope: MemoryScopeFilter::All, project_id: Some(project.id), kinds: vec![], tags: vec![],
+        }).await?;
+        let seen: std::collections::HashSet<Uuid> = memories.iter().map(|h| h.memory.id).collect();
+        let recent = self.backend.list_memories(MemoryStatus::Active, Some(project.id), MemoryScopeFilter::All).await?;
+        memories.extend(recent.into_iter().filter(|m| !seen.contains(&m.id)).take(10).map(|memory| RecallHit { memory, score: 0.0 }));
+        Ok(ProjectContext {
+            practices: self.backend.list_docs(DocKind::Practice, Some(project.id)).await?,
+            workflows: self.backend.list_workflows(Some(project.id)).await?.iter().map(WorkflowSummary::from).collect(),
+            project,
+            memories,
+        })
     }
 
     #[tool(description = "Store a memory shared with every agent. Use for facts about the project, decisions and their reasons, user preferences, and insights worth keeping.")]
@@ -817,7 +865,11 @@ const PROJECT_URI_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'/').remove(b'-
 const MARKDOWN: &str = "text/markdown";
 const JSON: &str = "application/json";
 
-const BOARD_WORKFLOW_PROMPT: &str = "board-workflow";
+/// Returned when `project_connect` is disabled and a call names a root Atlas does not
+/// already know: with the tool off, nothing else may register a project either.
+const PROJECT_CONNECT_DISABLED: &str = "project is not connected; enable the project_connect tool or connect it from the desktop or CLI";
+
+const BOARD_WORKFLOW_PROMPT: &str = "atlas.board_workflow";
 const BOARD_WORKFLOW_TEXT: &str = "Work the task board like this: pick a ready task with task_list \
     (ready=true), claim it with task_claim, and comment progress with task_comment as you go. Move it \
     forward with task_move: into the testing stage with verification notes once the work is done, and \
@@ -833,7 +885,7 @@ const BOOTSTRAP_TEXT: &str = "Atlas is the shared memory and task board for ever
     memory_search before starting work on anything, to pick up prior decisions and preferences; call \
     practice_list to see the coding practices this project follows before writing code; and work the task \
     board with task_list(ready=true), task_claim, task_move and task_comment, in the order the \
-    board-workflow prompt describes. Store what you learn with memory_remember: facts, decisions and \
+    atlas.board_workflow prompt describes. Store what you learn with memory_remember: facts, decisions and \
     their reasons, user preferences, and insights worth keeping. Nothing is ever deleted from memory; \
     memory_forget only marks a memory superseded, and memory_list browses what is stored without a \
     search query.";
@@ -924,7 +976,7 @@ pub async fn resources_for<B: Backend>(backend: &B) -> atlas_core::Result<Vec<Re
     }
     for p in backend.list_projects().await? {
         let seg = utf8_percent_encode(&p.name, PROJECT_URI_SEGMENT).to_string();
-        out.push(Resource::new(format!("{PROJECTS}{}/context", p.id), p.name.clone())
+        out.push(Resource::new(format!("{PROJECTS}{seg}/context"), p.name.clone())
             .with_description(format!("Profile, practices, workflows and top memories for {}", p.root_path))
             .with_mime_type(JSON));
         out.push(Resource::new(format!("{PROJECTS}{seg}/practices"), format!("{} practices", p.name))
@@ -1034,9 +1086,9 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
             let (seg, suffix) = rest.rsplit_once('/').ok_or_else(|| McpError::resource_not_found(format!("no Atlas resource at {uri}"), None))?;
             match suffix {
                 "context" => {
-                    let id = seg.parse::<Uuid>().map_err(|e| McpError::resource_not_found(format!("{uri} is not a project context resource: {e}"), None))?;
-                    let project = self.backend.get_project(id).await.map_err(|e| resource_err(&uri, e))?;
-                    let ctx = self.backend.project_context(PathBuf::from(project.root_path), "mcp").await.map_err(|e| resource_err(&uri, e))?;
+                    let project_id = self.resolve_project_segment(seg).await.map_err(|e| resource_err(&uri, e))?
+                        .ok_or_else(|| McpError::resource_not_found(format!("{uri}: no context resource for the global scope"), None))?;
+                    let ctx = self.project_context_readonly(project_id).await.map_err(|e| resource_err(&uri, e))?;
                     (serde_json::to_string_pretty(&ctx).map_err(|e| McpError::internal_error(e.to_string(), None))?, JSON)
                 }
                 "practices" => {
@@ -1163,8 +1215,11 @@ mod tests {
 
     /// `mcp.disabled_tools` gates both `tools/list` and `tools/call`: with the setting
     /// unset, the two tools disabled by default (`project_connect`, `memory_review`)
-    /// are absent from the list and a call to either answers method-not-found; setting
-    /// it to an empty list re-enables both.
+    /// are absent from the list and a call to either answers method-not-found; writing
+    /// an empty list through the backend re-enables both on the very next request of
+    /// the same, still-connected session, proving the "takes effect on the next call
+    /// rather than after a restart" claim rather than only that a fresh session picks
+    /// up the setting.
     #[tokio::test]
     async fn disabled_tools_are_hidden_from_list_and_refused_on_call() {
         let dir = tempfile::tempdir().unwrap();
@@ -1187,21 +1242,12 @@ mod tests {
         let call = client.call_tool(CallToolRequestParams::new("project_connect")).await.unwrap_err();
         assert!(matches!(&call, rmcp::service::ServiceError::McpError(e) if e.code == rmcp::model::ErrorCode::METHOD_NOT_FOUND), "{call:?}");
 
-        client.cancel().await.unwrap();
-        handle.await.unwrap();
-
         backend.set_settings(serde_json::Map::from_iter([("mcp.disabled_tools".to_string(), serde_json::json!([]))]), "t").await.unwrap();
-        let s2 = AtlasMcp::new(backend.clone());
-        let (server_io, client_io) = tokio::io::duplex(16 * 1024);
-        let handle = tokio::spawn(async move {
-            let running = s2.serve(server_io).await.unwrap();
-            running.waiting().await.unwrap();
-        });
-        let client: rmcp::service::RunningService<rmcp::RoleClient, ()> = ().serve(client_io).await.unwrap();
         let tools = client.list_tools(None).await.unwrap();
         let names: Vec<&str> = tools.tools.iter().map(|t| t.name.as_ref()).collect();
         assert!(names.contains(&"project_connect"), "{names:?}");
         assert!(names.contains(&"memory_review"), "{names:?}");
+
         client.cancel().await.unwrap();
         handle.await.unwrap();
     }
@@ -1265,13 +1311,17 @@ mod tests {
         ingest("x".repeat(1_000_000)).await.unwrap();
     }
 
-    /// A server started in a project scopes memories to it without being told, and does
-    /// so from a cache: the second recall must not touch the projects table.
+    /// A server started in an already-connected project scopes memories to it without
+    /// being told, and does so from a cache: the second recall must not touch the
+    /// projects table. `project_connect` is disabled by default, so the project has to
+    /// be connected ahead of time here; the `disabled_project_connect_*` tests below
+    /// cover the seeded root of a project Atlas has never seen.
     #[tokio::test]
     async fn seeded_root_scopes_memories_and_is_resolved_once() {
         let home = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
         let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        let connected = backend.connect_project(repo.path().to_path_buf(), "test").await.unwrap();
         let s = AtlasMcp::new(backend.clone())
             .with_env_project_root(false)
             .with_project_root(repo.path().to_path_buf());
@@ -1285,11 +1335,11 @@ mod tests {
         let stored = backend.list_memories(MemoryStatus::Active, None, MemoryScopeFilter::All).await.unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].scope, MemoryScope::Project);
-        let project_id = stored[0].project_id.expect("the seeded root should have scoped the memory");
+        assert_eq!(stored[0].project_id, Some(connected.id), "the seeded root should have scoped the memory to the connected project");
 
         let projects = backend.list_projects().await.unwrap();
         assert_eq!(projects.len(), 1);
-        assert_eq!(projects[0].id, project_id);
+        assert_eq!(projects[0].id, connected.id);
 
         // Recall with no project_id finds it through the same resolution.
         let hit = s.memory_search(Parameters(MemorySearchArgs {
@@ -1448,6 +1498,9 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
         let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        // project_connect is disabled by default, so the seeded root has to already be
+        // a known project for the board tools to resolve it.
+        backend.connect_project(repo.path().to_path_buf(), "test").await.unwrap();
         let s = AtlasMcp::new(backend.clone()).with_source_tool("test").with_env_project_root(false).with_project_root(repo.path().to_path_buf());
 
         let mut keys = Vec::new();
@@ -1499,6 +1552,9 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
         let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        // project_connect is disabled by default, so the seeded root has to already be
+        // a known project for the board tools to resolve it.
+        backend.connect_project(repo.path().to_path_buf(), "test").await.unwrap();
         let s = AtlasMcp::new(backend.clone())
             .with_source_tool("test")
             .with_env_project_root(false)
@@ -1595,13 +1651,16 @@ mod tests {
 
     /// A full client/server round trip over an in-memory duplex: the board resource
     /// (now at `atlas://projects/{name}/board`) renders Markdown containing the
-    /// task's key, and the board-workflow prompt is listed and names the project's
-    /// stages.
+    /// task's key, and the atlas.board_workflow prompt is listed and names the
+    /// project's stages.
     #[tokio::test]
     async fn board_resource_and_prompt_are_served_over_the_wire() {
         let home = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
         let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        // project_connect is disabled by default, so the seeded root has to already be
+        // a known project for the board tools to resolve it.
+        backend.connect_project(repo.path().to_path_buf(), "test").await.unwrap();
         let s = AtlasMcp::new(backend.clone()).with_env_project_root(false).with_project_root(repo.path().to_path_buf());
 
         let created = s
@@ -1634,11 +1693,11 @@ mod tests {
         assert!(text.contains(&task.key), "{text}");
 
         let prompts = client.list_prompts(None).await.unwrap();
-        assert!(prompts.prompts.iter().any(|p| p.name == "board-workflow"), "{:?}", prompts.prompts);
+        assert!(prompts.prompts.iter().any(|p| p.name == BOARD_WORKFLOW_PROMPT), "{:?}", prompts.prompts);
         assert!(prompts.prompts.iter().any(|p| p.name == BOOTSTRAP_PROMPT), "{:?}", prompts.prompts);
         assert!(prompts.prompts.iter().any(|p| p.name == HANDOFF_PROMPT), "{:?}", prompts.prompts);
 
-        let prompt = client.get_prompt(GetPromptRequestParams::new("board-workflow")).await.unwrap();
+        let prompt = client.get_prompt(GetPromptRequestParams::new(BOARD_WORKFLOW_PROMPT)).await.unwrap();
         let prompt_text: String = prompt.messages.iter().filter_map(|m| m.content.as_text().map(|t| t.text.clone())).collect();
         assert!(prompt_text.contains("Testing"), "{prompt_text}");
 
@@ -1653,7 +1712,7 @@ mod tests {
         client.cancel().await.unwrap();
     }
 
-    /// `board-workflow` resolves `project_root: "global"` through the same
+    /// `atlas.board_workflow` resolves `project_root: "global"` through the same
     /// `board_project_id()` helper the tools use: it must answer with the global
     /// board's stages and must not connect (or create) a project for the literal
     /// "global".
@@ -1682,6 +1741,137 @@ mod tests {
         assert!(backend.list_projects().await.unwrap().is_empty(), "the global board prompt should not have connected a project");
     }
 
+    /// With `project_connect` disabled, any other tool given a `project_root` Atlas
+    /// has never seen must not register it: `resolve_project` matches only known
+    /// projects and fails with the disabled-tool sentence instead of connecting.
+    #[tokio::test]
+    async fn disabled_project_connect_refuses_an_unknown_root_from_another_tool() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        backend.set_settings(serde_json::Map::from_iter([("mcp.disabled_tools".to_string(), serde_json::json!(["project_connect"]))]), "t").await.unwrap();
+        let s = AtlasMcp::new(backend.clone()).with_env_project_root(false);
+
+        let err = s.memory_search(Parameters(MemorySearchArgs {
+            query: "x".into(), limit: None, scope: None, kinds: None, tags: None,
+            project_id: None, project_root: Some(repo.path().to_path_buf()),
+        })).await.unwrap_err();
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS, "{err:?}");
+        assert!(err.message.contains(PROJECT_CONNECT_DISABLED), "{err:?}");
+        assert!(backend.list_projects().await.unwrap().is_empty(), "a disabled project_connect should not have registered the project");
+    }
+
+    /// With `project_connect` disabled, reading `atlas://projects/{name}/context` for a
+    /// project Atlas has never connected answers resource-not-found rather than
+    /// connecting it. The resource is already read-only regardless of the gate; this
+    /// proves it stays that way (and stays refused) with the tool off too.
+    #[tokio::test]
+    async fn disabled_project_connect_context_resource_does_not_connect_an_unknown_project() {
+        let home = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        backend.set_settings(serde_json::Map::from_iter([("mcp.disabled_tools".to_string(), serde_json::json!(["project_connect"]))]), "t").await.unwrap();
+        let s = AtlasMcp::new(backend.clone()).with_env_project_root(false);
+
+        let (server_io, client_io) = tokio::io::duplex(16 * 1024);
+        tokio::spawn(async move {
+            let running = s.serve(server_io).await.unwrap();
+            running.waiting().await.unwrap();
+        });
+        let client: rmcp::service::RunningService<rmcp::RoleClient, ()> = ().serve(client_io).await.unwrap();
+
+        let err = client.read_resource(ReadResourceRequestParams::new(format!("{PROJECTS}nope/context"))).await.unwrap_err();
+        assert!(matches!(&err, rmcp::service::ServiceError::McpError(e) if e.code == rmcp::model::ErrorCode::RESOURCE_NOT_FOUND), "{err:?}");
+
+        client.cancel().await.unwrap();
+        assert!(backend.list_projects().await.unwrap().is_empty(), "a disabled project_connect should not have registered the project via the resource");
+    }
+
+    /// With `project_connect` disabled, `atlas.board_workflow` given a `project_root`
+    /// Atlas has never connected must not register it: it resolves through the same
+    /// `board_project_id()` -> `resolve_project()` path every board tool uses.
+    #[tokio::test]
+    async fn disabled_project_connect_board_workflow_prompt_does_not_connect_an_unknown_root() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        backend.set_settings(serde_json::Map::from_iter([("mcp.disabled_tools".to_string(), serde_json::json!(["project_connect"]))]), "t").await.unwrap();
+        let s = AtlasMcp::new(backend.clone()).with_env_project_root(false);
+
+        let (server_io, client_io) = tokio::io::duplex(16 * 1024);
+        tokio::spawn(async move {
+            let running = s.serve(server_io).await.unwrap();
+            running.waiting().await.unwrap();
+        });
+        let client: rmcp::service::RunningService<rmcp::RoleClient, ()> = ().serve(client_io).await.unwrap();
+
+        let mut params = GetPromptRequestParams::new(BOARD_WORKFLOW_PROMPT);
+        let mut args = serde_json::Map::new();
+        args.insert("project_root".into(), serde_json::Value::String(repo.path().display().to_string()));
+        params.arguments = Some(args);
+        let err = client.get_prompt(params).await.unwrap_err();
+        assert!(matches!(&err, rmcp::service::ServiceError::McpError(e) if e.code == rmcp::model::ErrorCode::INVALID_PARAMS), "{err:?}");
+
+        client.cancel().await.unwrap();
+        assert!(backend.list_projects().await.unwrap().is_empty(), "a disabled project_connect should not have registered the project via the prompt");
+    }
+
+    /// With `project_connect` disabled, a project Atlas already knows still resolves:
+    /// the gate refuses only an unknown root, it does not turn every tool that takes a
+    /// `project_root` into a no-op.
+    #[tokio::test]
+    async fn disabled_project_connect_still_resolves_a_known_project() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        let connected = backend.connect_project(repo.path().to_path_buf(), "test").await.unwrap();
+        backend.set_settings(serde_json::Map::from_iter([("mcp.disabled_tools".to_string(), serde_json::json!(["project_connect"]))]), "t").await.unwrap();
+        let s = AtlasMcp::new(backend.clone()).with_env_project_root(false);
+
+        s.memory_remember(Parameters(MemoryRememberArgs {
+            text: "known project fact".into(), kind: None, tags: None, scope: None,
+            project_id: None, project_root: Some(repo.path().to_path_buf()), source_agent: None,
+        })).await.unwrap();
+
+        let stored = backend.list_memories(MemoryStatus::Active, None, MemoryScopeFilter::All).await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].project_id, Some(connected.id), "a known project should still resolve with project_connect disabled");
+    }
+
+    /// `atlas://projects/{name}/context` (the URI `resources_for` now lists, matching
+    /// `practices` and `board`) accepts either the project's name or its id, and
+    /// neither read connects or re-profiles the project.
+    #[tokio::test]
+    async fn context_resource_reads_by_name_and_by_id_without_connecting() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        let project = backend.connect_project(repo.path().to_path_buf(), "test").await.unwrap();
+        backend.save_doc(DocKind::Practice, NewDoc { name: "ctx-practice".into(), body: "b".into(), tags: vec![], project_id: Some(project.id) }, "test").await.unwrap();
+        let before = project_writes(&backend);
+        let s = AtlasMcp::new(backend.clone()).with_env_project_root(false);
+
+        let (server_io, client_io) = tokio::io::duplex(16 * 1024);
+        tokio::spawn(async move {
+            let running = s.serve(server_io).await.unwrap();
+            running.waiting().await.unwrap();
+        });
+        let client: rmcp::service::RunningService<rmcp::RoleClient, ()> = ().serve(client_io).await.unwrap();
+
+        let listed = client.list_resources(None).await.unwrap();
+        let context_uri = listed.resources.iter().map(|r| r.uri.clone()).find(|u| u.contains("/context")).expect("a context resource");
+        assert!(context_uri.contains(&project.name), "{context_uri}");
+
+        let by_name = client.read_resource(ReadResourceRequestParams::new(context_uri)).await.unwrap();
+        let by_id = client.read_resource(ReadResourceRequestParams::new(format!("{PROJECTS}{}/context", project.id))).await.unwrap();
+        for resource in [by_name, by_id] {
+            let text: String = resource.contents.iter().filter_map(|c| match c { ResourceContents::TextResourceContents { text, .. } => Some(text.clone()), _ => None }).collect();
+            assert!(text.contains("ctx-practice"), "{text}");
+        }
+
+        client.cancel().await.unwrap();
+        assert_eq!(project_writes(&backend), before, "reading the context resource must not connect or re-profile the project");
+    }
+
     /// A project root with a space round-trips through the resource listing: the
     /// listed `atlas://projects/{name}/board` URI is percent-encoded, and reading it
     /// back decodes to the same project and finds the board.
@@ -1692,6 +1882,9 @@ mod tests {
         let repo = outer.path().join("my project");
         std::fs::create_dir(&repo).unwrap();
         let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        // project_connect is disabled by default, so the seeded root has to already be
+        // a known project for the board tools to resolve it.
+        backend.connect_project(repo.clone(), "test").await.unwrap();
         let s = AtlasMcp::new(backend.clone()).with_env_project_root(false).with_project_root(repo.clone());
 
         let created = s
@@ -1770,6 +1963,9 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
         let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        // project_connect is disabled by default, so the seeded root has to already be
+        // a known project for the board tools to resolve it.
+        backend.connect_project(repo.path().to_path_buf(), "test").await.unwrap();
         let s = AtlasMcp::new(backend.clone()).with_env_project_root(false).with_project_root(repo.path().to_path_buf());
 
         let created = s

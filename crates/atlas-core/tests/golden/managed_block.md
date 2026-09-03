@@ -2,7 +2,7 @@
 ## Atlas (shared memory and agents)
 
 This project is connected to Atlas as `fixture`. Atlas is available as the MCP server `atlas` (`atlas mcp`).
-Call `recall` before starting a task and `remember` when you learn a durable fact, make a decision, or notice a preference.
+Call `memory_search` before starting a task and `memory_remember` when you learn a durable fact, make a decision, or notice a preference.
 
 ### Agents
 - `reviewer`: Reviews pull requests for correctness and risk
