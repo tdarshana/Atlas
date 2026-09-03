@@ -168,7 +168,7 @@ export interface ProjectContext {
 	project: Project;
 	memories: RecallHit[];
 	practices: Doc[];
-	workflows: Doc[];
+	workflows: WorkflowSummary[];
 }
 
 export interface NewAgent {
@@ -462,6 +462,17 @@ export interface Workflow {
 	created_at: Timestamp;
 	updated_at: Timestamp;
 	last_run_at: Timestamp | null;
+	last_status: RunStatus | null;
+}
+
+/** A workflow's shape without its graph, the way `list_workflows` (MCP) and
+ * `ProjectContext.workflows` answer. */
+export interface WorkflowSummary {
+	id: Uuid;
+	name: string;
+	trigger: TriggerKind;
+	action_count: number;
+	enabled: boolean;
 	last_status: RunStatus | null;
 }
 
