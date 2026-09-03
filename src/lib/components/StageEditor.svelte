@@ -2,7 +2,8 @@
 	// Edits a stage list. Renaming a stage has to move the tasks standing in it, and
 	// the daemon can only do that if it is told which old name became which new one,
 	// so each row remembers the name it arrived with.
-	import { validateStages } from '$lib/stores/board.svelte';
+	import { untrack } from 'svelte';
+	import { stageRenames, validateStages } from '$lib/stores/board.svelte';
 	import type { Stage } from '$lib/types';
 	import Button from '$lib/ui/Button.svelte';
 	import Input from '$lib/ui/Input.svelte';
@@ -25,13 +26,26 @@
 	let nextId = 0;
 	let rows = $state<Row[]>([]);
 	let saving = $state(false);
-	let touched = $state(false);
+	let dirty = $state(false);
 
-	// The server's list is the draft's starting point, and replaces it whenever the
-	// saved list comes back changed.
+	/** The list the rows were last built from, so an identical prop is not a change. */
+	let applied: string | null = null;
+
+	const signature = (list: Stage[]) => JSON.stringify(list.map((s) => [s.name, s.done]));
+
+	// The server's list seeds the draft. A parent that hands back the same list, which
+	// is what the Settings page's Reload does when nothing changed, is not a change and
+	// must not wipe half-typed names; neither is any prop change while the draft is
+	// dirty, since unsaved work outranks a list that moved underneath it.
 	$effect(() => {
-		rows = stages.map((s) => ({ id: nextId++, name: s.name, done: s.done, original: s.name }));
-		touched = false;
+		const next = signature(stages);
+		if (next === applied) return;
+		const list = stages.map((s) => ({ ...s }));
+		untrack(() => {
+			if (dirty) return;
+			applied = next;
+			rows = list.map((s) => ({ id: nextId++, name: s.name, done: s.done, original: s.name }));
+		});
 	});
 
 	const draft = $derived(rows.map((r) => ({ name: r.name.trim(), done: r.done })));
@@ -39,12 +53,12 @@
 
 	function add() {
 		rows.push({ id: nextId++, name: '', done: false, original: null });
-		touched = true;
+		dirty = true;
 	}
 
 	function remove(index: number) {
 		rows.splice(index, 1);
-		touched = true;
+		dirty = true;
 	}
 
 	function swap(index: number, delta: number) {
@@ -52,24 +66,17 @@
 		if (to < 0 || to >= rows.length) return;
 		const [row] = rows.splice(index, 1);
 		rows.splice(to, 0, row);
-		touched = true;
-	}
-
-	/** Old name to new name, for the rows whose name changed. */
-	function renames(): Record<string, string> {
-		const out: Record<string, string> = {};
-		for (const row of rows) {
-			const name = row.name.trim();
-			if (row.original !== null && row.original !== name) out[row.original] = name;
-		}
-		return out;
+		dirty = true;
 	}
 
 	async function save() {
 		if (problem) return;
 		saving = true;
+		// Cleared before the call so the saved list can flow back in through the effect.
+		// A refusal leaves the parent's `stages` untouched, so the draft survives it.
+		dirty = false;
 		try {
-			await onsave(draft, renames());
+			await onsave(draft, stageRenames(rows));
 		} finally {
 			saving = false;
 		}
@@ -84,23 +91,28 @@
 					bind:value={row.name}
 					aria-label="Stage {i + 1} name"
 					data-testid="stage-name-{i}"
-					oninput={() => (touched = true)}
+					oninput={() => (dirty = true)}
 				/>
 				<label class="done">
 					<input
 						type="checkbox"
 						bind:checked={row.done}
 						data-testid="stage-done-{i}"
-						onchange={() => (touched = true)}
+						onchange={() => (dirty = true)}
 					/>
 					<span>Done</span>
 				</label>
-				<Button size="sm" aria-label="Move {row.name} up" disabled={i === 0} onclick={() => swap(i, -1)}>
+				<Button
+					size="sm"
+					aria-label="Move stage {i + 1} up"
+					disabled={i === 0}
+					onclick={() => swap(i, -1)}
+				>
 					↑
 				</Button>
 				<Button
 					size="sm"
-					aria-label="Move {row.name} down"
+					aria-label="Move stage {i + 1} down"
 					disabled={i === rows.length - 1}
 					onclick={() => swap(i, 1)}
 				>
@@ -109,7 +121,7 @@
 				<Button
 					size="sm"
 					variant="ghost"
-					aria-label="Remove {row.name}"
+					aria-label="Remove stage {i + 1}"
 					data-testid="stage-remove-{i}"
 					onclick={() => remove(i)}
 				>
@@ -129,7 +141,7 @@
 			size="sm"
 			variant="primary"
 			data-testid="stage-save"
-			disabled={saving || !!problem || !touched}
+			disabled={saving || !!problem}
 			onclick={save}
 		>
 			{saving ? 'Saving…' : 'Save stages'}

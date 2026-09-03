@@ -22,6 +22,15 @@ export interface BoardColumn {
 	tasks: Task[];
 	/** True when this column also holds tasks whose stage is not in the list. */
 	strays: boolean;
+	/** How many of `tasks` are those strays, so the header can count only its own. */
+	strayCount: number;
+}
+
+/** A stage row being edited, and the name it arrived with. */
+export interface StageRow {
+	name: string;
+	/** The name the server has for this row, or null for a row added in the editor. */
+	original: string | null;
 }
 
 export const board = $state({
@@ -53,7 +62,12 @@ export const board = $state({
  * column says so; a stage rename that missed a task is the way this happens.
  */
 export function deriveColumns(stages: Stage[], tasks: Task[]): BoardColumn[] {
-	const columns: BoardColumn[] = stages.map((stage) => ({ stage, tasks: [], strays: false }));
+	const columns: BoardColumn[] = stages.map((stage) => ({
+		stage,
+		tasks: [],
+		strays: false,
+		strayCount: 0
+	}));
 	if (columns.length === 0) return columns;
 	const byStage = new Map(columns.map((c) => [c.stage.name, c]));
 	for (const task of tasks) {
@@ -63,9 +77,24 @@ export function deriveColumns(stages: Stage[], tasks: Task[]): BoardColumn[] {
 		} else {
 			columns[0].tasks.push(task);
 			columns[0].strays = true;
+			columns[0].strayCount++;
 		}
 	}
 	return columns;
+}
+
+/**
+ * Old name to new name for the rows whose name changed. `original` is pinned to the
+ * name the server sent, never rewritten mid-session, so renaming A to B and then B to
+ * C in one sitting sends `{A: C}` and the tasks standing in A follow all the way.
+ */
+export function stageRenames(rows: StageRow[]): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const row of rows) {
+		const name = row.name.trim();
+		if (row.original !== null && row.original !== name) out[row.original] = name;
+	}
+	return out;
 }
 
 /** The reason the list is not usable, or null when it is. */
@@ -195,21 +224,27 @@ export async function reload(): Promise<void> {
  */
 export async function move(key: string, stage: string): Promise<void> {
 	const task = board.tasks.find((t) => t.key === key);
-	if (!task || task.stage === stage) return;
-	const previous = task.stage;
-	const expected = task.updated_at;
-	task.stage = stage;
+	if (task && task.stage === stage) return;
+	// The drawer outlives a task's place in `board.tasks`: a search that no longer
+	// matches it, or a failed refresh, empties the list while the drawer stays open.
+	// The move still has to happen, it just has nothing on screen to move first.
+	const previous = task?.stage ?? null;
+	const expected = task?.updated_at;
+	if (task) task.stage = stage;
 	try {
 		const moved = await api().moveTask(key, stage, expected);
 		const i = board.tasks.findIndex((t) => t.key === key);
 		if (i >= 0) board.tasks[i] = moved;
+		else await refresh();
 		if (board.selected === key) void loadDetail(key);
 	} catch (e) {
-		const i = board.tasks.findIndex((t) => t.key === key);
-		if (i >= 0) board.tasks[i].stage = previous;
+		// Only undo our own optimism. A refresh that landed mid-flight may have brought
+		// a stage someone else set, and that is fresher than the one we started from.
+		const current = board.tasks.find((t) => t.key === key);
+		if (previous !== null && current && current.stage === stage) current.stage = previous;
 		if (e instanceof ApiError && e.status === 409) {
 			push('error', CONFLICT_MESSAGE);
-			await refresh();
+			await reload();
 		} else {
 			push('error', errorMessage(e));
 		}

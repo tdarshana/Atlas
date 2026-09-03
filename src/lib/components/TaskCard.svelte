@@ -1,7 +1,7 @@
 <script lang="ts">
-	// One card in a board column. The whole card opens the drawer, so it is a button
-	// for the keyboard too; the move select sits inside it and has to keep its own
-	// clicks and keys to itself.
+	// One card in a board column. The card is a plain container: the key and title are
+	// a real button, so the keyboard reaches them natively, and the move select sits
+	// outside that button because ARIA forbids interactive descendants of one.
 	import type { Stage, Task } from '$lib/types';
 	import Badge from '$lib/ui/Badge.svelte';
 	import Select from '$lib/ui/Select.svelte';
@@ -15,47 +15,50 @@
 
 	let { task, stages, onopen, onmove }: Props = $props();
 
-	const stageOptions = $derived(stages.map((s) => ({ value: s.name, label: s.name })));
-	const blockers = $derived(task.blocked_by.length);
+	// A task can sit in a stage the board no longer has. With no option of its own the
+	// browser would show the first stage instead, contradicting the column's own note.
+	const stageOptions = $derived(
+		stages.some((s) => s.name === task.stage)
+			? stages.map((s) => ({ value: s.name, label: s.name }))
+			: [
+					{ value: task.stage, label: `${task.stage} (removed)` },
+					...stages.map((s) => ({ value: s.name, label: s.name }))
+				]
+	);
 
-	/** Enter and Space do what a click does; Space would otherwise scroll the page. */
-	function activate(event: KeyboardEvent) {
-		if (event.key !== 'Enter' && event.key !== ' ') return;
-		event.preventDefault();
-		onopen(task.key);
-	}
+	const blockers = $derived(task.blocked_by.length);
 </script>
 
-<div
-	class="card"
-	role="button"
-	tabindex="0"
-	data-testid="task-card-{task.key}"
-	onclick={() => onopen(task.key)}
-	onkeydown={activate}
->
-	<div class="top">
-		<code class="key">{task.key}</code>
-		<span
-			class="dot {task.priority}"
-			title="Priority: {task.priority}"
-			aria-label="Priority: {task.priority}"
-		></span>
-	</div>
+<div class="card" data-testid="task-card-{task.key}">
+	<button
+		type="button"
+		class="open"
+		data-testid="task-open-{task.key}"
+		onclick={() => onopen(task.key)}
+	>
+		<span class="top">
+			<code class="key">{task.key}</code>
+			<span
+				class="dot {task.priority}"
+				title="Priority: {task.priority}"
+				aria-label="Priority: {task.priority}"
+			></span>
+		</span>
 
-	<p class="title">{task.title}</p>
+		<span class="title">{task.title}</span>
 
-	<div class="meta">
-		<Badge>{task.kind}</Badge>
-		{#if task.assignee}
-			<Badge tone="accent">{task.assignee}</Badge>
-		{/if}
-		{#if blockers > 0}
-			<Badge tone="danger" title="Waiting on {blockers} task{blockers === 1 ? '' : 's'}">
-				{blockers} blocked by
-			</Badge>
-		{/if}
-	</div>
+		<span class="meta">
+			<Badge>{task.kind}</Badge>
+			{#if task.assignee}
+				<Badge tone="accent">{task.assignee}</Badge>
+			{/if}
+			{#if blockers > 0}
+				<Badge tone="danger" title="Waiting on {blockers} task{blockers === 1 ? '' : 's'}">
+					{blockers} blocked by
+				</Badge>
+			{/if}
+		</span>
+	</button>
 
 	<Select
 		value={task.stage}
@@ -63,8 +66,6 @@
 		class="move"
 		aria-label="Move {task.key}"
 		data-testid="task-move-{task.key}"
-		onclick={(e: MouseEvent) => e.stopPropagation()}
-		onkeydown={(e: KeyboardEvent) => e.stopPropagation()}
 		onchange={(e: Event & { currentTarget: HTMLSelectElement }) =>
 			onmove(task.key, e.currentTarget.value)}
 	/>
@@ -79,17 +80,28 @@
 		border: 1px solid var(--border);
 		border-radius: var(--radius);
 		background: var(--bg-elev);
-		cursor: pointer;
-		text-align: left;
 	}
 
 	.card:hover {
 		background: var(--bg-hover);
 	}
 
-	.card:focus-visible {
+	.open {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-2);
+		padding: 0;
+		border: none;
+		background: none;
+		color: inherit;
+		font: inherit;
+		text-align: left;
+		cursor: pointer;
+	}
+
+	.open:focus-visible {
 		outline: 2px solid var(--accent);
-		outline-offset: 1px;
+		outline-offset: 2px;
 	}
 
 	.top {
@@ -125,7 +137,6 @@
 	}
 
 	.title {
-		margin: 0;
 		overflow-wrap: anywhere;
 	}
 

@@ -1,7 +1,7 @@
 <script lang="ts">
 	// Board: one column per stage of the chosen project's list, cards for the tasks
 	// that pass the filter bar, and a drawer for the task in hand.
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import NewTaskDialog from '$lib/components/NewTaskDialog.svelte';
 	import TaskCard from '$lib/components/TaskCard.svelte';
 	import TaskDrawer from '$lib/components/TaskDrawer.svelte';
@@ -30,6 +30,17 @@
 
 	const stageColumns = $derived(columns());
 	let creating = $state(false);
+
+	/** Closes the drawer and hands focus back to the card it came from. */
+	async function dismiss() {
+		const key = board.selected;
+		closeTask();
+		if (!key) return;
+		// The focused close button unmounts with the drawer, which would drop focus on
+		// the body and restart the tab order at the top of the page.
+		await tick();
+		document.querySelector<HTMLElement>(`[data-testid="task-open-${key}"]`)?.focus();
+	}
 
 	function onProject(value: string) {
 		board.filters.projectId = value || null;
@@ -108,10 +119,10 @@
 			{#each stageColumns as column (column.stage.name)}
 				<section class="column" data-testid="board-column-{column.stage.name}">
 					<header>
-						<h2>{column.stage.name} ({column.tasks.length})</h2>
+						<h2>{column.stage.name} ({column.tasks.length - column.strayCount})</h2>
 						{#if column.strays}
 							<span class="note" title="These tasks are in a stage the board no longer has">
-								includes tasks from a removed stage
+								plus {column.strayCount} from a removed stage
 							</span>
 						{/if}
 					</header>
@@ -136,7 +147,7 @@
 				stages={board.stages}
 				loading={board.detailLoading}
 				error={board.detailError}
-				onclose={closeTask}
+				onclose={dismiss}
 				onchanged={reload}
 				onmove={(key, stage) => void move(key, stage)}
 				ondeleted={() => {

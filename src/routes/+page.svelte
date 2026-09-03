@@ -29,6 +29,8 @@
 	});
 	let recent = $state<Memory[]>([]);
 	let openTasks = $state<StageCount[]>([]);
+	let tasksLoading = $state(true);
+	let tasksError = $state<string | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let loadErrorLogPath = $state<string | null>(null);
@@ -69,6 +71,7 @@
 	 * a board failure is worth explaining.
 	 */
 	async function loadTasks() {
+		tasksLoading = true;
 		try {
 			const client = api();
 			const [stageList, stageCounts] = await Promise.all([
@@ -78,8 +81,14 @@
 			// A done column is finished work, so only the other stages are open tasks.
 			const doneStages = new Set(stageList.stages.filter((s) => s.done).map((s) => s.name));
 			openTasks = stageCounts.filter((c) => !doneStages.has(c.stage));
-		} catch {
+			tasksError = null;
+		} catch (e) {
+			// An empty card would state there is no open work, which is not what a failed
+			// call knows. Say the board could not be read instead.
 			openTasks = [];
+			tasksError = errorMessage(e);
+		} finally {
+			tasksLoading = false;
 		}
 	}
 
@@ -105,8 +114,14 @@
 	</Card>
 
 	<Card title="Open tasks" data-testid="dashboard-tasks">
-		{#if openTasks.length === 0}
-			<p class="muted">{loading ? 'Loading…' : 'No open tasks.'}</p>
+		{#if tasksError}
+			<p class="bad" role="alert" data-testid="dashboard-tasks-error">
+				The board could not be read. {tasksError}
+			</p>
+		{:else if tasksLoading}
+			<p class="muted">Loading…</p>
+		{:else if openTasks.length === 0}
+			<p class="muted">No open tasks.</p>
 		{:else}
 			<dl>
 				{#each openTasks as row (row.stage)}
@@ -199,6 +214,13 @@
 
 	.muted {
 		color: var(--muted);
+	}
+
+	.bad {
+		margin: 0;
+		color: var(--danger);
+		font-size: 13px;
+		overflow-wrap: anywhere;
 	}
 
 	.text {

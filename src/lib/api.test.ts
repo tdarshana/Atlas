@@ -127,3 +127,54 @@ describe('AtlasApi', () => {
 		expect(calls[1].url).toBe('http://127.0.0.1:7433/api/v1/workflows?project_id=p1');
 	});
 });
+
+describe('board requests', () => {
+	/** The header the daemon records as the actor on every event the app causes. */
+	const actor = (call: Call) => new Headers(call.init.headers).get('X-Atlas-Actor');
+
+	it('sends X-Atlas-Actor: desktop on a board write', async () => {
+		const calls = stubFetch([{ status: 200, body: {} }]);
+
+		await api().moveTask('ATL-1', 'Done', '2026-09-03T10:00:00Z');
+
+		expect(calls[0].url).toBe('http://127.0.0.1:7433/api/v1/tasks/ATL-1/move');
+		expect(calls[0].init.method).toBe('POST');
+		expect(actor(calls[0])).toBe('desktop');
+		expect(JSON.parse(calls[0].init.body as string)).toEqual({
+			stage: 'Done',
+			expected_updated_at: '2026-09-03T10:00:00Z'
+		});
+	});
+
+	it('sends the actor on the board reads too', async () => {
+		const calls = stubFetch([
+			{ status: 200, body: [] },
+			{ status: 200, body: { stages: [], overridden: false } },
+			{ status: 200, body: [] }
+		]);
+
+		await api().listTasks({ assignee: 'alice', include_done: true });
+		await api().boardStages();
+		await api().taskCounts();
+
+		expect(calls.map((c) => actor(c))).toEqual(['desktop', 'desktop', 'desktop']);
+		expect(calls[0].url).toBe(
+			'http://127.0.0.1:7433/api/v1/tasks?assignee=alice&include_done=true'
+		);
+		expect(calls[2].url).toBe('http://127.0.0.1:7433/api/v1/tasks/counts');
+	});
+
+	it('omits an absent assignee and clears one that is null', async () => {
+		const calls = stubFetch([
+			{ status: 200, body: {} },
+			{ status: 200, body: {} }
+		]);
+
+		await api().updateTask('ATL-1', { title: 'renamed' });
+		await api().updateTask('ATL-1', { assignee: null });
+
+		expect(calls[0].init.method).toBe('PATCH');
+		expect(JSON.parse(calls[0].init.body as string)).toEqual({ title: 'renamed' });
+		expect(JSON.parse(calls[1].init.body as string)).toEqual({ assignee: null });
+	});
+});

@@ -2,9 +2,12 @@
 	// The open task: its fields, its blockers and children, its history, and the
 	// writes a person can make from here. Every write goes straight to the daemon and
 	// then asks the board to reload, so the drawer holds no state the server does not.
+	import { onMount, untrack } from 'svelte';
+	import { ApiError } from '$lib/api';
 	import { api } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
 	import { relativeAge } from '$lib/format';
+	import { CONFLICT_MESSAGE } from '$lib/stores/board.svelte';
 	import type { Stage, TaskDetail, TaskKind, TaskPriority } from '$lib/types';
 	import Badge from '$lib/ui/Badge.svelte';
 	import Button from '$lib/ui/Button.svelte';
@@ -52,20 +55,60 @@
 	let saving = $state(false);
 	let busy = $state(false);
 	let confirming = $state(false);
+	let titleError = $state<string | null>(null);
+	let panel = $state<HTMLElement>();
 
-	// The draft follows the server row. `updated_at` is in the dependency list so a
-	// reload after someone else's edit refills the boxes instead of keeping stale text.
+	/** The server values the draft was last filled from, to tell an edit from staleness. */
+	let base = {
+		id: '',
+		title: '',
+		description: '',
+		kind: '',
+		priority: '',
+		assignee: '',
+		labels: ''
+	};
+
+	// Every write in this drawer reloads the task, so refilling the whole form on each
+	// reload would throw away unsaved typing the moment someone clicked Claim. A field
+	// the user has not touched follows the server; one they have keeps their text. A
+	// different task refills everything, since none of that typing belongs to it.
 	$effect(() => {
 		const t = detail?.task;
 		if (!t) return;
-		void t.updated_at;
-		title = t.title;
-		description = t.description;
-		kind = t.kind;
-		priority = t.priority;
-		assignee = t.assignee ?? '';
-		labels = t.labels.join(', ');
+		const next = {
+			id: t.id,
+			title: t.title,
+			description: t.description,
+			kind: t.kind as string,
+			priority: t.priority as string,
+			assignee: t.assignee ?? '',
+			labels: t.labels.join(', ')
+		};
+		untrack(() => {
+			const other = next.id !== base.id;
+			if (other || title === base.title) title = next.title;
+			if (other || description === base.description) description = next.description;
+			if (other || kind === base.kind) kind = next.kind;
+			if (other || priority === base.priority) priority = next.priority;
+			if (other || assignee === base.assignee) assignee = next.assignee;
+			if (other || labels === base.labels) labels = next.labels;
+			if (other) titleError = null;
+			base = next;
+		});
 	});
+
+	onMount(() => {
+		// The drawer is what the click opened, so the keyboard starts here rather than
+		// back at the top of the page.
+		panel?.focus();
+	});
+
+	function onWindowKey(event: KeyboardEvent) {
+		// The delete dialog is modal and closes itself on Escape.
+		if (event.key !== 'Escape' || confirming) return;
+		onclose();
+	}
 
 	const splitList = (text: string) =>
 		text
@@ -89,10 +132,16 @@
 
 	async function save() {
 		if (!task) return;
+		const name = title.trim();
+		if (!name) {
+			titleError = 'A task needs a title.';
+			return;
+		}
+		titleError = null;
 		saving = true;
 		try {
 			await api().updateTask(task.key, {
-				title: title.trim(),
+				title: name,
 				description,
 				kind: kind as TaskKind,
 				priority: priority as TaskPriority,
@@ -104,7 +153,15 @@
 			await onchanged();
 			push('success', 'Task saved');
 		} catch (e) {
-			push('error', errorMessage(e));
+			// A stale stamp would refuse every retry, so take the fresh row. The reload
+			// keeps this form's typing, because only untouched fields follow the server,
+			// and the next Save carries the new `expected_updated_at`.
+			if (e instanceof ApiError && e.status === 409) {
+				await onchanged();
+				push('error', CONFLICT_MESSAGE);
+			} else {
+				push('error', errorMessage(e));
+			}
 		} finally {
 			saving = false;
 		}
@@ -133,12 +190,15 @@
 
 	async function confirmDelete() {
 		if (!task) return;
+		// `task` is a live read of `detail`, and `ondeleted` closes the drawer, so the
+		// key has to be in hand before the first await or the toast reads it as null.
+		const key = task.key;
 		busy = true;
 		try {
-			await api().deleteTask(task.key);
+			await api().deleteTask(key);
 			confirming = false;
 			await ondeleted();
-			push('success', `Deleted ${task.key}`);
+			push('success', `Deleted ${key}`);
 		} catch (e) {
 			push('error', errorMessage(e));
 		} finally {
@@ -147,7 +207,14 @@
 	}
 </script>
 
-<aside class="drawer" data-testid="task-drawer">
+<svelte:window onkeydown={onWindowKey} />
+
+<aside
+	bind:this={panel}
+	class="drawer"
+	data-testid="task-drawer"
+	tabindex="-1"
+>
 	<header>
 		<div class="head">
 			<code>{task?.key ?? ''}</code>
@@ -167,6 +234,9 @@
 			<label class="field">
 				<span>Title</span>
 				<Input bind:value={title} data-testid="task-title" />
+				{#if titleError}
+					<span class="bad" role="alert" data-testid="task-title-error">{titleError}</span>
+				{/if}
 			</label>
 
 			<label class="field">
@@ -453,7 +523,13 @@
 	.bad {
 		margin: 0;
 		color: var(--danger);
+		font-size: 13px;
 		overflow-wrap: anywhere;
+	}
+
+	.drawer:focus-visible {
+		outline: 2px solid var(--accent);
+		outline-offset: 2px;
 	}
 
 	.prose {

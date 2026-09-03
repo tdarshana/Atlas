@@ -19,7 +19,7 @@ vi.mock('$lib/daemon.svelte', () => ({
 	boot: async () => {}
 }));
 
-import { board, deriveColumns, move, refresh, validateStages } from './board.svelte';
+import { board, deriveColumns, move, refresh, stageRenames, validateStages } from './board.svelte';
 
 const STAGES: Stage[] = [
 	{ name: 'Backlog', done: false },
@@ -124,6 +124,33 @@ describe('validateStages', () => {
 	});
 });
 
+describe('stageRenames', () => {
+	it('maps the name the server sent to the name in the box', () => {
+		const rows = [
+			{ name: 'Todo', original: 'Backlog' },
+			{ name: 'In Progress', original: 'In Progress' },
+			{ name: 'Shipped', original: null }
+		];
+
+		expect(stageRenames(rows)).toEqual({ Backlog: 'Todo' });
+	});
+
+	it('follows two renames in one sitting back to the original name', () => {
+		// The row arrived as A, was typed to B, then to C. The daemon has to be told
+		// A became C, because A is the name the tasks are standing in.
+		expect(stageRenames([{ name: 'C', original: 'A' }])).toEqual({ A: 'C' });
+	});
+
+	it('ignores whitespace and rows that did not change', () => {
+		const rows = [
+			{ name: '  Backlog  ', original: 'Backlog' },
+			{ name: 'Done', original: 'Done' }
+		];
+
+		expect(stageRenames(rows)).toEqual({});
+	});
+});
+
 describe('refresh', () => {
 	it('drops a load that finishes after a newer one', async () => {
 		let release: (tasks: Task[]) => void = () => {};
@@ -175,6 +202,37 @@ describe('move', () => {
 		await move('ATL-1', 'Done');
 
 		expect(mocks.listTasks).toHaveBeenCalledTimes(1);
+		expect(board.tasks[0].stage).toBe('In Progress');
+	});
+
+	it('still asks the daemon when the task is not in the filtered list', async () => {
+		// The drawer outlives a task's place in `board.tasks`: a search that no longer
+		// matches it empties the list while the drawer stays open.
+		board.tasks = [];
+		board.selected = 'ATL-1';
+		mocks.moveTask.mockResolvedValue(task('ATL-1', 'Done'));
+		mocks.getTask.mockResolvedValue({ task: task('ATL-1', 'Done'), children: [], events: [] });
+		mocks.boardStages.mockResolvedValue({ stages: STAGES, overridden: false });
+		mocks.listTasks.mockResolvedValue([task('ATL-1', 'Done')]);
+
+		await move('ATL-1', 'Done');
+
+		expect(mocks.moveTask).toHaveBeenCalledWith('ATL-1', 'Done', undefined);
+		expect(mocks.listTasks).toHaveBeenCalledTimes(1);
+		expect(board.tasks[0].stage).toBe('Done');
+	});
+
+	it('leaves a stage someone else set rather than rolling back over it', async () => {
+		board.tasks = [task('ATL-1', 'Backlog')];
+		let reject: (e: unknown) => void = () => {};
+		mocks.moveTask.mockReturnValue(new Promise((_, r) => (reject = r)));
+
+		const pending = move('ATL-1', 'Done');
+		// A refresh lands mid-flight and brings a stage a second agent set.
+		board.tasks = [task('ATL-1', 'In Progress')];
+		reject(new ApiError('nope', 400));
+		await pending;
+
 		expect(board.tasks[0].stage).toBe('In Progress');
 	});
 });
