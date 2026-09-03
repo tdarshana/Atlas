@@ -82,20 +82,25 @@ async fn board_backend(paths: &AtlasPaths, port: u16, actor: Option<String>) -> 
 /// environment carries no `CLAUDE_CODE` hint either. Shells out to `ps` twice (own pid
 /// to parent pid, then parent pid to its command name) since there is no portable std
 /// API for a parent's name; `None` on any failure, for the caller to fall back further.
+/// Run on `spawn_blocking` since both `Command::output` calls block the thread they
+/// run on and this fires during shim startup, on the same runtime that is about to
+/// serve stdio traffic.
 #[cfg(unix)]
-fn parent_process_name() -> Option<String> {
-    let ppid_out = std::process::Command::new("ps").args(["-o", "ppid=", "-p", &std::process::id().to_string()]).output().ok()?;
-    let ppid = String::from_utf8_lossy(&ppid_out.stdout).trim().to_string();
-    if ppid.is_empty() { return None; }
-    let comm_out = std::process::Command::new("ps").args(["-o", "comm=", "-p", &ppid]).output().ok()?;
-    let comm = String::from_utf8_lossy(&comm_out.stdout).trim().to_string();
-    // `comm=` reports the full launch path on macOS; keep just the file name for a
-    // readable client label.
-    let name = std::path::Path::new(&comm).file_name().and_then(|s| s.to_str()).unwrap_or(&comm).to_string();
-    (!name.is_empty()).then_some(name)
+async fn parent_process_name() -> Option<String> {
+    tokio::task::spawn_blocking(|| {
+        let ppid_out = std::process::Command::new("ps").args(["-o", "ppid=", "-p", &std::process::id().to_string()]).output().ok()?;
+        let ppid = String::from_utf8_lossy(&ppid_out.stdout).trim().to_string();
+        if ppid.is_empty() { return None; }
+        let comm_out = std::process::Command::new("ps").args(["-o", "comm=", "-p", &ppid]).output().ok()?;
+        let comm = String::from_utf8_lossy(&comm_out.stdout).trim().to_string();
+        // `comm=` reports the full launch path on macOS; keep just the file name for a
+        // readable client label.
+        let name = std::path::Path::new(&comm).file_name().and_then(|s| s.to_str()).unwrap_or(&comm).to_string();
+        (!name.is_empty()).then_some(name)
+    }).await.ok().flatten()
 }
 #[cfg(not(unix))]
-fn parent_process_name() -> Option<String> { None }
+async fn parent_process_name() -> Option<String> { None }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -135,12 +140,14 @@ async fn main() -> anyhow::Result<()> {
             // working even when the daemon's registry route is unreachable.
             let client_id = uuid::Uuid::new_v4().to_string();
             let peer_info = running.peer_info();
-            let client_name = peer_info.as_ref()
+            let client_name = match peer_info.as_ref()
                 .map(|info| info.client_info.name.clone())
                 .filter(|n| !n.is_empty())
                 .or_else(|| std::env::var("CLAUDE_CODE").is_ok().then(|| "claude-code".to_string()))
-                .or_else(parent_process_name)
-                .unwrap_or_else(|| "unknown".to_string());
+            {
+                Some(n) => n,
+                None => parent_process_name().await.unwrap_or_else(|| "unknown".to_string()),
+            };
             let client_version = peer_info.and_then(|info| (!info.client_info.version.is_empty()).then(|| info.client_info.version.clone()));
             if let Err(e) = remote.register_mcp_client(&client_id, "stdio", &client_name, client_version.as_deref()).await {
                 tracing::debug!("mcp client registration failed: {e}");
@@ -153,7 +160,15 @@ async fn main() -> anyhow::Result<()> {
                     interval.tick().await; // the first tick fires immediately; skip it
                     loop {
                         interval.tick().await;
-                        let _ = remote.heartbeat_mcp_client(&client_id, tool_calls.load(std::sync::atomic::Ordering::Relaxed)).await;
+                        let calls = tool_calls.load(std::sync::atomic::Ordering::Relaxed);
+                        // A 404 means the daemon does not know this id, either because the
+                        // initial registration above failed or because a daemon restart
+                        // dropped the entry: re-register with the same id rather than
+                        // heartbeat forever a session that will never show up in the
+                        // status view again.
+                        if let Err(atlas_core::AtlasError::NotFound(_)) = remote.heartbeat_mcp_client(&client_id, calls).await {
+                            let _ = remote.register_mcp_client(&client_id, "stdio", &client_name, client_version.as_deref()).await;
+                        }
                     }
                 })
             };

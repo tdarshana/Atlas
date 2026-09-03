@@ -194,8 +194,8 @@ impl Backend for RemoteBackend {
     // real workflow and deletes the document, and that HTTP path now serves the real
     // workflow API below instead. Nothing is ever stored under this doc kind again, so
     // these four answer it locally rather than reaching a path that no longer means what
-    // its name says: a caller (`atlas export`/`import`, and the MCP `list_workflows`/
-    // `get_workflow` tools this crate's stdio shim serves) sees an always-empty
+    // its name says: a caller (`atlas export`/`import`, and the MCP `workflow_list`/
+    // `workflow_get` tools this crate's stdio shim serves) sees an always-empty
     // collection rather than a 404.
     async fn list_docs(&self, kind: DocKind, project_id: Option<Uuid>) -> Result<Vec<Doc>> {
         if kind == DocKind::Workflow {

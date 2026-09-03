@@ -550,10 +550,17 @@ async fn global_search(State(s): State<AppState>, ApiQuery(q): ApiQuery<SearchQ>
 // ---- MCP (Phase 10) ----
 
 /// The stdio shim's registration on start. Idempotent on `id`, so a retry from the
-/// shim never produces two entries for the one process.
+/// shim never produces two entries for the one process. Only the stdio shim registers
+/// itself explicitly: an HTTP MCP session has no separate handshake to register from
+/// and is picked up on its first tool call instead (`ClientRegistry::record_http_call`),
+/// so this route refuses `transport: "http"` rather than let any local caller add a row
+/// that claims to be one.
 async fn register_mcp_client(State(s): State<AppState>, ApiJson(b): ApiJson<RegisterMcpClientBody>) -> Result<(StatusCode, Json<McpClient>), ApiError> {
     let transport = b.transport.parse::<Transport>()
         .map_err(|_| ApiError(AtlasError::Invalid(format!("transport must be \"stdio\" or \"http\", got \"{}\"", b.transport))))?;
+    if transport != Transport::Stdio {
+        return Err(ApiError(AtlasError::Invalid(format!("this route only registers the stdio transport, got \"{}\"", b.transport))));
+    }
     let record = s.mcp_clients.register(b.id, transport, b.client_name, b.client_version);
     Ok((StatusCode::CREATED, Json(record)))
 }

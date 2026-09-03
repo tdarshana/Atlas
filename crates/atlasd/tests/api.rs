@@ -259,7 +259,8 @@ async fn mcp_status_reports_transports_counts_and_an_http_client_after_a_call() 
 /// The stdio shim's own registration routes, exercised directly rather than through a
 /// real `atlas mcp` process (the CLI test `stdio_shim_registers_with_the_daemon_and_
 /// appears_in_mcp_status` covers that end to end): register, heartbeat with a reported
-/// call count, a heartbeat for an unknown id is a 404, an unknown transport is a 400,
+/// call count, a heartbeat for an unknown id is a 404, an unknown transport (or the
+/// "http" transport, which registers itself over `record_http_call` instead) is a 400,
 /// and unregister drops the entry immediately.
 #[tokio::test]
 async fn mcp_clients_route_registers_heartbeats_and_unregisters() {
@@ -288,6 +289,12 @@ async fn mcp_clients_route_registers_heartbeats_and_unregisters() {
 
     let bad_transport = c.post(format!("{base}/mcp/clients")).json(&serde_json::json!({"id": "x", "transport": "carrier-pigeon", "client_name": "y"})).send().await.unwrap();
     assert_eq!(bad_transport.status(), 400);
+
+    // This route is the stdio shim's own explicit registration; an HTTP session is
+    // picked up on its first tool call instead, so a local caller cannot use this
+    // route to plant a row that claims to be an HTTP session.
+    let http_transport = c.post(format!("{base}/mcp/clients")).json(&serde_json::json!({"id": "y", "transport": "http", "client_name": "z"})).send().await.unwrap();
+    assert_eq!(http_transport.status(), 400);
 
     let deleted = c.delete(format!("{base}/mcp/clients/test-id")).send().await.unwrap();
     assert_eq!(deleted.status(), 204);

@@ -49,7 +49,7 @@ impl ClientRegistry {
     /// that races its own retry) ends up with one entry, not two.
     pub fn register(&self, id: String, transport: Transport, client_name: String, client_version: Option<String>) -> McpClient {
         let now = Utc::now();
-        let mut clients = self.clients.lock().unwrap();
+        let mut clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
         let entry = clients.entry(id.clone()).or_insert_with(|| McpClient {
             id,
             transport,
@@ -72,7 +72,7 @@ impl ClientRegistry {
     /// `None` for an id nobody registered (a stale id from a daemon that restarted
     /// since, most likely), which the route reports as 404.
     pub fn heartbeat(&self, id: &str, tool_calls: u64) -> Option<McpClient> {
-        let mut clients = self.clients.lock().unwrap();
+        let mut clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
         let entry = clients.get_mut(id)?;
         entry.last_seen = Utc::now();
         entry.tool_calls = tool_calls;
@@ -84,7 +84,7 @@ impl ClientRegistry {
     /// hook to register from instead; see `atlas_mcp::OnToolCall`.
     pub fn record_http_call(&self, session_id: String, client_name: String, client_version: Option<String>) {
         let now = Utc::now();
-        let mut clients = self.clients.lock().unwrap();
+        let mut clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
         let entry = clients.entry(session_id.clone()).or_insert_with(|| McpClient {
             id: session_id,
             transport: Transport::Http,
@@ -108,7 +108,7 @@ impl ClientRegistry {
     /// /api/v1/mcp/clients/{id}`). Idempotent: removing an id nobody holds is not an
     /// error, since the caller cannot tell the difference from here.
     pub fn unregister(&self, id: &str) {
-        self.clients.lock().unwrap().remove(id);
+        self.clients.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
     }
 
     /// The clients to show in `GET /api/v1/mcp/status`: every entry heartbeated (or
@@ -117,7 +117,7 @@ impl ClientRegistry {
     /// unregistering does not linger forever.
     pub fn live(&self) -> Vec<McpClient> {
         let cutoff = Utc::now() - chrono::Duration::minutes(STALE_AFTER_MINUTES);
-        let mut clients = self.clients.lock().unwrap();
+        let mut clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
         clients.retain(|_, c| c.last_seen >= cutoff);
         let mut out: Vec<_> = clients.values().cloned().collect();
         out.sort_by(|a, b| a.first_seen.cmp(&b.first_seen));
