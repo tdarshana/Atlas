@@ -653,6 +653,7 @@ mod tests {
             updated_at: Utc::now(),
             closed_at: None,
             blocked_by: vec!["ATL-9".into()],
+            open_blockers: 1,
             ready: false,
             blocked_reason: Some("waiting on ATL-9".into()),
         }

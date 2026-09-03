@@ -31,6 +31,10 @@ pub enum Target {
     ClaudeHook,
     #[value(name = "codex_hook")]
     CodexHook,
+    /// The project's `TASKS.md` board mirror. Written only when the setting
+    /// `board.mirror_tasks_md` is on, whether or not it is named here.
+    #[value(name = "tasks_md")]
+    TasksMd,
 }
 
 impl Target {
@@ -42,6 +46,7 @@ impl Target {
             Target::ClaudeMd => SyncKind::ClaudeMd,
             Target::ClaudeHook => SyncKind::ClaudeHook,
             Target::CodexHook => SyncKind::CodexHook,
+            Target::TasksMd => SyncKind::TasksMd,
         }
     }
 }

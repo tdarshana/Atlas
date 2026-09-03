@@ -183,6 +183,15 @@ pub struct TaskClaimArgs {
     pub agent: Option<String>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TaskBlockArgs {
+    pub key: String,
+    /// The tasks this one waits on, by id or key. This replaces the whole list, so
+    /// pass every blocker that still applies; an empty list clears them all.
+    pub blocked_by: Vec<String>,
+    pub agent: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct AtlasMcp<B: Backend> {
     backend: Arc<B>,
@@ -419,6 +428,12 @@ impl<B: Backend> AtlasMcp<B> {
         json_result(&self.backend.claim_task(&a.key, a.force.unwrap_or(false), &actor).await.map_err(board_err)?)
     }
 
+    #[tool(description = "Record the tasks a task waits on, by key. This replaces the whole blocker list, so pass every blocker that still applies; an empty list clears them. A task with an open blocker drops out of task_list(ready=true) until that blocker is done.")]
+    async fn task_block(&self, Parameters(a): Parameters<TaskBlockArgs>) -> Result<CallToolResult, McpError> {
+        let actor = self.actor(&a.agent);
+        json_result(&self.backend.set_task_blockers(&a.key, a.blocked_by, &actor).await.map_err(board_err)?)
+    }
+
     #[tool(description = "List the stages this project's board moves tasks through, in order. Call before task_move so you never invent a stage name.")]
     async fn board_stages(&self, Parameters(a): Parameters<ProjectRootArgs>) -> Result<CallToolResult, McpError> {
         let project_id = self.board_project_id(a.project_root).await?;
@@ -573,10 +588,10 @@ const JSON: &str = "application/json";
 const BOARD_WORKFLOW_PROMPT: &str = "board-workflow";
 const BOARD_WORKFLOW_TEXT: &str = "Work the task board like this: pick a ready task with task_list \
     (ready=true), claim it with task_claim, and comment progress with task_comment as you go. Move it \
-    forward with task_move — into the testing stage with verification notes once the work is done, and \
+    forward with task_move: into the testing stage with verification notes once the work is done, and \
     into a done stage only once that work is verified. Use task_list with ready=true, then task_claim, \
-    then task_move as you progress; comment with task_comment; never invent a stage — only move to one \
-    of the stages listed below.";
+    then task_move as you progress; comment with task_comment; record a dependency you find mid-work \
+    with task_block; never invent a stage, only move to one of the stages listed below.";
 
 /// Resources and prompts are written by hand rather than by the static macros: both
 /// lists come from the database, so they change while the server is running.
@@ -835,10 +850,63 @@ mod tests {
         let b = Arc::new(LocalBackend::open(&AtlasPaths::at(dir.path()), None, false).unwrap());
         let s = AtlasMcp::new(b);
         let tools = s.tool_router.list_all();
-        for n in ["task_list", "task_get", "task_create", "task_update", "task_move", "task_comment", "task_claim", "board_stages"] {
+        let board = ["task_list", "task_get", "task_create", "task_update", "task_move", "task_comment", "task_claim", "task_block", "board_stages"];
+        assert_eq!(board.len(), 9);
+        for n in board {
             let tool = tools.iter().find(|t| t.name == n).unwrap_or_else(|| panic!("missing {n}"));
             assert!(!tool.description.as_deref().unwrap_or_default().is_empty(), "{n} has no description");
         }
+        // Deletion stays out of the agent surface.
+        assert!(!tools.iter().any(|t| t.name == "task_delete"));
+    }
+
+    /// `task_block` replaces the whole blocker list, so an agent can record a
+    /// dependency it finds mid-work and clear it again when the blocker is gone.
+    #[tokio::test]
+    async fn task_block_sets_and_clears_the_blocker_list() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        let s = AtlasMcp::new(backend.clone()).with_source_tool("test").with_env_project_root(false).with_project_root(repo.path().to_path_buf());
+
+        let mut keys = Vec::new();
+        for title in ["waiter", "blocker"] {
+            let out = s
+                .task_create(Parameters(TaskCreateArgs {
+                    title: title.into(), description: None, kind: None, priority: None,
+                    labels: None, parent: None, blocked_by: None, project_root: None, agent: None,
+                }))
+                .await
+                .unwrap();
+            let t: atlas_core::models::Task = serde_json::from_str(&text_of(&out)).unwrap();
+            keys.push(t.key);
+        }
+        let (waiter, blocker) = (keys[0].clone(), keys[1].clone());
+
+        let out = s
+            .task_block(Parameters(TaskBlockArgs { key: waiter.clone(), blocked_by: vec![blocker.clone()], agent: Some("agent-x".into()) }))
+            .await
+            .unwrap();
+        let t: atlas_core::models::Task = serde_json::from_str(&text_of(&out)).unwrap();
+        assert_eq!(t.blocked_by, vec![blocker.clone()]);
+        assert_eq!(t.open_blockers, 1);
+        assert!(!t.ready);
+
+        let ready = s
+            .task_list(Parameters(TaskListArgs {
+                project_root: None, stage: None, assignee: None, ready: Some(true),
+                query: None, include_done: None, agent: None,
+            }))
+            .await
+            .unwrap();
+        let ready: Vec<atlas_core::models::Task> = serde_json::from_str(&text_of(&ready)).unwrap();
+        assert_eq!(ready.iter().map(|t| t.key.clone()).collect::<Vec<_>>(), vec![blocker.clone()]);
+
+        let out = s.task_block(Parameters(TaskBlockArgs { key: waiter.clone(), blocked_by: vec![], agent: None })).await.unwrap();
+        let t: atlas_core::models::Task = serde_json::from_str(&text_of(&out)).unwrap();
+        assert!(t.blocked_by.is_empty());
+        assert_eq!(t.open_blockers, 0);
+        assert!(t.ready);
     }
 
     /// Create, claim, move, comment, and confirm a task blocked by an open one is

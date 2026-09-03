@@ -43,9 +43,14 @@ impl RemoteBackend {
     async fn error(r: reqwest::Response) -> AtlasError {
         let status = r.status();
         let msg = r.json::<serde_json::Value>().await.ok().and_then(|v| v["error"].as_str().map(String::from)).unwrap_or_else(|| status.to_string());
+        // The daemon renders `AtlasError` through `Display` before putting it on the
+        // wire, so `{"error": ...}` already carries the prefix the variant rebuilt
+        // here would add a second time: without this, the CLI prints
+        // "invalid input: invalid input: a task needs a title".
+        let strip = |prefix: &str, msg: String| msg.strip_prefix(prefix).map(str::to_string).unwrap_or(msg);
         match status.as_u16() {
-            404 => AtlasError::NotFound(msg),
-            400 => AtlasError::Invalid(msg),
+            404 => AtlasError::NotFound(strip("not found: ", msg)),
+            400 => AtlasError::Invalid(strip("invalid input: ", msg)),
             409 => AtlasError::Conflict(msg),
             413 => AtlasError::TooLarge(msg),
             _ => AtlasError::Other(msg),

@@ -18,10 +18,13 @@ use uuid::Uuid;
 pub enum TaskCmd {
     /// List tasks as a table. Done tasks are left out unless --all.
     List {
-        /// A project root path or board key; the default is the project the
-        /// working directory is in, else the global board
+        /// A project root path or board key, or `global`; the default is the project
+        /// the working directory is in, else the global board
         #[arg(long)]
         project: Option<String>,
+        /// The global board, whatever directory you are in
+        #[arg(long, conflicts_with = "project")]
+        global: bool,
         #[arg(long)]
         stage: Option<String>,
         #[arg(long)]
@@ -40,6 +43,9 @@ pub enum TaskCmd {
         title: String,
         #[arg(long)]
         project: Option<String>,
+        /// File the task on the global board, whatever directory you are in
+        #[arg(long, conflicts_with = "project")]
+        global: bool,
         /// task, bug, feature or chore
         #[arg(long)]
         kind: Option<String>,
@@ -108,10 +114,16 @@ pub enum TaskCmd {
 pub enum BoardCmd {
     /// Print the effective stage list, or set or clear it
     Stages {
-        /// A project root path or board key; without it the global list is meant
+        /// A project root path or board key, or `global`; without it the project the
+        /// working directory is in is meant, else the global list
         #[arg(long)]
         project: Option<String>,
-        /// The new list as `Name[:done],...`, e.g. "Backlog,In Progress,Testing,Done:done"
+        /// The global stage list, whatever directory you are in
+        #[arg(long, conflicts_with = "project")]
+        global: bool,
+        /// The new list, stage names separated by commas, each optionally followed by
+        /// `:done`, e.g. "Backlog,In Progress,Testing,Done:done". A stage name cannot
+        /// contain a comma.
         #[arg(long, conflicts_with = "clear")]
         set: Option<String>,
         /// Drop the project's override and go back to the global list
@@ -131,9 +143,9 @@ pub fn actor(name: Option<&str>) -> String {
 pub async fn run_task(cmd: TaskCmd, backend: &RemoteBackend) -> anyhow::Result<()> {
     let actor = backend.actor.clone();
     match cmd {
-        TaskCmd::List { project, stage, assignee, ready, all } => {
+        TaskCmd::List { project, global, stage, assignee, ready, all } => {
             let filter = TaskFilter {
-                project_id: project_id(project.as_deref(), backend).await?,
+                project_id: project_id(project.as_deref(), global, backend).await?,
                 stage,
                 assignee,
                 ready,
@@ -156,9 +168,9 @@ pub async fn run_task(cmd: TaskCmd, backend: &RemoteBackend) -> anyhow::Result<(
             super::print_table(&["KEY", "STAGE", "PRIORITY", "ASSIGNEE", "TITLE"], &rows);
         }
         TaskCmd::Show { key } => show(&backend.get_task(&key).await?),
-        TaskCmd::Create { title, project, kind, priority, labels, blocked_by, parent, description_file, stage } => {
+        TaskCmd::Create { title, project, global, kind, priority, labels, blocked_by, parent, description_file, stage } => {
             let new = NewTask {
-                project_id: project_id(project.as_deref(), backend).await?,
+                project_id: project_id(project.as_deref(), global, backend).await?,
                 title,
                 description: description_file.as_deref().map(super::read_source).transpose()?,
                 kind: parse_opt::<TaskKind>(kind.as_deref())?,
@@ -206,25 +218,30 @@ pub async fn run_task(cmd: TaskCmd, backend: &RemoteBackend) -> anyhow::Result<(
 
 pub async fn run_board(cmd: BoardCmd, backend: &RemoteBackend) -> anyhow::Result<()> {
     let actor = backend.actor.clone();
-    let BoardCmd::Stages { project, set, clear } = cmd;
-    let project = project_id(project.as_deref(), backend).await?;
+    let BoardCmd::Stages { project, global, set, clear } = cmd;
+    let target = resolve_project(project.as_deref(), global, backend).await?;
+    let project = target.as_ref().map(|p| p.id);
     match (set, clear) {
         (Some(list), _) => {
             let stages = parse_stage_list(&list)?;
-            match project {
-                Some(id) => {
-                    backend.set_project_stages(id, Some(stages), HashMap::new(), &actor).await?;
+            match &target {
+                Some(p) => {
+                    backend.set_project_stages(p.id, Some(stages), HashMap::new(), &actor).await?;
                 }
                 None => {
                     backend.set_board_stages(stages, HashMap::new(), &actor).await?;
                 }
             }
+            // Without --project or --global the target came from the working
+            // directory, so say which board this call just rewrote.
+            println!("set the stages on {}", board_label(target.as_ref()));
         }
         (None, true) => {
-            let Some(id) = project else {
+            let Some(p) = &target else {
                 anyhow::bail!("--clear drops a project's override, so it needs --project");
             };
-            backend.set_project_stages(id, None, HashMap::new(), &actor).await?;
+            backend.set_project_stages(p.id, None, HashMap::new(), &actor).await?;
+            println!("cleared the override on {}", board_label(target.as_ref()));
         }
         (None, false) => {}
     }
@@ -236,40 +253,66 @@ pub async fn run_board(cmd: BoardCmd, backend: &RemoteBackend) -> anyhow::Result
     Ok(())
 }
 
-/// Resolves `--project`. An argument is matched against the known board keys and
-/// then the known root paths, so both `--project ATL` and `--project ~/code/atlas`
-/// work. Without one, the project whose root contains the working directory is
-/// meant, and if no project does, the global board.
-async fn project_id(arg: Option<&str>, backend: &RemoteBackend) -> anyhow::Result<Option<Uuid>> {
+/// The board a command works on, as an id. See [`resolve_project`].
+async fn project_id(arg: Option<&str>, global: bool, backend: &RemoteBackend) -> anyhow::Result<Option<Uuid>> {
+    Ok(resolve_project(arg, global, backend).await?.map(|p| p.id))
+}
+
+/// Resolves `--project` and `--global` to a board: `Some(project)` or, for the
+/// project-less board, `None`. An argument is matched against the known board keys
+/// and then the known root paths, so both `--project ATL` and `--project ~/code/atlas`
+/// work; `--global`, and `--project global` for callers who have only the one flag to
+/// hand, name the global board wherever the caller is standing. Without either, the
+/// project whose root contains the working directory is meant, and if no project
+/// does, the global board.
+async fn resolve_project(arg: Option<&str>, global: bool, backend: &RemoteBackend) -> anyhow::Result<Option<Project>> {
+    if global || arg.is_some_and(|a| a.eq_ignore_ascii_case("global")) {
+        return Ok(None);
+    }
     let projects = backend.list_projects().await?;
     let Some(arg) = arg else {
-        return Ok(containing_project(&projects));
+        return Ok(containing_project(projects));
     };
     if let Some(p) = projects.iter().find(|p| p.board_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(arg))) {
-        return Ok(Some(p.id));
+        return Ok(Some(p.clone()));
     }
     let abs = super::abs_path(Some(PathBuf::from(arg)))?;
     let abs = abs.to_string_lossy().to_string();
-    match projects.iter().find(|p| p.root_path == arg || p.root_path == abs) {
-        Some(p) => Ok(Some(p.id)),
+    match projects.into_iter().find(|p| p.root_path == arg || p.root_path == abs) {
+        Some(p) => Ok(Some(p)),
         None => anyhow::bail!("no project with root or board key '{arg}'"),
     }
 }
 
 /// The connected project the working directory sits in. The longest matching root
 /// wins, so a project nested inside another one is not shadowed by its parent.
-fn containing_project(projects: &[Project]) -> Option<Uuid> {
+fn containing_project(projects: Vec<Project>) -> Option<Project> {
     let cwd = std::env::current_dir().ok()?;
-    projects
-        .iter()
-        .filter(|p| cwd.starts_with(&p.root_path))
-        .max_by_key(|p| p.root_path.len())
-        .map(|p| p.id)
+    projects.into_iter().filter(|p| cwd.starts_with(&p.root_path)).max_by_key(|p| p.root_path.len())
+}
+
+/// How a board is named back to the caller: the project's board key and name, or the
+/// global board.
+fn board_label(project: Option<&Project>) -> String {
+    match project {
+        Some(p) => match &p.board_key {
+            Some(key) => format!("{} ({key})", p.name),
+            None => p.name.clone(),
+        },
+        None => "the global board".to_string(),
+    }
 }
 
 /// `Name[:done],...`. Anything after the colon that is not `done` is a typo worth
 /// naming rather than a stage silently left open.
+///
+/// Commas separate the names, so a name cannot contain one and there is no quoting
+/// that would let it. A double quote in the value is a caller trying to protect a
+/// comma; splitting it anyway would quietly make two stages out of one, so say so.
 fn parse_stage_list(list: &str) -> anyhow::Result<Vec<Stage>> {
+    if list.contains('"') {
+        anyhow::bail!("--set separates stage names with commas, so a stage name cannot contain one and quotes do not group it: '{list}'");
+    }
     let mut stages = Vec::new();
     for part in list.split(',') {
         let part = part.trim();
@@ -373,6 +416,19 @@ mod tests {
         assert_eq!(stages.iter().map(|s| s.done).collect::<Vec<_>>(), [false, false, false, true]);
         assert!(parse_stage_list("Backlog,,Done:done").is_err());
         assert!(parse_stage_list("Backlog,Done:closed").is_err());
+    }
+
+    /// A quoted name is a caller trying to keep a comma inside one stage. Splitting
+    /// it would make two stages nobody asked for, so the list is refused instead.
+    #[test]
+    fn a_quoted_stage_name_is_refused_rather_than_split() {
+        let err = parse_stage_list(r#"Backlog,"Wait, then go",Done:done"#).unwrap_err();
+        assert!(err.to_string().contains("cannot contain one"), "{err}");
+    }
+
+    #[test]
+    fn board_label_names_the_project_or_the_global_board() {
+        assert_eq!(board_label(None), "the global board");
     }
 
     #[test]

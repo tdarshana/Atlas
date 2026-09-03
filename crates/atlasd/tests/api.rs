@@ -966,6 +966,34 @@ async fn board_tasks_ready_query_and_stage_moves() {
     assert!(ready_after_keys.contains(&dependent_key.as_str()), "the dependent should be ready once its blocker is done: {ready_after:?}");
 }
 
+/// A list route answers with a list. `ready=1` is the same ask as `ready=true`, and a
+/// value that is neither is a filter left off rather than a 400; `include_done` reads
+/// the same way.
+#[tokio::test]
+async fn board_list_flags_take_true_or_one_and_never_answer_400() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+
+    let open: serde_json::Value = c.post(format!("{base}/tasks")).header("X-Atlas-Actor", "alice").json(&serde_json::json!({"title": "open"})).send().await.unwrap().json().await.unwrap();
+    let closed: serde_json::Value = c.post(format!("{base}/tasks")).header("X-Atlas-Actor", "alice").json(&serde_json::json!({"title": "closed"})).send().await.unwrap().json().await.unwrap();
+    let closed_key = closed["key"].as_str().unwrap().to_string();
+    c.post(format!("{base}/tasks/{closed_key}/move")).header("X-Atlas-Actor", "alice").json(&serde_json::json!({"stage": "Done"})).send().await.unwrap();
+
+    for (query, want) in [("ready=1", 1_usize), ("ready=true", 1), ("ready=0", 2), ("ready=yes", 2), ("ready=", 2)] {
+        let r = c.get(format!("{base}/tasks?{query}&include_done=1")).send().await.unwrap();
+        assert_eq!(r.status(), 200, "{query} should not be a 400");
+        let list: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(list.as_array().unwrap().len(), want, "{query}: {list}");
+    }
+
+    // `include_done=1` is what let the done task into those counts; without it only
+    // the open task comes back.
+    let list: serde_json::Value = c.get(format!("{base}/tasks")).send().await.unwrap().json().await.unwrap();
+    let keys: Vec<&str> = list.as_array().unwrap().iter().map(|t| t["key"].as_str().unwrap()).collect();
+    assert_eq!(keys, vec![open["key"].as_str().unwrap()]);
+}
+
 /// A stale `expected_updated_at` on `PATCH` is a 409; claiming a task alice holds
 /// fails for bob with 409 and succeeds with `force`; a comment lands as an event in
 /// `GET /tasks/{key}` carrying the actor from the `X-Atlas-Actor` header.

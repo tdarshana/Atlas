@@ -169,13 +169,22 @@ fn actor(q: &ActorQ) -> &str { q.actor.as_deref().unwrap_or("api") }
 
 // ---- board ----
 
+/// A query flag: `true` and `1` are true, and anything else, including an absent or
+/// empty value, is false. Serde's own `bool` refuses `ready=1` with a 400, which is a
+/// worse answer to a list request than the list it asked for; a filter nobody spelled
+/// the way this route expects is better left off than turned into an error.
+fn query_flag<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<bool, D::Error> {
+    let raw = Option::<String>::deserialize(d)?;
+    Ok(matches!(raw.as_deref(), Some("true") | Some("1")))
+}
+
 #[derive(Deserialize)] pub struct TaskListQ {
     #[serde(default)] pub project_id: Option<Uuid>,
     #[serde(default)] pub stage: Option<String>,
     #[serde(default)] pub assignee: Option<String>,
-    #[serde(default)] pub ready: bool,
+    #[serde(default, deserialize_with = "query_flag")] pub ready: bool,
     #[serde(default)] pub q: Option<String>,
-    #[serde(default)] pub include_done: bool,
+    #[serde(default, deserialize_with = "query_flag")] pub include_done: bool,
 }
 #[derive(Deserialize)] pub struct MoveBody { pub stage: String, #[serde(default)] pub expected_updated_at: Option<DateTime<Utc>> }
 #[derive(Deserialize)] pub struct CommentBody { pub body: String }
