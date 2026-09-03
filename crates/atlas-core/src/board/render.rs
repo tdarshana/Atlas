@@ -1,6 +1,6 @@
 //! Markdown rendering of the board: one `## <stage>` section per stage, in board
-//! order, with `- KEY title (assignee)` lines. Shared by the `atlas://board/{project}`
-//! MCP resource and, later, the `TASKS.md` sync mirror.
+//! order, with `- KEY title (assignee)` lines. Shared by the
+//! `atlas://projects/{name}/board` MCP resource and, later, the `TASKS.md` sync mirror.
 
 use crate::models::{Stage, Task};
 

@@ -269,7 +269,7 @@ fn mcp_stdio_shim_lists_tools() {
     let _ = child.kill();
     let _ = child.wait();
     let listing = listing.expect("atlas mcp produced no tools/list response within 30s");
-    for t in ["remember", "recall", "forget", "status"] { assert!(listing.contains(&format!("\"name\":\"{t}\"")), "tools/list missing {t}: {listing}"); }
+    for t in ["memory_remember", "memory_search", "memory_forget", "status"] { assert!(listing.contains(&format!("\"name\":\"{t}\"")), "tools/list missing {t}: {listing}"); }
 }
 
 /// `atlas workflow` has no `save`: a workflow is a graph, seeded here straight against

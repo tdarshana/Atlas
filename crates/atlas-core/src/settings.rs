@@ -18,7 +18,49 @@ pub const SETTING_KEYS: &[&str] = &[
     "board.mirror_tasks_md",
     "ui.theme",
     "workflows.docs_migrated",
+    "mcp.disabled_tools",
 ];
+
+/// Every MCP tool name `mcp.disabled_tools` may name. The single source of truth for
+/// validation here; `atlas-mcp`'s `TOOL_TABLE` is asserted (by test) to cover the same
+/// names, since this crate cannot depend on atlas-mcp to import them directly.
+pub const MCP_TOOL_NAMES: &[&str] = &[
+    "memory_remember",
+    "memory_search",
+    "memory_list",
+    "memory_forget",
+    "memory_review",
+    "project_list",
+    "project_get",
+    "project_connect",
+    "project_context",
+    "task_create",
+    "task_list",
+    "task_get",
+    "task_claim",
+    "task_move",
+    "task_comment",
+    "task_block",
+    "task_update",
+    "board_stages",
+    "practice_list",
+    "get_practice",
+    "agent_list",
+    "get_agent",
+    "save_agent",
+    "workflow_list",
+    "workflow_get",
+    "workflow_run",
+    "workflow_status",
+    "ingest_transcript",
+    "status",
+];
+
+/// `mcp.disabled_tools` default when the setting is unset: `project_connect` writes a
+/// project row on any local caller's say-so, and `memory_review` decides which pending
+/// memories become active, so both stay opt-in rather than exposed to every agent by
+/// default.
+pub const DEFAULT_DISABLED_MCP_TOOLS: &[&str] = &["project_connect", "memory_review"];
 
 const API_KEY: &str = "extraction.api_key";
 const BASE_URL: &str = "extraction.base_url";
@@ -74,6 +116,20 @@ fn check_type(key: &str, value: &Value) -> Result<()> {
         "ui.theme" => match value.as_str() {
             Some("dark") | Some("light") => {}
             _ => return wrong("\"dark\" or \"light\""),
+        },
+        // A tool name outside the known list can never match a real tool, so it would
+        // silently do nothing while looking like it disabled something.
+        "mcp.disabled_tools" => match value.as_array() {
+            Some(names) => {
+                for n in names {
+                    match n.as_str() {
+                        Some(n) if MCP_TOOL_NAMES.contains(&n) => {}
+                        Some(n) => return wrong(&format!("an array of known MCP tool names (got '{n}')")),
+                        None => return wrong("an array of strings"),
+                    }
+                }
+            }
+            None => return wrong("an array of strings"),
         },
         _ => {}
     }
@@ -238,6 +294,9 @@ mod tests {
             ("daemon.port", Value::from(70000)),
             ("ui.theme", Value::String("solarized".into())),
             ("ui.theme", Value::from(1)),
+            ("mcp.disabled_tools", Value::String("memory_review".into())),
+            ("mcp.disabled_tools", serde_json::json!(["memory_review", "no_such_tool"])),
+            ("mcp.disabled_tools", serde_json::json!([1])),
         ];
         for (key, value) in bad {
             let values = Map::from_iter([((*key).to_string(), value.clone())]);
@@ -272,9 +331,11 @@ mod tests {
             ("daemon.port".to_string(), Value::from(7433)),
             ("embedding.model".to_string(), Value::Null),
             ("ui.theme".to_string(), Value::String("light".into())),
+            ("mcp.disabled_tools".to_string(), serde_json::json!(["project_connect", "memory_review"])),
         ]);
         repo.set_many(&values, "t").unwrap();
         assert_eq!(repo.get_raw("ui.theme").unwrap(), Some(Value::String("light".into())));
+        assert_eq!(repo.get_raw("mcp.disabled_tools").unwrap(), Some(serde_json::json!(["project_connect", "memory_review"])));
         assert_eq!(repo.get_raw("extraction.enabled").unwrap(), Some(Value::from(true)));
         assert_eq!(repo.get_raw("daemon.port").unwrap(), Some(Value::from(7433)));
         // The bounds are inclusive at both ends.

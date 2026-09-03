@@ -624,8 +624,7 @@ impl Backend for LocalBackend {
     async fn search(&self, q: SearchQuery) -> Result<SearchResult> {
         let memories = crate::memories::MemoryRepo::new(&self.db);
         let projects = self.projects();
-        let workflows = self.docs(DocKind::Workflow);
-        crate::search::global::search(&q, &self.tasks, &memories, &projects, &workflows)
+        crate::search::global::search(&q, &self.tasks, &memories, &projects, &self.workflows)
     }
 }
 

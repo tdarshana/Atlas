@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
     model::*,
     schemars,
     service::RequestContext,
@@ -22,7 +22,7 @@ use uuid::Uuid;
 pub fn source_tool_label() -> String { std::env::var("ATLAS_SOURCE_TOOL").unwrap_or_else(|_| "mcp".into()) }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct RememberArgs {
+pub struct MemoryRememberArgs {
     /// The fact, decision, preference, insight or todo to store, in one or two sentences.
     pub text: String,
     /// One of fact, decision, preference, insight, todo. Default fact.
@@ -38,7 +38,7 @@ pub struct RememberArgs {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct RecallArgs {
+pub struct MemorySearchArgs {
     pub query: String,
     pub limit: Option<usize>,
     pub scope: Option<String>,
@@ -50,7 +50,33 @@ pub struct RecallArgs {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ForgetArgs { pub id: Uuid, pub reason: Option<String> }
+pub struct MemoryForgetArgs { pub id: Uuid, pub reason: Option<String> }
+
+/// Filters for `memory_list`. Unlike `memory_search`, there is no query: this is a
+/// plain listing, narrowed by whichever of these the caller gives.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct MemoryListArgs {
+    /// Keep only memories of these kinds (fact, decision, preference, insight, todo).
+    pub kinds: Option<Vec<String>>,
+    /// Keep only memories carrying at least one of these tags.
+    pub tags: Option<Vec<String>>,
+    pub project_id: Option<Uuid>,
+    /// Absolute path to the project to list. Ignored when project_id is given. With
+    /// neither, every memory is in scope (global and every project's own).
+    pub project_root: Option<PathBuf>,
+    /// Keep only memories created at or after this time.
+    pub since: Option<DateTime<Utc>>,
+    /// Default 50.
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct MemoryReviewArgs {
+    /// The pending memory's id.
+    pub id: Uuid,
+    /// "accept" (becomes active) or "reject" (stays out of recall, like forget).
+    pub decision: String,
+}
 
 /// Arguments for the tools that only need to know which project is in play.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -86,7 +112,7 @@ pub struct WorkflowStatusArgs {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ConnectProjectArgs {
+pub struct ProjectConnectArgs {
     /// Absolute path to the project root. Any directory inside the repository works.
     pub root_path: PathBuf,
 }
@@ -106,6 +132,21 @@ pub struct SaveAgentArgs {
     pub model_hint: Option<String>,
     /// Tools the agent is allowed to use.
     pub tools: Option<Vec<String>>,
+    pub tags: Option<Vec<String>>,
+}
+
+/// `agent_list`'s arguments. Agents are global today, not scoped to a project, so
+/// `project_root` has no effect yet; it is accepted now for the same shape as
+/// `practice_list` and to leave room for project-scoped agents later.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AgentListArgs {
+    pub project_root: Option<PathBuf>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct PracticeListArgs {
+    pub project_root: Option<PathBuf>,
+    /// Keep only practices carrying at least one of these tags.
     pub tags: Option<Vec<String>>,
 }
 
@@ -206,6 +247,59 @@ pub struct TaskBlockArgs {
     pub agent: Option<String>,
 }
 
+/// Whether a tool in [`TOOL_TABLE`] only reads state or can change it. Shown in the
+/// `/api/v1/mcp/status` tools table (Task 2) as a badge: read is informational, write
+/// is a warning, since a write tool run by an agent this project has not admitted is
+/// refused by the backend's own `agent_access` gate, not by anything in this crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolScope { Read, Write }
+
+/// One row of the MCP tool status table: enough to render `docs/usage.md`'s table and
+/// the desktop Settings card without either hand-typing the other's copy or this
+/// crate depending on either. `atlas-mcp-tool-table-matches-the-router` (below) checks
+/// this against the tool router itself so the two cannot drift silently; `atlas-core`'s
+/// `settings::MCP_TOOL_NAMES` is checked against it the same way.
+pub struct ToolMeta {
+    pub name: &'static str,
+    pub description: &'static str,
+    /// A short, comma-joined summary of arguments, `*` marking a required one.
+    pub args: &'static str,
+    pub scope: ToolScope,
+}
+
+pub const TOOL_TABLE: &[ToolMeta] = &[
+    ToolMeta { name: "memory_remember", description: "Store a memory shared with every agent. Use for facts about the project, decisions and their reasons, user preferences, and insights worth keeping.", args: "text*, kind, tags, scope, project_id, project_root, source_agent", scope: ToolScope::Write },
+    ToolMeta { name: "memory_search", description: "Search shared memory with a natural-language query. Returns ranked memories with scores. Call this before starting work on a task to pick up prior decisions and preferences.", args: "query*, limit, scope, kinds, tags, project_id, project_root", scope: ToolScope::Read },
+    ToolMeta { name: "memory_list", description: "List memories without a search query, narrowed by kind, tag, project and time. Call to browse what is stored rather than search for something specific.", args: "kinds, tags, project_id, project_root, since, limit", scope: ToolScope::Read },
+    ToolMeta { name: "memory_forget", description: "Mark a memory as superseded so it stops appearing in recall. Nothing is deleted.", args: "id*, reason", scope: ToolScope::Write },
+    ToolMeta { name: "memory_review", description: "Accept a pending memory into active use, or reject it. Pending memories come from an actor whose project requires review.", args: "id*, decision*", scope: ToolScope::Write },
+    ToolMeta { name: "project_list", description: "List every project Atlas knows about.", args: "none", scope: ToolScope::Read },
+    ToolMeta { name: "project_get", description: "Fetch one project by name.", args: "name*", scope: ToolScope::Read },
+    ToolMeta { name: "project_connect", description: "Register a repository with Atlas and build its profile (languages, frameworks, tree, recent commits). Call this once when starting work in a repository Atlas has not seen.", args: "root_path*", scope: ToolScope::Write },
+    ToolMeta { name: "project_context", description: "Call at the start of a session to load the current project's profile, practices, workflows and top memories. Pass project_root to name a repository other than the one this server was started in.", args: "project_root", scope: ToolScope::Write },
+    ToolMeta { name: "task_create", description: "Create a task on the board. Pass project_root to name a project other than the one this server was started in, or \"global\" for a task with no project.", args: "title*, description, kind, priority, labels, parent, blocked_by, project_root, agent", scope: ToolScope::Write },
+    ToolMeta { name: "task_list", description: "List board tasks for the current project. Pass ready=true to get work whose blockers are done and is safe to start; pass stage or assignee to narrow further.", args: "project_root, stage, assignee, ready, query, include_done, agent", scope: ToolScope::Read },
+    ToolMeta { name: "task_get", description: "Fetch one task by key, including its subtasks and full event history. Call before updating or moving a task you have not read recently.", args: "key*, agent", scope: ToolScope::Read },
+    ToolMeta { name: "task_claim", description: "Claim a task: assign it to you and, if it is still in the board's first stage, move it to the second. Fails if someone else already holds it unless force is set.", args: "key*, force, agent", scope: ToolScope::Write },
+    ToolMeta { name: "task_move", description: "Move a task to another stage on its board. Fails naming the valid stages if the stage does not exist, or with a conflict if expected_updated_at no longer matches.", args: "key*, stage*, expected_updated_at, agent", scope: ToolScope::Write },
+    ToolMeta { name: "task_comment", description: "Add a comment to a task's history. Use it to record progress, verification notes, or why a task was moved.", args: "key*, body*, agent", scope: ToolScope::Write },
+    ToolMeta { name: "task_block", description: "Record the tasks a task waits on, by key. This replaces the whole blocker list, so pass every blocker that still applies; an empty list clears them. A task with an open blocker drops out of task_list(ready=true) until that blocker is done.", args: "key*, blocked_by*, agent", scope: ToolScope::Write },
+    ToolMeta { name: "task_update", description: "Edit a task's title, description, kind, priority, assignee or labels. Pass expected_updated_at, from a prior task_get or task_list, to fail with a conflict instead of overwriting a concurrent change.", args: "key*, title, description, kind, priority, assignee, labels, expected_updated_at, agent", scope: ToolScope::Write },
+    ToolMeta { name: "board_stages", description: "List the stages this project's board moves tasks through, in order. Call before task_move so you never invent a stage name.", args: "project_root", scope: ToolScope::Read },
+    ToolMeta { name: "practice_list", description: "List the coding practices that apply here: the global ones plus any scoped to this project, optionally narrowed by tag. Call before writing code so the work follows the house style.", args: "project_root, tags", scope: ToolScope::Read },
+    ToolMeta { name: "get_practice", description: "Fetch the full text of one practice by name. Call after practice_list when a practice looks relevant to the task.", args: "name*", scope: ToolScope::Read },
+    ToolMeta { name: "agent_list", description: "List the agent roles stored in Atlas, with their descriptions. Call this to see which specialist role fits the task before doing the work yourself.", args: "project_root", scope: ToolScope::Read },
+    ToolMeta { name: "get_agent", description: "Fetch one agent role by name, including its full instructions. Call after agent_list to adopt the role.", args: "name*", scope: ToolScope::Read },
+    ToolMeta { name: "save_agent", description: "Create or update an agent role so every coding agent on this machine can use it. Call when the user describes a repeatable specialist role worth keeping.", args: "name*, description*, instructions*, model_hint, tools, tags", scope: ToolScope::Write },
+    ToolMeta { name: "workflow_list", description: "List the workflows that apply here: the global ones plus any scoped to this project. Call when the user asks for a multi-step process such as a release or a review.", args: "project_root", scope: ToolScope::Read },
+    ToolMeta { name: "workflow_get", description: "Fetch one workflow by name, including its full graph. Call after workflow_list to see its trigger and actions.", args: "name*", scope: ToolScope::Read },
+    ToolMeta { name: "workflow_run", description: "Start a workflow run by name and answer with its run id and number. Call workflow_status to follow it. Fails with a conflict if the workflow already has a run queued or running.", args: "name*, input", scope: ToolScope::Write },
+    ToolMeta { name: "workflow_status", description: "Report a workflow run's status: the run's own state plus a summary of each step (name, status, duration, last log line). Call after workflow_run to follow progress.", args: "run_id*", scope: ToolScope::Read },
+    ToolMeta { name: "ingest_transcript", description: "Queue a conversation transcript for opt-in LLM extraction of durable memories. Returns a job id to poll; fails if extraction is not enabled and configured on the daemon.", args: "text*, agent, project_root", scope: ToolScope::Write },
+    ToolMeta { name: "status", description: "Report Atlas daemon status: version, database path, active memory count, embedding availability.", args: "none", scope: ToolScope::Read },
+];
+
 #[derive(Clone)]
 pub struct AtlasMcp<B: Backend> {
     backend: Arc<B>,
@@ -299,9 +393,9 @@ impl<B: Backend> AtlasMcp<B> {
     /// The project for the resolved root, connecting it the first time and remembering
     /// it after. `None` when no root resolves, which leaves the caller global.
     ///
-    /// Reads go through here so they stay reads: `connect_project` upserts the row and
+    /// Reads go through here so they stay reads: `project_connect` upserts the row and
     /// writes an audit entry, which a recall or a doc listing has no business doing on
-    /// every call. `connect_project` and `project_context` are explicit connects and
+    /// every call. `project_connect` and `project_context` are explicit connects and
     /// refresh the entry instead.
     async fn resolve_project(&self, project_root: Option<PathBuf>) -> Result<Option<Project>, McpError> {
         let Some(root) = self.root_for(project_root) else { return Ok(None) };
@@ -365,7 +459,7 @@ impl<B: Backend> AtlasMcp<B> {
     /// Resolves `project_root` to the project scope a board tool should use. The
     /// literal value "global" names the project-less board explicitly; otherwise the
     /// usual precedence applies (the argument, then `ATLAS_PROJECT_ROOT`, then the
-    /// root this server was started in). Unlike `remember`, which is content to
+    /// root this server was started in). Unlike `memory_remember`, which is content to
     /// stay unscoped, a board tool errors when none of those resolves: a task's key
     /// is a project prefix, so there is nowhere to file it without one.
     async fn board_project_id(&self, project_root: Option<PathBuf>) -> Result<Option<Uuid>, McpError> {
@@ -379,6 +473,20 @@ impl<B: Backend> AtlasMcp<B> {
                 None,
             )),
         }
+    }
+
+    /// Every known MCP tool name currently in `mcp.disabled_tools`, or the built-in
+    /// default (`project_connect`, `memory_review`) when the setting has never been
+    /// written. Read fresh on every `list_tools`/`call_tool`, the same
+    /// read-live-not-cached pattern the backend's own settings reads use, so a change
+    /// takes effect on the next call rather than after a restart.
+    async fn disabled_tools(&self) -> Result<std::collections::HashSet<String>, McpError> {
+        let settings = self.backend.get_settings().await.map_err(err)?;
+        let names = match settings.get("mcp.disabled_tools").and_then(|v| v.as_array()) {
+            Some(arr) => arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
+            None => atlas_core::settings::DEFAULT_DISABLED_MCP_TOOLS.iter().map(|s| s.to_string()).collect(),
+        };
+        Ok(names)
     }
 
     #[tool(description = "List board tasks for the current project. Pass ready=true to get work whose blockers are done and is safe to start; pass stage or assignee to narrow further.")]
@@ -467,20 +575,24 @@ impl<B: Backend> AtlasMcp<B> {
         json_result(&self.backend.board_stages(project_id).await.map_err(board_err)?)
     }
 
-    /// Resolves the `{project}` segment of an `atlas://board/{project}` resource URI
-    /// to a project scope: "global" names the project-less board, otherwise `raw` may
-    /// be a board key (`ATL`) or a percent-encoded project root path, matched against
-    /// whatever `list_projects` already has on file. Read-only: unlike a tool
-    /// argument, a resource read never connects a project that is not already known.
-    async fn board_resource_project(&self, raw: &str) -> Result<Option<Uuid>, atlas_core::AtlasError> {
+    /// Resolves the `{name}` segment of an `atlas://projects/{name}/...` resource URI
+    /// to a project scope: "global" names the project-less scope, otherwise `raw` is
+    /// tried, in order, as a project name (case-insensitive), a board key (`ATL`), or a
+    /// percent-encoded project root path, against whatever `list_projects` already has
+    /// on file. Read-only: unlike a tool argument, a resource read never connects a
+    /// project that is not already known.
+    async fn resolve_project_segment(&self, raw: &str) -> Result<Option<Uuid>, atlas_core::AtlasError> {
         let decoded = percent_decode_str(raw)
             .decode_utf8()
-            .map_err(|e| atlas_core::AtlasError::Invalid(format!("board URI segment is not valid UTF-8: {e}")))?
+            .map_err(|e| atlas_core::AtlasError::Invalid(format!("project URI segment is not valid UTF-8: {e}")))?
             .into_owned();
         if decoded == "global" {
             return Ok(None);
         }
         let projects = self.backend.list_projects().await?;
+        if let Some(p) = projects.iter().find(|p| p.name.eq_ignore_ascii_case(&decoded)) {
+            return Ok(Some(p.id));
+        }
         if let Some(p) = projects.iter().find(|p| p.board_key.as_deref().map(|k| k.eq_ignore_ascii_case(&decoded)).unwrap_or(false)) {
             return Ok(Some(p.id));
         }
@@ -492,11 +604,11 @@ impl<B: Backend> AtlasMcp<B> {
         }) {
             return Ok(Some(p.id));
         }
-        Err(atlas_core::AtlasError::NotFound(format!("board {decoded}")))
+        Err(atlas_core::AtlasError::NotFound(format!("project {decoded}")))
     }
 
     #[tool(description = "Store a memory shared with every agent. Use for facts about the project, decisions and their reasons, user preferences, and insights worth keeping.")]
-    async fn remember(&self, Parameters(a): Parameters<RememberArgs>) -> Result<CallToolResult, McpError> {
+    async fn memory_remember(&self, Parameters(a): Parameters<MemoryRememberArgs>) -> Result<CallToolResult, McpError> {
         let kind = a.kind.as_deref().unwrap_or("fact").parse::<MemoryKind>().map_err(err)?;
         let asked = match a.scope.as_deref() { Some(s) => Some(s.parse::<MemoryScope>().map_err(err)?), None => None };
         // A memory the caller called global stays unattached even in a project session.
@@ -511,7 +623,7 @@ impl<B: Backend> AtlasMcp<B> {
     }
 
     #[tool(description = "Search shared memory with a natural-language query. Returns ranked memories with scores. Call this before starting work on a task to pick up prior decisions and preferences.")]
-    async fn recall(&self, Parameters(a): Parameters<RecallArgs>) -> Result<CallToolResult, McpError> {
+    async fn memory_search(&self, Parameters(a): Parameters<MemorySearchArgs>) -> Result<CallToolResult, McpError> {
         let scope = match a.scope.as_deref() { Some(s) => Some(s.parse::<MemoryScope>().map_err(err)?), None => None };
         let mut kinds = vec![]; for k in a.kinds.unwrap_or_default() { kinds.push(k.parse::<MemoryKind>().map_err(err)?); }
         // A project id widens rather than narrows: the store returns that project's
@@ -521,8 +633,38 @@ impl<B: Backend> AtlasMcp<B> {
         json_result(&self.backend.recall(q).await.map_err(err)?)
     }
 
+    #[tool(description = "List memories without a search query, narrowed by kind, tag, project and time. Call to browse what is stored rather than search for something specific.")]
+    async fn memory_list(&self, Parameters(a): Parameters<MemoryListArgs>) -> Result<CallToolResult, McpError> {
+        let mut kinds = vec![]; for k in a.kinds.unwrap_or_default() { kinds.push(k.parse::<MemoryKind>().map_err(err)?); }
+        let project_id = self.scope_id(a.project_id, a.project_root).await?;
+        let mut memories = self.backend.list_memories(MemoryStatus::Active, project_id, MemoryScopeFilter::All).await.map_err(err)?;
+        if !kinds.is_empty() {
+            memories.retain(|m| kinds.contains(&m.kind));
+        }
+        if let Some(tags) = &a.tags {
+            if !tags.is_empty() {
+                memories.retain(|m| tags.iter().any(|t| m.tags.contains(t)));
+            }
+        }
+        if let Some(since) = a.since {
+            memories.retain(|m| m.created_at >= since);
+        }
+        memories.truncate(a.limit.unwrap_or(50));
+        json_result(&memories)
+    }
+
+    #[tool(description = "Accept a pending memory into active use, or reject it. Pending memories come from an actor whose project requires review.")]
+    async fn memory_review(&self, Parameters(a): Parameters<MemoryReviewArgs>) -> Result<CallToolResult, McpError> {
+        let status = match a.decision.trim().to_lowercase().as_str() {
+            "accept" => MemoryStatus::Active,
+            "reject" => MemoryStatus::Rejected,
+            other => return Err(McpError::invalid_params(format!("decision must be \"accept\" or \"reject\", got \"{other}\""), None)),
+        };
+        json_result(&self.backend.set_memory_status(a.id, status, "mcp").await.map_err(err)?)
+    }
+
     #[tool(description = "Mark a memory as superseded so it stops appearing in recall. Nothing is deleted.")]
-    async fn forget(&self, Parameters(a): Parameters<ForgetArgs>) -> Result<CallToolResult, McpError> {
+    async fn memory_forget(&self, Parameters(a): Parameters<MemoryForgetArgs>) -> Result<CallToolResult, McpError> {
         json_result(&self.backend.forget(a.id, a.reason, "mcp").await.map_err(err)?)
     }
 
@@ -543,18 +685,33 @@ impl<B: Backend> AtlasMcp<B> {
     }
 
     #[tool(description = "Register a repository with Atlas and build its profile (languages, frameworks, tree, recent commits). Call this once when starting work in a repository Atlas has not seen.")]
-    async fn connect_project(&self, Parameters(a): Parameters<ConnectProjectArgs>) -> Result<CallToolResult, McpError> {
+    async fn project_connect(&self, Parameters(a): Parameters<ProjectConnectArgs>) -> Result<CallToolResult, McpError> {
         let project = self.backend.connect_project(a.root_path.clone(), "mcp").await.map_err(err)?;
         self.cache(a.root_path, &project);
         json_result(&project)
     }
 
+    #[tool(description = "List every project Atlas knows about.")]
+    async fn project_list(&self) -> Result<CallToolResult, McpError> {
+        json_result(&self.backend.list_projects().await.map_err(err)?)
+    }
+
+    #[tool(description = "Fetch one project by name.")]
+    async fn project_get(&self, Parameters(a): Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
+        let projects = self.backend.list_projects().await.map_err(err)?;
+        let project = projects
+            .into_iter()
+            .find(|p| p.name.eq_ignore_ascii_case(&a.name))
+            .ok_or_else(|| McpError::invalid_params(format!("no project named '{}'", a.name), None))?;
+        json_result(&project)
+    }
+
     #[tool(description = "List the agent roles stored in Atlas, with their descriptions. Call this to see which specialist role fits the task before doing the work yourself.")]
-    async fn list_agents(&self) -> Result<CallToolResult, McpError> {
+    async fn agent_list(&self, Parameters(_a): Parameters<AgentListArgs>) -> Result<CallToolResult, McpError> {
         json_result(&self.backend.list_agents().await.map_err(err)?)
     }
 
-    #[tool(description = "Fetch one agent role by name, including its full instructions. Call after list_agents to adopt the role.")]
+    #[tool(description = "Fetch one agent role by name, including its full instructions. Call after agent_list to adopt the role.")]
     async fn get_agent(&self, Parameters(a): Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         json_result(&self.backend.get_agent(&a.name).await.map_err(err)?)
     }
@@ -565,23 +722,29 @@ impl<B: Backend> AtlasMcp<B> {
         json_result(&self.backend.save_agent(agent, "mcp").await.map_err(err)?)
     }
 
-    #[tool(description = "List the coding practices that apply here: the global ones plus any scoped to this project. Call before writing code so the work follows the house style.")]
-    async fn list_practices(&self, Parameters(a): Parameters<ProjectRootArgs>) -> Result<CallToolResult, McpError> {
-        json_result(&self.docs_here(DocKind::Practice, a.project_root).await?)
+    #[tool(description = "List the coding practices that apply here: the global ones plus any scoped to this project, optionally narrowed by tag. Call before writing code so the work follows the house style.")]
+    async fn practice_list(&self, Parameters(a): Parameters<PracticeListArgs>) -> Result<CallToolResult, McpError> {
+        let mut docs = self.docs_here(DocKind::Practice, a.project_root).await?;
+        if let Some(tags) = &a.tags {
+            if !tags.is_empty() {
+                docs.retain(|d| tags.iter().any(|t| d.tags.contains(t)));
+            }
+        }
+        json_result(&docs)
     }
 
-    #[tool(description = "Fetch the full text of one practice by name. Call after list_practices when a practice looks relevant to the task.")]
+    #[tool(description = "Fetch the full text of one practice by name. Call after practice_list when a practice looks relevant to the task.")]
     async fn get_practice(&self, Parameters(a): Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         json_result(&self.backend.get_doc(DocKind::Practice, &a.name).await.map_err(err)?)
     }
 
     #[tool(description = "List the workflows that apply here: the global ones plus any scoped to this project. Call when the user asks for a multi-step process such as a release or a review.")]
-    async fn list_workflows(&self, Parameters(a): Parameters<ProjectRootArgs>) -> Result<CallToolResult, McpError> {
+    async fn workflow_list(&self, Parameters(a): Parameters<ProjectRootArgs>) -> Result<CallToolResult, McpError> {
         json_result(&self.workflows_here(a.project_root).await?)
     }
 
-    #[tool(description = "Fetch one workflow by name, including its full graph. Call after list_workflows to see its trigger and actions.")]
-    async fn get_workflow(&self, Parameters(a): Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
+    #[tool(description = "Fetch one workflow by name, including its full graph. Call after workflow_list to see its trigger and actions.")]
+    async fn workflow_get(&self, Parameters(a): Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         json_result(&self.backend.get_workflow(&a.name).await.map_err(err)?)
     }
 
@@ -633,13 +796,16 @@ const AGENTS: &str = "atlas://agents/";
 const PRACTICES: &str = "atlas://practices/";
 const WORKFLOWS: &str = "atlas://workflows/";
 const PROJECTS: &str = "atlas://projects/";
-const BOARD: &str = "atlas://board/";
+const MEMORIES_RECENT: &str = "atlas://memories/recent";
+
+/// How many memories `atlas://memories/recent` renders.
+const MEMORIES_RECENT_LIMIT: usize = 50;
 
 /// Everything but alphanumerics and `/ - _ . ~`: enough to escape a space or other
-/// reserved character in a project root path so the `{project}` segment of an
-/// `atlas://board/{project}` URI stays a single legal path component, while leaving
-/// the path itself readable.
-const BOARD_URI_PATH: &AsciiSet = &NON_ALPHANUMERIC.remove(b'/').remove(b'-').remove(b'_').remove(b'.').remove(b'~');
+/// reserved character in a project name or root path so a `{name}` segment of an
+/// `atlas://projects/{name}/...` URI stays a single legal path component, while
+/// leaving the segment itself readable.
+const PROJECT_URI_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'/').remove(b'-').remove(b'_').remove(b'.').remove(b'~');
 
 const MARKDOWN: &str = "text/markdown";
 const JSON: &str = "application/json";
@@ -652,14 +818,109 @@ const BOARD_WORKFLOW_TEXT: &str = "Work the task board like this: pick a ready t
     then task_move as you progress; comment with task_comment; record a dependency you find mid-work \
     with task_block; never invent a stage, only move to one of the stages listed below.";
 
+const BOOTSTRAP_PROMPT: &str = "atlas.bootstrap";
+const BOOTSTRAP_DESCRIPTION: &str = "What Atlas is and how to recall, remember, use the board and find practices at the start of a session.";
+const BOOTSTRAP_TEXT: &str = "Atlas is the shared memory and task board for every coding agent on this \
+    machine, reached here over MCP. At the start of a session: call project_context (or project_connect \
+    if this repository is new to Atlas) to load its profile, practices, workflows and top memories; call \
+    memory_search before starting work on anything, to pick up prior decisions and preferences; call \
+    practice_list to see the coding practices this project follows before writing code; and work the task \
+    board with task_list(ready=true), task_claim, task_move and task_comment, in the order the \
+    board-workflow prompt describes. Store what you learn with memory_remember: facts, decisions and \
+    their reasons, user preferences, and insights worth keeping. Nothing is ever deleted from memory; \
+    memory_forget only marks a memory superseded, and memory_list browses what is stored without a \
+    search query.";
+
+const HANDOFF_PROMPT: &str = "atlas.handoff";
+const HANDOFF_DESCRIPTION: &str = "Summarise this session into memories and tasks before it ends.";
+const HANDOFF_TEXT: &str = "Summarise this session before it ends, so the next agent, or your own next \
+    session, does not have to rediscover it. Call memory_remember for every durable fact, decision, \
+    preference or insight this session produced that is not already stored, one memory per idea, scoped \
+    to the project it belongs to. For any work left unfinished, file it with task_create or bring an \
+    existing task up to date with task_update, and record what happened with task_comment: what is done \
+    and what remains. Do not restate what memory_search or task_list already shows as stored; only add \
+    what this session made new.";
+
+/// Markdown for `atlas://projects/{name}/practices`: the global practices plus this
+/// project's own, or just the global ones for the literal "global" segment.
+fn practices_markdown(project_name: Option<&str>, docs: &[Doc]) -> String {
+    let mut out = match project_name {
+        Some(name) => format!("# Practices for {name}\n\n"),
+        None => "# Global practices\n\n".to_string(),
+    };
+    if docs.is_empty() {
+        out.push_str("_No practices yet._\n");
+    }
+    for d in docs {
+        out.push_str(&format!("## {}\n\n{}\n\n", d.name, d.body));
+    }
+    out
+}
+
+/// Markdown for `atlas://memories/recent`: the newest active memories, newest first.
+fn memories_recent_markdown(memories: &[Memory]) -> String {
+    let mut out = "# Recent memories\n\n".to_string();
+    if memories.is_empty() {
+        out.push_str("_No active memories yet._\n");
+    }
+    for m in memories {
+        let tags = if m.tags.is_empty() { String::new() } else { format!(" ({})", m.tags.join(", ")) };
+        out.push_str(&format!("- [{}] {}{}\n", m.kind, m.text, tags));
+    }
+    out
+}
+
+/// Markdown for `atlas://workflows/{name}`: the workflow's description plus its
+/// action nodes, in place of the old `DocKind::Workflow` document body.
+fn workflow_markdown(w: &Workflow) -> String {
+    let mut out = format!("# {}\n\n{}\n\n## Actions\n\n", w.name, w.description);
+    let mut any = false;
+    for n in &w.graph.nodes {
+        if let NodeData::Action { name, instructions, .. } = &n.data {
+            any = true;
+            out.push_str(&format!("- **{name}**: {instructions}\n"));
+        }
+    }
+    if !any {
+        out.push_str("_No actions yet._\n");
+    }
+    out
+}
+
 /// Resources and prompts are written by hand rather than by the static macros: both
 /// lists come from the database, so they change while the server is running.
+/// `list_tools` and `call_tool` are also written by hand (`#[tool_handler]` only
+/// generates the ones a sibling method does not already provide) so `mcp.disabled_tools`
+/// can gate the router's static list at both list and call time.
 #[tool_handler]
 impl<B: Backend> ServerHandler for AtlasMcp<B> {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().enable_resources().enable_prompts().build())
             .with_server_info(Implementation::new("atlas", env!("CARGO_PKG_VERSION")))
-            .with_instructions("Atlas is the shared memory for all coding agents on this machine. Call recall at the start of a task and remember when you learn a durable fact, make a decision, or notice a user preference.")
+            .with_instructions("Atlas is the shared memory and task board for all coding agents on this machine. Call memory_search at the start of a task and memory_remember when you learn a durable fact, make a decision, or notice a user preference. The atlas.bootstrap prompt walks through the rest.")
+    }
+
+    async fn list_tools(&self, _request: Option<PaginatedRequestParams>, context: RequestContext<RoleServer>) -> Result<ListToolsResult, McpError> {
+        let disabled = self.disabled_tools().await?;
+        let supports_cache_hints = context.protocol_version().is_some_and(|version| version >= ProtocolVersion::V_2026_07_28);
+        let tools = self.tool_router.list_all().into_iter().filter(|t| !disabled.contains(t.name.as_ref())).collect();
+        Ok(ListToolsResult {
+            result_type: Some(ResultType::COMPLETE),
+            tools,
+            meta: None,
+            next_cursor: None,
+            ttl_ms: supports_cache_hints.then_some(0),
+            cache_scope: supports_cache_hints.then_some(CacheScope::Public),
+        })
+    }
+
+    async fn call_tool(&self, request: CallToolRequestParams, context: RequestContext<RoleServer>) -> Result<CallToolResponse, McpError> {
+        let disabled = self.disabled_tools().await?;
+        if disabled.contains(request.name.as_ref()) {
+            return Err(McpError::method_not_found::<CallToolRequestMethod>());
+        }
+        let tcc = ToolCallContext::new(self, request, context);
+        self.tool_router.call(tcc).await
     }
 
     async fn list_resources(&self, _request: Option<PaginatedRequestParams>, _context: RequestContext<RoleServer>) -> Result<ListResourcesResult, McpError> {
@@ -667,21 +928,32 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
         for a in self.backend.list_agents().await.map_err(err)? {
             out.push(Resource::new(format!("{AGENTS}{}", a.name), a.name.clone()).with_description(a.description).with_mime_type(MARKDOWN));
         }
-        for (prefix, kind) in [(PRACTICES, DocKind::Practice), (WORKFLOWS, DocKind::Workflow)] {
-            for d in self.backend.list_docs(kind, None).await.map_err(err)? {
-                out.push(Resource::new(format!("{prefix}{}", d.name), d.name.clone()).with_mime_type(MARKDOWN));
-            }
+        for d in self.backend.list_docs(DocKind::Practice, None).await.map_err(err)? {
+            out.push(Resource::new(format!("{PRACTICES}{}", d.name), d.name.clone()).with_mime_type(MARKDOWN));
+        }
+        for w in self.backend.list_workflows(None).await.map_err(err)? {
+            out.push(Resource::new(format!("{WORKFLOWS}{}", w.name), w.name.clone()).with_description(w.description.clone()).with_mime_type(MARKDOWN));
         }
         for p in self.backend.list_projects().await.map_err(err)? {
+            let seg = utf8_percent_encode(&p.name, PROJECT_URI_SEGMENT).to_string();
             out.push(Resource::new(format!("{PROJECTS}{}/context", p.id), p.name.clone())
                 .with_description(format!("Profile, practices, workflows and top memories for {}", p.root_path))
                 .with_mime_type(JSON));
-            out.push(Resource::new(format!("{BOARD}{}", utf8_percent_encode(&p.root_path, BOARD_URI_PATH)), format!("{} board", p.name))
+            out.push(Resource::new(format!("{PROJECTS}{seg}/practices"), format!("{} practices", p.name))
+                .with_description(format!("Global and project practices for {}, as Markdown", p.root_path))
+                .with_mime_type(MARKDOWN));
+            out.push(Resource::new(format!("{PROJECTS}{seg}/board"), format!("{} board", p.name))
                 .with_description(format!("Task board for {}, as Markdown", p.root_path))
                 .with_mime_type(MARKDOWN));
         }
-        out.push(Resource::new(format!("{BOARD}global"), "Global board".to_string())
+        out.push(Resource::new(format!("{PROJECTS}global/practices"), "Global practices".to_string())
+            .with_description("Practices with no project, as Markdown")
+            .with_mime_type(MARKDOWN));
+        out.push(Resource::new(format!("{PROJECTS}global/board"), "Global board".to_string())
             .with_description("Tasks with no project, as Markdown")
+            .with_mime_type(MARKDOWN));
+        out.push(Resource::new(MEMORIES_RECENT, "Recent memories".to_string())
+            .with_description(format!("The last {MEMORIES_RECENT_LIMIT} active memories, as Markdown"))
             .with_mime_type(MARKDOWN));
         Ok(ListResourcesResult::with_all_items(out))
     }
@@ -693,18 +965,39 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
         } else if let Some(name) = uri.strip_prefix(PRACTICES) {
             (self.backend.get_doc(DocKind::Practice, name).await.map_err(|e| resource_err(&uri, e))?.body, MARKDOWN)
         } else if let Some(name) = uri.strip_prefix(WORKFLOWS) {
-            (self.backend.get_doc(DocKind::Workflow, name).await.map_err(|e| resource_err(&uri, e))?.body, MARKDOWN)
-        } else if let Some(id) = uri.strip_prefix(PROJECTS).and_then(|r| r.strip_suffix("/context")) {
-            let id = id.parse::<Uuid>().map_err(|e| McpError::resource_not_found(format!("{uri} is not a project context resource: {e}"), None))?;
-            let project = self.backend.get_project(id).await.map_err(|e| resource_err(&uri, e))?;
-            let ctx = self.backend.project_context(PathBuf::from(project.root_path), "mcp").await.map_err(|e| resource_err(&uri, e))?;
-            (serde_json::to_string_pretty(&ctx).map_err(|e| McpError::internal_error(e.to_string(), None))?, JSON)
-        } else if let Some(raw) = uri.strip_prefix(BOARD) {
-            let project_id = self.board_resource_project(raw).await.map_err(|e| resource_err(&uri, e))?;
-            let stages = self.backend.board_stages(project_id).await.map_err(|e| resource_err(&uri, e))?.stages;
-            let filter = TaskFilter { project_id, include_done: true, ..Default::default() };
-            let tasks = self.backend.list_tasks(filter).await.map_err(|e| resource_err(&uri, e))?;
-            (render_board_markdown(&stages, &tasks), MARKDOWN)
+            (workflow_markdown(&self.backend.get_workflow(name).await.map_err(|e| resource_err(&uri, e))?), MARKDOWN)
+        } else if uri == MEMORIES_RECENT {
+            let mut memories = self.backend.list_memories(MemoryStatus::Active, None, MemoryScopeFilter::All).await.map_err(err)?;
+            memories.truncate(MEMORIES_RECENT_LIMIT);
+            (memories_recent_markdown(&memories), MARKDOWN)
+        } else if let Some(rest) = uri.strip_prefix(PROJECTS) {
+            let (seg, suffix) = rest.rsplit_once('/').ok_or_else(|| McpError::resource_not_found(format!("no Atlas resource at {uri}"), None))?;
+            match suffix {
+                "context" => {
+                    let id = seg.parse::<Uuid>().map_err(|e| McpError::resource_not_found(format!("{uri} is not a project context resource: {e}"), None))?;
+                    let project = self.backend.get_project(id).await.map_err(|e| resource_err(&uri, e))?;
+                    let ctx = self.backend.project_context(PathBuf::from(project.root_path), "mcp").await.map_err(|e| resource_err(&uri, e))?;
+                    (serde_json::to_string_pretty(&ctx).map_err(|e| McpError::internal_error(e.to_string(), None))?, JSON)
+                }
+                "practices" => {
+                    let project_id = self.resolve_project_segment(seg).await.map_err(|e| resource_err(&uri, e))?;
+                    let docs = self.backend.list_docs(DocKind::Practice, project_id).await.map_err(|e| resource_err(&uri, e))?;
+                    let docs = match project_id { Some(_) => docs, None => docs.into_iter().filter(|d| d.project_id.is_none()).collect() };
+                    let name = match project_id {
+                        Some(id) => Some(self.backend.get_project(id).await.map_err(|e| resource_err(&uri, e))?.name),
+                        None => None,
+                    };
+                    (practices_markdown(name.as_deref(), &docs), MARKDOWN)
+                }
+                "board" => {
+                    let project_id = self.resolve_project_segment(seg).await.map_err(|e| resource_err(&uri, e))?;
+                    let stages = self.backend.board_stages(project_id).await.map_err(|e| resource_err(&uri, e))?.stages;
+                    let filter = TaskFilter { project_id, include_done: true, ..Default::default() };
+                    let tasks = self.backend.list_tasks(filter).await.map_err(|e| resource_err(&uri, e))?;
+                    (render_board_markdown(&stages, &tasks), MARKDOWN)
+                }
+                _ => return Err(McpError::resource_not_found(format!("no Atlas resource at {uri}"), None)),
+            }
         } else {
             return Err(McpError::resource_not_found(format!("no Atlas resource at {uri}"), None));
         };
@@ -712,18 +1005,32 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
     }
 
     async fn list_prompts(&self, _request: Option<PaginatedRequestParams>, _context: RequestContext<RoleServer>) -> Result<ListPromptsResult, McpError> {
-        let mut prompts = vec![Prompt::new(
-            BOARD_WORKFLOW_PROMPT,
-            Some("Work the task board: pick a ready task, claim it, move it through the stages, and comment as you go."),
-            Some(vec![PromptArgument::new("project_root")
-                .with_description("Absolute path to the project whose board to work, or \"global\" for the project-less board. Defaults to the root this server was started in.")
-                .with_required(false)]),
-        )];
+        let mut prompts = vec![
+            Prompt::new(BOOTSTRAP_PROMPT, Some(BOOTSTRAP_DESCRIPTION), None),
+            Prompt::new(HANDOFF_PROMPT, Some(HANDOFF_DESCRIPTION), None),
+            Prompt::new(
+                BOARD_WORKFLOW_PROMPT,
+                Some("Work the task board: pick a ready task, claim it, move it through the stages, and comment as you go."),
+                Some(vec![PromptArgument::new("project_root")
+                    .with_description("Absolute path to the project whose board to work, or \"global\" for the project-less board. Defaults to the root this server was started in.")
+                    .with_required(false)]),
+            ),
+        ];
         prompts.extend(self.backend.list_agents().await.map_err(err)?.into_iter().map(|a| Prompt::new(a.name, Some(a.description), None)));
         Ok(ListPromptsResult::with_all_items(prompts))
     }
 
     async fn get_prompt(&self, request: GetPromptRequestParams, _context: RequestContext<RoleServer>) -> Result<GetPromptResponse, McpError> {
+        if request.name == BOOTSTRAP_PROMPT {
+            let mut result = GetPromptResult::new(vec![PromptMessage::new_text(Role::User, BOOTSTRAP_TEXT.to_string())]);
+            result.description = Some(BOOTSTRAP_DESCRIPTION.into());
+            return Ok(result.into());
+        }
+        if request.name == HANDOFF_PROMPT {
+            let mut result = GetPromptResult::new(vec![PromptMessage::new_text(Role::User, HANDOFF_TEXT.to_string())]);
+            result.description = Some(HANDOFF_DESCRIPTION.into());
+            return Ok(result.into());
+        }
         if request.name == BOARD_WORKFLOW_PROMPT {
             let project_root = request.arguments.as_ref().and_then(|a| a.get("project_root")).and_then(|v| v.as_str()).map(PathBuf::from);
             let project_id = self.board_project_id(project_root).await?;
@@ -766,11 +1073,89 @@ mod tests {
         let b = std::sync::Arc::new(LocalBackend::open(&AtlasPaths::at(dir.path()), None, false).unwrap());
         let s = AtlasMcp::new(b);
         let names: Vec<String> = s.tool_router.list_all().into_iter().map(|t| t.name.to_string()).collect();
-        for n in ["remember", "recall", "forget", "status", "project_context", "connect_project", "list_agents",
-                  "get_agent", "save_agent", "list_practices", "get_practice", "list_workflows", "get_workflow",
-                  "ingest_transcript", "workflow_run", "workflow_status"] {
+        for n in ["memory_remember", "memory_search", "memory_list", "memory_forget", "memory_review",
+                  "status", "project_context", "project_connect", "project_list", "project_get",
+                  "agent_list", "get_agent", "save_agent", "practice_list", "get_practice",
+                  "workflow_list", "workflow_get", "ingest_transcript", "workflow_run", "workflow_status"] {
             assert!(names.contains(&n.to_string()), "missing {n}");
         }
+    }
+
+    /// [`TOOL_TABLE`] is a hand-maintained const, kept honest here rather than by
+    /// construction: its names must be exactly the tool router's names (nothing
+    /// listed that does not exist, nothing that exists left out of the status table),
+    /// and it must be exactly the list `atlas-core::settings::MCP_TOOL_NAMES` validates
+    /// `mcp.disabled_tools` against, so a name that would validate but never gate
+    /// anything (or vice versa) fails a test rather than shipping quietly.
+    #[test]
+    fn tool_table_matches_the_router_and_the_settings_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = Arc::new(LocalBackend::open(&AtlasPaths::at(dir.path()), None, false).unwrap());
+        let s = AtlasMcp::new(b);
+        let mut router_names: Vec<String> = s.tool_router.list_all().into_iter().map(|t| t.name.to_string()).collect();
+        router_names.sort();
+        let mut table_names: Vec<String> = TOOL_TABLE.iter().map(|m| m.name.to_string()).collect();
+        table_names.sort();
+        assert_eq!(router_names, table_names, "TOOL_TABLE and the tool router have drifted apart");
+
+        let mut allowlist: Vec<String> = atlas_core::settings::MCP_TOOL_NAMES.iter().map(|s| s.to_string()).collect();
+        allowlist.sort();
+        assert_eq!(table_names, allowlist, "TOOL_TABLE and atlas_core::settings::MCP_TOOL_NAMES have drifted apart");
+
+        for meta in TOOL_TABLE {
+            let tool = router_names_to_tools(&s).into_iter().find(|t| t.name == meta.name).unwrap();
+            let actual = tool.description.as_deref().unwrap_or_default();
+            assert_eq!(actual, meta.description, "{} description drifted from its #[tool] attribute", meta.name);
+        }
+    }
+
+    fn router_names_to_tools<B: Backend>(s: &AtlasMcp<B>) -> Vec<Tool> {
+        s.tool_router.list_all()
+    }
+
+    /// `mcp.disabled_tools` gates both `tools/list` and `tools/call`: with the setting
+    /// unset, the two tools disabled by default (`project_connect`, `memory_review`)
+    /// are absent from the list and a call to either answers method-not-found; setting
+    /// it to an empty list re-enables both.
+    #[tokio::test]
+    async fn disabled_tools_are_hidden_from_list_and_refused_on_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(dir.path()), None, false).unwrap());
+        let s = AtlasMcp::new(backend.clone());
+
+        let (server_io, client_io) = tokio::io::duplex(16 * 1024);
+        let handle = tokio::spawn(async move {
+            let running = s.serve(server_io).await.unwrap();
+            running.waiting().await.unwrap();
+        });
+        let client: rmcp::service::RunningService<rmcp::RoleClient, ()> = ().serve(client_io).await.unwrap();
+
+        let tools = client.list_tools(None).await.unwrap();
+        let names: Vec<&str> = tools.tools.iter().map(|t| t.name.as_ref()).collect();
+        assert!(!names.contains(&"project_connect"), "{names:?}");
+        assert!(!names.contains(&"memory_review"), "{names:?}");
+        assert!(names.contains(&"memory_remember"), "{names:?}");
+
+        let call = client.call_tool(CallToolRequestParams::new("project_connect")).await.unwrap_err();
+        assert!(matches!(&call, rmcp::service::ServiceError::McpError(e) if e.code == rmcp::model::ErrorCode::METHOD_NOT_FOUND), "{call:?}");
+
+        client.cancel().await.unwrap();
+        handle.await.unwrap();
+
+        backend.set_settings(serde_json::Map::from_iter([("mcp.disabled_tools".to_string(), serde_json::json!([]))]), "t").await.unwrap();
+        let s2 = AtlasMcp::new(backend.clone());
+        let (server_io, client_io) = tokio::io::duplex(16 * 1024);
+        let handle = tokio::spawn(async move {
+            let running = s2.serve(server_io).await.unwrap();
+            running.waiting().await.unwrap();
+        });
+        let client: rmcp::service::RunningService<rmcp::RoleClient, ()> = ().serve(client_io).await.unwrap();
+        let tools = client.list_tools(None).await.unwrap();
+        let names: Vec<&str> = tools.tools.iter().map(|t| t.name.as_ref()).collect();
+        assert!(names.contains(&"project_connect"), "{names:?}");
+        assert!(names.contains(&"memory_review"), "{names:?}");
+        client.cancel().await.unwrap();
+        handle.await.unwrap();
     }
 
     /// A daemon with extraction off (the default) answers `ingest_transcript` with
@@ -844,7 +1229,7 @@ mod tests {
             .with_project_root(repo.path().to_path_buf());
 
         // No scope, no project_id: the seeded root supplies both.
-        s.remember(Parameters(RememberArgs {
+        s.memory_remember(Parameters(MemoryRememberArgs {
             text: "the fixture uses duckdb".into(), kind: None, tags: None, scope: None,
             project_id: None, project_root: None, source_agent: None,
         })).await.unwrap();
@@ -859,7 +1244,7 @@ mod tests {
         assert_eq!(projects[0].id, project_id);
 
         // Recall with no project_id finds it through the same resolution.
-        let hit = s.recall(Parameters(RecallArgs {
+        let hit = s.memory_search(Parameters(MemorySearchArgs {
             query: "duckdb".into(), limit: None, scope: None, kinds: None, tags: None,
             project_id: None, project_root: None,
         })).await.unwrap();
@@ -867,11 +1252,11 @@ mod tests {
 
         // Everything from here on is a read, so the audit trail must stand still.
         let before = project_writes(&backend);
-        s.recall(Parameters(RecallArgs {
+        s.memory_search(Parameters(MemorySearchArgs {
             query: "duckdb".into(), limit: None, scope: None, kinds: None, tags: None,
             project_id: None, project_root: None,
         })).await.unwrap();
-        s.list_practices(Parameters(ProjectRootArgs { project_root: None })).await.unwrap();
+        s.practice_list(Parameters(PracticeListArgs { project_root: None, tags: None })).await.unwrap();
         assert_eq!(project_writes(&backend), before, "a read reconnected the project instead of using the cache");
     }
 
@@ -884,7 +1269,7 @@ mod tests {
         let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
         let s = AtlasMcp::new(backend.clone()).with_env_project_root(false);
 
-        s.remember(Parameters(RememberArgs {
+        s.memory_remember(Parameters(MemoryRememberArgs {
             text: "bun is the runtime".into(), kind: None, tags: None, scope: None,
             project_id: None, project_root: None, source_agent: None,
         })).await.unwrap();
@@ -897,10 +1282,99 @@ mod tests {
         let project = backend.connect_project(repo.path().to_path_buf(), "test").await.unwrap();
         backend.save_doc(DocKind::Practice, NewDoc { name: "scoped".into(), body: "b".into(), tags: vec![], project_id: Some(project.id) }, "test").await.unwrap();
         backend.save_doc(DocKind::Practice, NewDoc { name: "everywhere".into(), body: "b".into(), tags: vec![], project_id: None }, "test").await.unwrap();
-        let listed = s.list_practices(Parameters(ProjectRootArgs { project_root: None })).await.unwrap();
+        let listed = s.practice_list(Parameters(PracticeListArgs { project_root: None, tags: None })).await.unwrap();
         let listed = text_of(&listed);
         assert!(listed.contains("everywhere"), "{listed}");
         assert!(!listed.contains("scoped"), "a global listing leaked another project's practice: {listed}");
+    }
+
+    /// `practice_list`'s `tags` filter keeps only practices carrying at least one of
+    /// the given tags.
+    #[tokio::test]
+    async fn practice_list_narrows_by_tag() {
+        let home = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        backend.save_doc(DocKind::Practice, NewDoc { name: "rust-style".into(), body: "b".into(), tags: vec!["rust".into()], project_id: None }, "test").await.unwrap();
+        backend.save_doc(DocKind::Practice, NewDoc { name: "svelte-style".into(), body: "b".into(), tags: vec!["svelte".into()], project_id: None }, "test").await.unwrap();
+        let s = AtlasMcp::new(backend).with_env_project_root(false);
+
+        let listed = s.practice_list(Parameters(PracticeListArgs { project_root: None, tags: Some(vec!["rust".into()]) })).await.unwrap();
+        let listed = text_of(&listed);
+        assert!(listed.contains("rust-style"), "{listed}");
+        assert!(!listed.contains("svelte-style"), "{listed}");
+    }
+
+    /// `memory_list` narrows by kind, tag and since without a search query, newest
+    /// first, capped by `limit`.
+    #[tokio::test]
+    async fn memory_list_filters_by_kind_tag_and_since() {
+        let home = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        let s = AtlasMcp::new(backend.clone()).with_env_project_root(false);
+
+        s.memory_remember(Parameters(MemoryRememberArgs { text: "a fact".into(), kind: Some("fact".into()), tags: Some(vec!["x".into()]), scope: None, project_id: None, project_root: None, source_agent: None })).await.unwrap();
+        s.memory_remember(Parameters(MemoryRememberArgs { text: "a decision".into(), kind: Some("decision".into()), tags: None, scope: None, project_id: None, project_root: None, source_agent: None })).await.unwrap();
+
+        let by_kind = s.memory_list(Parameters(MemoryListArgs { kinds: Some(vec!["decision".into()]), tags: None, project_id: None, project_root: None, since: None, limit: None })).await.unwrap();
+        let by_kind = text_of(&by_kind);
+        assert!(by_kind.contains("a decision"), "{by_kind}");
+        assert!(!by_kind.contains("a fact"), "{by_kind}");
+
+        let by_tag = s.memory_list(Parameters(MemoryListArgs { kinds: None, tags: Some(vec!["x".into()]), project_id: None, project_root: None, since: None, limit: None })).await.unwrap();
+        let by_tag = text_of(&by_tag);
+        assert!(by_tag.contains("a fact"), "{by_tag}");
+        assert!(!by_tag.contains("a decision"), "{by_tag}");
+
+        let future = Utc::now() + chrono::Duration::days(1);
+        let by_since = s.memory_list(Parameters(MemoryListArgs { kinds: None, tags: None, project_id: None, project_root: None, since: Some(future), limit: None })).await.unwrap();
+        let by_since: Vec<Memory> = serde_json::from_str(&text_of(&by_since)).unwrap();
+        assert!(by_since.is_empty(), "{by_since:?}");
+    }
+
+    /// `memory_review` accepts a pending memory into active use, or rejects it; an
+    /// unrecognised decision is invalid_params.
+    #[tokio::test]
+    async fn memory_review_accepts_or_rejects_a_pending_memory() {
+        let home = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        let m = backend.remember(
+            NewMemory { scope: MemoryScope::Global, project_id: None, kind: MemoryKind::Insight, text: "pending one".into(), tags: vec![], source_agent: None, source_tool: None, confidence: 0.4, status: MemoryStatus::Pending },
+            "t",
+        ).await.unwrap();
+        let s = AtlasMcp::new(backend.clone());
+
+        let bad = s.memory_review(Parameters(MemoryReviewArgs { id: m.id, decision: "maybe".into() })).await.unwrap_err();
+        assert_eq!(bad.code, rmcp::model::ErrorCode::INVALID_PARAMS, "{bad:?}");
+
+        let accepted = s.memory_review(Parameters(MemoryReviewArgs { id: m.id, decision: "accept".into() })).await.unwrap();
+        let accepted: Memory = serde_json::from_str(&text_of(&accepted)).unwrap();
+        assert_eq!(accepted.status, MemoryStatus::Active);
+
+        let rejected = s.memory_review(Parameters(MemoryReviewArgs { id: m.id, decision: "reject".into() })).await.unwrap();
+        let rejected: Memory = serde_json::from_str(&text_of(&rejected)).unwrap();
+        assert_eq!(rejected.status, MemoryStatus::Rejected);
+    }
+
+    /// `project_list` and `project_get` round trip a connected project by name.
+    #[tokio::test]
+    async fn project_list_and_get_round_trip_by_name() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        let connected = backend.connect_project(repo.path().to_path_buf(), "test").await.unwrap();
+        let s = AtlasMcp::new(backend);
+
+        let listed = s.project_list().await.unwrap();
+        let listed: Vec<Project> = serde_json::from_str(&text_of(&listed)).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, connected.id);
+
+        let got = s.project_get(Parameters(NameArgs { name: connected.name.clone() })).await.unwrap();
+        let got: Project = serde_json::from_str(&text_of(&got)).unwrap();
+        assert_eq!(got.id, connected.id);
+
+        let missing = s.project_get(Parameters(NameArgs { name: "nope".into() })).await.unwrap_err();
+        assert_eq!(missing.code, rmcp::model::ErrorCode::INVALID_PARAMS, "{missing:?}");
     }
 
     #[test]
@@ -1072,8 +1546,9 @@ mod tests {
     }
 
     /// A full client/server round trip over an in-memory duplex: the board resource
-    /// renders Markdown containing the task's key, and the board-workflow prompt is
-    /// listed and names the project's stages.
+    /// (now at `atlas://projects/{name}/board`) renders Markdown containing the
+    /// task's key, and the board-workflow prompt is listed and names the project's
+    /// stages.
     #[tokio::test]
     async fn board_resource_and_prompt_are_served_over_the_wire() {
         let home = tempfile::tempdir().unwrap();
@@ -1089,6 +1564,7 @@ mod tests {
             .await
             .unwrap();
         let task: atlas_core::models::Task = serde_json::from_str(&text_of(&created)).unwrap();
+        let project = backend.list_projects().await.unwrap().into_iter().next().unwrap();
 
         let (server_io, client_io) = tokio::io::duplex(16 * 1024);
         tokio::spawn(async move {
@@ -1097,7 +1573,7 @@ mod tests {
         });
         let client: rmcp::service::RunningService<rmcp::RoleClient, ()> = ().serve(client_io).await.unwrap();
 
-        let uri = format!("atlas://board/{}", repo.path().display());
+        let uri = format!("atlas://projects/{}/board", percent_encoding::utf8_percent_encode(&project.name, PROJECT_URI_SEGMENT));
         let resource = client.read_resource(ReadResourceRequestParams::new(uri)).await.unwrap();
         let text: String = resource
             .contents
@@ -1111,10 +1587,20 @@ mod tests {
 
         let prompts = client.list_prompts(None).await.unwrap();
         assert!(prompts.prompts.iter().any(|p| p.name == "board-workflow"), "{:?}", prompts.prompts);
+        assert!(prompts.prompts.iter().any(|p| p.name == BOOTSTRAP_PROMPT), "{:?}", prompts.prompts);
+        assert!(prompts.prompts.iter().any(|p| p.name == HANDOFF_PROMPT), "{:?}", prompts.prompts);
 
         let prompt = client.get_prompt(GetPromptRequestParams::new("board-workflow")).await.unwrap();
         let prompt_text: String = prompt.messages.iter().filter_map(|m| m.content.as_text().map(|t| t.text.clone())).collect();
         assert!(prompt_text.contains("Testing"), "{prompt_text}");
+
+        let bootstrap = client.get_prompt(GetPromptRequestParams::new(BOOTSTRAP_PROMPT)).await.unwrap();
+        let bootstrap_text: String = bootstrap.messages.iter().filter_map(|m| m.content.as_text().map(|t| t.text.clone())).collect();
+        assert!(bootstrap_text.contains("memory_search") && bootstrap_text.contains("task_list"), "{bootstrap_text}");
+
+        let handoff = client.get_prompt(GetPromptRequestParams::new(HANDOFF_PROMPT)).await.unwrap();
+        let handoff_text: String = handoff.messages.iter().filter_map(|m| m.content.as_text().map(|t| t.text.clone())).collect();
+        assert!(handoff_text.contains("memory_remember") && handoff_text.contains("task_create"), "{handoff_text}");
 
         client.cancel().await.unwrap();
     }
@@ -1149,10 +1635,10 @@ mod tests {
     }
 
     /// A project root with a space round-trips through the resource listing: the
-    /// listed `atlas://board/{project}` URI is percent-encoded, and reading it back
-    /// decodes to the same root and finds the board.
+    /// listed `atlas://projects/{name}/board` URI is percent-encoded, and reading it
+    /// back decodes to the same project and finds the board.
     #[tokio::test]
-    async fn board_resource_uri_round_trips_a_root_with_a_space() {
+    async fn board_resource_uri_round_trips_a_name_with_a_space() {
         let home = tempfile::tempdir().unwrap();
         let outer = tempfile::tempdir().unwrap();
         let repo = outer.path().join("my project");
@@ -1177,7 +1663,7 @@ mod tests {
         let client: rmcp::service::RunningService<rmcp::RoleClient, ()> = ().serve(client_io).await.unwrap();
 
         let listed = client.list_resources(None).await.unwrap();
-        let board_uri = listed.resources.iter().map(|r| r.uri.clone()).find(|u| u.contains("%20")).expect("a board URI with an encoded space");
+        let board_uri = listed.resources.iter().map(|r| r.uri.clone()).find(|u| u.contains("/board") && u.contains("%20")).expect("a board URI with an encoded space");
 
         let resource = client.read_resource(ReadResourceRequestParams::new(board_uri)).await.unwrap();
         let text: String = resource
@@ -1189,6 +1675,42 @@ mod tests {
             })
             .collect();
         assert!(text.contains(&task.key), "{text}");
+
+        client.cancel().await.unwrap();
+    }
+
+    /// `atlas://projects/{name}/practices` renders the global practices plus the
+    /// project's own as one Markdown document; `atlas://memories/recent` renders the
+    /// newest active memories.
+    #[tokio::test]
+    async fn practices_and_recent_memories_resources_render_markdown() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        let project = backend.connect_project(repo.path().to_path_buf(), "test").await.unwrap();
+        backend.save_doc(DocKind::Practice, NewDoc { name: "global-one".into(), body: "body one".into(), tags: vec![], project_id: None }, "test").await.unwrap();
+        backend.save_doc(DocKind::Practice, NewDoc { name: "project-one".into(), body: "body two".into(), tags: vec![], project_id: Some(project.id) }, "test").await.unwrap();
+        backend.remember(
+            NewMemory { scope: MemoryScope::Global, project_id: None, kind: MemoryKind::Fact, text: "a recent fact".into(), tags: vec![], source_agent: None, source_tool: None, confidence: 1.0, status: MemoryStatus::Active },
+            "test",
+        ).await.unwrap();
+        let s = AtlasMcp::new(backend);
+
+        let (server_io, client_io) = tokio::io::duplex(16 * 1024);
+        tokio::spawn(async move {
+            let running = s.serve(server_io).await.unwrap();
+            running.waiting().await.unwrap();
+        });
+        let client: rmcp::service::RunningService<rmcp::RoleClient, ()> = ().serve(client_io).await.unwrap();
+
+        let uri = format!("atlas://projects/{}/practices", percent_encoding::utf8_percent_encode(&project.name, PROJECT_URI_SEGMENT));
+        let resource = client.read_resource(ReadResourceRequestParams::new(uri)).await.unwrap();
+        let text: String = resource.contents.iter().filter_map(|c| match c { ResourceContents::TextResourceContents { text, .. } => Some(text.clone()), _ => None }).collect();
+        assert!(text.contains("global-one") && text.contains("project-one"), "{text}");
+
+        let resource = client.read_resource(ReadResourceRequestParams::new(MEMORIES_RECENT)).await.unwrap();
+        let text: String = resource.contents.iter().filter_map(|c| match c { ResourceContents::TextResourceContents { text, .. } => Some(text.clone()), _ => None }).collect();
+        assert!(text.contains("a recent fact"), "{text}");
 
         client.cancel().await.unwrap();
     }

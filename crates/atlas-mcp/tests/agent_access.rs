@@ -125,7 +125,7 @@ async fn require_review_lands_an_mcp_memory_as_pending() {
 
     let client = session(backend.clone(), root.path(), "codex").await;
     let stored = client
-        .call_tool(call("remember", serde_json::json!({"text": "the deploy target is fly.io", "kind": "decision"})))
+        .call_tool(call("memory_remember", serde_json::json!({"text": "the deploy target is fly.io", "kind": "decision"})))
         .await
         .unwrap();
     assert!(!stored.is_error.unwrap_or(false), "{stored:?}");
@@ -155,7 +155,7 @@ async fn memory_writers_refuses_an_unnamed_tool_but_never_the_cli() {
 
     let client = session(backend.clone(), root.path(), "codex").await;
     let err = client
-        .call_tool(call("remember", serde_json::json!({"text": "codex was here"})))
+        .call_tool(call("memory_remember", serde_json::json!({"text": "codex was here"})))
         .await
         .expect_err("codex is not on memory_writers");
     let text = err.to_string();

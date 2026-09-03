@@ -17,10 +17,10 @@
 //! character rather than by byte.
 
 use crate::board::TaskRepo;
-use crate::library::DocRepo;
 use crate::memories::MemoryRepo;
 use crate::models::Project;
 use crate::projects::ProjectRepo;
+use crate::workflow::WorkflowRepo;
 use crate::{AtlasError, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -426,43 +426,48 @@ fn search_events(q: &str, pattern: &str, project_id: Option<Uuid>, tasks: &TaskR
     Ok(out)
 }
 
-fn search_workflows(q: &str, pattern: &str, project_id: Option<Uuid>, docs: &DocRepo, name_of: &HashMap<Uuid, String>) -> Result<Vec<Candidate>> {
-    let list = docs.search_candidates(project_id, pattern)?;
+/// Unlike the other prefiltered sources, workflows have no SQL `LIKE` prefilter of
+/// their own: `WorkflowRepo` carries no `search_candidates`, so this lists every
+/// workflow in scope (widened by `project_id`, the same as `WorkflowRepo::list`) and
+/// scores each in memory. Acceptable because the table is small; if that stops being
+/// true, give `WorkflowRepo` a SQL prefilter like `DocRepo`'s.
+fn search_workflows(q: &str, project_id: Option<Uuid>, workflows: &WorkflowRepo, name_of: &HashMap<Uuid, String>) -> Result<Vec<Candidate>> {
+    let list = workflows.list(project_id)?;
     let mut out = Vec::with_capacity(list.len());
-    for d in list {
-        let score = score_of(q, Some(&d.name), Some(&d.name), Some(&d.body));
+    for w in list {
+        let score = score_of(q, Some(&w.name), Some(&w.name), Some(&w.description));
         if score <= 0.0 {
             continue;
         }
-        let highlights = highlight(q, &d.name);
+        let highlights = highlight(q, &w.name);
         out.push(Candidate {
             hit: SearchHit {
                 kind: SearchKind::Workflow,
-                id: d.id.to_string(),
-                title: d.name.clone(),
-                subtitle: d.project_id.and_then(|p| name_of.get(&p).cloned()),
-                project_id: d.project_id,
+                id: w.id.to_string(),
+                title: w.name.clone(),
+                subtitle: w.project_id.and_then(|p| name_of.get(&p).cloned()),
+                project_id: w.project_id,
                 reference: None,
                 score,
                 highlights,
             },
             score,
-            recency: d.updated_at,
+            recency: w.updated_at,
         });
     }
     Ok(out)
 }
 
-/// One query across every entity kind. `docs` must already be scoped to
-/// `DocKind::Workflow`: the "workflow" group is the only doc kind this search covers.
+/// One query across every entity kind.
 ///
 /// A blank or whitespace-only `q` answers with no groups and a total of 0, without
 /// touching the database: an empty search is not "everything", it's nothing yet.
 ///
 /// Every other kind's SQL prefilter caps at 500 rows per source (newest first; see
 /// the module doc comment), so `total` reflects at most 500 candidates from any one
-/// of them even when the table holds far more true matches.
-pub fn search(query: &SearchQuery, tasks: &TaskRepo, memories: &MemoryRepo, projects: &ProjectRepo, docs: &DocRepo) -> Result<SearchResult> {
+/// of them even when the table holds far more true matches. Workflows are the
+/// exception: see [`search_workflows`].
+pub fn search(query: &SearchQuery, tasks: &TaskRepo, memories: &MemoryRepo, projects: &ProjectRepo, workflows: &WorkflowRepo) -> Result<SearchResult> {
     let start = std::time::Instant::now();
     let q = query.q.trim().to_lowercase();
     if q.is_empty() {
@@ -489,7 +494,7 @@ pub fn search(query: &SearchQuery, tasks: &TaskRepo, memories: &MemoryRepo, proj
             SearchKind::File => search_files(&q, query.project_id, &all_projects),
             SearchKind::Commit => search_commits(&q, query.project_id, &all_projects),
             SearchKind::Event => search_events(&q, &pattern, query.project_id, tasks, memories, &name_of)?,
-            SearchKind::Workflow => search_workflows(&q, &pattern, query.project_id, docs, &name_of)?,
+            SearchKind::Workflow => search_workflows(&q, query.project_id, workflows, &name_of)?,
         };
         candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal).then_with(|| b.recency.cmp(&a.recency)));
         total += candidates.len();
@@ -507,7 +512,7 @@ mod tests {
     use super::*;
     use crate::board::TaskRepo;
     use crate::db::Db;
-    use crate::models::{DocKind, NewMemory, NewTask, MemoryKind, MemoryScope, MemoryStatus};
+    use crate::models::{NewMemory, NewTask, MemoryKind, MemoryScope, MemoryStatus};
     use crate::projects::detect::Detected;
     use std::sync::{Arc, Mutex};
 
@@ -527,8 +532,8 @@ mod tests {
         let tasks = task_repo(db);
         let memories = MemoryRepo::new(db);
         let projects = ProjectRepo::new(db);
-        let docs = DocRepo::new(db, DocKind::Workflow);
-        search(query, &tasks, &memories, &projects, &docs).unwrap()
+        let workflows = WorkflowRepo::new(db.clone(), Arc::new(Mutex::new(())));
+        search(query, &tasks, &memories, &projects, &workflows).unwrap()
     }
 
     fn group(r: &SearchResult, kind: SearchKind) -> Option<&SearchGroup> {

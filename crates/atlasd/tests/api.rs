@@ -170,12 +170,14 @@ async fn mcp_over_http_lists_and_calls_tools() {
     let _ = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})).await;
 
     let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).await;
-    for t in ["remember", "recall", "forget", "status", "project_context", "connect_project", "list_agents",
-              "get_agent", "save_agent", "list_practices", "get_practice", "list_workflows", "get_workflow"] {
+    // project_connect and memory_review are disabled by default (mcp.disabled_tools),
+    // so they are not in this list; see atlas-mcp's own gating tests for that.
+    for t in ["memory_remember", "memory_search", "memory_forget", "status", "project_context", "agent_list",
+              "get_agent", "save_agent", "practice_list", "get_practice", "workflow_list", "workflow_get"] {
         assert!(body.contains(&format!("\"name\":\"{t}\"")), "tools/list missing {t}: {body}");
     }
 
-    let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"remember","arguments":{"text":"mcp round trip works","kind":"insight"}}})).await;
+    let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"memory_remember","arguments":{"text":"mcp round trip works","kind":"insight"}}})).await;
     assert!(body.contains("mcp round trip works"), "{body}");
 
     // Agents reach MCP through the same store the JSON API writes, so save one there and
@@ -1941,9 +1943,9 @@ async fn mcp_workflow_tools_run_and_report_status() {
     assert_eq!(steps[0]["status"], "success", "{last}");
 }
 
-/// `list_workflows` (MCP) answers with the `WorkflowRepo` summary shape: name,
+/// `workflow_list` (MCP) answers with the `WorkflowRepo` summary shape: name,
 /// trigger, action count, enabled, last status, not the retired workflow-document
-/// listing; `get_workflow` answers with the full workflow, graph included.
+/// listing; `workflow_get` answers with the full workflow, graph included.
 #[tokio::test]
 async fn mcp_list_and_get_workflow_read_the_workflow_repo() {
     let d = start().await;
@@ -1959,7 +1961,7 @@ async fn mcp_list_and_get_workflow_read_the_workflow_repo() {
     let session = init.headers().get("mcp-session-id").map(|v| v.to_str().unwrap().to_string());
     let _ = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})).await;
 
-    let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_workflows","arguments":{}}})).await;
+    let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"workflow_list","arguments":{}}})).await;
     let listed = tool_json(&body);
     let row = listed.as_array().unwrap().iter().find(|w| w["name"] == wname).expect("the workflow in the listing");
     assert_eq!(row["trigger"], "manual", "{row}");
@@ -1968,7 +1970,7 @@ async fn mcp_list_and_get_workflow_read_the_workflow_repo() {
     assert_eq!(row["last_status"], serde_json::Value::Null, "{row}");
     assert!(row.get("graph").is_none(), "the listing must not carry the full graph: {row}");
 
-    let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_workflow","arguments":{"name": wname}}})).await;
+    let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"workflow_get","arguments":{"name": wname}}})).await;
     let got = tool_json(&body);
     assert_eq!(got["name"], wname, "{got}");
     assert_eq!(got["graph"]["nodes"].as_array().unwrap().len(), 4, "{got}");
