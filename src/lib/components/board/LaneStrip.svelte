@@ -4,7 +4,7 @@
 	// scrolls its cards rather than the whole board.
 	import { Icon } from '$lib/ds';
 	import type { SelectOption } from '$lib/ds';
-	import { LANE_DEFAULT, type LaneView } from '$lib/stores/board.svelte';
+	import { laneWidth, type LaneView } from '$lib/stores/board.svelte';
 	import Lane from './Lane.svelte';
 
 	interface Props {
@@ -38,7 +38,7 @@
 		<Lane
 			column={lane.column}
 			collapsed={lane.collapsed}
-			width={widths[lane.column.stage.name] ?? LANE_DEFAULT}
+			width={laneWidth(widths, lane.column.stage.name)}
 			{stageOptions}
 			{selected}
 			{onopen}
@@ -64,6 +64,11 @@
 		overflow-x: auto;
 		overflow-y: hidden;
 		padding-bottom: 8px;
+		/* The docked detail is out of flow and sits over this strip's right edge, so the
+		   scroll range has to be lengthened by its width or the last lane and the `Add
+		   column` slot end up under it with no scroll left to reach them. The dock sets
+		   the variable and keeps it at 0 while no task is open. */
+		padding-right: var(--strip-reserve, 0px);
 	}
 
 	.add {

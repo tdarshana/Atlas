@@ -56,7 +56,8 @@ function strip(stage: string | null = null) {
 		props: {
 			lanes: visibleLanes(deriveColumns(STAGES, tasks), stage),
 			widths: { Backlog: 420 },
-			stageOptions: STAGES.map((s) => s.name),
+			// The shape the page passes, so the test renders the Select production builds.
+			stageOptions: STAGES.map((s) => ({ value: s.name, label: s.name })),
 			selected: null,
 			onopen: () => {},
 			onmove: () => {},
@@ -115,6 +116,14 @@ describe('LaneStrip', () => {
 		expect(container.querySelector('[data-testid="task-open-ATL-1"]')).toBeNull();
 		expect(container.querySelector('[data-testid="task-open-ATL-3"]')).not.toBeNull();
 		expect(container.querySelectorAll('[data-testid="board-show-all"]')).toHaveLength(2);
+	});
+
+	it('keeps a folded lane 44px wide and still says which stage it is', () => {
+		const { container } = strip('Testing');
+
+		const backlog = container.querySelector<HTMLElement>('[data-testid="board-column-Backlog"]');
+		expect(backlog?.style.getPropertyValue('--lane-w')).toBe('44px');
+		expect(backlog?.querySelector('h2')?.textContent).toBe('Backlog');
 	});
 });
 

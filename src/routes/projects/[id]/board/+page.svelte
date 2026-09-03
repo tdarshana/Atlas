@@ -75,7 +75,9 @@
 		untrack(() => {
 			board.filters.projectId = id;
 			board.filters.query = q;
-			// Lane widths belong to one board, so they are read when the board changes.
+			// Re-read on every URL change, not only when the project does: the widths for a
+			// board are the same values each time, so a `?task=` change costs one read of
+			// two storage keys and moves nothing on the screen.
 			loadLayout(id);
 			closeTask();
 			void refresh();
@@ -196,8 +198,13 @@
 	/>
 {:else}
 	<!-- Relative, so the detail can dock over the strip's right edge and the lanes keep
-	     scrolling beneath it. -->
-	<div class="dock">
+	     scrolling beneath it. `--detail-w` is the panel's width and the room the strip has
+	     to reserve; the drag rewrites it on this node so both follow the pointer. -->
+	<div
+		class="dock"
+		class:docked={!!board.selected}
+		style="--detail-w:{board.detailWidth}px"
+	>
 		<LaneStrip
 			{lanes}
 			widths={board.laneWidths}
@@ -252,6 +259,13 @@
 		display: flex;
 		flex: 1;
 		min-height: 0;
+		--strip-reserve: 0px;
+	}
+
+	/* The strip reads this, so its scroll range runs past the docked panel and the last
+	   lane and the `Add column` slot stay reachable. */
+	.dock.docked {
+		--strip-reserve: calc(var(--detail-w) + 12px);
 	}
 
 	/* The design system has no small Input, and the header's row is 28px tall, so the

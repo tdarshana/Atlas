@@ -43,7 +43,7 @@ export const DETAIL_DEFAULT = 340;
 export const DETAIL_MIN = 280;
 export const DETAIL_MAX = 560;
 
-/** A collapsed lane shows its header and nothing else, so it needs no more than this. */
+/** A collapsed lane shows its header and its name on end, so it needs no more than this. */
 export const LANE_COLLAPSED = 44;
 
 const clamp = (value: number, min: number, max: number) =>
@@ -79,6 +79,23 @@ export function loadLaneWidths(projectId: Uuid | null): Record<string, number> {
 	} catch {
 		return {};
 	}
+}
+
+/**
+ * The widths for stages the board still has. A rename or a removed column would otherwise
+ * leave its entry under the key for good: inert, since only live stage names are looked
+ * up, but it accumulates one dead entry per rename.
+ */
+export function pruneLaneWidths(
+	widths: Record<string, number>,
+	stages: Stage[]
+): Record<string, number> {
+	const live = new Set(stages.map((s) => s.name));
+	const out: Record<string, number> = {};
+	for (const [stage, width] of Object.entries(widths)) {
+		if (live.has(stage)) out[stage] = width;
+	}
+	return out;
 }
 
 export function saveLaneWidths(projectId: Uuid | null, widths: Record<string, number>): void {
@@ -173,8 +190,8 @@ export function loadLayout(projectId: Uuid | null): void {
 }
 
 /** The width a lane is drawn at, which is the default until someone drags it. */
-export function laneWidth(stage: string): number {
-	return board.laneWidths[stage] ?? LANE_DEFAULT;
+export function laneWidth(widths: Record<string, number>, stage: string): number {
+	return widths[stage] ?? LANE_DEFAULT;
 }
 
 export function setLaneWidth(stage: string, width: number): void {
@@ -276,6 +293,16 @@ export async function refresh(): Promise<void> {
 		board.stages = list.stages;
 		board.overridden = list.overridden;
 		board.tasks = tasks;
+		// The stage list is only known once it lands, so this is where a width belonging
+		// to a renamed or removed column is dropped. Guarded on a non-empty list, or a
+		// board that failed to answer would take every width with it.
+		if (list.stages.length > 0) {
+			const kept = pruneLaneWidths(board.laneWidths, list.stages);
+			if (Object.keys(kept).length !== Object.keys(board.laneWidths).length) {
+				board.laneWidths = kept;
+				saveLaneWidths(projectId, kept);
+			}
+		}
 		board.error = null;
 		board.errorLogPath = null;
 	} catch (e) {

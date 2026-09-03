@@ -29,6 +29,7 @@ import {
 	loadDetailWidth,
 	loadLaneWidths,
 	loadLayout,
+	pruneLaneWidths,
 	saveDetailWidth,
 	saveLaneWidths,
 	setDetailWidth,
@@ -132,9 +133,20 @@ describe('lane width persistence', () => {
 	});
 
 	it('gives an undragged lane the default width', () => {
-		board.laneWidths = { Backlog: 500 };
-		expect(laneWidth('Backlog')).toBe(500);
-		expect(laneWidth('Testing')).toBe(LANE_DEFAULT);
+		const widths = { Backlog: 500 };
+		expect(laneWidth(widths, 'Backlog')).toBe(500);
+		expect(laneWidth(widths, 'Testing')).toBe(LANE_DEFAULT);
+	});
+});
+
+describe('pruneLaneWidths', () => {
+	it('drops the width of a stage the board no longer has', () => {
+		expect(pruneLaneWidths({ Backlog: 300, Retired: 500 }, STAGES)).toEqual({ Backlog: 300 });
+	});
+
+	it('keeps every live stage, so nothing is lost to a reload', () => {
+		const widths = { Backlog: 300, Testing: 400 };
+		expect(pruneLaneWidths(widths, STAGES)).toEqual(widths);
 	});
 });
 

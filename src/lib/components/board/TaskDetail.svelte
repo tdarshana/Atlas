@@ -245,10 +245,20 @@
 		event.preventDefault();
 	}
 
+	/**
+	 * The dock above this panel reads the same variable to reserve room on the lane strip,
+	 * so the live width has to reach it too; otherwise the strip's tail would only catch up
+	 * when the drag ended.
+	 */
+	function setLive(width: number) {
+		panel?.style.setProperty('--detail-w', `${width}px`);
+		panel?.parentElement?.style.setProperty('--detail-w', `${width}px`);
+	}
+
 	function drag(event: PointerEvent) {
-		if (!dragging || !panel) return;
+		if (!dragging) return;
 		live = clampDetail(startWidth - (event.clientX - startX));
-		panel.style.setProperty('--detail-w', `${live}px`);
+		setLive(live);
 	}
 
 	function drop(event: PointerEvent) {
@@ -256,6 +266,14 @@
 		dragging = false;
 		(event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
 		onresize(live);
+	}
+
+	/** An interrupted gesture is not a decision; the panel goes back where it started. */
+	function cancel(event: PointerEvent) {
+		if (!dragging) return;
+		dragging = false;
+		(event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
+		setLive(startWidth);
 	}
 
 	function nudge(event: KeyboardEvent) {
@@ -290,7 +308,7 @@
 		onpointerdown={grab}
 		onpointermove={drag}
 		onpointerup={drop}
-		onpointercancel={drop}
+		onpointercancel={cancel}
 		onkeydown={nudge}
 	></div>
 

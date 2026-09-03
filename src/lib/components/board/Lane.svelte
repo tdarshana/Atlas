@@ -7,7 +7,13 @@
 	// it once, on release, and that is what gets persisted.
 	import { Badge, IconButton } from '$lib/ds';
 	import type { SelectOption } from '$lib/ds';
-	import { type BoardColumn, clampLane, LANE_MAX, LANE_MIN } from '$lib/stores/board.svelte';
+	import {
+		type BoardColumn,
+		clampLane,
+		LANE_COLLAPSED,
+		LANE_MAX,
+		LANE_MIN
+	} from '$lib/stores/board.svelte';
 	import TaskCard from './TaskCard.svelte';
 
 	interface Props {
@@ -68,6 +74,17 @@
 		onresize(stage, live);
 	}
 
+	/**
+	 * An interrupted gesture is not a decision. The lane goes back to the width it was
+	 * grabbed at rather than persisting wherever the pointer had got to.
+	 */
+	function cancel(event: PointerEvent) {
+		if (!dragging) return;
+		dragging = false;
+		(event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
+		node?.style.setProperty('--lane-w', `${startWidth}px`);
+	}
+
 	/** The keyboard gets the same range in 20px steps, since a pointer drag has none. */
 	function nudge(event: KeyboardEvent) {
 		const step = event.key === 'ArrowLeft' ? -20 : event.key === 'ArrowRight' ? 20 : 0;
@@ -80,8 +97,9 @@
 {#if collapsed}
 	<section
 		class="lane collapsed"
+		style="--lane-w:{LANE_COLLAPSED}px"
 		data-testid="board-column-{stage}"
-		aria-label="{stage}, {count} tasks, hidden by the column filter"
+		aria-label="{stage}, {count} tasks, folded by the column filter"
 	>
 		<header>
 			<IconButton
@@ -93,6 +111,8 @@
 			/>
 		</header>
 		<span class="tally">{count}</span>
+		<!-- On end rather than hidden: a folded lane still has to say which one it is. -->
+		<h2 class="sideways">{stage}</h2>
 	</section>
 {:else}
 	<section
@@ -143,7 +163,7 @@
 			onpointerdown={grab}
 			onpointermove={drag}
 			onpointerup={drop}
-			onpointercancel={drop}
+			onpointercancel={cancel}
 			onkeydown={nudge}
 		></div>
 	</section>
@@ -160,15 +180,23 @@
 		min-height: 0;
 		max-height: 100%;
 		padding: 8px;
-		background: var(--bg-raised);
-		border: 1px solid var(--border-default);
+		/* The lane is the recessed surface and the card the raised one, per frame 03. */
+		background: var(--bg-base);
+		border: 1px solid var(--border-subtle);
 		border-radius: 5px;
 	}
 
 	.lane.collapsed {
-		--lane-w: 44px;
 		align-items: center;
 		gap: 6px;
+		overflow: hidden;
+	}
+
+	.sideways {
+		writing-mode: vertical-rl;
+		min-height: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	header {
