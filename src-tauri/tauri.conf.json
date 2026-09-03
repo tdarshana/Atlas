@@ -31,6 +31,7 @@
     "targets": [
       "app"
     ],
+    "createUpdaterArtifacts": true,
     "externalBin": [
       "binaries/atlasd"
     ],
@@ -41,5 +42,14 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://github.com/DarshanaWT/atlas/releases/latest/download/latest.json"
+      ],
+      "pubkey": "REPLACE_WITH_TAURI_PUBLIC_KEY"
+    }
   }
 }

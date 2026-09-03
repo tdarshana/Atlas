@@ -36,6 +36,11 @@ tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-clipboard-manager = "2"
+tauri-plugin-stronghold = "2"
+tauri-plugin-updater = "2"
+# Formats an update's publish date the same way the updater plugin's own JS command
+# does (`well_known::Rfc3339`), for `update_check`'s reply.
+time = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # `tauri-plugin-log` installs this crate's global logger, so a warning logged here

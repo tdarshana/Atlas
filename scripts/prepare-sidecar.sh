@@ -3,10 +3,18 @@
 # src-tauri/binaries/atlasd-<target triple>. `tauri.conf.json` runs this as part of
 # beforeBuildCommand, so `bun run tauri build` works with no separate step; running it
 # by hand first is still fine, since a second run does nothing.
+#
+# An optional first argument cross-compiles for that target triple instead of the host's
+# own (`rustc -vV`'s "host:" line), for a CI job building macOS aarch64 and x86_64 from
+# one runner; the caller is responsible for that target's toolchain being installed
+# (`rustup target add`).
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-triple="$(rustc -vV | sed -n 's/host: //p')"
+triple="${1:-}"
+if [ -z "$triple" ]; then
+  triple="$(rustc -vV | sed -n 's/host: //p')"
+fi
 if [ -z "$triple" ]; then
   echo "could not read the host target triple from rustc -vV" >&2
   exit 1
@@ -17,12 +25,18 @@ fi
 # fresh binary stages silently.
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
-if ! cargo build --release -p atlasd --manifest-path "$root/Cargo.toml" >"$log" 2>&1; then
+build_args=(--release -p atlasd --manifest-path "$root/Cargo.toml")
+target_dir="$root/target/release"
+if [ -n "${1:-}" ]; then
+  build_args+=(--target "$triple")
+  target_dir="$root/target/$triple/release"
+fi
+if ! cargo build "${build_args[@]}" >"$log" 2>&1; then
   cat "$log" >&2
   exit 1
 fi
 
-src="$root/target/release/atlasd"
+src="$target_dir/atlasd"
 dest_dir="$root/src-tauri/binaries"
 dest="$dest_dir/atlasd-$triple"
 

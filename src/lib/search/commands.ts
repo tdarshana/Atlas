@@ -4,7 +4,7 @@
 // does nothing.
 
 import type { IconName } from '$lib/ds';
-import { desktop } from '$lib/shell/platform';
+import { desktop, inTauri } from '$lib/shell/platform';
 import { setTheme, shell, toggleRail, toggleSidePanel } from '$lib/shell/shell.svelte';
 import type { Uuid } from '$lib/types';
 
@@ -13,10 +13,8 @@ import type { Uuid } from '$lib/types';
  * warning for a command that has nothing useful to fall back to. Exported so the
  * Settings screen's About card can offer the same action as its own button. */
 export async function openLogFolder(): Promise<void> {
-	const dir = await desktop<string | null>('log_dir', undefined, () => null);
-	if (!dir) return;
-	const { revealItemInDir } = await import('@tauri-apps/plugin-opener');
-	await revealItemInDir(dir);
+	if (!inTauri()) return;
+	await desktop('open_log_folder', undefined, () => undefined);
 }
 
 export interface CommandContext {

@@ -12,8 +12,10 @@ mod notify_poller;
 
 use commands::platform::{
     about_info, app_exit, app_relaunch, autostart_get, autostart_set, clipboard_write,
-    install_shortcut, log_dir, notification_permission, notify, shortcut_set, ui_state_all,
-    ui_state_get, ui_state_set, window_center, window_move, ShortcutRegistration,
+    install_shortcut, log_dir, notification_permission, notify, open_log_folder, shortcut_set,
+    ui_state_all, ui_state_get, ui_state_set, update_check, update_install, vault_list,
+    vault_lock, vault_put_key, vault_reapply, vault_set_passphrase, vault_status, vault_unlock,
+    window_center, window_move, ShortcutRegistration, UpdateState, VaultState,
 };
 
 const DEFAULT_PORT: u16 = 7433;
@@ -147,7 +149,13 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        // `tauri-plugin-stronghold` is used as a plain Rust library (see
+        // `commands::platform`'s vault commands), not registered here: the webview never
+        // invokes its own commands, so it needs no managed state or capability entry.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(ShortcutRegistration::default())
+        .manage(VaultState::default())
+        .manage(UpdateState::default())
         // macOS keeps its own chrome under the overlay title bar; Windows and Linux draw
         // none, so the webview's title bar is the only one there.
         .setup(|app| {
@@ -196,7 +204,17 @@ pub fn run() {
             notify,
             notification_permission,
             clipboard_write,
-            about_info
+            about_info,
+            open_log_folder,
+            vault_status,
+            vault_set_passphrase,
+            vault_unlock,
+            vault_lock,
+            vault_put_key,
+            vault_list,
+            vault_reapply,
+            update_check,
+            update_install
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

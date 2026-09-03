@@ -9,6 +9,7 @@
 	import { api } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
 	import { setStatusItems } from '$lib/shell';
+	import { mirrorKey, vaultStatus } from '$lib/shell/vault';
 	import { openProject, project, remove, setHeaderActions } from '$lib/stores/project.svelte';
 	import AgentAccessCard from '$lib/components/project/settings/AgentAccessCard.svelte';
 	import RemoveProjectDialog from '$lib/components/project/RemoveProjectDialog.svelte';
@@ -27,7 +28,7 @@
 		toAgentAccess,
 		toProjectExtraction
 	} from '$lib/components/project/settings/settings';
-	import type { AgentAccess, Project, ProjectPatch } from '$lib/types';
+	import type { AgentAccess, Project, ProjectPatch, VaultStatus } from '$lib/types';
 	import Dialog from '$lib/ui/Dialog.svelte';
 	import { push } from '$lib/ui/toasts.svelte';
 
@@ -59,6 +60,8 @@
 	let testResult = $state<{ ok: boolean; text: string } | null>(null);
 	let renaming = $state<{ from: string; to: string; text: string } | null>(null);
 	let confirmingRemove = $state(false);
+	/** Whether the desktop vault is open, so a freshly typed key gets mirrored on save. */
+	let vault = $state<VaultStatus>('missing');
 
 	const id = $derived(page.params.id ?? '');
 	const current = $derived(project.current);
@@ -167,6 +170,12 @@
 		setHeaderActions(null);
 	});
 
+	// Loaded once: unlike the project itself, the vault is not per-project state, and the
+	// Security card (Settings) is where it is opened or closed.
+	$effect(() => {
+		void vaultStatus().then((s) => (vault = s));
+	});
+
 	/** `15:15`, the time the save landed. */
 	function clockNow(): string {
 		const d = new Date();
@@ -258,6 +267,15 @@
 			await write('Extraction', 'extraction', () =>
 				api().setProjectExtraction(p.id, toProjectExtraction(f.extraction))
 			);
+			// A freshly typed key (not a masked round trip) mirrors into the vault once the
+			// write itself has landed; a mirror failure is reported but does not undo it.
+			if (landed.extraction && f.extraction.apiKey && vault === 'unlocked') {
+				try {
+					await mirrorKey(`project/${p.id}`, f.extraction.apiKey);
+				} catch (e) {
+					push('error', `Vault: ${errorMessage(e)}`);
+				}
+			}
 		}
 
 		if (Object.values(landed).some(Boolean)) {
@@ -391,7 +409,13 @@
 			bind:manual={form.manual}
 			{split}
 		/>
-		<ExtractionCard bind:form={form.extraction} {testing} result={testResult} ontest={onTest} />
+		<ExtractionCard
+			bind:form={form.extraction}
+			{testing}
+			result={testResult}
+			vaultLocked={vault !== 'unlocked'}
+			ontest={onTest}
+		/>
 		<DangerCard disabled={project.removing} onremove={() => (confirmingRemove = true)} />
 
 		<div class="actions">

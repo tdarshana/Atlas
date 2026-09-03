@@ -83,6 +83,27 @@ export interface AboutInfo {
 	data_dir: string;
 }
 
+/** `vault_status`: `missing` before `atlas.hold` exists, `locked` once it does but this
+ * process has not opened it, `unlocked` while it holds the open vault in memory. */
+export type VaultStatus = 'missing' | 'locked' | 'unlocked';
+
+/** `update_check`'s reply. `available: false` means the current version is the latest;
+ * a rejected promise (not this shape) means the check itself failed, including the
+ * placeholder pubkey's "updates are not configured". */
+export interface UpdateCheckResult {
+	available: boolean;
+	version: string | null;
+	notes: string | null;
+	date: string | null;
+}
+
+/** `atlas:update-progress`'s payload. `total` is absent when the server did not send a
+ * content length. */
+export interface UpdateProgress {
+	downloaded: number;
+	total: number | null;
+}
+
 export interface ProjectProfile {
 	name: string;
 	languages: string[];

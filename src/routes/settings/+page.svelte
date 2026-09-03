@@ -12,11 +12,13 @@
 	import { NOTHING, relativeAge } from '$lib/format';
 	import { copyText, inTauri, setStatusItems } from '$lib/shell';
 	import { desktop } from '$lib/shell/platform';
+	import { mirrorKey, vaultStatus } from '$lib/shell/vault';
 	import { VIEWS } from '$lib/shell/views';
 	import { openLogFolder } from '$lib/search/commands';
 	import { CLAUDE_SNIPPET, CODEX_SNIPPET, nextDisabledTools, toolIcon } from '$lib/mcp';
 	import { scrollToSection } from '$lib/components/settings-sections';
 	import { diagnosticsText } from '$lib/components/settings/diagnostics';
+	import { updateProgressPercent } from '$lib/components/settings/update-progress';
 	import {
 		acceleratorToKeyHintCombo,
 		blurRecording,
@@ -45,7 +47,10 @@
 		McpClient,
 		McpStatusReport,
 		McpToolRow,
-		Stage
+		Stage,
+		UpdateCheckResult,
+		UpdateProgress,
+		VaultStatus
 	} from '$lib/types';
 	import ErrorState from '$lib/ui/ErrorState.svelte';
 	import { push } from '$lib/ui/toasts.svelte';
@@ -244,6 +249,127 @@
 			: ''
 	);
 
+	// -- Security (vault) --------------------------------------------------------------
+
+	let vault = $state<VaultStatus>('missing');
+	let vaultPassphrase = $state('');
+	let vaultBusy = $state(false);
+	let vaultError = $state<string | null>(null);
+	let vaultScopes = $state<string[]>([]);
+
+	async function loadVault(): Promise<void> {
+		vault = await vaultStatus();
+		vaultScopes = vault === 'unlocked' ? await desktop('vault_list', undefined, () => []) : [];
+	}
+
+	async function setVaultPassphrase(): Promise<void> {
+		vaultBusy = true;
+		vaultError = null;
+		try {
+			await desktop('vault_set_passphrase', { passphrase: vaultPassphrase }, () => undefined);
+			vaultPassphrase = '';
+			await loadVault();
+			push('success', 'Vault passphrase set');
+		} catch (e) {
+			vaultError = errorMessage(e);
+		} finally {
+			vaultBusy = false;
+		}
+	}
+
+	async function unlockVault(): Promise<void> {
+		vaultBusy = true;
+		vaultError = null;
+		try {
+			await desktop('vault_unlock', { passphrase: vaultPassphrase }, () => undefined);
+			vaultPassphrase = '';
+			await loadVault();
+			push('success', 'Vault unlocked');
+		} catch (e) {
+			vaultError = errorMessage(e);
+		} finally {
+			vaultBusy = false;
+		}
+	}
+
+	async function lockVault(): Promise<void> {
+		vaultBusy = true;
+		vaultError = null;
+		try {
+			await desktop('vault_lock', undefined, () => undefined);
+			await loadVault();
+		} catch (e) {
+			vaultError = errorMessage(e);
+		} finally {
+			vaultBusy = false;
+		}
+	}
+
+	async function reapplyVaultKey(scope: string): Promise<void> {
+		vaultBusy = true;
+		vaultError = null;
+		try {
+			await desktop('vault_reapply', { scope }, () => undefined);
+			push('success', `Reapplied the key for ${scope}`);
+		} catch (e) {
+			vaultError = errorMessage(e);
+		} finally {
+			vaultBusy = false;
+		}
+	}
+
+	// -- Updater --------------------------------------------------------------------
+
+	let updateChecking = $state(false);
+	let updateResult = $state<UpdateCheckResult | null>(null);
+	let updateError = $state<string | null>(null);
+	let updateInstalling = $state(false);
+	let updateProgress = $state<UpdateProgress | null>(null);
+
+	const updateProgressPct = $derived(updateProgressPercent(updateProgress));
+
+	async function checkForUpdates(): Promise<void> {
+		updateChecking = true;
+		updateError = null;
+		updateResult = null;
+		try {
+			updateResult = await desktop('update_check', undefined, () => {
+				throw new Error('Only available in the desktop app.');
+			});
+		} catch (e) {
+			updateError = errorMessage(e);
+		} finally {
+			updateChecking = false;
+		}
+	}
+
+	async function installUpdate(): Promise<void> {
+		if (!inTauri()) return;
+		updateInstalling = true;
+		updateError = null;
+		updateProgress = { downloaded: 0, total: null };
+		let unlisten: (() => void) | null = null;
+		try {
+			const { listen } = await import('@tauri-apps/api/event');
+			unlisten = await listen<UpdateProgress>('atlas:update-progress', (e) => {
+				updateProgress = e.payload;
+			});
+			const { invoke } = await import('@tauri-apps/api/core');
+			// Resolves only on failure: a successful install relaunches the app before
+			// this promise would otherwise settle.
+			await invoke('update_install');
+		} catch (e) {
+			updateError = errorMessage(e);
+		} finally {
+			updateInstalling = false;
+			unlisten?.();
+		}
+	}
+
+	async function restartToUpdate(): Promise<void> {
+		await desktop('app_relaunch', undefined, () => undefined);
+	}
+
 	/** The CONNECT block shows both snippets, one after the other, as frame 10 does. */
 	const connectSnippet = `${CLAUDE_SNIPPET}\n\n${CODEX_SNIPPET}`;
 
@@ -360,12 +486,23 @@
 			push('info', 'No changes to save');
 			return;
 		}
+		// Captured before `syncDraft` blanks the box again: a stored key never reads back,
+		// so this is the only moment the real value is still around to mirror.
+		const savedKey = typeof partial['extraction.api_key'] === 'string' ? partial['extraction.api_key'] : null;
 		saving = true;
 		saveError = null;
 		try {
 			await saveSettings(partial);
 			syncDraft();
 			push('success', 'Settings saved');
+			if (savedKey && vault === 'unlocked') {
+				try {
+					await mirrorKey('global', savedKey);
+					await loadVault();
+				} catch (e) {
+					push('error', `Vault: ${errorMessage(e)}`);
+				}
+			}
 		} catch (e) {
 			// The daemon's `error` string is the whole explanation; show it verbatim.
 			saveError = errorMessage(e);
@@ -382,6 +519,7 @@
 		await loadMcp();
 		await loadAutostart();
 		await loadAbout();
+		await loadVault();
 	}
 
 	async function loadStages(): Promise<void> {
@@ -536,6 +674,11 @@
 				{#if keyWillBeCleared}
 					<span class="hint warn" role="status" data-testid="settings-key-cleared-note">
 						Changing the base URL clears the stored key; enter it again.
+					</span>
+				{/if}
+				{#if vault !== 'unlocked'}
+					<span class="hint" role="status" data-testid="settings-vault-hint">
+						Vault locked, key not mirrored.
 					</span>
 				{/if}
 
@@ -853,6 +996,85 @@
 			</div>
 		</section>
 
+		<section class="card" id="security">
+			<div class="card-head">
+				<span class="card-title">Security</span>
+				<span class="spacer"></span>
+				<Badge tone={vault === 'unlocked' ? 'success' : vault === 'locked' ? 'warning' : 'neutral'}>
+					{vault}
+				</Badge>
+			</div>
+			<div class="card-body">
+				<span class="hint">
+					An encrypted vault (<span class="mono">atlas.hold</span>) in the app data folder that
+					mirrors every extraction API key you save here. The daemon keeps its own copy in
+					DuckDB, so extraction still works headless without the vault unlocked.
+				</span>
+				<Input
+					label="Passphrase"
+					type="password"
+					autocomplete="off"
+					bind:value={vaultPassphrase}
+					disabled={!inTauri() || vaultBusy}
+					data-testid="vault-passphrase"
+				/>
+				<div class="recorder-row">
+					{#if vault === 'missing'}
+						<Button
+							variant="primary"
+							size="sm"
+							data-testid="vault-set"
+							disabled={!inTauri() || vaultBusy || !vaultPassphrase}
+							onclick={setVaultPassphrase}
+						>
+							{vaultBusy ? 'Setting…' : 'Set vault passphrase'}
+						</Button>
+					{:else if vault === 'locked'}
+						<Button
+							variant="primary"
+							size="sm"
+							data-testid="vault-unlock"
+							disabled={!inTauri() || vaultBusy || !vaultPassphrase}
+							onclick={unlockVault}
+						>
+							{vaultBusy ? 'Unlocking…' : 'Unlock vault'}
+						</Button>
+					{:else}
+						<Button size="sm" data-testid="vault-lock" disabled={vaultBusy} onclick={lockVault}>
+							{vaultBusy ? 'Locking…' : 'Lock'}
+						</Button>
+					{/if}
+				</div>
+				{#if vaultError}
+					<p class="bad" role="alert" data-testid="vault-error">{vaultError}</p>
+				{/if}
+				{#if vault === 'unlocked'}
+					<div class="group">
+						<span class="group-heading">Stored keys</span>
+						{#if vaultScopes.length === 0}
+							<span class="hint">No keys mirrored yet.</span>
+						{:else}
+							{#each vaultScopes as scope (scope)}
+								<div class="transport">
+									<span class="mono value">{scope}</span>
+									<span class="spacer"></span>
+									<Button
+										variant="ghost"
+										size="sm"
+										data-testid={`vault-reapply-${scope}`}
+										disabled={vaultBusy}
+										onclick={() => reapplyVaultKey(scope)}
+									>
+										Reapply
+									</Button>
+								</div>
+							{/each}
+						{/if}
+					</div>
+				{/if}
+			</div>
+		</section>
+
 		<section class="card" id="about">
 			<div class="card-head">
 				<span class="card-title">About</span>
@@ -902,6 +1124,64 @@
 				{:else}
 					<p class="hint">Loading…</p>
 				{/if}
+
+				<div class="group">
+					<span class="group-heading">Updates</span>
+					<div class="recorder-row">
+						<Button
+							variant="ghost"
+							size="sm"
+							data-testid="update-check"
+							disabled={!inTauri() || updateChecking || updateInstalling}
+							onclick={checkForUpdates}
+						>
+							{updateChecking ? 'Checking…' : 'Check for updates'}
+						</Button>
+						{#if updateError}
+							<span class="hint warn" role="status" data-testid="update-error">{updateError}</span>
+						{:else if updateResult}
+							<span class="hint" role="status" data-testid="update-result">
+								{updateResult.available ? `Update available: ${updateResult.version}` : 'Atlas is up to date.'}
+							</span>
+						{/if}
+					</div>
+					{#if updateResult?.available}
+						<div class="recorder-row">
+							<Button
+								variant="primary"
+								size="sm"
+								data-testid="update-install"
+								disabled={updateInstalling}
+								onclick={installUpdate}
+							>
+								{updateInstalling ? 'Installing…' : 'Download and install'}
+							</Button>
+							<Button
+								variant="ghost"
+								size="sm"
+								data-testid="update-restart"
+								disabled={updateInstalling}
+								onclick={restartToUpdate}
+							>
+								Restart to update
+							</Button>
+						</div>
+						{#if updateProgress}
+							<div class="progress-track" data-testid="update-progress">
+								<div class="progress-fill" style={`width: ${updateProgressPct}%`}></div>
+							</div>
+						{/if}
+					{/if}
+					{#if updateError === 'updates are not configured'}
+						<span class="hint">
+							See <a
+								href="https://github.com/DarshanaWT/atlas/blob/main/docs/usage.md#desktop-platform"
+								target="_blank"
+								rel="noreferrer">docs/usage.md, Desktop platform</a
+							> for the manual signing key steps.
+						</span>
+					{/if}
+				</div>
 			</div>
 		</section>
 
@@ -1179,5 +1459,18 @@
 		margin: 0;
 		color: var(--text-primary);
 		word-break: break-all;
+	}
+
+	.progress-track {
+		height: 4px;
+		border-radius: 2px;
+		background: var(--bg-base);
+		overflow: hidden;
+	}
+
+	.progress-fill {
+		height: 100%;
+		background: var(--accent);
+		transition: width 0.2s ease;
 	}
 </style>

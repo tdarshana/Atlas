@@ -4,9 +4,12 @@
 // calls these; it never imports a plugin's own JS package.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use atlas_cli::daemon_ctl;
+use atlas_core::paths::AtlasPaths;
 use tauri::{Emitter, Manager, Runtime, WebviewWindow};
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -14,6 +17,9 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_positioner::{Position, WindowExt};
 use tauri_plugin_store::{Store, StoreExt};
+use tauri_plugin_stronghold::kdf::KeyDerivation;
+use tauri_plugin_stronghold::stronghold::Stronghold;
+use tauri_plugin_updater::UpdaterExt;
 
 /// The event the global shortcut and the palette's own Mod+K both raise; the shell's
 /// shortcut layer (`src/lib/shell/shortcuts.ts`) listens for it on `window`.
@@ -122,6 +128,15 @@ pub fn log_dir<R: Runtime>(app: tauri::AppHandle<R>) -> Result<String, String> {
         .app_log_dir()
         .map(|dir| dir.display().to_string())
         .map_err(|e| e.to_string())
+}
+
+/// Reveals the log folder in the OS file browser. Rust-first like every other command
+/// here: the page used to import `@tauri-apps/plugin-opener` itself for this, which this
+/// replaces.
+#[tauri::command]
+pub fn open_log_folder<R: Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    let dir = app.path().app_log_dir().map_err(|e| e.to_string())?;
+    tauri_plugin_opener::reveal_item_in_dir(dir).map_err(|e| e.to_string())
 }
 
 /// Whether the app is registered to launch at login (a macOS launch agent).
@@ -260,6 +275,283 @@ pub fn about_info<R: Runtime>(app: tauri::AppHandle<R>) -> Result<AboutInfo, Str
     })
 }
 
+// ---- Vault (stronghold) ----
+//
+// Used as a plain Rust library, not as a registered Tauri plugin: the passphrase and
+// every scoped key stay on this side of the IPC boundary, and the webview never invokes
+// `tauri-plugin-stronghold`'s own commands, so no stronghold capability entry is needed.
+// A vault holds one Stronghold client (`VAULT_CLIENT`); a scope's key is a record in
+// that client's own key/value store, which (unlike the top-level `Stronghold::store()`)
+// is part of what `Stronghold::save` commits to the snapshot file.
+
+/// The vault's snapshot file, in the app data dir.
+const VAULT_FILE: &str = "atlas.hold";
+/// The argon2 salt beside it. Generated once, on the first `vault_set_passphrase`; the
+/// salt itself is not secret, only the passphrase is.
+const VAULT_SALT_FILE: &str = "atlas-vault.salt";
+/// The one Stronghold client every scoped key is stored under.
+const VAULT_CLIENT: &[u8] = b"atlas";
+
+/// The unlocked vault, held only in memory: `None` while locked or missing. The
+/// passphrase itself is never kept past the argon2 hash that opens or creates it, and
+/// is never written to disk.
+#[derive(Default)]
+pub struct VaultState(pub Mutex<Option<Stronghold>>);
+
+fn vault_path<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
+    app.path().app_data_dir().map(|d| d.join(VAULT_FILE)).map_err(|e| e.to_string())
+}
+
+fn vault_salt_path<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
+    app.path().app_data_dir().map(|d| d.join(VAULT_SALT_FILE)).map_err(|e| e.to_string())
+}
+
+/// `"missing"` when `atlas.hold` does not exist yet, `"unlocked"` while this app process
+/// holds the open vault in memory, `"locked"` otherwise.
+#[tauri::command]
+pub fn vault_status<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    vault: tauri::State<'_, VaultState>,
+) -> Result<String, String> {
+    if vault.0.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+        return Ok("unlocked".to_string());
+    }
+    Ok(if vault_path(&app)?.exists() { "locked" } else { "missing" }.to_string())
+}
+
+/// Creates `atlas.hold` and its one client, keyed by an argon2 hash of `passphrase`.
+/// Refuses if a vault already exists here; `vault_unlock` is how an existing one opens.
+#[tauri::command]
+pub fn vault_set_passphrase<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    vault: tauri::State<'_, VaultState>,
+    passphrase: String,
+) -> Result<(), String> {
+    let path = vault_path(&app)?;
+    if path.exists() {
+        return Err("A vault already exists; unlock it instead.".to_string());
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let key = KeyDerivation::argon2(&passphrase, &vault_salt_path(&app)?);
+    let stronghold = Stronghold::new(&path, key).map_err(|e| e.to_string())?;
+    stronghold.create_client(VAULT_CLIENT).map_err(|e| e.to_string())?;
+    stronghold.save().map_err(|e| e.to_string())?;
+    *vault.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(stronghold);
+    Ok(())
+}
+
+/// Opens the existing `atlas.hold` with an argon2 hash of `passphrase`. A wrong
+/// passphrase fails to decrypt the snapshot, which is reported as a plain sentence
+/// rather than the crypto error underneath it.
+#[tauri::command]
+pub fn vault_unlock<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    vault: tauri::State<'_, VaultState>,
+    passphrase: String,
+) -> Result<(), String> {
+    let path = vault_path(&app)?;
+    if !path.exists() {
+        return Err("No vault exists yet; set a passphrase first.".to_string());
+    }
+    let key = KeyDerivation::argon2(&passphrase, &vault_salt_path(&app)?);
+    let stronghold = Stronghold::new(&path, key).map_err(|_| "Incorrect passphrase.".to_string())?;
+    stronghold
+        .load_client(VAULT_CLIENT)
+        .or_else(|_| stronghold.create_client(VAULT_CLIENT))
+        .map_err(|e| e.to_string())?;
+    *vault.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(stronghold);
+    Ok(())
+}
+
+/// Saves the vault, then drops it from memory. Every key it holds stays on disk,
+/// encrypted; only the open, in-memory handle is gone.
+#[tauri::command]
+pub fn vault_lock(vault: tauri::State<'_, VaultState>) -> Result<(), String> {
+    let mut guard = vault.0.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(stronghold) = guard.as_ref() {
+        stronghold.save().map_err(|e| e.to_string())?;
+    }
+    *guard = None;
+    Ok(())
+}
+
+/// Stores `key` under `scope` (`"global"` or `"project/<id>"`) and saves the vault.
+/// Errs with the same sentence the Extraction cards show when the vault is locked.
+#[tauri::command]
+pub fn vault_put_key(vault: tauri::State<'_, VaultState>, scope: String, key: String) -> Result<(), String> {
+    let guard = vault.0.lock().unwrap_or_else(|e| e.into_inner());
+    let stronghold = guard.as_ref().ok_or_else(|| "Vault locked, key not mirrored.".to_string())?;
+    let client = stronghold.get_client(VAULT_CLIENT).map_err(|e| e.to_string())?;
+    client.store().insert(scope.into_bytes(), key.into_bytes(), None).map_err(|e| e.to_string())?;
+    stronghold.save().map_err(|e| e.to_string())
+}
+
+/// Every scope the vault currently holds a key for, sorted.
+#[tauri::command]
+pub fn vault_list(vault: tauri::State<'_, VaultState>) -> Result<Vec<String>, String> {
+    let guard = vault.0.lock().unwrap_or_else(|e| e.into_inner());
+    let stronghold = guard.as_ref().ok_or_else(|| "Vault locked, key not mirrored.".to_string())?;
+    let client = stronghold.get_client(VAULT_CLIENT).map_err(|e| e.to_string())?;
+    let mut scopes: Vec<String> = client
+        .store()
+        .keys()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter_map(|k| String::from_utf8(k).ok())
+        .collect();
+    scopes.sort();
+    Ok(scopes)
+}
+
+/// The daemon's base API url, resolved fresh from `daemon.json` rather than cached: the
+/// port can change across a restart. Mirrors `notify_poller::base_url`.
+fn daemon_base_url() -> Result<String, String> {
+    let port = daemon_ctl::daemon_info(&AtlasPaths::discover())
+        .and_then(|v| v.get("port")?.as_u64())
+        .ok_or_else(|| "The daemon is not running.".to_string())?;
+    Ok(format!("http://127.0.0.1:{port}/api/v1"))
+}
+
+/// Sends the vault's stored key for `scope` back to the daemon: `"global"` writes
+/// `extraction.api_key` through `PUT /settings`; `"project/<id>"` reads the project's
+/// current extraction override (so its other fields survive) and writes the key back
+/// through `PUT /projects/{id}/extraction`.
+#[tauri::command]
+pub async fn vault_reapply(vault: tauri::State<'_, VaultState>, scope: String) -> Result<(), String> {
+    let key = {
+        let guard = vault.0.lock().unwrap_or_else(|e| e.into_inner());
+        let stronghold = guard.as_ref().ok_or_else(|| "Vault locked, key not mirrored.".to_string())?;
+        let client = stronghold.get_client(VAULT_CLIENT).map_err(|e| e.to_string())?;
+        let raw = client
+            .store()
+            .get(scope.as_bytes())
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("No key stored for '{scope}'."))?;
+        String::from_utf8(raw).map_err(|e| e.to_string())?
+    };
+    let base = daemon_base_url()?;
+    let http = reqwest::Client::builder().timeout(Duration::from_secs(5)).build().map_err(|e| e.to_string())?;
+    if scope == "global" {
+        let resp = http
+            .put(format!("{base}/settings"))
+            .json(&serde_json::json!({ "extraction.api_key": key }))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        return if resp.status().is_success() { Ok(()) } else { Err(format!("The daemon refused the key ({}).", resp.status())) };
+    }
+    let Some(id) = scope.strip_prefix("project/") else {
+        return Err(format!("'{scope}' is not a vault scope."));
+    };
+    let project: serde_json::Value = http
+        .get(format!("{base}/projects/{id}"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .json()
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut extraction = project.get("extraction").cloned().unwrap_or(serde_json::Value::Null);
+    if extraction.is_null() {
+        extraction = serde_json::json!({});
+    }
+    extraction["api_key"] = serde_json::Value::String(key);
+    let resp = http
+        .put(format!("{base}/projects/{id}/extraction"))
+        .json(&extraction)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.status().is_success() { Ok(()) } else { Err(format!("The daemon refused the key ({}).", resp.status())) }
+}
+
+// ---- Updater ----
+
+/// Mirrors `tauri.conf.json`'s `plugins.updater.pubkey`. A placeholder is not a valid
+/// minisign public key, so `update_check` refuses before ever calling the plugin rather
+/// than surfacing a parse error that means nothing to the user. Flip this to `true` only
+/// once both that key and this constant have been replaced together, per docs/usage.md,
+/// Desktop platform.
+const UPDATER_PUBKEY_CONFIGURED: bool = false;
+
+const UPDATE_PROGRESS_EVENT: &str = "atlas:update-progress";
+
+/// The last `update_check` result, held so `update_install` does not have to check
+/// again: the daemon-style flow here is check once, install what was found.
+#[derive(Default)]
+pub struct UpdateState(pub Mutex<Option<tauri_plugin_updater::Update>>);
+
+#[derive(Debug, serde::Serialize)]
+pub struct UpdateCheckResult {
+    pub available: bool,
+    pub version: Option<String>,
+    pub notes: Option<String>,
+    pub date: Option<String>,
+}
+
+/// Checks the endpoint in `tauri.conf.json` for a newer release. While the updater's
+/// pubkey is still the repo's placeholder this returns the plain sentence the About card
+/// shows instead, without making a request.
+#[tauri::command]
+pub async fn update_check<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, UpdateState>,
+) -> Result<UpdateCheckResult, String> {
+    if !UPDATER_PUBKEY_CONFIGURED {
+        return Err("updates are not configured".to_string());
+    }
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    match updater.check().await.map_err(|e| e.to_string())? {
+        Some(update) => {
+            let date = update
+                .date
+                .and_then(|d| d.format(&time::format_description::well_known::Rfc3339).ok());
+            let result = UpdateCheckResult {
+                available: true,
+                version: Some(update.version.clone()),
+                notes: update.body.clone(),
+                date,
+            };
+            *state.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(update);
+            Ok(result)
+        }
+        None => {
+            *state.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            Ok(UpdateCheckResult { available: false, version: None, notes: None, date: None })
+        }
+    }
+}
+
+/// Downloads and installs the update `update_check` last found, streaming progress as
+/// `atlas:update-progress` events (`{ downloaded, total }`, `total` absent when the
+/// server did not send a content length), then relaunches the app the same way
+/// `app_relaunch` does. Never returns on success: the process is replaced first.
+#[tauri::command]
+pub async fn update_install<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, UpdateState>,
+) -> Result<(), String> {
+    if !UPDATER_PUBKEY_CONFIGURED {
+        return Err("updates are not configured".to_string());
+    }
+    let update = state.0.lock().unwrap_or_else(|e| e.into_inner()).clone().ok_or_else(|| "Check for updates first.".to_string())?;
+    let handle = app.clone();
+    let mut downloaded: u64 = 0;
+    update
+        .download_and_install(
+            move |chunk_len, total| {
+                downloaded += chunk_len as u64;
+                let _ = handle.emit(UPDATE_PROGRESS_EVENT, serde_json::json!({ "downloaded": downloaded, "total": total }));
+            },
+            || {},
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    app_relaunch(app)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,20 +618,29 @@ mod tests {
         assert_eq!(err, "\"middle\" is not a window position.");
     }
 
+    /// Serializes every test in this module that points `HOME` at a scratch directory:
+    /// `HOME` is process-global and `cargo test` runs this binary's tests on several
+    /// threads by default, so two such tests running at once would each see the other's
+    /// directory. Held for the life of the [`HomeGuard`] that acquired it.
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// A guard that points `HOME` at a scratch directory for the life of one test and
-    /// restores it on drop, so the store commands resolve the app data dir under a
-    /// throwaway path instead of the real user's home. Rust unit tests in this crate
-    /// run in one process per binary and this is the crate's only test that touches
-    /// `HOME`, so there is nothing else in this process to race with it.
-    struct HomeGuard(Option<std::ffi::OsString>);
+    /// restores it on drop, so the store and vault commands resolve the app data dir
+    /// under a throwaway path instead of the real user's home. `_lock` is never read;
+    /// it exists only to hold `HOME_LOCK` until this guard drops.
+    struct HomeGuard {
+        previous: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
 
     impl HomeGuard {
         fn set(dir: &std::path::Path) -> Self {
+            let _lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let previous = std::env::var_os("HOME");
-            // SAFETY: single-threaded with respect to `HOME` within this crate's tests;
-            // see the doc comment above.
+            // SAFETY: serialized against every other `HomeGuard` by `HOME_LOCK`, held
+            // until this guard drops.
             unsafe { std::env::set_var("HOME", dir) };
-            Self(previous)
+            Self { previous, _lock }
         }
     }
 
@@ -347,7 +648,7 @@ mod tests {
         fn drop(&mut self) {
             // SAFETY: as above.
             unsafe {
-                match &self.0 {
+                match &self.previous {
                     Some(v) => std::env::set_var("HOME", v),
                     None => std::env::remove_var("HOME"),
                 }
@@ -384,5 +685,81 @@ mod tests {
         assert_eq!(all.get("atlas.rail"), Some(&serde_json::json!("expanded")));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One test covering the whole vault lifecycle rather than several: `Stronghold`'s
+    /// argon2 hash is not cheap, and the file it opens is the same scratch directory
+    /// `HomeGuard` serializes every run through.
+    #[test]
+    fn vault_lifecycle_covers_missing_set_lock_unlock_and_scoped_keys() {
+        let dir = std::env::temp_dir().join(format!("atlas-desktop-vault-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("failed to create the test's scratch dir");
+        let _home = HomeGuard::set(&dir);
+
+        let app = mock_builder()
+            .manage(VaultState::default())
+            .build(mock_context(noop_assets()))
+            .expect("failed to build mock app");
+        let handle = app.handle().clone();
+
+        assert_eq!(vault_status(handle.clone(), handle.state::<VaultState>()).unwrap(), "missing");
+
+        vault_set_passphrase(handle.clone(), handle.state::<VaultState>(), "correct horse".into()).unwrap();
+        assert_eq!(vault_status(handle.clone(), handle.state::<VaultState>()).unwrap(), "unlocked");
+
+        // A vault already on disk refuses a second `vault_set_passphrase` rather than
+        // silently re-keying it.
+        let err = vault_set_passphrase(handle.clone(), handle.state::<VaultState>(), "another".into()).unwrap_err();
+        assert_eq!(err, "A vault already exists; unlock it instead.");
+
+        vault_put_key(handle.state::<VaultState>(), "global".into(), "sk-real".into()).unwrap();
+        vault_put_key(handle.state::<VaultState>(), "project/abc".into(), "sk-proj".into()).unwrap();
+        assert_eq!(
+            vault_list(handle.state::<VaultState>()).unwrap(),
+            vec!["global".to_string(), "project/abc".to_string()]
+        );
+
+        vault_lock(handle.state::<VaultState>()).unwrap();
+        assert_eq!(vault_status(handle.clone(), handle.state::<VaultState>()).unwrap(), "locked");
+
+        let locked_err = vault_put_key(handle.state::<VaultState>(), "global".into(), "sk-new".into()).unwrap_err();
+        assert_eq!(locked_err, "Vault locked, key not mirrored.");
+
+        let wrong_err = vault_unlock(handle.clone(), handle.state::<VaultState>(), "not it".into()).unwrap_err();
+        assert_eq!(wrong_err, "Incorrect passphrase.");
+        assert_eq!(vault_status(handle.clone(), handle.state::<VaultState>()).unwrap(), "locked");
+
+        // The keys stored before locking are still there once unlocked with the right
+        // passphrase: they were saved to the snapshot, not only held in memory.
+        vault_unlock(handle.clone(), handle.state::<VaultState>(), "correct horse".into()).unwrap();
+        assert_eq!(vault_status(handle.clone(), handle.state::<VaultState>()).unwrap(), "unlocked");
+        assert_eq!(
+            vault_list(handle.state::<VaultState>()).unwrap(),
+            vec!["global".to_string(), "project/abc".to_string()]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn update_check_refuses_while_the_pubkey_is_the_placeholder() {
+        let app = mock_builder()
+            .manage(UpdateState::default())
+            .build(mock_context(noop_assets()))
+            .expect("failed to build mock app");
+        let handle = app.handle().clone();
+        let err = update_check(handle.clone(), handle.state::<UpdateState>()).await.unwrap_err();
+        assert_eq!(err, "updates are not configured");
+    }
+
+    #[tokio::test]
+    async fn update_install_refuses_while_the_pubkey_is_the_placeholder() {
+        let app = mock_builder()
+            .manage(UpdateState::default())
+            .build(mock_context(noop_assets()))
+            .expect("failed to build mock app");
+        let handle = app.handle().clone();
+        let err = update_install(handle.clone(), handle.state::<UpdateState>()).await.unwrap_err();
+        assert_eq!(err, "updates are not configured");
     }
 }

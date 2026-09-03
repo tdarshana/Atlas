@@ -10,10 +10,12 @@
 		testing: boolean;
 		/** The last `Test connection` answer, or null before one has been asked for. */
 		result: { ok: boolean; text: string } | null;
+		/** Whether the desktop vault is closed, so a saved key would not be mirrored. */
+		vaultLocked: boolean;
 		ontest: () => void;
 	}
 
-	let { form = $bindable(), testing, result, ontest }: Props = $props();
+	let { form = $bindable(), testing, result, vaultLocked, ontest }: Props = $props();
 
 	const dropping = $derived(keyWillDrop(form));
 
@@ -91,6 +93,11 @@
 				hint={keyHint}
 				bind:value={form.apiKey}
 			/>
+			{#if vaultLocked}
+				<span class="hint" data-testid="project-extraction-vault-hint">
+					Vault locked, key not mirrored.
+				</span>
+			{/if}
 		{/if}
 
 		{#if result}

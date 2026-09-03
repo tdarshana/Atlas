@@ -1,0 +1,91 @@
+# Builds the desktop app and drafts a GitHub release when a `v*` tag is pushed. This
+# file is not wired to any remote from this repository: nothing here runs until a tag is
+# actually pushed to a repository that has it, and the draft it makes is never published
+# automatically (`releaseDraft: true` below).
+#
+# Signing is a manual step the release owner takes outside this workflow. `tauri.conf.json`
+# ships `plugins.updater.pubkey` as the literal placeholder `REPLACE_WITH_TAURI_PUBLIC_KEY`;
+# until it is replaced with a real key (see docs/usage.md, "Desktop platform"), a build
+# made by this workflow has no update signature and `update_check` refuses with "updates
+# are not configured" in the app itself. To make real signed releases:
+#
+#   1. Run `bunx tauri signer generate -w ~/.tauri/atlas.key` on a machine you trust, not
+#      in CI. Keep the private key and its password out of this repository entirely.
+#   2. Put the generated public key in `src-tauri/tauri.conf.json`'s
+#      `plugins.updater.pubkey`, replacing the placeholder, and flip
+#      `UPDATER_PUBKEY_CONFIGURED` in `src-tauri/src/commands/platform.rs` to `true`.
+#   3. Add `TAURI_SIGNING_PRIVATE_KEY` (the private key's contents) and
+#      `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` as repository secrets, which the `env:` block
+#      below already reads.
+#
+# macOS bundle targets: `tauri.conf.json`'s `bundle.targets` is `["app"]` only right now.
+# The `dmg` target was disabled earlier for a bundling issue tracked as ATL-3
+# (docs/superpowers/plans/2026-09-04-phase14-maintenance.md, Task 3), which verifies it
+# with a real `bun run tauri build` and re-enables it; this workflow will pick up a `dmg`
+# artifact automatically once that lands, with no change needed here.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux bundler dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Set up bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install frontend dependencies
+        run: bun install
+
+      # Stages `src-tauri/binaries/atlasd-${{ matrix.target }}` before `tauri build`
+      # (which `tauri-action` runs below) so the bundler has the sidecar it externalBins.
+      - name: Build the atlasd sidecar
+        run: bash scripts/prepare-sidecar.sh ${{ matrix.target }}
+
+      - name: Build and draft the release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Atlas ${{ github.ref_name }}'
+          releaseBody: 'See the commit history for what changed.'
+          releaseDraft: true
+          prerelease: false
+          args: --target ${{ matrix.target }}
