@@ -38,6 +38,10 @@ tauri-plugin-notification = "2"
 tauri-plugin-clipboard-manager = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# `tauri-plugin-log` installs this crate's global logger, so a warning logged here
+# (the boot-time shortcut restore, when the daemon or the stored shortcut is unusable)
+# reaches the same log file and webview console every other log line does.
+log = "0.4"
 # The notification poller reads the daemon's HTTP API from a Rust background task.
 reqwest = { workspace = true }
 tokio = { workspace = true }

@@ -137,20 +137,30 @@ pub fn autostart_set<R: Runtime>(app: tauri::AppHandle<R>, enabled: bool) -> Res
     if enabled { manager.enable() } else { manager.disable() }.map_err(|e| e.to_string())
 }
 
-/// Registers `accelerator` as the app's one global shortcut, unregistering whatever was
-/// registered before it: this command is the only writer, so there is never more than
-/// one to unregister. Validated as an accelerator (the same check `settings.rs` runs on
-/// `ui.global_shortcut`) before it ever reaches the plugin, so a bad value comes back as
-/// a plain sentence instead of a plugin error. Pressing the shortcut shows and focuses
-/// the main window and emits `atlas:palette`, which the shell's shortcut layer bridges
-/// onto the same event Mod+K raises from inside the webview.
-#[tauri::command]
-pub fn shortcut_set<R: Runtime>(app: tauri::AppHandle<R>, accelerator: String) -> Result<(), String> {
-    atlas_core::settings::validate_accelerator(&accelerator).map_err(|e| e.to_string())?;
+/// The accelerator this app process last managed to register, if any. Tracked so
+/// [`install_shortcut`] knows exactly what to unregister when it replaces it, rather
+/// than reaching for `unregister_all` (which would also remove the new one if it ever
+/// raced a second registration) or reading it back off the plugin, which does not
+/// expose a "what is currently registered" query.
+#[derive(Default)]
+pub struct ShortcutRegistration(pub std::sync::Mutex<Option<String>>);
+
+/// Registers `accelerator` as the app's one global shortcut. Registers the new one
+/// *before* touching whatever was registered before it: `validate_accelerator` only
+/// checks the string's shape, not whether the OS will actually grant it (another app
+/// may already hold the same combination), so unregistering the old shortcut first
+/// would leave the user with no working shortcut at all on a failed attempt to change
+/// it. On success the previous accelerator, if different, is unregistered; on failure
+/// it is left exactly as it was. Pressing the shortcut shows and focuses the main
+/// window and emits `atlas:palette`, which the shell's shortcut layer bridges onto the
+/// same event Mod+K raises from inside the webview.
+///
+/// Shared by the `shortcut_set` command and the boot-time restore in `notify_poller`,
+/// so both paths track the same "currently registered" state.
+pub fn install_shortcut<R: Runtime>(app: &tauri::AppHandle<R>, accelerator: &str) -> Result<(), String> {
     let global_shortcut = app.global_shortcut();
-    global_shortcut.unregister_all().map_err(|e| e.to_string())?;
     global_shortcut
-        .on_shortcut(accelerator.as_str(), move |app, _shortcut, event| {
+        .on_shortcut(accelerator, move |app, _shortcut, event| {
             if event.state != ShortcutState::Pressed {
                 return;
             }
@@ -160,7 +170,39 @@ pub fn shortcut_set<R: Runtime>(app: tauri::AppHandle<R>, accelerator: String) -
             }
             let _ = app.emit(PALETTE_EVENT, ());
         })
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    let registration = app.state::<ShortcutRegistration>();
+    let previous = {
+        let mut guard = registration.0.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = guard.clone();
+        *guard = Some(accelerator.to_string());
+        previous
+    };
+    if let Some(stale) = accelerator_to_unregister(previous.as_deref(), accelerator) {
+        let _ = global_shortcut.unregister(stale.as_str());
+    }
+    Ok(())
+}
+
+/// The previously-registered accelerator to unregister now that `new` has just
+/// registered successfully, or `None` when there was nothing before it or the same
+/// combination was simply reapplied (which must never unregister the one just
+/// installed). Split out from [`install_shortcut`] so the ordering it fixes (the new
+/// shortcut is already live by the time this is even consulted) is testable without a
+/// running global-shortcut plugin, which needs a real OS event loop and so cannot run
+/// in a unit test.
+fn accelerator_to_unregister(previous: Option<&str>, new: &str) -> Option<String> {
+    previous.filter(|p| *p != new).map(str::to_string)
+}
+
+/// Validates `accelerator` (the same check `settings.rs` runs on `ui.global_shortcut`,
+/// so a bad value comes back as a plain sentence instead of a plugin error) and
+/// installs it. See [`install_shortcut`] for the register-before-unregister ordering.
+#[tauri::command]
+pub fn shortcut_set<R: Runtime>(app: tauri::AppHandle<R>, accelerator: String) -> Result<(), String> {
+    atlas_core::settings::validate_accelerator(&accelerator).map_err(|e| e.to_string())?;
+    install_shortcut(&app, &accelerator)
 }
 
 /// Shows an OS notification.
@@ -238,6 +280,27 @@ mod tests {
             parse_position("middle").unwrap_err(),
             "\"middle\" is not a window position."
         );
+    }
+
+    #[test]
+    fn accelerator_to_unregister_is_none_with_nothing_registered_before() {
+        assert_eq!(accelerator_to_unregister(None, "CmdOrCtrl+Shift+K"), None);
+    }
+
+    #[test]
+    fn accelerator_to_unregister_names_a_different_previous_accelerator() {
+        assert_eq!(
+            accelerator_to_unregister(Some("CmdOrCtrl+Shift+K"), "Alt+Space"),
+            Some("CmdOrCtrl+Shift+K".to_string())
+        );
+    }
+
+    /// Reapplying the same accelerator must never unregister the one that was just
+    /// installed a moment earlier: the whole point of registering before unregistering
+    /// is that the newly-live shortcut is never the one this hands back.
+    #[test]
+    fn accelerator_to_unregister_is_none_when_the_combination_is_unchanged() {
+        assert_eq!(accelerator_to_unregister(Some("Alt+Space"), "Alt+Space"), None);
     }
 
     /// A mock app with no window, so `main_window` fails the way it would if the

@@ -11,9 +11,9 @@ mod commands;
 mod notify_poller;
 
 use commands::platform::{
-    about_info, app_exit, app_relaunch, autostart_get, autostart_set, clipboard_write, log_dir,
-    notification_permission, notify, shortcut_set, ui_state_all, ui_state_get, ui_state_set,
-    window_center, window_move,
+    about_info, app_exit, app_relaunch, autostart_get, autostart_set, clipboard_write,
+    install_shortcut, log_dir, notification_permission, notify, shortcut_set, ui_state_all,
+    ui_state_get, ui_state_set, window_center, window_move, ShortcutRegistration,
 };
 
 const DEFAULT_PORT: u16 = 7433;
@@ -66,6 +66,51 @@ fn log_path() -> String {
     AtlasPaths::discover().log_file().display().to_string()
 }
 
+/// How long to wait, in total, for the daemon to answer before giving up on restoring
+/// the global shortcut at boot. Matches the scale the daemon's own integration test
+/// harness gives itself to come up (20s, in `atlasd/tests/api.rs`).
+const SHORTCUT_RESTORE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const SHORTCUT_RESTORE_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Reads `ui.global_shortcut` from the daemon, once it answers, and registers it. Runs
+/// once at boot as its own background task, in parallel with (not blocking) window
+/// creation: a daemon that never comes up within `SHORTCUT_RESTORE_TIMEOUT`, or a
+/// stored shortcut that fails to register (already claimed by another app, say), is
+/// logged and otherwise left alone, since the user can always set one from Settings.
+fn restore_global_shortcut_at_boot(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).build().unwrap_or_default();
+        let deadline = tokio::time::Instant::now() + SHORTCUT_RESTORE_TIMEOUT;
+        let settings = loop {
+            if let Some(port) = daemon_ctl::daemon_info(&AtlasPaths::discover()).and_then(|v| v.get("port")?.as_u64()) {
+                let base = format!("http://127.0.0.1:{port}/api/v1");
+                if let Ok(resp) = client.get(format!("{base}/settings")).send().await {
+                    if resp.status().is_success() {
+                        if let Ok(settings) = resp.json::<serde_json::Value>().await {
+                            break Some(settings);
+                        }
+                    }
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break None;
+            }
+            tokio::time::sleep(SHORTCUT_RESTORE_POLL).await;
+        };
+
+        let Some(settings) = settings else {
+            log::warn!("could not reach the daemon within {SHORTCUT_RESTORE_TIMEOUT:?}; the global shortcut was not restored at boot");
+            return;
+        };
+        let Some(accelerator) = settings.get("ui.global_shortcut").and_then(|v| v.as_str()) else {
+            return;
+        };
+        if let Err(e) = install_shortcut(&app, accelerator) {
+            log::warn!("could not restore the global shortcut '{accelerator}' at boot: {e}");
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -102,6 +147,7 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .manage(ShortcutRegistration::default())
         // macOS keeps its own chrome under the overlay title bar; Windows and Linux draw
         // none, so the webview's title bar is the only one there.
         .setup(|app| {
@@ -126,6 +172,9 @@ pub fn run() {
             // in the webview drives it, and it must keep running whether or not a Settings
             // page is open to read `ui.notify.*`.
             notify_poller::spawn(app.handle().clone());
+            // Restores the last shortcut the user applied, once the daemon is up: a
+            // shortcut set before quitting must still work after a relaunch.
+            restore_global_shortcut_at_boot(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

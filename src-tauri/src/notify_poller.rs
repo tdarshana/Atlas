@@ -119,6 +119,11 @@ async fn tick<R: Runtime>(app: &AppHandle<R>, client: &reqwest::Client, state: &
         }
     }
 
+    // The cursor only advances on a tick that actually checked for runs, and only past
+    // a successful fetch: while the toggle is off, or a request fails, `state.since`
+    // stays put, so re-enabling (or the next successful tick) still asks about
+    // everything since the last time this was actually checked rather than silently
+    // skipping runs that finished in between.
     if flag("ui.notify.workflow_runs") {
         let since_rfc3339 = state.since.to_rfc3339();
         let url = format!("{base}/runs?since={}", urlencoding_light(&since_rfc3339));
@@ -127,10 +132,9 @@ async fn tick<R: Runtime>(app: &AppHandle<R>, client: &reqwest::Client, state: &
                 let workflows = get_json(client, &format!("{base}/workflows")).await;
                 show(app, &workflow_runs_summary(&runs, workflows.as_ref()));
             }
+            state.since = now;
         }
     }
-
-    state.since = now;
 }
 
 /// Percent-encodes just the characters `to_rfc3339` can produce that a query string

@@ -593,6 +593,7 @@ dependencies = [
  "atlas-cli",
  "atlas-core",
  "chrono",
+ "log",
  "reqwest 0.13.4",
  "serde",
  "serde_json",

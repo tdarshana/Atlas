@@ -19,9 +19,13 @@
 	import { diagnosticsText } from '$lib/components/settings/diagnostics';
 	import {
 		acceleratorToKeyHintCombo,
-		comboFromEvent,
+		blurRecording,
+		cancelRecording,
+		captureKey,
 		comboToAccelerator,
-		type CapturedCombo
+		INITIAL_RECORDER_STATE,
+		startRecording as startRecordingCombo,
+		type RecorderState
 	} from '$lib/components/settings/shortcut-recorder';
 	import StageEditor from '$lib/components/StageEditor.svelte';
 	import {
@@ -116,12 +120,11 @@
 
 	// -- Global shortcut recorder ------------------------------------------------------
 
-	let recording = $state(false);
-	let capturedCombo = $state<CapturedCombo>({ modifiers: [], key: null });
+	let recorder = $state<RecorderState>(INITIAL_RECORDER_STATE);
 	let shortcutError = $state<string | null>(null);
 	let applyingShortcut = $state(false);
 
-	const capturedAccelerator = $derived(comboToAccelerator(capturedCombo));
+	const capturedAccelerator = $derived(comboToAccelerator(recorder.combo));
 	const storedShortcut = $derived(settingString('ui.global_shortcut'));
 	/** What the recorder shows: the combo being captured, or the stored shortcut when
 	 * nothing is being recorded right now. */
@@ -134,24 +137,28 @@
 	);
 
 	function startRecording(): void {
-		recording = true;
-		capturedCombo = { modifiers: [], key: null };
+		recorder = startRecordingCombo();
 		shortcutError = null;
 	}
 
-	function stopRecording(): void {
-		recording = false;
-		capturedCombo = { modifiers: [], key: null };
+	/**
+	 * Losing focus must not lose the captured combo: the Apply button sits right next
+	 * to the recorder, so a plain click on it fires blur before click in a
+	 * click-focuses-buttons engine, and clearing the combo here would make Apply
+	 * unclickable on every attempt. `blurRecording` only stops recording.
+	 */
+	function onRecorderBlur(): void {
+		recorder = blurRecording(recorder);
 	}
 
 	function onRecorderKeydown(e: KeyboardEvent): void {
-		if (!recording) return;
+		if (!recorder.recording) return;
 		e.preventDefault();
 		if (e.key === 'Escape') {
-			stopRecording();
+			recorder = cancelRecording();
 			return;
 		}
-		capturedCombo = comboFromEvent(e);
+		recorder = captureKey(recorder, e);
 	}
 
 	async function applyShortcut(): Promise<void> {
@@ -162,7 +169,7 @@
 		try {
 			await desktop('shortcut_set', { accelerator }, () => undefined);
 			await api().setSettings({ 'ui.global_shortcut': accelerator });
-			stopRecording();
+			recorder = cancelRecording();
 			push('success', 'Shortcut applied');
 		} catch (e) {
 			shortcutError = errorMessage(e);
@@ -768,9 +775,9 @@
 							title={inTauri() ? 'Click, then press a key combination' : 'Only available in the desktop app'}
 							onclick={startRecording}
 							onkeydown={onRecorderKeydown}
-							onblur={stopRecording}
+							onblur={onRecorderBlur}
 						>
-							{#if recording && !capturedAccelerator}
+							{#if recorder.recording && !capturedAccelerator}
 								Press a key combination…
 							{:else if recorderCombo}
 								<KeyHint combo={recorderCombo} />

@@ -1869,6 +1869,13 @@ async fn all_runs_route_lists_runs_finished_after_since() {
     // `limit` is honoured.
     let limited: serde_json::Value = c.get(format!("{base}/runs?limit=0")).send().await.unwrap().json().await.unwrap();
     assert_eq!(limited.as_array().unwrap().len(), 0, "{limited}");
+
+    // A `since` that does not parse as RFC 3339 is a 400, the same `ApiQuery` rejection
+    // every other malformed query parameter in this file gets.
+    let bad_since = c.get(format!("{base}/runs?since=not-a-date")).send().await.unwrap();
+    assert_eq!(bad_since.status(), 400);
+    let bad_since_body: serde_json::Value = bad_since.json().await.unwrap();
+    assert!(bad_since_body["error"].as_str().is_some(), "{bad_since_body}");
 }
 
 /// The output node's trailing JSON block turns into a pending memory (its confidence

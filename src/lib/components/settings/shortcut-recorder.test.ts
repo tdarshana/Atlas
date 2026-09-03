@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { acceleratorToKeyHintCombo, comboFromEvent, comboToAccelerator } from './shortcut-recorder';
+import {
+	acceleratorToKeyHintCombo,
+	blurRecording,
+	cancelRecording,
+	captureKey,
+	comboFromEvent,
+	comboToAccelerator,
+	startRecording
+} from './shortcut-recorder';
 
 describe('comboFromEvent', () => {
 	it('captures the platform modifier as CmdOrCtrl on mac (metaKey)', () => {
@@ -53,5 +61,43 @@ describe('acceleratorToKeyHintCombo', () => {
 
 	it('leaves every other part alone', () => {
 		expect(acceleratorToKeyHintCombo('Alt+Space')).toBe('Alt+Space');
+	});
+});
+
+describe('recorder state machine', () => {
+	const keyEvent = { metaKey: true, ctrlKey: false, altKey: false, shiftKey: false, key: 'k' };
+
+	it('starting recording clears any previously captured combo', () => {
+		const state = startRecording();
+		expect(state).toEqual({ recording: true, combo: { modifiers: [], key: null } });
+	});
+
+	it('captureKey fills in the combo while recording', () => {
+		const state = captureKey(startRecording(), keyEvent);
+		expect(state.combo).toEqual({ modifiers: ['CmdOrCtrl'], key: 'K' });
+	});
+
+	it('captureKey is a no-op once recording has stopped', () => {
+		const recorded = captureKey(startRecording(), keyEvent);
+		const stopped = blurRecording(recorded);
+		const after = captureKey(stopped, { ...keyEvent, key: 'j' });
+		expect(after).toBe(stopped);
+	});
+
+	// The regression this guards: the Apply button sits next to the recorder, so a
+	// plain click on it blurs the recorder before the click lands. If blur cleared the
+	// combo, capturedAccelerator would already be null by the time Apply's own click
+	// handler (or its `disabled` binding) saw it, so Apply could never be clicked.
+	it('losing focus keeps the captured combo, only stopping recording', () => {
+		const recorded = captureKey(startRecording(), keyEvent);
+		const blurred = blurRecording(recorded);
+		expect(blurred).toEqual({ recording: false, combo: { modifiers: ['CmdOrCtrl'], key: 'K' } });
+	});
+
+	it('cancelRecording clears the combo (Escape, or a completed Apply)', () => {
+		const recorded = captureKey(startRecording(), keyEvent);
+		const cancelled = cancelRecording();
+		expect(cancelled).toEqual({ recording: false, combo: { modifiers: [], key: null } });
+		expect(recorded.combo).not.toEqual(cancelled.combo);
 	});
 });

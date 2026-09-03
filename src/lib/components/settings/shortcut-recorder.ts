@@ -57,3 +57,47 @@ export function acceleratorToKeyHintCombo(accelerator: string): string {
 		.map((part) => (part === 'CmdOrCtrl' || part === 'CommandOrControl' ? 'Mod' : part))
 		.join('+');
 }
+
+// -- Recorder state machine --------------------------------------------------------
+//
+// Pulled out as pure functions, rather than left as state mutations inline in the
+// Settings page, so the one rule that matters here is directly testable: losing focus
+// must not lose the captured combo. The Apply button sits right next to the recorder,
+// and a plain click on it fires `blur` before `click` in a click-focuses-buttons
+// engine (Chromium, Firefox); clearing the combo on blur made Apply unclickable on
+// every attempt. Only `cancelRecording` (Escape, or a completed Apply) actually clears
+// what was captured.
+
+const EMPTY_COMBO: CapturedCombo = { modifiers: [], key: null };
+
+export interface RecorderState {
+	recording: boolean;
+	combo: CapturedCombo;
+}
+
+export const INITIAL_RECORDER_STATE: RecorderState = { recording: false, combo: EMPTY_COMBO };
+
+/** Click on the recorder: starts a fresh capture, discarding whatever was there. */
+export function startRecording(): RecorderState {
+	return { recording: true, combo: EMPTY_COMBO };
+}
+
+/** Losing focus: stops recording, keeps the combo. */
+export function blurRecording(state: RecorderState): RecorderState {
+	return { ...state, recording: false };
+}
+
+/** Escape, or a successful Apply: recording stops and the combo is discarded. */
+export function cancelRecording(): RecorderState {
+	return { recording: false, combo: EMPTY_COMBO };
+}
+
+/** A keydown while recording: ignored once recording has already stopped (a stray key
+ * after blur must not silently re-arm the combo). */
+export function captureKey(
+	state: RecorderState,
+	e: { metaKey: boolean; ctrlKey: boolean; altKey: boolean; shiftKey: boolean; key: string }
+): RecorderState {
+	if (!state.recording) return state;
+	return { ...state, combo: comboFromEvent(e) };
+}
