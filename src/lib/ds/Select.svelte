@@ -3,6 +3,7 @@
 </script>
 
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import type { HTMLSelectAttributes } from 'svelte/elements';
 
 	// `size` is redefined: on a native select it is a row count, here it is the density step.
@@ -19,21 +20,27 @@
 		size = 'md',
 		label,
 		id,
-		value = $bindable(''),
+		value = $bindable(),
 		class: className = '',
 		...rest
 	}: Props = $props();
 
-	const generated = 'sel' + Math.random().toString(36).slice(2, 8);
-	const fid = $derived(id ?? generated);
+	const uid = $props.id();
+	const fid = $derived(id ?? uid);
 
 	const cls = $derived(
 		['dbm-select', size === 'sm' && 'dbm-select--sm', className].filter(Boolean).join(' ')
 	);
 
-	const items = $derived(
-		options.map((o) => (typeof o === 'string' ? { value: o, label: o } : o))
-	);
+	const items = $derived(options.map((o) => (typeof o === 'string' ? { value: o, label: o } : o)));
+
+	/* The React original is uncontrolled, so a Select with no value shows its first option.
+	   Seed the binding once at init to keep that, and to keep the value readable. Later
+	   changes to `options` do not re-seed, which is what uncontrolled means. */
+	const first = untrack(() => options)[0];
+	if (value === undefined && first !== undefined) {
+		value = typeof first === 'string' ? first : first.value;
+	}
 </script>
 
 {#snippet control()}

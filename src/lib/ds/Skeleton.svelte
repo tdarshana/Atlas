@@ -1,5 +1,7 @@
 <script lang="ts">
-	interface Props {
+	import type { HTMLAttributes } from 'svelte/elements';
+
+	interface Props extends Omit<HTMLAttributes<HTMLElement>, 'class'> {
 		width?: string | number;
 		height?: string | number;
 		/** When set, renders a block of placeholder rows instead of a single bar. */
@@ -7,7 +9,7 @@
 		columns?: number;
 	}
 
-	let { width = '100%', height = 10, rows, columns = 4 }: Props = $props();
+	let { width = '100%', height = 10, rows, columns = 4, ...rest }: Props = $props();
 
 	const WIDTHS = [56, 140, 92, 72, 110];
 
@@ -15,7 +17,7 @@
 </script>
 
 {#if rows}
-	<div class="dbm-skeleton-rows" role="status" aria-label="Loading rows">
+	<div {...rest} class="dbm-skeleton-rows" role="status" aria-label="Loading rows">
 		{#each { length: rows } as _, r (r)}
 			<div>
 				{#each { length: columns } as _, c (c)}
@@ -29,6 +31,7 @@
 	</div>
 {:else}
 	<span
+		{...rest}
 		class="dbm-skeleton"
 		style="width:{size(width)};height:{size(height)}"
 		role="status"

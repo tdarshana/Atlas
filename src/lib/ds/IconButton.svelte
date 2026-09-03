@@ -36,13 +36,14 @@
 	);
 </script>
 
+<!-- {...rest} comes last, as in the React original, so a caller's own title wins. -->
 <button
 	type="button"
-	{...rest}
-	class={cls}
 	aria-label={label}
 	title={label}
 	aria-pressed={active ? true : undefined}
+	{...rest}
+	class={cls}
 >
 	<Icon name={icon} size={size === 'sm' ? 12 : 14} />
 </button>

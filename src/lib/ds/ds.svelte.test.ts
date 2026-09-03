@@ -5,9 +5,14 @@ import { createRawSnippet } from 'svelte';
 
 import Badge from './Badge.svelte';
 import Button from './Button.svelte';
+import Checkbox from './Checkbox.svelte';
 import Icon from './Icon.svelte';
+import IconButton from './IconButton.svelte';
 import Input from './Input.svelte';
 import KeyHint from './KeyHint.svelte';
+import Select from './Select.svelte';
+import Skeleton from './Skeleton.svelte';
+import Tooltip from './Tooltip.svelte';
 
 afterEach(cleanup);
 
@@ -45,6 +50,120 @@ describe('Input', () => {
 		const hint = field.querySelector('.dbm-field__hint')!;
 		expect(hint.textContent).toBe('Loopback only');
 		expect(hint.className).not.toContain('dbm-field__hint--error');
+	});
+
+	it('keeps the caller oninput working alongside the binding', () => {
+		const seen: string[] = [];
+		const { container } = render(Input, {
+			props: { oninput: (e: Event) => seen.push((e.currentTarget as HTMLInputElement).value) }
+		});
+
+		const input = container.querySelector('input')!;
+		input.value = 'analytics-prod';
+		input.dispatchEvent(new Event('input', { bubbles: true }));
+
+		expect(seen).toEqual(['analytics-prod']);
+	});
+});
+
+describe('Select', () => {
+	it('shows the first option when nothing is bound', () => {
+		const { container } = render(Select, { props: { options: ['hybrid', 'bm25', 'vector'] } });
+
+		const select = container.querySelector('select')!;
+		expect(select.value).toBe('hybrid');
+		expect(select.selectedIndex).toBe(0);
+		expect(container.querySelectorAll('option')).toHaveLength(3);
+	});
+
+	it('honours a given value and labels object options', () => {
+		const { container } = render(Select, {
+			props: {
+				options: [
+					{ value: 'bm25', label: 'Keyword' },
+					{ value: 'vector', label: 'Semantic' }
+				],
+				value: 'vector',
+				size: 'sm'
+			}
+		});
+
+		const select = container.querySelector('select')!;
+		expect(select.value).toBe('vector');
+		expect(select.className).toBe('dbm-select dbm-select--sm');
+		expect(container.querySelectorAll('option')[0].textContent).toBe('Keyword');
+	});
+});
+
+describe('Checkbox', () => {
+	it('renders the radio variant with its dot when checked', () => {
+		const { container } = render(Checkbox, {
+			props: { radio: true, checked: true, label: 'Production' }
+		});
+
+		expect(container.querySelector('label')!.className).toBe('dbm-check dbm-radio');
+		expect(container.querySelector('input')!.getAttribute('type')).toBe('radio');
+		expect(container.querySelector('.dbm-check__box.dbm-radio__box')).toBeTruthy();
+		expect(container.querySelector('.dbm-radio__dot')).toBeTruthy();
+	});
+
+	it('draws the dash instead of the tick when indeterminate', () => {
+		const { container } = render(Checkbox, { props: { indeterminate: true } });
+
+		const path = container.querySelector('.dbm-check__box svg path')!;
+		expect(path.getAttribute('d')).toBe('M2 5h6');
+	});
+});
+
+describe('Skeleton', () => {
+	it('renders one placeholder per cell and reports itself as a status', () => {
+		const { container } = render(Skeleton, { props: { rows: 3, columns: 2 } });
+
+		const root = container.querySelector('.dbm-skeleton-rows')!;
+		expect(root.getAttribute('role')).toBe('status');
+		expect(root.querySelectorAll(':scope > div')).toHaveLength(3);
+		expect(root.querySelectorAll('span.dbm-skeleton')).toHaveLength(6);
+	});
+});
+
+describe('IconButton', () => {
+	it('labels the button and marks it pressed when active', () => {
+		const { container } = render(IconButton, {
+			props: { icon: 'refresh-cw', label: 'Reload', active: true }
+		});
+
+		const button = container.querySelector('button')!;
+		expect(button.className).toBe('dbm-iconbtn dbm-iconbtn--active');
+		expect(button.getAttribute('aria-label')).toBe('Reload');
+		expect(button.getAttribute('title')).toBe('Reload');
+		expect(button.getAttribute('aria-pressed')).toBe('true');
+	});
+
+	it('lets a caller title win over the label', () => {
+		const { container } = render(IconButton, {
+			props: { icon: 'refresh-cw', label: 'Reload', title: 'Reload memories ⌘R' }
+		});
+
+		const button = container.querySelector('button')!;
+		expect(button.getAttribute('title')).toBe('Reload memories ⌘R');
+		expect(button.getAttribute('aria-label')).toBe('Reload');
+		expect(button.getAttribute('aria-pressed')).toBe(null);
+	});
+});
+
+describe('Tooltip', () => {
+	it('renders the label and the shortcut in the popover', () => {
+		const { container } = render(Tooltip, {
+			props: { label: 'Execute statement', combo: 'Mod+Enter', children: text('Run') }
+		});
+
+		expect(container.querySelector('.dbm-tip')!.textContent).toContain('Run');
+
+		const pop = container.querySelector('.dbm-tip__pop')!;
+		expect(pop.getAttribute('role')).toBe('tooltip');
+		expect(pop.className).toBe('dbm-tip__pop dbm-tip__pop--top');
+		expect(pop.textContent).toContain('Execute statement');
+		expect(pop.querySelector('.dbm-tip__kbd .dbm-keyhint')).toBeTruthy();
 	});
 });
 

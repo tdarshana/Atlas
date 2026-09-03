@@ -12,7 +12,11 @@
 		return 'windows';
 	}
 
+	/* Arrows are glyphs on every platform: the words have no windows form either. */
 	const ARROWS = { Up: '↑', Down: '↓', Left: '←', Right: '→' };
+
+	/* Divergence from the React MAP, which prints the lowercase word `esc` on mac. The system
+	   escape glyph is what the rest of the mac map uses, so `Esc` and `Escape` both give ⎋. */
 
 	const MAP: Record<Platform, Record<string, string>> = {
 		mac: {

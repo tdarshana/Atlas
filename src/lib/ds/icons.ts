@@ -2,8 +2,6 @@
    components. Nothing is fetched at runtime: the desktop webview runs under a
    `default-src 'self'` CSP, so every glyph is imported and bundled here. */
 
-import type { Component } from 'svelte';
-
 import AlertTriangle from '@lucide/svelte/icons/alert-triangle';
 import ArrowDown from '@lucide/svelte/icons/arrow-down';
 import ArrowLeft from '@lucide/svelte/icons/arrow-left';
@@ -61,7 +59,9 @@ import WandSparkles from '@lucide/svelte/icons/wand-sparkles';
 import X from '@lucide/svelte/icons/x';
 import Zap from '@lucide/svelte/icons/zap';
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+/** Every Lucide glyph module exports the same component shape; `circle` stands for all. */
+export type LucideIcon = typeof Circle;
+
 export const icons = {
 	gauge: Gauge,
 	folder: Folder,
@@ -119,15 +119,15 @@ export const icons = {
 	filter: Filter,
 	'alert-triangle': AlertTriangle,
 	loader: Loader
-} satisfies Record<string, Component<any>>;
+} satisfies Record<string, LucideIcon>;
 
 export type IconName = keyof typeof icons;
 
 const warned = new Set<string>();
 
 /** Resolves an icon name, falling back to `circle` and warning once per unknown name. */
-export function resolveIcon(name: string): Component<any> {
-	const found = (icons as Record<string, Component<any>>)[name];
+export function resolveIcon(name: string): LucideIcon {
+	const found = (icons as Record<string, LucideIcon>)[name];
 	if (found) return found;
 	if (!warned.has(name)) {
 		warned.add(name);

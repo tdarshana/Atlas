@@ -1,8 +1,9 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
+	import type { HTMLAttributes } from 'svelte/elements';
 	import Icon from './Icon.svelte';
 
-	interface Props {
+	interface Props extends Omit<HTMLAttributes<HTMLSpanElement>, 'class'> {
 		tone?: 'neutral' | 'accent' | 'success' | 'warning' | 'info' | 'danger';
 		variant?: 'soft' | 'solid' | 'outline';
 		/** Mono for keys, tags and counts. */
@@ -19,7 +20,8 @@
 		mono = false,
 		icon,
 		children,
-		class: className = ''
+		class: className = '',
+		...rest
 	}: Props = $props();
 
 	const key = $derived(
@@ -35,7 +37,7 @@
 	);
 </script>
 
-<span class={cls}>
+<span {...rest} class={cls}>
 	{#if icon}<Icon name={icon} size={10} />{/if}
 	{@render children?.()}
 </span>

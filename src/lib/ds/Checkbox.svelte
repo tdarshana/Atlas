@@ -1,14 +1,13 @@
 <script lang="ts">
-	interface Props {
+	import type { HTMLInputAttributes } from 'svelte/elements';
+
+	// Rest props land on the input, as in the React original.
+	interface Props extends Omit<HTMLInputAttributes, 'type' | 'checked'> {
 		label?: string;
 		checked?: boolean;
 		indeterminate?: boolean;
-		disabled?: boolean;
 		/** Renders the radio variant: a round box with a dot instead of a tick. */
 		radio?: boolean;
-		name?: string;
-		value?: string;
-		onchange?: (event: Event) => void;
 	}
 
 	let {
@@ -17,10 +16,14 @@
 		indeterminate = false,
 		disabled = false,
 		radio = false,
-		name,
-		value,
-		onchange
+		...rest
 	}: Props = $props();
+
+	/* Our handler comes after {...rest}, so call the caller's through. */
+	function onchange(event: Event & { currentTarget: EventTarget & HTMLInputElement }) {
+		checked = event.currentTarget.checked;
+		rest.onchange?.(event);
+	}
 
 	const cls = $derived(
 		['dbm-check', radio && 'dbm-radio', disabled && 'dbm-check--disabled'].filter(Boolean).join(' ')
@@ -28,17 +31,7 @@
 </script>
 
 <label class={cls}>
-	<input
-		type={radio ? 'radio' : 'checkbox'}
-		{name}
-		{value}
-		{checked}
-		{disabled}
-		onchange={(e) => {
-			checked = e.currentTarget.checked;
-			onchange?.(e);
-		}}
-	/>
+	<input {...rest} type={radio ? 'radio' : 'checkbox'} {checked} {disabled} {onchange} />
 	<span class="dbm-check__box{radio ? ' dbm-radio__box' : ''}">
 		{#if radio}
 			{#if checked}<span class="dbm-radio__dot"></span>{/if}
