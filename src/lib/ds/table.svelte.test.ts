@@ -75,4 +75,100 @@ describe('Table', () => {
 		});
 		expect(getByText('No rows.')).toBeTruthy();
 	});
+
+	it('carries grid semantics: grid, row, columnheader, gridcell', () => {
+		const { container } = render(Table, {
+			props: { id: 'test-grid', columns, rows, rowKey }
+		});
+
+		expect(container.querySelector('.table')!.getAttribute('role')).toBe('grid');
+		expect(container.querySelector('.header')!.getAttribute('role')).toBe('row');
+		expect(container.querySelectorAll('.header-cell').length).toBeGreaterThan(0);
+		for (const header of container.querySelectorAll('.header-cell')) {
+			expect(header.getAttribute('role')).toBe('columnheader');
+		}
+		const row = container.querySelector('.row')!;
+		expect(row.getAttribute('role')).toBe('row');
+		for (const cell of row.querySelectorAll('.cell')) {
+			expect(cell.getAttribute('role')).toBe('gridcell');
+		}
+	});
+
+	it('reports aria-sort on the sorted column and none on other sortable columns', async () => {
+		const { container } = render(Table, {
+			props: { id: 'test-aria-sort', columns, rows, rowKey }
+		});
+
+		const sortableHeader = container.querySelector('.header-cell.sortable')!;
+		expect(sortableHeader.getAttribute('aria-sort')).toBe('none');
+
+		await fireEvent.click(sortableHeader);
+		expect(sortableHeader.getAttribute('aria-sort')).toBe('ascending');
+
+		await fireEvent.click(sortableHeader);
+		expect(sortableHeader.getAttribute('aria-sort')).toBe('descending');
+
+		// The Id column is not sortable, so it carries no aria-sort at all.
+		const idHeader = [...container.querySelectorAll('.header-cell')].find(
+			(h) => h.textContent?.trim() === 'Id'
+		)!;
+		expect(idHeader.getAttribute('aria-sort')).toBeNull();
+	});
+
+	it('seeds the sort from defaultSort when nothing is persisted, and shows the indicator', () => {
+		const { container } = render(Table, {
+			props: {
+				id: 'test-default-sort',
+				columns,
+				rows,
+				rowKey,
+				defaultSort: { key: 'name', dir: 'asc' }
+			}
+		});
+
+		const names = [...container.querySelectorAll('.row')].map(
+			(r) => r.querySelector('.cell')!.textContent
+		);
+		expect(names).toEqual(['alpha', 'beta', 'gamma']);
+
+		const sortableHeader = container.querySelector('.header-cell.sortable')!;
+		expect(sortableHeader.getAttribute('aria-sort')).toBe('ascending');
+		expect(sortableHeader.querySelector('svg')).toBeTruthy();
+	});
+
+	it('lets a persisted sort win over defaultSort', () => {
+		localStorage.setItem(
+			'atlas.table.test-persisted-sort',
+			JSON.stringify({ order: ['name', 'id'], sort: { key: 'name', dir: 'desc' } })
+		);
+
+		const { container } = render(Table, {
+			props: {
+				id: 'test-persisted-sort',
+				columns,
+				rows,
+				rowKey,
+				defaultSort: { key: 'name', dir: 'asc' }
+			}
+		});
+
+		const names = [...container.querySelectorAll('.row')].map(
+			(r) => r.querySelector('.cell')!.textContent
+		);
+		expect(names).toEqual(['gamma', 'beta', 'alpha']);
+	});
+
+	it('moves a column with Alt+ArrowRight on a focused header', async () => {
+		const { container } = render(Table, {
+			props: { id: 'test-keyboard-reorder', columns, rows, rowKey }
+		});
+
+		const nameHeader = container.querySelector('.header-cell.sortable')!;
+		expect([...container.querySelectorAll('.header-cell')].indexOf(nameHeader)).toBe(0);
+
+		await fireEvent.keyDown(nameHeader, { key: 'ArrowRight', altKey: true });
+
+		const headersAfter = [...container.querySelectorAll('.header-cell')];
+		expect(headersAfter.map((h) => h.textContent?.trim())).toEqual(['Id', 'Name']);
+	});
 });

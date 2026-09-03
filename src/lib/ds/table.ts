@@ -26,28 +26,37 @@ export interface TableState {
 
 const KEY_PREFIX = 'atlas.table.';
 
-/** Numeric fields compare numerically; everything else compares with `localeCompare`. */
+/**
+ * Numeric fields compare numerically; everything else compares with `localeCompare`,
+ * `numeric: true` so "item2" sorts before "item10", `sensitivity: 'base'` so case does
+ * not affect the order.
+ */
 function defaultCompare<T>(key: string): (a: T, b: T) => number {
 	return (a, b) => {
 		const av = (a as Record<string, unknown>)[key];
 		const bv = (b as Record<string, unknown>)[key];
 		if (typeof av === 'number' && typeof bv === 'number') return av - bv;
-		return String(av ?? '').localeCompare(String(bv ?? ''));
+		return String(av ?? '').localeCompare(String(bv ?? ''), undefined, {
+			numeric: true,
+			sensitivity: 'base'
+		});
 	};
 }
 
 /**
  * Sorts `rows` by `sort`, using the column's own `sort` function when it has one.
  * Returns `rows` in its input order when `sort` is null or names a column that is
- * not there.
+ * not there. `desc` negates the comparator rather than sorting ascending and reversing
+ * the array, so rows tied on the key keep their relative order either way (a stable
+ * sort reversed in bulk would flip tied rows against each other).
  */
 export function applySort<T>(rows: T[], columns: TableColumn<T>[], sort: SortState | null): T[] {
 	if (!sort) return rows;
 	const column = columns.find((c) => c.key === sort.key);
 	if (!column) return rows;
 	const compare = column.sort ?? defaultCompare<T>(column.key);
-	const sorted = [...rows].sort(compare);
-	return sort.dir === 'desc' ? sorted.reverse() : sorted;
+	const directional = sort.dir === 'desc' ? (a: T, b: T) => -compare(a, b) : compare;
+	return [...rows].sort(directional);
 }
 
 /** asc -> desc -> null for the same column; a different column always starts at asc. */

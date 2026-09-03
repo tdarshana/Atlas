@@ -66,6 +66,41 @@ describe('applySort', () => {
 			applySort(withDifferentLengths, byLength, { key: 'name', dir: 'asc' }).map((r) => r.name)
 		).toEqual(['a', 'aa', 'aaa']);
 	});
+
+	it('sorts strings with natural number ordering, not lexicographic', () => {
+		const items: Row[] = [
+			{ name: 'item10', count: 0 },
+			{ name: 'item2', count: 0 }
+		];
+		expect(applySort(items, columns, { key: 'name', dir: 'asc' }).map((r) => r.name)).toEqual([
+			'item2',
+			'item10'
+		]);
+	});
+
+	it('keeps rows tied on the sort key in their original relative order, descending too', () => {
+		interface Grouped {
+			group: number;
+			label: string;
+		}
+		const grouped: Grouped[] = [
+			{ group: 1, label: 'a' },
+			{ group: 1, label: 'b' },
+			{ group: 2, label: 'c' }
+		];
+		const groupColumns: TableColumn<Grouped>[] = [
+			{ key: 'group', label: 'Group', sortable: true }
+		];
+		// Ascending: group 1 (a, b) before group 2 (c), ties keep their input order.
+		expect(
+			applySort(grouped, groupColumns, { key: 'group', dir: 'asc' }).map((r) => r.label)
+		).toEqual(['a', 'b', 'c']);
+		// Descending: group 2 (c) first, but a still comes before b (a whole-array
+		// reverse would give c, b, a instead).
+		expect(
+			applySort(grouped, groupColumns, { key: 'group', dir: 'desc' }).map((r) => r.label)
+		).toEqual(['c', 'a', 'b']);
+	});
 });
 
 describe('nextSort', () => {

@@ -113,12 +113,13 @@
 	onMount(refresh);
 
 	$effect(() => {
+		const n = report?.memories_active ?? 0;
 		setStatusItems({
 			right: [
 				status.error
 					? { text: status.error, tone: 'danger' }
 					: { text: `embedding ${embeddingWord || 'unknown'}`, tone: embeddingWord === 'ready' ? 'success' : undefined },
-				{ text: `${report?.memories_active ?? 0} memories` }
+				{ text: `${n} ${n === 1 ? 'memory' : 'memories'}` }
 			]
 		});
 	});
@@ -190,7 +191,13 @@
 	{:else if loading && recent.length === 0}
 		<p class="loading">Loading…</p>
 	{:else}
-		<Table id="dashboard-recent" {columns} rows={recent} rowKey={(m) => m.id}>
+		<Table
+			id="dashboard-recent"
+			{columns}
+			rows={recent}
+			rowKey={(m) => m.id}
+			defaultSort={{ key: 'age', dir: 'desc' }}
+		>
 			{#snippet cell(memory: Memory, column: TableColumn<Memory>)}
 				{#if column.key === 'kind'}
 					<Badge tone={kindTone(memory.kind)}>{memory.kind}</Badge>

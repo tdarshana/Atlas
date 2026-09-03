@@ -1,7 +1,9 @@
 <script lang="ts" generics="T">
-	// Desktop table: 32px header with dividers and a sort indicator, 28px rows, drag to
-	// reorder columns with a 2px accent drop indicator. Order and sort persist under
-	// `atlas.table.<id>`.
+	// Desktop table: 28px header with dividers and a sort indicator, 28px rows, drag to
+	// reorder columns with a 2px accent drop indicator (or Alt+Left/Alt+Right on a
+	// focused header). Order and sort persist under `atlas.table.<id>`. Grid semantics
+	// (`role="grid"`, `columnheader`/`gridcell`, `aria-sort`) so a screen reader gets a
+	// table, not a pile of unlabelled buttons and divs.
 	import { untrack, type Snippet } from 'svelte';
 	import Icon from './Icon.svelte';
 	import {
@@ -22,6 +24,8 @@
 		onRowClick?: (row: T) => void;
 		selectedKey?: string | null;
 		emptyText?: string;
+		/** Used to seed `sort` only when nothing is persisted yet. */
+		defaultSort?: SortState;
 		cell?: Snippet<[T, TableColumn<T>]>;
 		empty?: Snippet;
 	}
@@ -34,6 +38,7 @@
 		onRowClick,
 		selectedKey = null,
 		emptyText = 'Nothing here yet.',
+		defaultSort,
 		cell,
 		empty
 	}: Props = $props();
@@ -52,16 +57,19 @@
 		sort: SortState | null;
 	}
 
-	// `id` and `columns` are read once here, on purpose: the persisted order and sort
-	// seed the initial state, not every render.
+	function validSort(candidate: SortState | undefined | null): SortState | null {
+		return candidate && columns.some((c) => c.key === candidate.key && c.sortable)
+			? candidate
+			: null;
+	}
+
+	// `id`, `columns` and `defaultSort` are read once here, on purpose: the persisted
+	// order and sort seed the initial state, not every render.
 	const initial: InitialState = untrack(() => {
 		const stored = loadTableState(id);
 		return {
 			order: reconcile(stored?.order ?? columns.map((c) => c.key), columns),
-			sort:
-				stored?.sort && columns.some((c) => c.key === stored.sort!.key && c.sortable)
-					? stored.sort
-					: null
+			sort: validSort(stored?.sort) ?? validSort(defaultSort)
 		};
 	});
 
@@ -121,6 +129,24 @@
 		dropKey = null;
 	}
 
+	/** Alt+Left/Alt+Right on a focused header moves that column one place, the keyboard
+	    equivalent of the drag reorder. */
+	function onHeaderKeydown(event: KeyboardEvent, column: TableColumn<T>): void {
+		if (!event.altKey || (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight')) return;
+		event.preventDefault();
+		const from = order.indexOf(column.key);
+		const to = event.key === 'ArrowLeft' ? from - 1 : from + 1;
+		if (to < 0 || to >= order.length) return;
+		order = reorder(order, from, to);
+		persist();
+	}
+
+	function ariaSort(column: TableColumn<T>): 'ascending' | 'descending' | 'none' | undefined {
+		if (!column.sortable) return undefined;
+		if (sort?.key !== column.key) return 'none';
+		return sort.dir === 'asc' ? 'ascending' : 'descending';
+	}
+
 	function activate(event: KeyboardEvent, row: T): void {
 		if (event.key !== 'Enter' && event.key !== ' ') return;
 		event.preventDefault();
@@ -132,11 +158,14 @@
 	}
 </script>
 
-<div class="table">
-	<div class="header" style:grid-template-columns={gridTemplate}>
+<div class="table" role="grid">
+	<div class="header" role="row" style:grid-template-columns={gridTemplate}>
 		{#each visibleColumns as column (column.key)}
 			<button
 				type="button"
+				role="columnheader"
+				aria-sort={ariaSort(column)}
+				title="Drag, or focus and press Alt+Left or Alt+Right, to move this column"
 				class="header-cell group-heading"
 				class:sortable={column.sortable}
 				class:drop-before={dropKey === column.key && dropBefore}
@@ -148,6 +177,7 @@
 				ondrop={(e) => onDrop(column.key, e)}
 				ondragend={resetDrag}
 				onclick={() => onHeaderClick(column)}
+				onkeydown={(e) => onHeaderKeydown(e, column)}
 			>
 				{#if sort?.key === column.key}<Icon name="arrow-down" size={11} />{/if}
 				<span>{column.label}</span>
@@ -157,7 +187,12 @@
 
 	{#snippet rowCells(row: T)}
 		{#each visibleColumns as column (column.key)}
-			<div class="cell" class:mono={column.mono} style:text-align={column.align ?? 'left'}>
+			<div
+				class="cell"
+				role="gridcell"
+				class:mono={column.mono}
+				style:text-align={column.align ?? 'left'}
+			>
 				{#if cell}{@render cell(row, column)}{:else}{cellValue(row, column)}{/if}
 			</div>
 		{/each}
@@ -173,10 +208,10 @@
 				{#if onRowClick}
 					<div
 						class="row clickable"
+						role="row"
 						class:selected={selectedKey != null && rowKey(row) === selectedKey}
 						style:grid-template-columns={gridTemplate}
 						tabindex="0"
-						role="button"
 						onclick={() => onRowClick(row)}
 						onkeydown={(e) => activate(e, row)}
 					>
@@ -185,6 +220,7 @@
 				{:else}
 					<div
 						class="row"
+						role="row"
 						class:selected={selectedKey != null && rowKey(row) === selectedKey}
 						style:grid-template-columns={gridTemplate}
 					>
@@ -206,8 +242,8 @@
 	.header {
 		display: grid;
 		align-items: center;
-		height: 32px;
-		flex: 0 0 32px;
+		height: 28px;
+		flex: 0 0 28px;
 		padding: 0 12px;
 		column-gap: 12px;
 		border-bottom: 1px solid var(--border-subtle);
