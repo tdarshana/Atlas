@@ -2,6 +2,8 @@
 // `atlas.table.<id>` localStorage persistence. No Svelte here, so these are plain
 // unit tests.
 
+import { persistSet } from '$lib/shell/persist';
+
 export interface TableColumn<T> {
 	key: string;
 	label: string;
@@ -95,4 +97,5 @@ export function saveTableState(id: string, state: TableState): void {
 	} catch {
 		/* storage is unavailable; order and sort are simply not remembered */
 	}
+	void persistSet(KEY_PREFIX + id, state);
 }

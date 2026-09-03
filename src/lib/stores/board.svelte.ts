@@ -5,6 +5,7 @@
 import { ApiError } from '$lib/api';
 import { api } from '$lib/daemon.svelte';
 import { errorLogPath, errorMessage } from '$lib/errors';
+import { persistSet } from '$lib/shell/persist';
 import type { Stage, Task, TaskDetail, Uuid } from '$lib/types';
 import { push } from '$lib/ui/toasts.svelte';
 
@@ -105,6 +106,7 @@ export function saveLaneWidths(projectId: Uuid | null, widths: Record<string, nu
 	} catch {
 		/* storage is unavailable; the lanes are simply the default width next time */
 	}
+	void persistSet(laneKey(projectId), widths);
 }
 
 export function loadDetailWidth(): number {
@@ -120,12 +122,14 @@ export function loadDetailWidth(): number {
 }
 
 export function saveDetailWidth(width: number): void {
+	const clamped = clampDetail(width);
 	try {
 		if (typeof localStorage === 'undefined') return;
-		localStorage.setItem(DETAIL_KEY, String(clampDetail(width)));
+		localStorage.setItem(DETAIL_KEY, String(clamped));
 	} catch {
 		/* as above */
 	}
+	void persistSet(DETAIL_KEY, clamped);
 }
 
 /** A lane and whether the column filter has folded it away. */

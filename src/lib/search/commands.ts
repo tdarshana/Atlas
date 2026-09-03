@@ -4,8 +4,19 @@
 // does nothing.
 
 import type { IconName } from '$lib/ds';
+import { desktop } from '$lib/shell/platform';
 import { setTheme, shell, toggleRail, toggleSidePanel } from '$lib/shell/shell.svelte';
 import type { Uuid } from '$lib/types';
+
+/** Opens the log directory in the OS file manager. No-op outside Tauri: there is no
+ * folder to reveal in a browser tab, so `desktop` is skipped entirely rather than
+ * warning for a command that has nothing useful to fall back to. */
+async function openLogFolder(): Promise<void> {
+	const dir = await desktop<string | null>('log_dir', undefined, () => null);
+	if (!dir) return;
+	const { revealItemInDir } = await import('@tauri-apps/plugin-opener');
+	await revealItemInDir(dir);
+}
 
 export interface CommandContext {
 	/** The project the window is on, or null when the view is global. */
@@ -91,6 +102,55 @@ export const COMMANDS: PaletteCommand[] = [
 		icon: 'panel-right',
 		combo: 'Mod+J',
 		run: () => toggleSidePanel()
+	},
+	{
+		id: 'window-center',
+		label: 'Move window to center',
+		hint: '',
+		icon: 'maximize',
+		run: () => desktop('window_center', undefined, () => undefined)
+	},
+	{
+		id: 'window-top-left',
+		label: 'Move window to top left',
+		hint: '',
+		icon: 'maximize',
+		run: () => desktop('window_move', { position: 'top-left' }, () => undefined)
+	},
+	{
+		id: 'window-top-right',
+		label: 'Move window to top right',
+		hint: '',
+		icon: 'maximize',
+		run: () => desktop('window_move', { position: 'top-right' }, () => undefined)
+	},
+	{
+		id: 'window-bottom-left',
+		label: 'Move window to bottom left',
+		hint: '',
+		icon: 'maximize',
+		run: () => desktop('window_move', { position: 'bottom-left' }, () => undefined)
+	},
+	{
+		id: 'window-bottom-right',
+		label: 'Move window to bottom right',
+		hint: '',
+		icon: 'maximize',
+		run: () => desktop('window_move', { position: 'bottom-right' }, () => undefined)
+	},
+	{
+		id: 'open-log-folder',
+		label: 'Open log folder',
+		hint: '',
+		icon: 'folder',
+		run: () => openLogFolder()
+	},
+	{
+		id: 'quit-atlas',
+		label: 'Quit Atlas',
+		hint: '',
+		icon: 'x',
+		run: () => desktop('app_exit', undefined, () => undefined)
 	}
 ];
 

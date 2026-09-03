@@ -22,3 +22,28 @@ export async function resolvePlatform(): Promise<Platform> {
 		return 'mac';
 	}
 }
+
+const warnedCommands = new Set<string>();
+
+/**
+ * Every desktop-only capability in the app goes through this: it calls a Rust command
+ * when running inside Tauri, and otherwise runs `fallback` (`localStorage`, a no-op,
+ * whatever the caller has), printing one console warning per command name so a
+ * repeatedly-called command does not spam the console. This keeps the browser build
+ * (`bun run dev`) working without a Tauri bridge.
+ */
+export async function desktop<T>(
+	command: string,
+	args: Record<string, unknown> | undefined,
+	fallback: () => T | Promise<T>
+): Promise<T> {
+	if (inTauri()) {
+		const { invoke } = await import('@tauri-apps/api/core');
+		return invoke<T>(command, args);
+	}
+	if (!warnedCommands.has(command)) {
+		warnedCommands.add(command);
+		console.warn(`Not running in Tauri; "${command}" falls back.`);
+	}
+	return fallback();
+}

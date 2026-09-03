@@ -6,6 +6,7 @@
 import { goto } from '$app/navigation';
 import { api } from '$lib/daemon.svelte';
 import { errorMessage } from '$lib/errors';
+import { persistSet } from '$lib/shell/persist';
 import { projects } from '$lib/stores/projects.svelte';
 import type { SearchGroup, SearchHit, SearchKind, SearchResult, Uuid } from '$lib/types';
 import { parseQuery, resolveScopes, stripScopes, type ParsedQuery, type ScopeChip } from './parse';
@@ -275,6 +276,7 @@ function saveRecent(): void {
 	} catch {
 		/* the list is a convenience; losing it must not break opening the item */
 	}
+	void persistSet(RECENT_KEY, palette.recent);
 }
 
 /**
