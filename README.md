@@ -42,6 +42,10 @@ Atlas can optionally turn conversation transcripts into candidate memories throu
 
 A task board inside Atlas, with configurable stages, blockers and subtasks, that every agent reads and writes over MCP alongside the CLI and the TUI's Board tab. `atlas task create "Add board export"` files a task; `atlas task claim ATL-12` assigns and starts it. See [Board](docs/usage.md#board) in `docs/usage.md` for the stage rules, the ready and claim rules, every CLI form, the API routes, the MCP tools, and the optional `TASKS.md` mirror.
 
+## Workflows
+
+A workflow is a graph of a trigger, one or more actions and an output, editable on a Svelte Flow canvas, that the daemon can run on a schedule, on an agent's own prompt, or by hand. The runner calls the configured extraction endpoint once per action and, when the workflow's output node asks for it, turns the last action's trailing JSON block into pending memories and filed tasks. `atlas workflow run <name> --wait` starts a run and waits for it to finish; an agent can do the same over MCP with `workflow_run`/`workflow_status`. The desktop app's Workflows screen holds the editor, a run history tab with a per-step log, and a real Workflows tab on every project. See [Workflows](docs/usage.md#workflows) in `docs/usage.md` for the graph shape, the trigger kinds and cron examples, the JSON output block, the routes, the MCP tools and the CLI.
+
 ## CLI
 
     atlas remember "we deploy to fly.io" --kind decision --tag infra
@@ -51,7 +55,7 @@ A task board inside Atlas, with configurable stages, blockers and subtasks, that
     atlas sync
     atlas daemon status
 
-`atlas project`, `atlas agent`, `atlas practice` and `atlas workflow` manage the corresponding library with `list`, `show`, `save` and `delete` subcommands (`project` has `connect`, `list` and `show`). `atlas export DIR` writes the whole library to `DIR` as JSONL and Markdown; `atlas import DIR` reads it back. Export empties `DIR/agents`, `DIR/practices` and `DIR/workflows` first, so a deleted document does not come back on the next import, and refuses when one of them holds a file the export did not write unless you pass `--force`. Import seeds a destination rather than restoring one: it creates no projects, and ids and timestamps are new. Full flags in `docs/usage.md`.
+`atlas project`, `atlas agent` and `atlas practice` manage the corresponding library with `list`, `show`, `save` and `delete` subcommands (`project` has `connect`, `list` and `show`); `atlas workflow` is `list`, `show`, `run`, `runs`, `log` and `cancel` instead, since a workflow's graph is edited through the desktop app rather than the command line. `atlas export DIR` writes the whole library to `DIR` as JSONL and Markdown; `atlas import DIR` reads it back. Export empties `DIR/agents`, `DIR/practices` and `DIR/workflows` first, so a deleted document does not come back on the next import, and refuses when one of them holds a file the export did not write unless you pass `--force`. Import seeds a destination rather than restoring one: it creates no projects, and ids and timestamps are new. Full flags in `docs/usage.md`.
 
 ## TUI
 

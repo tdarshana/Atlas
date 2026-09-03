@@ -3,9 +3,10 @@
 import { daemon } from './daemon.svelte';
 import type { Timestamp } from './types';
 
-/** Compact "how long ago", e.g. `3h`. */
-export function relativeAge(ts: Timestamp): string {
-	const ms = Date.now() - new Date(ts).getTime();
+/** Compact "how long ago", e.g. `3h`. `now` defaults to the wall clock; a caller
+ * passes one in to test a fixed instant, the same way `logTime` does. */
+export function relativeAge(ts: Timestamp, now: number = Date.now()): string {
+	const ms = now - new Date(ts).getTime();
 	if (!Number.isFinite(ms)) return '-';
 	const minutes = Math.floor(ms / 60_000);
 	if (minutes < 1) return 'just now';
@@ -89,4 +90,19 @@ export function plural(n: number, word: string, many = `${word}s`): string {
 /** The daemon log, which is what explains a connection failure. */
 export function logPath(): string {
 	return daemon.logPath || '~/.atlas/atlasd.log';
+}
+
+/**
+ * A run or step's wall time as `1m 42s`, whole seconds only. `n/a` before `finishedAt`
+ * is set (still queued or running) or if the pair does not parse to a sane span.
+ */
+export function duration(startedAt: Timestamp, finishedAt: Timestamp | null): string {
+	if (!finishedAt) return 'n/a';
+	const startMs = new Date(startedAt).getTime();
+	const endMs = new Date(finishedAt).getTime();
+	if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) return 'n/a';
+	const totalSeconds = Math.floor((endMs - startMs) / 1000);
+	const minutes = Math.floor(totalSeconds / 60);
+	const seconds = totalSeconds % 60;
+	return `${minutes}m ${seconds}s`;
 }

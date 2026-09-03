@@ -12,7 +12,9 @@ const mocks = vi.hoisted(() => ({
 	patchWorkflow: vi.fn(),
 	deleteWorkflow: vi.fn(),
 	runWorkflow: vi.fn(),
-	listRuns: vi.fn()
+	listRuns: vi.fn(),
+	getRun: vi.fn(),
+	cancelRun: vi.fn()
 }));
 
 vi.mock('$lib/daemon.svelte', () => ({
@@ -25,15 +27,20 @@ vi.mock('$lib/daemon.svelte', () => ({
 import {
 	ACTION_PRESETS,
 	addAction,
+	cancelRun,
 	connect,
 	createWorkflow,
 	cronHint,
+	filterRuns,
 	freePosition,
 	fromApiGraph,
+	loadRunDetail,
+	loadRunHistory,
 	NODE_WIDTH,
 	openWorkflow,
 	removeNode,
 	removeWorkflow,
+	rerun,
 	run,
 	save,
 	toApiGraph,
@@ -41,6 +48,7 @@ import {
 	workflow,
 	type WFNode
 } from './workflows.svelte';
+import type { WorkflowRun } from '$lib/types';
 
 const manualTrigger: Trigger = { kind: 'manual', cron: null, prompt: null };
 
@@ -93,7 +101,24 @@ beforeEach(() => {
 	workflow.selectedNodeId = null;
 	workflow.saveError = null;
 	workflow.runs = [];
+	workflow.history = [];
+	workflow.runDetail = null;
+	workflow.runDetailError = null;
 });
+
+function sampleRun(overrides: Partial<WorkflowRun> = {}): WorkflowRun {
+	return {
+		id: 'run-1',
+		workflow_id: 'wf-1',
+		number: 1,
+		trigger: 'manual',
+		status: 'success',
+		started_at: '2026-09-03T09:00:00Z',
+		finished_at: '2026-09-03T09:01:00Z',
+		summary: null,
+		...overrides
+	};
+}
 
 describe('fromApiGraph / toApiGraph', () => {
 	it('round trips a graph through the canvas shape and back', () => {
@@ -297,5 +322,90 @@ describe('run', () => {
 		const r = await run();
 		expect(mocks.runWorkflow).toHaveBeenCalledWith('wf-1', undefined, undefined);
 		expect(r.number).toBe(3);
+	});
+});
+
+describe('filterRuns', () => {
+	const runs: WorkflowRun[] = [
+		sampleRun({ id: 'r1', status: 'success', trigger: 'schedule' }),
+		sampleRun({ id: 'r2', status: 'failed', trigger: 'manual' }),
+		sampleRun({ id: 'r3', status: 'success', trigger: 'prompt' }),
+		sampleRun({ id: 'r4', status: 'cancelled', trigger: 'manual' })
+	];
+
+	it('passes every run through for "all"', () => {
+		expect(filterRuns(runs, 'all')).toEqual(runs);
+	});
+
+	it('keeps only failed runs for "failed"', () => {
+		expect(filterRuns(runs, 'failed').map((r) => r.id)).toEqual(['r2']);
+	});
+
+	it('keeps only schedule-triggered runs for "schedule"', () => {
+		expect(filterRuns(runs, 'schedule').map((r) => r.id)).toEqual(['r1']);
+	});
+
+	it('keeps only prompt-triggered runs for "prompt"', () => {
+		expect(filterRuns(runs, 'prompt').map((r) => r.id)).toEqual(['r3']);
+	});
+
+	it('keeps only manual-triggered runs for "manual"', () => {
+		expect(filterRuns(runs, 'manual').map((r) => r.id)).toEqual(['r2', 'r4']);
+	});
+});
+
+describe('loadRunHistory / loadRunDetail', () => {
+	it('loads the open workflow\'s run list into history, newest first as the daemon answers', async () => {
+		workflow.current = sampleWorkflow();
+		const runs = [sampleRun({ id: 'r2' }), sampleRun({ id: 'r1' })];
+		mocks.listRuns.mockResolvedValue(runs);
+		await loadRunHistory();
+		expect(mocks.listRuns).toHaveBeenCalledWith('wf-1', 200);
+		expect(workflow.history).toEqual(runs);
+	});
+
+	it('loads one run\'s detail', async () => {
+		const detail = { run: sampleRun(), steps: [] };
+		mocks.getRun.mockResolvedValue(detail);
+		await loadRunDetail('run-1');
+		expect(workflow.runDetail).toEqual(detail);
+		expect(workflow.runDetailError).toBeNull();
+	});
+});
+
+describe('cancelRun', () => {
+	it('cancels a run and updates it everywhere it is held', async () => {
+		const queued = sampleRun({ status: 'queued', finished_at: null });
+		const cancelled = { ...queued, status: 'cancelled' as const };
+		workflow.history = [queued];
+		workflow.runDetail = { run: queued, steps: [] };
+		mocks.cancelRun.mockResolvedValue(cancelled);
+
+		const updated = await cancelRun('run-1');
+
+		expect(mocks.cancelRun).toHaveBeenCalledWith('run-1');
+		expect(updated.status).toBe('cancelled');
+		expect(workflow.history[0].status).toBe('cancelled');
+		expect(workflow.runDetail?.run.status).toBe('cancelled');
+	});
+});
+
+describe('rerun', () => {
+	it('calls the API with the same trigger the given run used', async () => {
+		workflow.current = sampleWorkflow();
+		const original = sampleRun({ trigger: 'schedule' });
+		const created = sampleRun({ id: 'run-2', number: 2, status: 'queued', finished_at: null });
+		mocks.runWorkflow.mockResolvedValue(created);
+
+		const result = await rerun(original);
+
+		expect(mocks.runWorkflow).toHaveBeenCalledWith('wf-1', 'schedule');
+		expect(result).toEqual(created);
+		expect(workflow.history[0]).toEqual(created);
+	});
+
+	it('throws when no workflow is open', async () => {
+		workflow.current = null;
+		await expect(rerun(sampleRun())).rejects.toThrow('No workflow is open');
 	});
 });

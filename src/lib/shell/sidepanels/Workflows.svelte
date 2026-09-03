@@ -102,7 +102,7 @@
 				label={`Run ${r.number}`}
 				mono
 				meta={relativeAge(r.started_at)}
-				href={`/workflows/${workflow.current.id}/history`}
+				href={`/workflows/${workflow.current.id}/history?run=${r.id}`}
 			/>
 		{:else}
 			<TreeRow icon="circle" label="No runs yet" iconColor="var(--text-tertiary)" />

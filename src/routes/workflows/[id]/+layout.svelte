@@ -63,7 +63,7 @@
 		try {
 			const r = await run();
 			push('success', `Run ${r.number} queued`);
-			await goto(`/workflows/${id}/history`);
+			await goto(`/workflows/${id}/history?run=${r.id}`);
 		} catch (e) {
 			push('error', errorMessage(e));
 		}

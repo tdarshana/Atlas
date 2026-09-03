@@ -525,6 +525,20 @@ export interface RunDetail {
 	steps: WorkflowStep[];
 }
 
+/**
+ * `WorkflowRun.summary` once parsed: written only once a run finishes successfully
+ * (`crates/atlas-core/src/workflow/run.rs`), so a queued, running, failed or cancelled
+ * run's `summary` stays `null` and the run detail view falls back to the step list for
+ * a step count and `n/a` for tokens.
+ */
+export interface RunSummary {
+	steps: number;
+	memories_proposed: number;
+	tasks_filed: number;
+	trigger: TriggerKind;
+	tokens: number | null;
+}
+
 // ---- global search (GET /api/v1/search, crates/atlas-core/src/search/global.rs) ----
 
 /** The seven kinds a search result can hold, in the order the daemon returns them. */

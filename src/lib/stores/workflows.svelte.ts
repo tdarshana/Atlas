@@ -14,7 +14,10 @@ import type {
 	NodeKind,
 	NewWorkflow,
 	OutputNodeData,
+	RunDetail,
+	RunStatus,
 	Trigger,
+	TriggerKind,
 	Workflow,
 	WorkflowRun
 } from '$lib/types';
@@ -242,7 +245,16 @@ export const workflow = $state({
 	saveError: null as string | null,
 
 	runs: [] as WorkflowRun[],
-	runsLoading: false
+	runsLoading: false,
+
+	/** The Run history tab's own list, separate from `runs` above (the side panel's last
+	 * few) so loading the full history there never trims what the side panel shows. */
+	history: [] as WorkflowRun[],
+	historyLoading: false,
+
+	runDetail: null as RunDetail | null,
+	runDetailLoading: false,
+	runDetailError: null as string | null
 });
 
 export async function loadWorkflows(projectId?: string | null): Promise<void> {
@@ -285,8 +297,10 @@ function untitledName(): string {
 }
 
 /** Creates `untitled-<n>` with a manual trigger, one action node `main`, and an output
- * node, then pushes it onto the list. The caller navigates to it. */
-export async function createWorkflow(): Promise<Workflow> {
+ * node, then pushes it onto the list. The caller navigates to it. `projectId` binds the
+ * new workflow to that project (the project Workflows tab's own "New workflow"); left
+ * out, it is global, matching the side panel's own "New workflow…" row. */
+export async function createWorkflow(projectId?: string | null): Promise<Workflow> {
 	const graph: Graph = {
 		nodes: [
 			{
@@ -315,6 +329,7 @@ export async function createWorkflow(): Promise<Workflow> {
 	};
 	const body: NewWorkflow = {
 		name: untitledName(),
+		project_id: projectId ?? undefined,
 		trigger: { kind: 'manual', cron: null, prompt: null },
 		graph
 	};
@@ -432,4 +447,115 @@ export function statusLine(): string {
 	const edges = workflow.graph.edges.length;
 	const base = `${current.name} · ${nodes} nodes · ${edges} edges`;
 	return workflow.dirty ? `${base} · unsaved` : base;
+}
+
+// ---- run history ----
+
+/** Badge tone and label for a run's or a run's `trigger` field, shared by the runs
+ * table, the run detail header and the project tab's Recent runs card. */
+export const RUN_STATUS_TONE: Record<RunStatus, 'success' | 'danger' | 'warning' | 'neutral'> = {
+	success: 'success',
+	failed: 'danger',
+	cancelled: 'neutral',
+	queued: 'warning',
+	running: 'warning'
+};
+
+export const RUN_STATUS_LABEL: Record<RunStatus, string> = {
+	success: 'ok',
+	failed: 'failed',
+	cancelled: 'cancelled',
+	queued: 'queued',
+	running: 'running'
+};
+
+export const TRIGGER_TONE: Record<TriggerKind, 'warning' | 'accent' | 'neutral'> = {
+	schedule: 'warning',
+	prompt: 'accent',
+	manual: 'neutral'
+};
+
+export type RunFilterValue = 'all' | 'failed' | 'schedule' | 'prompt' | 'manual';
+
+/** The Run history card's filter Select, in the order frame 08.1 lists them. */
+export const RUN_FILTER_OPTIONS: { value: RunFilterValue; label: string }[] = [
+	{ value: 'all', label: 'All runs' },
+	{ value: 'failed', label: 'Failed only' },
+	{ value: 'schedule', label: 'Scheduled' },
+	{ value: 'prompt', label: 'Prompted' },
+	{ value: 'manual', label: 'Manual' }
+];
+
+/** Narrows a run list to one filter value; `'all'` (and anything else) passes every
+ * run through unchanged. */
+export function filterRuns(runs: WorkflowRun[], filter: RunFilterValue): WorkflowRun[] {
+	switch (filter) {
+		case 'failed':
+			return runs.filter((r) => r.status === 'failed');
+		case 'schedule':
+			return runs.filter((r) => r.trigger === 'schedule');
+		case 'prompt':
+			return runs.filter((r) => r.trigger === 'prompt');
+		case 'manual':
+			return runs.filter((r) => r.trigger === 'manual');
+		default:
+			return runs;
+	}
+}
+
+/** The open workflow's full run list, newest first, for the Run history tab. */
+export async function loadRunHistory(limit = 200): Promise<void> {
+	const current = workflow.current;
+	if (!current) return;
+	workflow.historyLoading = true;
+	try {
+		workflow.history = await api().listRuns(current.id, limit);
+	} catch {
+		workflow.history = [];
+	} finally {
+		workflow.historyLoading = false;
+	}
+}
+
+/** One run's full detail (the run plus every step and its log), for the run detail
+ * card. Errors are kept on `runDetailError` rather than thrown, since a poll tick
+ * failing should not blow up the caller. */
+export async function loadRunDetail(runId: string): Promise<void> {
+	workflow.runDetailLoading = true;
+	try {
+		workflow.runDetail = await api().getRun(runId);
+		workflow.runDetailError = null;
+	} catch (e) {
+		workflow.runDetailError = errorMessage(e);
+	} finally {
+		workflow.runDetailLoading = false;
+	}
+}
+
+/** Applies a run update (from a cancel or a poll) everywhere the run appears, so the
+ * side panel, the history table and the open detail card never disagree. */
+function applyRunUpdate(updated: WorkflowRun): void {
+	const hi = workflow.history.findIndex((r) => r.id === updated.id);
+	if (hi >= 0) workflow.history[hi] = updated;
+	const ri = workflow.runs.findIndex((r) => r.id === updated.id);
+	if (ri >= 0) workflow.runs[ri] = updated;
+	if (workflow.runDetail?.run.id === updated.id) workflow.runDetail.run = updated;
+}
+
+/** Cancels a queued or running run. Throws so the caller can toast it; a run already
+ * in a terminal status answers `Conflict` (409), per `WorkflowRepo::cancel_run`. */
+export async function cancelRun(runId: string): Promise<WorkflowRun> {
+	const updated = await api().cancelRun(runId);
+	applyRunUpdate(updated);
+	return updated;
+}
+
+/** Starts a new run of the open workflow with the same trigger kind an earlier run
+ * used, then adds it to the top of the history list so the caller can select it. */
+export async function rerun(run: WorkflowRun): Promise<WorkflowRun> {
+	const current = workflow.current;
+	if (!current) throw new Error('No workflow is open');
+	const created = await api().runWorkflow(current.id, run.trigger);
+	workflow.history = [created, ...workflow.history];
+	return created;
 }
