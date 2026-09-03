@@ -47,6 +47,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_os::init())
         // macOS keeps its own chrome under the overlay title bar; Windows and Linux draw
         // none, so the webview's title bar is the only one there.

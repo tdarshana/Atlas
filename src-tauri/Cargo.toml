@@ -21,6 +21,8 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
+# Writing the file the save dialog named: the project Log tab's JSONL export.
+tauri-plugin-fs = "2"
 # The webview draws its own title bar, so it needs to know which OS chrome to draw.
 tauri-plugin-os = "2"
 serde = { version = "1", features = ["derive"] }

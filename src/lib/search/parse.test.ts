@@ -15,7 +15,9 @@ function project(id: string, name: string): Project {
 		created_at: '2026-09-03T00:00:00Z',
 		last_seen_at: '2026-09-03T00:00:00Z',
 		board_key: null,
-		board_stages: null
+		board_stages: null,
+		agent_access: { memory_writers: null, task_movers: null, require_review: false },
+		extraction: null
 	};
 }
 

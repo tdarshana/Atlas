@@ -4,18 +4,24 @@
 
 import type {
 	Agent,
+	AgentAccess,
 	Doc,
 	DocKind,
 	ExtractionTestResult,
 	GlobalSearchQuery,
 	Job,
+	LogEntry,
+	LogFilter,
 	Memory,
+	MemoryScope,
 	MemoryStatus,
 	NewAgent,
 	NewDoc,
 	NewMemory,
 	NewTask,
 	Project,
+	ProjectExtraction,
+	ProjectPatch,
 	ProjectContext,
 	RecallHit,
 	RecallQuery,
@@ -35,6 +41,13 @@ import type {
 	Timestamp,
 	Uuid
 } from './types';
+
+/**
+ * A request-time narrowing, not a value of a memory's own `scope` column (that is
+ * `MemoryScope`). `project_only` asks `GET /memories` and `POST /memories/search` for
+ * exactly one project's own memories, nothing global.
+ */
+export type MemoryListScope = 'project_only';
 
 /** A non-2xx response, carrying the daemon's `error` string as the message. */
 export class ApiError extends Error {
@@ -70,11 +83,24 @@ export class AtlasApi {
 		return this.req('GET', '/api/v1/status');
 	}
 
-	listMemories(status?: MemoryStatus, projectId?: Uuid | null): Promise<Memory[]> {
-		return this.req('GET', `/api/v1/memories${query({ status, project_id: projectId })}`);
+	/**
+	 * `scope: 'project_only'` (paired with `projectId`) narrows to that project's own
+	 * memories, dropping the global ones a bare `project_id` still widens in. Fix round 1:
+	 * the daemon gains this on `GET /memories` in a parallel fix; see `MemoryListScope`.
+	 */
+	listMemories(
+		status?: MemoryStatus,
+		projectId?: Uuid | null,
+		scope?: MemoryListScope
+	): Promise<Memory[]> {
+		return this.req(
+			'GET',
+			`/api/v1/memories${query({ status, project_id: projectId, scope })}`
+		);
 	}
 
-	search(q: RecallQuery): Promise<RecallHit[]> {
+	/** Same `project_only` scope as `listMemories`, for the search route. */
+	search(q: Omit<RecallQuery, 'scope'> & { scope?: MemoryScope | MemoryListScope | null }): Promise<RecallHit[]> {
 		return this.req('POST', '/api/v1/memories/search', q);
 	}
 
@@ -141,6 +167,44 @@ export class AtlasApi {
 	/** Removes the project row. Its memories are kept; nothing is hard-deleted. */
 	deleteProject(id: Uuid): Promise<void> {
 		return this.req('DELETE', `/api/v1/projects/${encodeURIComponent(id)}`);
+	}
+
+	/**
+	 * Only the fields in `patch` change. `git_remote: null` clears the remote; leaving the
+	 * field out keeps it. A new `board_key` renames every task key in the project, so ask
+	 * before sending one.
+	 */
+	patchProject(id: Uuid, patch: ProjectPatch): Promise<Project> {
+		return this.req('PATCH', `/api/v1/projects/${encodeURIComponent(id)}`, patch);
+	}
+
+	/** Replaces the project's access rules wholesale; a null list means any actor. */
+	setAgentAccess(id: Uuid, access: AgentAccess): Promise<Project> {
+		return this.req('PUT', `/api/v1/projects/${encodeURIComponent(id)}/agent-access`, access);
+	}
+
+	/** `null` drops the override and puts the project back on the global settings. */
+	setProjectExtraction(id: Uuid, extraction: ProjectExtraction | null): Promise<Project> {
+		return this.req('PUT', `/api/v1/projects/${encodeURIComponent(id)}/extraction`, extraction);
+	}
+
+	/** One page of the project's event history, newest first. */
+	projectLog(id: Uuid, filter: LogFilter = {}): Promise<LogEntry[]> {
+		return this.req(
+			'GET',
+			`/api/v1/projects/${encodeURIComponent(id)}/log${query({
+				source: filter.source,
+				kind: filter.kind,
+				q: filter.q,
+				after: filter.after,
+				limit: filter.limit == null ? null : String(filter.limit)
+			})}`
+		);
+	}
+
+	/** The whole log as JSONL, no filter and no cap. Returned as text, not parsed. */
+	projectLogExport(id: Uuid): Promise<string> {
+		return this.text('GET', `/api/v1/projects/${encodeURIComponent(id)}/log/export`);
 	}
 
 	// ---- agents ----
@@ -217,11 +281,13 @@ export class AtlasApi {
 	 * a model error comes back as 400 with `{ok: false, error}` rather than the
 	 * usual `{error}` shape, so it is returned as data instead of thrown; a 409
 	 * (extraction disabled) still throws `ApiError` like any other route.
+	 *
+	 * `projectId` tests the settings that project resolves to, override and all.
 	 */
-	async testExtraction(): Promise<ExtractionTestResult> {
+	async testExtraction(projectId?: Uuid | null): Promise<ExtractionTestResult> {
 		let res: Response;
 		try {
-			res = await fetch(`${this.baseUrl}/api/v1/extraction/test`, {
+			res = await fetch(`${this.baseUrl}/api/v1/extraction/test${query({ project_id: projectId })}`, {
 				method: 'POST',
 				headers: { Accept: 'application/json' }
 			});
@@ -330,6 +396,22 @@ export class AtlasApi {
 	}
 
 	// ---- transport ----
+
+	/**
+	 * A route whose body is not JSON. The log export is JSONL, which `JSON.parse` would
+	 * choke on, so it comes back as the text it is.
+	 */
+	private async text(method: string, path: string): Promise<string> {
+		let res: Response;
+		try {
+			res = await fetch(`${this.baseUrl}${path}`, { method });
+		} catch (e) {
+			throw new ApiError(e instanceof Error ? e.message : String(e), 0);
+		}
+		const body = await res.text();
+		if (!res.ok) throw new ApiError(errorMessage(body, res), res.status);
+		return body;
+	}
 
 	private async req<T>(
 		method: string,

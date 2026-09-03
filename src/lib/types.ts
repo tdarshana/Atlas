@@ -83,6 +83,75 @@ export interface Project {
 	board_key: string | null;
 	/** Stage override; null means the project follows the global list. */
 	board_stages: Stage[] | null;
+	/** Never null on a read: an unset column comes back as the all-null default. */
+	agent_access: AgentAccess;
+	/** Null until an override is stored. `api_key` reads back as `"***"`. */
+	extraction: ProjectExtraction | null;
+}
+
+/**
+ * Who may write memories and move tasks in a project. `null` for either list means any
+ * actor. A list matches the whole label (`claude-code/reviewer`) or the part before the
+ * slash. `desktop` and anything starting with `cli` are exempt: those are the user's own
+ * hands, not an agent.
+ */
+export interface AgentAccess {
+	memory_writers: string[] | null;
+	task_movers: string[] | null;
+	require_review: boolean;
+}
+
+/**
+ * A project's extraction override. Every field is optional and an absent one falls back
+ * to the matching global `extraction.*` setting, field by field. Sending
+ * `api_key: "***"` back means "leave the stored key alone".
+ */
+export interface ProjectExtraction {
+	enabled?: boolean | null;
+	base_url?: string | null;
+	model?: string | null;
+	api_key?: string | null;
+	auto_accept_min_confidence?: number | null;
+}
+
+/**
+ * `PATCH /projects/{id}`. Only the fields present change; `git_remote: null` clears the
+ * remote where leaving the field out keeps it, which is the daemon's double option.
+ */
+export interface ProjectPatch {
+	name?: string;
+	board_key?: string;
+	git_remote?: string | null;
+}
+
+/**
+ * What a log row points at. `key` is set for tasks only. `run` is in the union because
+ * the Log tab links one; the daemon does not emit it yet.
+ */
+export type LogRefType = 'task' | 'memory' | 'project' | 'sync' | 'job' | 'run';
+
+export interface LogRef {
+	type: LogRefType;
+	id: string;
+	key?: string | null;
+}
+
+/** One row of `GET /projects/{id}/log`, newest first. */
+export interface LogEntry {
+	time: Timestamp;
+	source: string;
+	kind: string;
+	detail: string;
+	ref: LogRef | null;
+}
+
+/** The log's query string. `after` keeps entries strictly older than the time given. */
+export interface LogFilter {
+	source?: string | null;
+	kind?: string | null;
+	q?: string | null;
+	after?: Timestamp | null;
+	limit?: number | null;
 }
 
 export interface ProjectContext {
