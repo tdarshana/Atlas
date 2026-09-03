@@ -38,6 +38,10 @@ Once synced, saved agents show up as Claude Code and Codex subagents: Claude Cod
 
 Atlas can optionally turn conversation transcripts into candidate memories through an OpenAI-compatible endpoint. It is off by default; turn it on from the desktop app's Settings screen or `PUT /api/v1/settings`, then `atlas sync` installs a Claude Code Stop hook and a Codex `notify` entry that feed transcripts to `atlas ingest` automatically. Candidates land as pending memories for review before they count as real. See [Extraction](docs/usage.md#extraction) in `docs/usage.md` for the settings keys, the HTTP and CLI surfaces, and the trust boundary for the API key.
 
+## Board
+
+A task board inside Atlas, with configurable stages, blockers and subtasks, that every agent reads and writes over MCP alongside the CLI, the TUI's Board tab and the desktop app's `/board` route. `atlas task create "Add board export"` files a task; `atlas task claim ATL-12` assigns and starts it. See [Board](docs/usage.md#board) in `docs/usage.md` for the stage rules, the ready and claim rules, every CLI form, the API routes, the MCP tools, and the optional `TASKS.md` mirror.
+
 ## CLI
 
     atlas remember "we deploy to fly.io" --kind decision --tag infra

@@ -1094,3 +1094,28 @@ async fn board_task_counts_cover_every_stage() {
     let done = rows.iter().find(|r| r["stage"] == "Done").unwrap();
     assert_eq!(done["count"], 0, "a stage with no tasks is still reported: {counts}");
 }
+
+/// `TASKS.md` is only planned once `board.mirror_tasks_md` is switched on, the same
+/// unauthenticated-daemon-decides pattern the transcript hooks follow: `POST /sync` must
+/// not take the mirror flag from the request itself.
+#[tokio::test]
+async fn tasks_md_mirror_follows_the_board_setting() {
+    let repo = tempfile::tempdir().unwrap();
+    fixture_repo(repo.path());
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+
+    let sync_check = || c.post(format!("{base}/sync")).json(&serde_json::json!({"root": repo.path(), "check_only": true})).send();
+    let rep: serde_json::Value = sync_check().await.unwrap().json().await.unwrap();
+    let kinds: Vec<&str> = rep["ops"].as_array().unwrap().iter().filter_map(|o| o["kind"].as_str()).collect();
+    assert!(!kinds.contains(&"tasks_md"), "the mirror is off by default: {rep}");
+
+    let put = c.put(format!("{base}/settings")).json(&serde_json::json!({"board.mirror_tasks_md": true})).send().await.unwrap();
+    assert_eq!(put.status(), 200);
+
+    let rep: serde_json::Value = sync_check().await.unwrap().json().await.unwrap();
+    let op = rep["ops"].as_array().unwrap().iter().find(|o| o["kind"] == "tasks_md");
+    assert!(op.is_some(), "enabling the setting should report a TasksMd op: {rep}");
+    assert!(!repo.path().join("TASKS.md").exists(), "check_only must not write");
+}

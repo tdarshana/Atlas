@@ -163,6 +163,7 @@ str_enum!(SyncKind {
     ClaudeMd => "claude_md",
     ClaudeHook => "claude_hook",
     CodexHook => "codex_hook",
+    TasksMd => "tasks_md",
 });
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

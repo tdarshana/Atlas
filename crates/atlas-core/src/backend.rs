@@ -21,7 +21,7 @@ const MCP_COMMAND: &str = "atlas mcp";
 
 /// Targets a sync writes when the request names none.
 const DEFAULT_TARGETS: &[SyncKind] =
-    &[SyncKind::Claude, SyncKind::Codex, SyncKind::AgentsMd, SyncKind::ClaudeMd, SyncKind::ClaudeHook, SyncKind::CodexHook];
+    &[SyncKind::Claude, SyncKind::Codex, SyncKind::AgentsMd, SyncKind::ClaudeMd, SyncKind::ClaudeHook, SyncKind::CodexHook, SyncKind::TasksMd];
 
 /// Why a global sync reports a managed-block target as skipped.
 const GLOBAL_SKIP: &str = "global sync writes agent files only";
@@ -183,6 +183,13 @@ impl LocalBackend {
     fn extraction_enabled(&self) -> Result<bool> {
         Ok(self.settings().get_raw("extraction.enabled")?.and_then(|v| v.as_bool()) == Some(true))
     }
+
+    /// Whether `board.mirror_tasks_md` is on, the same fresh-read, off-by-default
+    /// pattern as `extraction_enabled`. `sync` resolves it here rather than trusting
+    /// the request: `POST /sync` is unauthenticated.
+    fn mirror_tasks_md_enabled(&self) -> Result<bool> {
+        Ok(self.settings().get_raw("board.mirror_tasks_md")?.and_then(|v| v.as_bool()) == Some(true))
+    }
 }
 
 #[async_trait::async_trait]
@@ -273,7 +280,7 @@ impl Backend for LocalBackend {
     async fn sync(&self, req: SyncRequest) -> Result<SyncReport> {
         let agents = self.agents().list()?;
         let requested = if req.targets.is_empty() { DEFAULT_TARGETS.to_vec() } else { req.targets.clone() };
-        let (root, targets, block, skipped) = if req.global {
+        let (root, targets, block, skipped, project_id) = if req.global {
             let home = sync_home()?;
             // Home is not a project, so only the agent exporters apply: splicing a managed
             // block into ~/AGENTS.md would name practices and a project that aren't there.
@@ -285,14 +292,18 @@ impl Backend for LocalBackend {
             let skipped = filtered
                 .into_iter()
                 .map(|kind| SyncOp {
-                    path: home.join(if matches!(kind, SyncKind::AgentsMd) { "AGENTS.md" } else { "CLAUDE.md" }),
+                    path: home.join(match kind {
+                        SyncKind::AgentsMd => "AGENTS.md",
+                        SyncKind::TasksMd => "TASKS.md",
+                        _ => "CLAUDE.md",
+                    }),
                     kind,
                     content: String::new(),
                     action: SyncAction::Skip(GLOBAL_SKIP.into()),
                 })
                 .collect();
             let block = BlockContext { mcp_command: MCP_COMMAND.into(), agents: agents.clone(), practices: vec![], project_name: None };
-            (home, targets, block, skipped)
+            (home, targets, block, skipped, None)
         } else {
             let requested_root = req.root.clone().ok_or_else(|| AtlasError::Invalid("sync requires a root unless global is set".into()))?;
             // Resolve and vet the root before anything is written or recorded: the route is
@@ -305,7 +316,7 @@ impl Backend for LocalBackend {
             let project = self.connect_project(detected.root, "sync").await?;
             let practices = self.docs(DocKind::Practice).list(Some(project.id))?;
             let block = BlockContext { mcp_command: MCP_COMMAND.into(), agents: agents.clone(), practices, project_name: Some(project.name.clone()) };
-            (PathBuf::from(project.root_path), requested, block, vec![])
+            (PathBuf::from(project.root_path), requested, block, vec![], Some(project.id))
         };
         // The hooks feed transcripts to a model, so they are installed only once the
         // user has switched extraction on. The daemon resolves that here rather than
@@ -316,7 +327,30 @@ impl Backend for LocalBackend {
         // with extraction on this resolves on nearly every sync, and a machine with no
         // home to find fails the whole pass rather than just the hook.
         let home = if hooks && targets.contains(&SyncKind::CodexHook) { sync_home()? } else { PathBuf::new() };
-        let mut ops = sync::plan_sync(&SyncInputs { root: &root, agents: &agents, block, targets: &targets, home: &home, hooks, global: req.global })?;
+        // The mirror is a per-project file, so a global sync (no project) never fetches
+        // board data for it, even when the setting is on. Fetched only when the setting
+        // is on, so an ordinary sync with the mirror off does not pay for two extra
+        // queries it will not use.
+        let mirror_tasks_md = self.mirror_tasks_md_enabled()? && project_id.is_some();
+        let (board_stages, board_tasks) = if let Some(project_id) = project_id.filter(|_| mirror_tasks_md) {
+            let stages = self.board_stages(Some(project_id)).await?.stages;
+            let tasks = self.list_tasks(TaskFilter { project_id: Some(project_id), include_done: true, ..Default::default() }).await?;
+            (stages, tasks)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let mut ops = sync::plan_sync(&SyncInputs {
+            root: &root,
+            agents: &agents,
+            block,
+            targets: &targets,
+            home: &home,
+            hooks,
+            global: req.global,
+            mirror_tasks_md,
+            board_stages: &board_stages,
+            board_tasks: &board_tasks,
+        })?;
         ops.extend(skipped);
         if req.check_only { Ok(sync::summarize(&ops)) } else { sync::apply(&ops) }
     }
