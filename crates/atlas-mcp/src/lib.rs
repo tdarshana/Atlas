@@ -4,8 +4,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use atlas_core::backend::Backend;
+use atlas_core::board::render::render_board_markdown;
 use atlas_core::export::claude_agent_md;
 use atlas_core::models::*;
+use chrono::{DateTime, Utc};
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -92,6 +94,92 @@ pub struct SaveAgentArgs {
     pub tags: Option<Vec<String>>,
 }
 
+/// Board (Phase 6) tool arguments. Every write tool takes an optional `agent`,
+/// appended to the actor as `<source_tool>/<agent>` so a board history reads as a
+/// plain sentence naming the specific agent, not just the tool that hosted it.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TaskListArgs {
+    /// Absolute path to the project whose board to list, or the literal string
+    /// "global" for tasks with no project. Defaults to the root this server was
+    /// started in.
+    pub project_root: Option<PathBuf>,
+    pub stage: Option<String>,
+    pub assignee: Option<String>,
+    /// Keep only tasks that are ready: not done, every blocker done, no open subtask.
+    pub ready: Option<bool>,
+    /// Case-insensitive substring match over key, title and description.
+    pub query: Option<String>,
+    /// Include tasks in a done stage. Default false.
+    pub include_done: Option<bool>,
+    pub agent: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TaskKeyArgs {
+    /// A task's key (e.g. ATL-12) or id.
+    pub key: String,
+    pub agent: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TaskCreateArgs {
+    pub title: String,
+    pub description: Option<String>,
+    /// One of task, bug, feature, chore. Default task.
+    pub kind: Option<String>,
+    /// One of low, medium, high, urgent. Default medium.
+    pub priority: Option<String>,
+    pub labels: Option<Vec<String>>,
+    /// Parent task, by id or key.
+    pub parent: Option<String>,
+    /// Tasks this one waits on, by id or key.
+    pub blocked_by: Option<Vec<String>>,
+    /// Absolute path to the project this task belongs to, or the literal string
+    /// "global" for a task with no project. Defaults to the root this server was
+    /// started in.
+    pub project_root: Option<PathBuf>,
+    pub agent: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TaskUpdateArgs {
+    pub key: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub kind: Option<String>,
+    pub priority: Option<String>,
+    pub assignee: Option<String>,
+    pub labels: Option<Vec<String>>,
+    /// The `updated_at` you last read for this task. A mismatch fails the call
+    /// with a conflict instead of overwriting a concurrent change.
+    pub expected_updated_at: Option<DateTime<Utc>>,
+    pub agent: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TaskMoveArgs {
+    pub key: String,
+    /// Must be one of the board's stage names; call board_stages to see them.
+    pub stage: String,
+    pub expected_updated_at: Option<DateTime<Utc>>,
+    pub agent: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TaskCommentArgs {
+    pub key: String,
+    pub body: String,
+    pub agent: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TaskClaimArgs {
+    pub key: String,
+    /// Take the task even if it is already assigned to someone else. Default false.
+    pub force: Option<bool>,
+    pub agent: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct AtlasMcp<B: Backend> {
     backend: Arc<B>,
@@ -129,6 +217,20 @@ fn resource_err(uri: &str, e: atlas_core::AtlasError) -> McpError {
         other => err(other),
     }
 }
+/// Like [`err`], but for the board tools: a `Conflict` (someone else holds the
+/// task, or `expected_updated_at` no longer matches) is the caller's to retry, not a
+/// server fault, so it is reported as `invalid_params` too, prefixed `conflict:` so
+/// an agent can tell it apart from a plain mistake and decide whether to re-read and
+/// retry. `NotFound` is spelled out the same way, since rmcp has no error kind for
+/// either.
+fn board_err(e: atlas_core::AtlasError) -> McpError {
+    match e {
+        atlas_core::AtlasError::Conflict(m) => McpError::invalid_params(format!("conflict: {m}"), None),
+        atlas_core::AtlasError::NotFound(m) => McpError::invalid_params(format!("not found: {m}"), None),
+        other => err(other),
+    }
+}
+
 fn json_result<T: serde::Serialize>(v: &T) -> Result<CallToolResult, McpError> {
     Ok(CallToolResult::success(vec![ContentBlock::text(serde_json::to_string_pretty(v).map_err(|e| McpError::internal_error(e.to_string(), None))?)]))
 }
@@ -209,6 +311,141 @@ impl<B: Backend> AtlasMcp<B> {
             Some(id) => Ok(Some(id)),
             None => Ok(self.resolve_project(project_root).await?.map(|p| p.id)),
         }
+    }
+
+    /// The actor a board write is recorded under: this server's `source_tool` label,
+    /// plus `/<agent>` when the caller named one, so the event history reads as a
+    /// sentence naming the specific agent ("claude-code/reviewer moved ATL-12").
+    fn actor(&self, agent: &Option<String>) -> String {
+        match agent.as_deref().map(str::trim) {
+            Some(a) if !a.is_empty() => format!("{}/{a}", self.source_tool),
+            _ => self.source_tool.clone(),
+        }
+    }
+
+    /// Resolves `project_root` to the project scope a board tool should use. The
+    /// literal value "global" names the project-less board explicitly; otherwise the
+    /// usual precedence applies (the argument, then `ATLAS_PROJECT_ROOT`, then the
+    /// root this server was started in) — but unlike `remember`, which is content to
+    /// stay unscoped, a board tool errors when none of those resolves: a task's key
+    /// is a project prefix, so there is nowhere to file it without one.
+    async fn board_project_id(&self, project_root: Option<PathBuf>) -> Result<Option<Uuid>, McpError> {
+        if project_root.as_deref().map(|p| p.as_os_str() == "global").unwrap_or(false) {
+            return Ok(None);
+        }
+        match self.resolve_project(project_root).await? {
+            Some(p) => Ok(Some(p.id)),
+            None => Err(McpError::invalid_params(
+                "no project is connected: pass project_root, set ATLAS_PROJECT_ROOT, or pass project_root: \"global\" for the global board",
+                None,
+            )),
+        }
+    }
+
+    #[tool(description = "List board tasks for the current project. Pass ready=true to get work whose blockers are done and is safe to start; pass stage or assignee to narrow further.")]
+    async fn task_list(&self, Parameters(a): Parameters<TaskListArgs>) -> Result<CallToolResult, McpError> {
+        let project_id = self.board_project_id(a.project_root).await?;
+        let filter = TaskFilter {
+            project_id,
+            stage: a.stage,
+            assignee: a.assignee,
+            ready: a.ready.unwrap_or(false),
+            query: a.query,
+            include_done: a.include_done.unwrap_or(false),
+        };
+        json_result(&self.backend.list_tasks(filter).await.map_err(board_err)?)
+    }
+
+    #[tool(description = "Fetch one task by key, including its subtasks and full event history. Call before updating or moving a task you have not read recently.")]
+    async fn task_get(&self, Parameters(a): Parameters<TaskKeyArgs>) -> Result<CallToolResult, McpError> {
+        json_result(&self.backend.get_task(&a.key).await.map_err(board_err)?)
+    }
+
+    #[tool(description = "Create a task on the board. Pass project_root to name a project other than the one this server was started in, or \"global\" for a task with no project.")]
+    async fn task_create(&self, Parameters(a): Parameters<TaskCreateArgs>) -> Result<CallToolResult, McpError> {
+        let project_id = self.board_project_id(a.project_root).await?;
+        let kind = a.kind.as_deref().map(str::parse::<TaskKind>).transpose().map_err(err)?;
+        let priority = a.priority.as_deref().map(str::parse::<TaskPriority>).transpose().map_err(err)?;
+        let new = NewTask {
+            project_id,
+            title: a.title,
+            description: a.description,
+            kind,
+            priority,
+            assignee: None,
+            labels: a.labels,
+            parent: a.parent,
+            blocked_by: a.blocked_by,
+            stage: None,
+        };
+        let actor = self.actor(&a.agent);
+        json_result(&self.backend.create_task(new, &actor).await.map_err(board_err)?)
+    }
+
+    #[tool(description = "Edit a task's title, description, kind, priority, assignee or labels. Pass expected_updated_at, from a prior task_get or task_list, to fail with a conflict instead of overwriting a concurrent change.")]
+    async fn task_update(&self, Parameters(a): Parameters<TaskUpdateArgs>) -> Result<CallToolResult, McpError> {
+        let kind = a.kind.as_deref().map(str::parse::<TaskKind>).transpose().map_err(err)?;
+        let priority = a.priority.as_deref().map(str::parse::<TaskPriority>).transpose().map_err(err)?;
+        let upd = TaskUpdate {
+            title: a.title,
+            description: a.description,
+            kind,
+            priority,
+            assignee: a.assignee.map(Some),
+            labels: a.labels,
+            parent: None,
+            expected_updated_at: a.expected_updated_at,
+        };
+        let actor = self.actor(&a.agent);
+        json_result(&self.backend.update_task(&a.key, upd, &actor).await.map_err(board_err)?)
+    }
+
+    #[tool(description = "Move a task to another stage on its board. Fails naming the valid stages if the stage does not exist, or with a conflict if expected_updated_at no longer matches.")]
+    async fn task_move(&self, Parameters(a): Parameters<TaskMoveArgs>) -> Result<CallToolResult, McpError> {
+        let actor = self.actor(&a.agent);
+        json_result(&self.backend.move_task(&a.key, &a.stage, a.expected_updated_at, &actor).await.map_err(board_err)?)
+    }
+
+    #[tool(description = "Add a comment to a task's history. Use it to record progress, verification notes, or why a task was moved.")]
+    async fn task_comment(&self, Parameters(a): Parameters<TaskCommentArgs>) -> Result<CallToolResult, McpError> {
+        let actor = self.actor(&a.agent);
+        json_result(&self.backend.comment_task(&a.key, &a.body, &actor).await.map_err(board_err)?)
+    }
+
+    #[tool(description = "Claim a task: assign it to you and, if it is still in the board's first stage, move it to the second. Fails if someone else already holds it unless force is set.")]
+    async fn task_claim(&self, Parameters(a): Parameters<TaskClaimArgs>) -> Result<CallToolResult, McpError> {
+        let actor = self.actor(&a.agent);
+        json_result(&self.backend.claim_task(&a.key, a.force.unwrap_or(false), &actor).await.map_err(board_err)?)
+    }
+
+    #[tool(description = "List the stages this project's board moves tasks through, in order. Call before task_move so you never invent a stage name.")]
+    async fn board_stages(&self, Parameters(a): Parameters<ProjectRootArgs>) -> Result<CallToolResult, McpError> {
+        let project_id = self.board_project_id(a.project_root).await?;
+        json_result(&self.backend.board_stages(project_id).await.map_err(board_err)?)
+    }
+
+    /// Resolves the `{project}` segment of an `atlas://board/{project}` resource URI
+    /// to a project scope: "global" names the project-less board, otherwise `raw` may
+    /// be a board key (`ATL`) or a project root path, matched against whatever
+    /// `list_projects` already has on file. Read-only: unlike a tool argument, a
+    /// resource read never connects a project that is not already known.
+    async fn board_resource_project(&self, raw: &str) -> Result<Option<Uuid>, atlas_core::AtlasError> {
+        if raw == "global" {
+            return Ok(None);
+        }
+        let projects = self.backend.list_projects().await?;
+        if let Some(p) = projects.iter().find(|p| p.board_key.as_deref().map(|k| k.eq_ignore_ascii_case(raw)).unwrap_or(false)) {
+            return Ok(Some(p.id));
+        }
+        let wanted = std::path::Path::new(raw);
+        let canon = wanted.canonicalize();
+        if let Some(p) = projects.iter().find(|p| {
+            let root = std::path::Path::new(&p.root_path);
+            root == wanted || canon.as_deref().ok() == Some(root)
+        }) {
+            return Ok(Some(p.id));
+        }
+        Err(atlas_core::AtlasError::NotFound(format!("board {raw}")))
     }
 
     #[tool(description = "Store a memory shared with every agent. Use for facts about the project, decisions and their reasons, user preferences, and insights worth keeping.")]
@@ -317,9 +554,18 @@ const AGENTS: &str = "atlas://agents/";
 const PRACTICES: &str = "atlas://practices/";
 const WORKFLOWS: &str = "atlas://workflows/";
 const PROJECTS: &str = "atlas://projects/";
+const BOARD: &str = "atlas://board/";
 
 const MARKDOWN: &str = "text/markdown";
 const JSON: &str = "application/json";
+
+const BOARD_WORKFLOW_PROMPT: &str = "board-workflow";
+const BOARD_WORKFLOW_TEXT: &str = "Work the task board like this: pick a ready task with task_list \
+    (ready=true), claim it with task_claim, and comment progress with task_comment as you go. Move it \
+    forward with task_move — into the testing stage with verification notes once the work is done, and \
+    into a done stage only once that work is verified. Use task_list with ready=true, then task_claim, \
+    then task_move as you progress; comment with task_comment; never invent a stage — only move to one \
+    of the stages listed below.";
 
 /// Resources and prompts are written by hand rather than by the static macros: both
 /// lists come from the database, so they change while the server is running.
@@ -345,7 +591,13 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
             out.push(Resource::new(format!("{PROJECTS}{}/context", p.id), p.name.clone())
                 .with_description(format!("Profile, practices, workflows and top memories for {}", p.root_path))
                 .with_mime_type(JSON));
+            out.push(Resource::new(format!("{BOARD}{}", p.root_path), format!("{} board", p.name))
+                .with_description(format!("Task board for {}, as Markdown", p.root_path))
+                .with_mime_type(MARKDOWN));
         }
+        out.push(Resource::new(format!("{BOARD}global"), "Global board".to_string())
+            .with_description("Tasks with no project, as Markdown")
+            .with_mime_type(MARKDOWN));
         Ok(ListResourcesResult::with_all_items(out))
     }
 
@@ -362,6 +614,12 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
             let project = self.backend.get_project(id).await.map_err(|e| resource_err(&uri, e))?;
             let ctx = self.backend.project_context(PathBuf::from(project.root_path), "mcp").await.map_err(|e| resource_err(&uri, e))?;
             (serde_json::to_string_pretty(&ctx).map_err(|e| McpError::internal_error(e.to_string(), None))?, JSON)
+        } else if let Some(raw) = uri.strip_prefix(BOARD) {
+            let project_id = self.board_resource_project(raw).await.map_err(|e| resource_err(&uri, e))?;
+            let stages = self.backend.board_stages(project_id).await.map_err(|e| resource_err(&uri, e))?.stages;
+            let filter = TaskFilter { project_id, include_done: true, ..Default::default() };
+            let tasks = self.backend.list_tasks(filter).await.map_err(|e| resource_err(&uri, e))?;
+            (render_board_markdown(&stages, &tasks), MARKDOWN)
         } else {
             return Err(McpError::resource_not_found(format!("no Atlas resource at {uri}"), None));
         };
@@ -369,13 +627,28 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
     }
 
     async fn list_prompts(&self, _request: Option<PaginatedRequestParams>, _context: RequestContext<RoleServer>) -> Result<ListPromptsResult, McpError> {
-        let prompts = self.backend.list_agents().await.map_err(err)?.into_iter()
-            .map(|a| Prompt::new(a.name, Some(a.description), None))
-            .collect();
+        let mut prompts = vec![Prompt::new(
+            BOARD_WORKFLOW_PROMPT,
+            Some("Work the task board: pick a ready task, claim it, move it through the stages, and comment as you go."),
+            Some(vec![PromptArgument::new("project_root")
+                .with_description("Absolute path to the project whose board to work. Defaults to the root this server was started in.")
+                .with_required(false)]),
+        )];
+        prompts.extend(self.backend.list_agents().await.map_err(err)?.into_iter().map(|a| Prompt::new(a.name, Some(a.description), None)));
         Ok(ListPromptsResult::with_all_items(prompts))
     }
 
     async fn get_prompt(&self, request: GetPromptRequestParams, _context: RequestContext<RoleServer>) -> Result<GetPromptResponse, McpError> {
+        if request.name == BOARD_WORKFLOW_PROMPT {
+            let project_root = request.arguments.as_ref().and_then(|a| a.get("project_root")).and_then(|v| v.as_str()).map(PathBuf::from);
+            let project_id = self.resolve_project(project_root).await?.map(|p| p.id);
+            let stages = self.backend.board_stages(project_id).await.map_err(err)?.stages;
+            let names = stages.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ");
+            let text = format!("{BOARD_WORKFLOW_TEXT}\n\nStages for this project: {names}");
+            let mut result = GetPromptResult::new(vec![PromptMessage::new_text(Role::User, text)]);
+            result.description = Some("Work the task board: claim ready work, move it through the stages, and comment as you go.".into());
+            return Ok(result.into());
+        }
         let agent = self.backend.get_agent(&request.name).await.map_err(err)?;
         let text = format!("Adopt the following agent role:\n\n{}", agent.instructions);
         let mut result = GetPromptResult::new(vec![PromptMessage::new_text(Role::User, text)]);
@@ -389,6 +662,7 @@ mod tests {
     use super::*;
     use atlas_core::backend::LocalBackend;
     use atlas_core::paths::AtlasPaths;
+    use rmcp::ServiceExt;
 
     /// The text of a tool result, so a test can read what the tool told the client.
     fn text_of(r: &CallToolResult) -> String {
@@ -542,5 +816,165 @@ mod tests {
         let listed = text_of(&listed);
         assert!(listed.contains("everywhere"), "{listed}");
         assert!(!listed.contains("scoped"), "a global listing leaked another project's practice: {listed}");
+    }
+
+    #[test]
+    fn tool_list_covers_the_board_tools_with_descriptions() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = Arc::new(LocalBackend::open(&AtlasPaths::at(dir.path()), None, false).unwrap());
+        let s = AtlasMcp::new(b);
+        let tools = s.tool_router.list_all();
+        for n in ["task_list", "task_get", "task_create", "task_update", "task_move", "task_comment", "task_claim", "board_stages"] {
+            let tool = tools.iter().find(|t| t.name == n).unwrap_or_else(|| panic!("missing {n}"));
+            assert!(!tool.description.as_deref().unwrap_or_default().is_empty(), "{n} has no description");
+        }
+    }
+
+    /// Create, claim, move, comment, and confirm a task blocked by an open one is
+    /// excluded from `ready=true`; also confirms the claim/move/comment events are
+    /// all recorded under `<source_tool>/<agent>` and that moving to an unknown
+    /// stage names the valid ones.
+    #[tokio::test]
+    async fn board_round_trip_through_the_tools() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        let s = AtlasMcp::new(backend.clone())
+            .with_source_tool("test")
+            .with_env_project_root(false)
+            .with_project_root(repo.path().to_path_buf());
+
+        let created = s
+            .task_create(Parameters(TaskCreateArgs {
+                title: "first task".into(), description: None, kind: None, priority: None,
+                labels: None, parent: None, blocked_by: None, project_root: None, agent: None,
+            }))
+            .await
+            .unwrap();
+        let task: atlas_core::models::Task = serde_json::from_str(&text_of(&created)).unwrap();
+        let key = task.key.clone();
+        assert!(key.starts_with(task.key.split('-').next().unwrap()));
+
+        let claimed = s.task_claim(Parameters(TaskClaimArgs { key: key.clone(), force: None, agent: Some("agent-x".into()) })).await.unwrap();
+        let claimed: atlas_core::models::Task = serde_json::from_str(&text_of(&claimed)).unwrap();
+        assert_eq!(claimed.assignee.as_deref(), Some("test/agent-x"));
+        assert_eq!(claimed.stage, "In Progress");
+
+        let moved = s
+            .task_move(Parameters(TaskMoveArgs { key: key.clone(), stage: "Testing".into(), expected_updated_at: None, agent: Some("agent-x".into()) }))
+            .await
+            .unwrap();
+        let moved: atlas_core::models::Task = serde_json::from_str(&text_of(&moved)).unwrap();
+        assert_eq!(moved.stage, "Testing");
+
+        s.task_comment(Parameters(TaskCommentArgs { key: key.clone(), body: "looks good".into(), agent: Some("agent-x".into()) })).await.unwrap();
+
+        // A second task, blocked by the first (which is not in a done stage), must
+        // not show up in a ready=true listing.
+        let second = s
+            .task_create(Parameters(TaskCreateArgs {
+                title: "second task".into(), description: None, kind: None, priority: None,
+                labels: None, parent: None, blocked_by: Some(vec![key.clone()]), project_root: None, agent: None,
+            }))
+            .await
+            .unwrap();
+        let second: atlas_core::models::Task = serde_json::from_str(&text_of(&second)).unwrap();
+
+        let ready = s
+            .task_list(Parameters(TaskListArgs { project_root: None, stage: None, assignee: None, ready: Some(true), query: None, include_done: None, agent: None }))
+            .await
+            .unwrap();
+        let ready_text = text_of(&ready);
+        assert!(!ready_text.contains(&second.key), "{ready_text}");
+
+        let detail = s.task_get(Parameters(TaskKeyArgs { key: key.clone(), agent: None })).await.unwrap();
+        let detail: TaskDetail = serde_json::from_str(&text_of(&detail)).unwrap();
+        let agent_x_events = detail.events.iter().filter(|e| e.actor == "test/agent-x").count();
+        assert!(agent_x_events >= 3, "expected claim, move and comment events from test/agent-x, got {:?}", detail.events);
+
+        let bad = s
+            .task_move(Parameters(TaskMoveArgs { key: key.clone(), stage: "Nope".into(), expected_updated_at: None, agent: None }))
+            .await
+            .unwrap_err();
+        assert_eq!(bad.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(bad.message.contains("Backlog"), "{bad:?}");
+    }
+
+    /// A board tool needs a project to file a key under: with no root resolvable it
+    /// errors, and the literal `project_root: "global"` opts into the project-less
+    /// board explicitly.
+    #[tokio::test]
+    async fn board_tools_require_a_connected_project_unless_global_is_named() {
+        let home = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        let s = AtlasMcp::new(backend).with_env_project_root(false);
+
+        let err = s
+            .task_create(Parameters(TaskCreateArgs {
+                title: "t".into(), description: None, kind: None, priority: None,
+                labels: None, parent: None, blocked_by: None, project_root: None, agent: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(err.message.contains("no project"), "{err:?}");
+
+        let global = s
+            .task_create(Parameters(TaskCreateArgs {
+                title: "global task".into(), description: None, kind: None, priority: None,
+                labels: None, parent: None, blocked_by: None, project_root: Some("global".into()), agent: None,
+            }))
+            .await
+            .unwrap();
+        let task: atlas_core::models::Task = serde_json::from_str(&text_of(&global)).unwrap();
+        assert!(task.key.starts_with("ATLAS-"), "{}", task.key);
+    }
+
+    /// A full client/server round trip over an in-memory duplex: the board resource
+    /// renders Markdown containing the task's key, and the board-workflow prompt is
+    /// listed and names the project's stages.
+    #[tokio::test]
+    async fn board_resource_and_prompt_are_served_over_the_wire() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        let s = AtlasMcp::new(backend.clone()).with_env_project_root(false).with_project_root(repo.path().to_path_buf());
+
+        let created = s
+            .task_create(Parameters(TaskCreateArgs {
+                title: "wire task".into(), description: None, kind: None, priority: None,
+                labels: None, parent: None, blocked_by: None, project_root: None, agent: None,
+            }))
+            .await
+            .unwrap();
+        let task: atlas_core::models::Task = serde_json::from_str(&text_of(&created)).unwrap();
+
+        let (server_io, client_io) = tokio::io::duplex(16 * 1024);
+        tokio::spawn(async move {
+            let running = s.serve(server_io).await.unwrap();
+            running.waiting().await.unwrap();
+        });
+        let client: rmcp::service::RunningService<rmcp::RoleClient, ()> = ().serve(client_io).await.unwrap();
+
+        let uri = format!("atlas://board/{}", repo.path().display());
+        let resource = client.read_resource(ReadResourceRequestParams::new(uri)).await.unwrap();
+        let text: String = resource
+            .contents
+            .iter()
+            .filter_map(|c| match c {
+                ResourceContents::TextResourceContents { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(text.contains(&task.key), "{text}");
+
+        let prompts = client.list_prompts(None).await.unwrap();
+        assert!(prompts.prompts.iter().any(|p| p.name == "board-workflow"), "{:?}", prompts.prompts);
+
+        let prompt = client.get_prompt(GetPromptRequestParams::new("board-workflow")).await.unwrap();
+        let prompt_text: String = prompt.messages.iter().filter_map(|m| m.content.as_text().map(|t| t.text.clone())).collect();
+        assert!(prompt_text.contains("Testing"), "{prompt_text}");
+
+        client.cancel().await.unwrap();
     }
 }

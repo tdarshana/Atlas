@@ -15,6 +15,7 @@
 //! never calls a `MemoryService` method, which would deadlock on the same gate; it
 //! writes audit rows through `MemoryRepo::audit`, which does not take the gate.
 
+pub mod render;
 pub mod stages;
 
 pub use stages::{default_stages, find_stage, parse_stages, unknown_stage, validate_stages};
