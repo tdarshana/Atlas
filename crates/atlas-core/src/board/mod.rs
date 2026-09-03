@@ -103,6 +103,27 @@ fn row_to_event(r: &Row) -> duckdb::Result<TaskEvent> {
     })
 }
 
+/// Joined with `tasks` so global search can show which board key and project an
+/// event belongs to without a second query per event.
+const EVENT_SEARCH_COLS: &str =
+    "t.key, t.project_id::text, e.id::text, e.task_id::text, e.actor, e.kind, e.body, e.detail::text, epoch_us(e.created_at)";
+
+fn row_to_event_for_search(r: &Row) -> duckdb::Result<(String, Option<Uuid>, TaskEvent)> {
+    let key: String = r.get(0)?;
+    let project_id = parse_uuid(1, r.get::<_, Option<String>>(1)?)?;
+    let detail: Option<String> = r.get(7)?;
+    let event = TaskEvent {
+        id: Uuid::parse_str(&r.get::<_, String>(2)?).map_err(|e| conv_err(2, Type::Text, e))?,
+        task_id: Uuid::parse_str(&r.get::<_, String>(3)?).map_err(|e| conv_err(3, Type::Text, e))?,
+        actor: r.get(4)?,
+        kind: r.get(5)?,
+        body: r.get(6)?,
+        detail: detail.map(|d| serde_json::from_str(&d).map_err(|e| conv_err(7, Type::Text, e))).transpose()?,
+        created_at: ts(8, r.get(8)?)?,
+    };
+    Ok((key, project_id, event))
+}
+
 /// The first three letters or digits of `name`, uppercased and padded with `X`.
 /// Non-ASCII characters are skipped so the key stays typeable in a CLI argument.
 pub fn board_key_base(name: &str) -> String {
@@ -490,6 +511,24 @@ impl TaskRepo {
                 out.push((s.name, n));
             }
             Ok(out)
+        })
+    }
+
+    /// Task key, owning project id, and one event, across every task in scope (or
+    /// every task, when `project_id` is `None`), newest first. Feeds the daemon's
+    /// global search event group; not used by any board route.
+    pub fn events_for_search(&self, project_id: Option<Uuid>) -> Result<Vec<(String, Option<Uuid>, TaskEvent)>> {
+        self.db.with_conn(|c| {
+            let mut sql = format!("select {EVENT_SEARCH_COLS} from task_events e join tasks t on t.id = e.task_id");
+            let mut args: Vec<String> = Vec::new();
+            if let Some(p) = project_id {
+                sql.push_str(" where t.project_id = ?");
+                args.push(p.to_string());
+            }
+            sql.push_str(" order by e.created_at desc");
+            let mut st = c.prepare(&sql)?;
+            let rows = st.query_map(params_from_iter(args.iter()), row_to_event_for_search)?;
+            Ok(rows.collect::<duckdb::Result<Vec<_>>>()?)
         })
     }
 

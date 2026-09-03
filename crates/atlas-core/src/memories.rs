@@ -61,6 +61,33 @@ fn select_cols() -> String {
     "id::text, scope, project_id::text, kind, text, to_json(tags)::text, source_agent, source_tool, confidence, status, superseded_by::text, created_at::text, updated_at::text".to_string()
 }
 
+/// One row of the `audit` table. Feeds the daemon's global search event group
+/// alongside `board::TaskEvent`; `audit` itself carries no `project_id` column, so
+/// this has no per-project scope to offer a caller.
+pub struct AuditEntry {
+    pub id: Uuid,
+    pub actor: String,
+    pub action: String,
+    pub entity: String,
+    pub entity_id: Option<Uuid>,
+    pub detail: Option<serde_json::Value>,
+    pub at: DateTime<Utc>,
+}
+
+fn row_to_audit(r: &Row) -> duckdb::Result<AuditEntry> {
+    let entity_id: Option<String> = r.get(4)?;
+    let detail: Option<String> = r.get(5)?;
+    Ok(AuditEntry {
+        id: Uuid::parse_str(&r.get::<_, String>(0)?).map_err(|e| conv_err(0, Type::Text, e))?,
+        actor: r.get(1)?,
+        action: r.get(2)?,
+        entity: r.get(3)?,
+        entity_id: entity_id.and_then(|s| Uuid::parse_str(&s).ok()),
+        detail: detail.map(|d| serde_json::from_str(&d).map_err(|e| conv_err(5, Type::Text, e))).transpose()?,
+        at: parse_ts(6, &r.get::<_, String>(6)?)?,
+    })
+}
+
 impl<'a> MemoryRepo<'a> {
     pub fn new(db: &'a Db) -> Self { Self { db } }
 
@@ -120,6 +147,16 @@ impl<'a> MemoryRepo<'a> {
 
     pub fn count_active(&self) -> Result<i64> {
         self.db.with_conn(|c| Ok(c.query_row("select count(*) from memories where status='active'", [], |r| r.get(0))?))
+    }
+
+    /// Every audit row, newest first. Used only by global search; `"at"` is quoted
+    /// because it's a reserved word.
+    pub fn list_audit_for_search(&self) -> Result<Vec<AuditEntry>> {
+        self.db.with_conn(|c| {
+            let mut st = c.prepare("select id::text, actor, action, entity, entity_id::text, detail::text, \"at\"::text from audit order by \"at\" desc")?;
+            let rows = st.query_map([], row_to_audit)?;
+            Ok(rows.collect::<duckdb::Result<Vec<_>>>()?)
+        })
     }
 
     pub fn audit(&self, actor: &str, action: &str, entity: &str, entity_id: Option<Uuid>, detail: serde_json::Value) -> Result<()> {

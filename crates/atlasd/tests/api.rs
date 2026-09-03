@@ -1148,3 +1148,58 @@ async fn tasks_md_mirror_follows_the_board_setting() {
     assert!(op.is_some(), "enabling the setting should report a TasksMd op: {rep}");
     assert!(!repo.path().join("TASKS.md").exists(), "check_only must not write");
 }
+
+// ---- search ----
+
+/// `GET /search` fans a query out across kinds: a distinctive task word finds only
+/// the task group, a distinctive memory word finds only the memory group, an unknown
+/// `kinds` value is a 400, and `kinds=` limits which groups can appear at all.
+#[tokio::test]
+async fn global_search_finds_tasks_and_memories_and_validates_kinds() {
+    let repo = tempfile::tempdir().unwrap();
+    fixture_repo(repo.path());
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+
+    let p: serde_json::Value = c.post(format!("{base}/projects/connect")).json(&serde_json::json!({"root": repo.path()})).send().await.unwrap().json().await.unwrap();
+    let pid = p["id"].as_str().unwrap().to_string();
+
+    let task: serde_json::Value = c.post(format!("{base}/tasks")).header("X-Atlas-Actor", "alice")
+        .json(&serde_json::json!({"project_id": pid, "title": "fix the flibbertigibbet bug"}))
+        .send().await.unwrap().json().await.unwrap();
+    let task_key = task["key"].as_str().unwrap().to_string();
+
+    let memory: serde_json::Value = c.post(format!("{base}/memories"))
+        .json(&serde_json::json!({"scope": "global", "kind": "fact", "text": "the wobblesnark runtime is bun"}))
+        .send().await.unwrap().json().await.unwrap();
+    let memory_id = memory["id"].as_str().unwrap().to_string();
+
+    let task_hits: serde_json::Value = c.get(format!("{base}/search?q=flibbertigibbet")).send().await.unwrap().json().await.unwrap();
+    let kinds: Vec<&str> = task_hits["groups"].as_array().unwrap().iter().map(|g| g["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, vec!["task"], "{task_hits}");
+    assert_eq!(task_hits["groups"][0]["items"][0]["reference"], task_key, "{task_hits}");
+    assert!(task_hits["took_ms"].is_u64(), "{task_hits}");
+    assert_eq!(task_hits["total"], 1, "{task_hits}");
+
+    let mem_hits: serde_json::Value = c.get(format!("{base}/search?q=wobblesnark")).send().await.unwrap().json().await.unwrap();
+    let kinds: Vec<&str> = mem_hits["groups"].as_array().unwrap().iter().map(|g| g["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, vec!["memory"], "{mem_hits}");
+    assert_eq!(mem_hits["groups"][0]["items"][0]["id"], memory_id, "{mem_hits}");
+
+    let bad = c.get(format!("{base}/search?q=x&kinds=bogus")).send().await.unwrap();
+    assert_eq!(bad.status(), 400);
+    let body: serde_json::Value = bad.json().await.unwrap();
+    assert!(body["error"].as_str().is_some(), "{body}");
+
+    let both: serde_json::Value = c.get(format!("{base}/search?q=flibbertigibbet&kinds=task,memory")).send().await.unwrap().json().await.unwrap();
+    let both_kinds: Vec<&str> = both["groups"].as_array().unwrap().iter().map(|g| g["kind"].as_str().unwrap()).collect();
+    assert_eq!(both_kinds, vec!["task"], "{both}: the task word has no memory hit, so only the task group appears");
+
+    let memory_only: serde_json::Value = c.get(format!("{base}/search?q=flibbertigibbet&kinds=memory")).send().await.unwrap().json().await.unwrap();
+    assert!(memory_only["groups"].as_array().unwrap().is_empty(), "restricting to kinds=memory must drop the task hit: {memory_only}");
+
+    let empty: serde_json::Value = c.get(format!("{base}/search?q=")).send().await.unwrap().json().await.unwrap();
+    assert!(empty["groups"].as_array().unwrap().is_empty());
+    assert_eq!(empty["total"], 0);
+}

@@ -1,5 +1,5 @@
 use axum::{body::Bytes, extract::{FromRequest, FromRequestParts, Path, Query, Request, State}, http::{header, request::Parts, HeaderMap, Method, StatusCode}, middleware::{self, Next}, response::{IntoResponse, Response}, routing::{get, post, put}, Json, Router};
-use atlas_core::{backend::Backend, jobs::Job, models::*, AtlasError};
+use atlas_core::{backend::Backend, jobs::Job, models::*, search::global::{SearchKind, SearchQuery, SearchResult, DEFAULT_LIMIT}, AtlasError};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -195,6 +195,15 @@ fn query_flag<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<boo
 #[derive(Deserialize)] pub struct SetProjectStagesBody { #[serde(default)] pub stages: Option<Vec<Stage>>, #[serde(default)] pub renames: HashMap<String, String> }
 #[derive(Serialize)] pub struct StageCount { pub stage: String, pub count: i64 }
 
+// ---- search ----
+
+#[derive(Deserialize)] pub struct SearchQ {
+    #[serde(default)] pub q: Option<String>,
+    #[serde(default)] pub project_id: Option<Uuid>,
+    #[serde(default)] pub kinds: Option<String>,
+    #[serde(default)] pub limit: Option<usize>,
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/status", get(status))
@@ -228,6 +237,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/tasks/{id_or_key}/blockers", put(set_task_blockers))
         .route("/api/v1/board/stages", get(get_board_stages).put(put_board_stages))
         .route("/api/v1/projects/{id}/stages", put(put_project_stages))
+        .route("/api/v1/search", get(global_search))
         .with_state(state)
 }
 
@@ -415,4 +425,18 @@ async fn put_project_stages(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid
 async fn task_counts(State(s): State<AppState>, ApiQuery(q): ApiQuery<BoardStagesQ>) -> Result<Json<Vec<StageCount>>, ApiError> {
     let counts = s.backend.task_counts(q.project_id).await?;
     Ok(Json(counts.into_iter().map(|(stage, count)| StageCount { stage, count }).collect()))
+}
+
+// ---- search ----
+
+/// `kinds` is a comma-separated list (`task,memory`); a blank or absent value
+/// searches every kind, and an unrecognized one is a 400 naming it, the same as
+/// every other query-parsed value in this file.
+async fn global_search(State(s): State<AppState>, ApiQuery(q): ApiQuery<SearchQ>) -> Result<Json<SearchResult>, ApiError> {
+    let kinds = match q.kinds.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        Some(raw) => Some(raw.split(',').map(str::parse::<SearchKind>).collect::<std::result::Result<Vec<_>, AtlasError>>()?),
+        None => None,
+    };
+    let query = SearchQuery { q: q.q.unwrap_or_default(), project_id: q.project_id, kinds, limit: q.limit.unwrap_or(DEFAULT_LIMIT) };
+    Ok(Json(s.backend.search(query).await?))
 }

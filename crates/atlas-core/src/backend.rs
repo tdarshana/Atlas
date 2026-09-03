@@ -11,6 +11,7 @@ use crate::library::{AgentRepo, DocRepo};
 use crate::models::*;
 use crate::paths::AtlasPaths;
 use crate::projects::{build_profile, detect_root, ProjectRepo};
+use crate::search::global::{SearchQuery, SearchResult};
 use crate::search::{FastEmbedder, NoopEmbedder};
 use crate::service::MemoryService;
 use crate::sync::{self, SyncInputs};
@@ -128,6 +129,9 @@ pub trait Backend: Send + Sync + 'static {
     async fn set_board_stages(&self, stages: Vec<Stage>, renames: HashMap<String, String>, actor: &str) -> Result<Vec<Stage>>;
     async fn set_project_stages(&self, project_id: Uuid, stages: Option<Vec<Stage>>, renames: HashMap<String, String>, actor: &str) -> Result<StageList>;
     async fn task_counts(&self, project_id: Option<Uuid>) -> Result<Vec<(String, i64)>>;
+
+    // ---- search ----
+    async fn search(&self, q: SearchQuery) -> Result<SearchResult>;
 }
 
 pub struct LocalBackend {
@@ -430,6 +434,13 @@ impl Backend for LocalBackend {
         self.tasks.set_project_stages(project_id, stages, &renames, actor)
     }
     async fn task_counts(&self, project_id: Option<Uuid>) -> Result<Vec<(String, i64)>> { self.tasks.counts_by_stage(project_id) }
+
+    async fn search(&self, q: SearchQuery) -> Result<SearchResult> {
+        let memories = crate::memories::MemoryRepo::new(&self.db);
+        let projects = self.projects();
+        let workflows = self.docs(DocKind::Workflow);
+        crate::search::global::search(&q, &self.tasks, &memories, &projects, &workflows)
+    }
 }
 
 #[cfg(test)]

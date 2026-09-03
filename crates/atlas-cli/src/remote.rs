@@ -1,4 +1,4 @@
-use atlas_core::{backend::Backend, jobs::Job, models::*, AtlasError, Result};
+use atlas_core::{backend::Backend, jobs::Job, models::*, search::global::{SearchQuery, SearchResult}, AtlasError, Result};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -211,6 +211,21 @@ impl Backend for RemoteBackend {
         let rows: Vec<StageCount> =
             Self::handle(self.client.get(format!("{}/tasks/counts{project}", self.base)).header("X-Atlas-Actor", &self.actor).send().await.map_err(Self::net)?).await?;
         Ok(rows.into_iter().map(|r| (r.stage, r.count)).collect())
+    }
+
+    // ---- search ----
+
+    async fn search(&self, q: SearchQuery) -> Result<SearchResult> {
+        // Matches the rest of this file: query values go straight into the URL rather
+        // than through a query-builder, same as `list_tasks`.
+        let mut parts = vec![format!("q={}", q.q), format!("limit={}", q.limit)];
+        if let Some(p) = q.project_id {
+            parts.push(format!("project_id={p}"));
+        }
+        if let Some(kinds) = &q.kinds {
+            parts.push(format!("kinds={}", kinds.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(",")));
+        }
+        Self::handle(self.client.get(format!("{}/search?{}", self.base, parts.join("&"))).send().await.map_err(Self::net)?).await
     }
 }
 
