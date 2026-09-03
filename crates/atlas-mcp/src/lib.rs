@@ -652,7 +652,7 @@ impl<B: Backend> AtlasMcp<B> {
             query, limit: 20, scope: None, list_scope: MemoryScopeFilter::All, project_id: Some(project.id), kinds: vec![], tags: vec![],
         }).await?;
         let seen: std::collections::HashSet<Uuid> = memories.iter().map(|h| h.memory.id).collect();
-        let recent = self.backend.list_memories(MemoryStatus::Active, Some(project.id), MemoryScopeFilter::All).await?;
+        let recent = self.backend.list_memories(MemoryStatus::Active, Some(project.id), MemoryScopeFilter::ProjectOnly).await?;
         memories.extend(recent.into_iter().filter(|m| !seen.contains(&m.id)).take(10).map(|memory| RecallHit { memory, score: 0.0 }));
         Ok(ProjectContext {
             practices: self.backend.list_docs(DocKind::Practice, Some(project.id)).await?,
