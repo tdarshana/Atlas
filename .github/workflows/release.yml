@@ -96,4 +96,7 @@ jobs:
           releaseBody: 'See the commit history for what changed.'
           releaseDraft: true
           prerelease: false
-          args: --target ${{ matrix.target }}
+          # Updater artifacts (the signed .tar.gz plus latest.json) are only produced here:
+          # tauri.conf.json keeps createUpdaterArtifacts off so a local `bun run tauri build`
+          # succeeds without the signing key.
+          args: --target ${{ matrix.target }} --config '{"bundle":{"createUpdaterArtifacts":true}}'
