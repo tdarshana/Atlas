@@ -1,6 +1,8 @@
-use axum::{body::Bytes, extract::{FromRequest, FromRequestParts, Path, Query, Request, State}, http::{header, request::Parts, HeaderMap, Method, StatusCode}, middleware::{self, Next}, response::{IntoResponse, Response}, routing::{get, post}, Json, Router};
+use axum::{body::Bytes, extract::{FromRequest, FromRequestParts, Path, Query, Request, State}, http::{header, request::Parts, HeaderMap, Method, StatusCode}, middleware::{self, Next}, response::{IntoResponse, Response}, routing::{get, post, put}, Json, Router};
 use atlas_core::{backend::Backend, jobs::Job, models::*, AtlasError};
-use serde::Deserialize;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
 use crate::state::AppState;
@@ -71,6 +73,30 @@ where
     }
 }
 
+/// The board's caller identity: `X-Atlas-Actor`, trimmed, defaulting to `api` when the
+/// header is absent. Present but out of range (empty after trimming, or over 64
+/// characters) is a 400, not a silent clamp: a caller who sent a bad header should be
+/// told, not have it quietly replaced.
+pub struct Actor(pub String);
+impl<S> FromRequestParts<S> for Actor
+where
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        match parts.headers.get("x-atlas-actor") {
+            None => Ok(Self("api".into())),
+            Some(v) => {
+                let s = v.to_str().map_err(|e| ApiError(AtlasError::Invalid(format!("X-Atlas-Actor: {e}"))))?.trim();
+                if s.is_empty() || s.chars().count() > 64 {
+                    return Err(ApiError(AtlasError::Invalid("X-Atlas-Actor must be 1..64 characters".into())));
+                }
+                Ok(Self(s.to_string()))
+            }
+        }
+    }
+}
+
 /// `host` with any `:port` suffix removed, so `127.0.0.1:7433` and `127.0.0.1` compare alike.
 fn strip_port(host: &str) -> &str {
     match host.rsplit_once(':') {
@@ -125,7 +151,7 @@ pub fn cors_layer() -> CorsLayer {
         .allow_origin(AllowOrigin::predicate(|origin, _parts| {
             origin.to_str().is_ok_and(is_cors_origin)
         }))
-        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE, Method::OPTIONS])
         .allow_headers([header::CONTENT_TYPE, header::ACCEPT])
         .allow_credentials(false)
         .max_age(std::time::Duration::from_secs(600))
@@ -140,6 +166,25 @@ pub fn cors_layer() -> CorsLayer {
 #[derive(Deserialize)] pub struct IngestBody { pub text: String, pub source_tool: String, #[serde(default)] pub project_root: Option<std::path::PathBuf> }
 
 fn actor(q: &ActorQ) -> &str { q.actor.as_deref().unwrap_or("api") }
+
+// ---- board ----
+
+#[derive(Deserialize)] pub struct TaskListQ {
+    #[serde(default)] pub project_id: Option<Uuid>,
+    #[serde(default)] pub stage: Option<String>,
+    #[serde(default)] pub assignee: Option<String>,
+    #[serde(default)] pub ready: bool,
+    #[serde(default)] pub q: Option<String>,
+    #[serde(default)] pub include_done: bool,
+}
+#[derive(Deserialize)] pub struct MoveBody { pub stage: String, #[serde(default)] pub expected_updated_at: Option<DateTime<Utc>> }
+#[derive(Deserialize)] pub struct CommentBody { pub body: String }
+#[derive(Deserialize, Default)] pub struct ClaimBody { #[serde(default)] pub force: bool }
+#[derive(Deserialize)] pub struct BlockersBody { pub blocked_by: Vec<String> }
+#[derive(Deserialize)] pub struct BoardStagesQ { pub project_id: Option<Uuid> }
+#[derive(Deserialize)] pub struct SetStagesBody { pub stages: Vec<Stage>, #[serde(default)] pub renames: HashMap<String, String> }
+#[derive(Deserialize)] pub struct SetProjectStagesBody { #[serde(default)] pub stages: Option<Vec<Stage>>, #[serde(default)] pub renames: HashMap<String, String> }
+#[derive(Serialize)] pub struct StageCount { pub stage: String, pub count: i64 }
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -165,6 +210,15 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/ingest", post(ingest))
         .route("/api/v1/jobs/{id}", get(get_job))
         .route("/api/v1/extraction/test", post(test_extraction))
+        .route("/api/v1/tasks", get(list_tasks).post(create_task))
+        .route("/api/v1/tasks/counts", get(task_counts))
+        .route("/api/v1/tasks/{id_or_key}", get(get_task).patch(update_task).delete(delete_task))
+        .route("/api/v1/tasks/{id_or_key}/move", post(move_task))
+        .route("/api/v1/tasks/{id_or_key}/comment", post(comment_task))
+        .route("/api/v1/tasks/{id_or_key}/claim", post(claim_task))
+        .route("/api/v1/tasks/{id_or_key}/blockers", put(set_task_blockers))
+        .route("/api/v1/board/stages", get(get_board_stages).put(put_board_stages))
+        .route("/api/v1/projects/{id}/stages", put(put_project_stages))
         .with_state(state)
 }
 
@@ -307,4 +361,49 @@ async fn test_extraction(State(s): State<AppState>) -> Response {
         Err(e @ AtlasError::Conflict(_)) => ApiError(e).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"ok": false, "error": e.to_string()}))).into_response(),
     }
+}
+
+// ---- board ----
+
+async fn list_tasks(State(s): State<AppState>, ApiQuery(q): ApiQuery<TaskListQ>) -> Result<Json<Vec<Task>>, ApiError> {
+    let f = TaskFilter { project_id: q.project_id, stage: q.stage, assignee: q.assignee, ready: q.ready, query: q.q, include_done: q.include_done };
+    Ok(Json(s.backend.list_tasks(f).await?))
+}
+async fn create_task(State(s): State<AppState>, Actor(actor): Actor, ApiJson(t): ApiJson<NewTask>) -> Result<(StatusCode, Json<Task>), ApiError> {
+    Ok((StatusCode::CREATED, Json(s.backend.create_task(t, &actor).await?)))
+}
+async fn get_task(State(s): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Json<TaskDetail>, ApiError> {
+    Ok(Json(s.backend.get_task(&id).await?))
+}
+async fn update_task(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor): Actor, ApiJson(u): ApiJson<TaskUpdate>) -> Result<Json<Task>, ApiError> {
+    Ok(Json(s.backend.update_task(&id, u, &actor).await?))
+}
+async fn move_task(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor): Actor, ApiJson(b): ApiJson<MoveBody>) -> Result<Json<Task>, ApiError> {
+    Ok(Json(s.backend.move_task(&id, &b.stage, b.expected_updated_at, &actor).await?))
+}
+async fn comment_task(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor): Actor, ApiJson(b): ApiJson<CommentBody>) -> Result<Json<TaskEvent>, ApiError> {
+    Ok(Json(s.backend.comment_task(&id, &b.body, &actor).await?))
+}
+async fn claim_task(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor): Actor, ApiJson(b): ApiJson<ClaimBody>) -> Result<Json<Task>, ApiError> {
+    Ok(Json(s.backend.claim_task(&id, b.force, &actor).await?))
+}
+async fn set_task_blockers(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor): Actor, ApiJson(b): ApiJson<BlockersBody>) -> Result<Json<Task>, ApiError> {
+    Ok(Json(s.backend.set_task_blockers(&id, b.blocked_by, &actor).await?))
+}
+async fn delete_task(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor): Actor) -> Result<StatusCode, ApiError> {
+    s.backend.delete_task(&id, &actor).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+async fn get_board_stages(State(s): State<AppState>, ApiQuery(q): ApiQuery<BoardStagesQ>) -> Result<Json<StageList>, ApiError> {
+    Ok(Json(s.backend.board_stages(q.project_id).await?))
+}
+async fn put_board_stages(State(s): State<AppState>, Actor(actor): Actor, ApiJson(b): ApiJson<SetStagesBody>) -> Result<Json<Vec<Stage>>, ApiError> {
+    Ok(Json(s.backend.set_board_stages(b.stages, b.renames, &actor).await?))
+}
+async fn put_project_stages(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor): Actor, ApiJson(b): ApiJson<SetProjectStagesBody>) -> Result<Json<StageList>, ApiError> {
+    Ok(Json(s.backend.set_project_stages(id, b.stages, b.renames, &actor).await?))
+}
+async fn task_counts(State(s): State<AppState>, ApiQuery(q): ApiQuery<BoardStagesQ>) -> Result<Json<Vec<StageCount>>, ApiError> {
+    let counts = s.backend.task_counts(q.project_id).await?;
+    Ok(Json(counts.into_iter().map(|(stage, count)| StageCount { stage, count }).collect()))
 }

@@ -19,6 +19,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 reqwest.workspace = true
+chrono.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
@@ -28,4 +29,3 @@ futures-util = "0.3"
 
 [dev-dependencies]
 tempfile.workspace = true
-chrono.workspace = true

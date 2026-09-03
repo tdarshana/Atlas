@@ -1,6 +1,9 @@
+use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
+use crate::board::TaskRepo;
 use crate::db::Db;
 use crate::export::BlockContext;
 use crate::jobs::{Job, JobQueue, JobRepo};
@@ -110,6 +113,21 @@ pub trait Backend: Send + Sync + 'static {
     /// its reply, trimmed. `Conflict` when extraction is off or half configured, the
     /// same gate `ingest_transcript` checks.
     async fn test_extraction(&self) -> Result<String>;
+
+    // ---- board (Phase 6) ----
+    async fn list_tasks(&self, f: TaskFilter) -> Result<Vec<Task>>;
+    async fn get_task(&self, id_or_key: &str) -> Result<TaskDetail>;
+    async fn create_task(&self, t: NewTask, actor: &str) -> Result<Task>;
+    async fn update_task(&self, id_or_key: &str, u: TaskUpdate, actor: &str) -> Result<Task>;
+    async fn move_task(&self, id_or_key: &str, stage: &str, expected: Option<DateTime<Utc>>, actor: &str) -> Result<Task>;
+    async fn comment_task(&self, id_or_key: &str, body: &str, actor: &str) -> Result<TaskEvent>;
+    async fn claim_task(&self, id_or_key: &str, force: bool, actor: &str) -> Result<Task>;
+    async fn set_task_blockers(&self, id_or_key: &str, blocked_by: Vec<String>, actor: &str) -> Result<Task>;
+    async fn delete_task(&self, id_or_key: &str, actor: &str) -> Result<()>;
+    async fn board_stages(&self, project_id: Option<Uuid>) -> Result<StageList>;
+    async fn set_board_stages(&self, stages: Vec<Stage>, renames: HashMap<String, String>, actor: &str) -> Result<Vec<Stage>>;
+    async fn set_project_stages(&self, project_id: Uuid, stages: Option<Vec<Stage>>, renames: HashMap<String, String>, actor: &str) -> Result<StageList>;
+    async fn task_counts(&self, project_id: Option<Uuid>) -> Result<Vec<(String, i64)>>;
 }
 
 pub struct LocalBackend {
@@ -120,6 +138,7 @@ pub struct LocalBackend {
     pub jobs: Arc<JobRepo>,
     /// Wakes the daemon's worker the moment a job is queued.
     pub queue: Arc<JobQueue>,
+    pub tasks: Arc<TaskRepo>,
 }
 
 impl LocalBackend {
@@ -147,7 +166,8 @@ impl LocalBackend {
                 bg.set_loading(false);
             });
         }
-        Ok(Self { jobs: Arc::new(JobRepo::new(db.clone())), queue: Arc::new(JobQueue::new()), memories, db, paths: paths.clone(), port })
+        let tasks = Arc::new(TaskRepo::new(db.clone(), memories.gate_handle()));
+        Ok(Self { jobs: Arc::new(JobRepo::new(db.clone())), queue: Arc::new(JobQueue::new()), memories, db, paths: paths.clone(), port, tasks })
     }
 
     fn projects(&self) -> ProjectRepo<'_> { ProjectRepo::new(&self.db) }
@@ -343,6 +363,28 @@ impl Backend for LocalBackend {
         let reply = client.chat("You are a connectivity check.", "Reply with the single word OK").await?;
         Ok(reply.trim().to_string())
     }
+
+    async fn list_tasks(&self, f: TaskFilter) -> Result<Vec<Task>> { self.tasks.list(&f) }
+    async fn get_task(&self, id_or_key: &str) -> Result<TaskDetail> { self.tasks.get(id_or_key) }
+    async fn create_task(&self, t: NewTask, actor: &str) -> Result<Task> { self.tasks.create(&t, actor) }
+    async fn update_task(&self, id_or_key: &str, u: TaskUpdate, actor: &str) -> Result<Task> { self.tasks.update(id_or_key, &u, actor) }
+    async fn move_task(&self, id_or_key: &str, stage: &str, expected: Option<DateTime<Utc>>, actor: &str) -> Result<Task> {
+        self.tasks.move_stage(id_or_key, stage, expected, actor)
+    }
+    async fn comment_task(&self, id_or_key: &str, body: &str, actor: &str) -> Result<TaskEvent> { self.tasks.comment(id_or_key, body, actor) }
+    async fn claim_task(&self, id_or_key: &str, force: bool, actor: &str) -> Result<Task> { self.tasks.claim(id_or_key, force, actor) }
+    async fn set_task_blockers(&self, id_or_key: &str, blocked_by: Vec<String>, actor: &str) -> Result<Task> {
+        self.tasks.set_blockers(id_or_key, blocked_by, actor)
+    }
+    async fn delete_task(&self, id_or_key: &str, actor: &str) -> Result<()> { self.tasks.delete(id_or_key, actor) }
+    async fn board_stages(&self, project_id: Option<Uuid>) -> Result<StageList> { self.tasks.effective_stages(project_id) }
+    async fn set_board_stages(&self, stages: Vec<Stage>, renames: HashMap<String, String>, actor: &str) -> Result<Vec<Stage>> {
+        self.tasks.set_global_stages(stages, &renames, actor)
+    }
+    async fn set_project_stages(&self, project_id: Uuid, stages: Option<Vec<Stage>>, renames: HashMap<String, String>, actor: &str) -> Result<StageList> {
+        self.tasks.set_project_stages(project_id, stages, &renames, actor)
+    }
+    async fn task_counts(&self, project_id: Option<Uuid>) -> Result<Vec<(String, i64)>> { self.tasks.counts_by_stage(project_id) }
 }
 
 #[cfg(test)]

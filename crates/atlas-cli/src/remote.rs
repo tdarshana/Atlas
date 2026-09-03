@@ -1,4 +1,6 @@
 use atlas_core::{backend::Backend, jobs::Job, models::*, AtlasError, Result};
+use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -8,7 +10,15 @@ fn docs_path(kind: DocKind) -> &'static str {
 }
 
 #[derive(Clone)]
-pub struct RemoteBackend { base: String, client: reqwest::Client }
+pub struct RemoteBackend {
+    base: String,
+    client: reqwest::Client,
+    /// The caller's identity for board routes, which read it from `X-Atlas-Actor`
+    /// rather than a query parameter. Set by the CLI (`cli`, or `cli/NAME` for
+    /// `--as NAME`); a board call whose trait method takes its own `actor` argument
+    /// sends that value instead, the same way the query-parameter routes already do.
+    pub actor: String,
+}
 
 impl RemoteBackend {
     /// A request deadline matters because `atlas ingest --hook-stdin` runs inside
@@ -19,7 +29,7 @@ impl RemoteBackend {
     /// loopback client has none of, so the default is a sound fallback.
     pub fn new(port: u16) -> Self {
         let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_default();
-        Self { base: format!("http://127.0.0.1:{port}/api/v1"), client }
+        Self { base: format!("http://127.0.0.1:{port}/api/v1"), client, actor: "cli".into() }
     }
     async fn handle<T: serde::de::DeserializeOwned>(r: reqwest::Response) -> Result<T> {
         if r.status().is_success() { return r.json::<T>().await.map_err(|e| AtlasError::Other(e.to_string())); }
@@ -116,4 +126,89 @@ impl Backend for RemoteBackend {
         let v: serde_json::Value = Self::handle(r).await?;
         v["reply"].as_str().map(str::to_string).ok_or_else(|| AtlasError::Other(format!("extraction test response had no reply: {v}")))
     }
+
+    // ---- board ----
+
+    async fn list_tasks(&self, f: TaskFilter) -> Result<Vec<Task>> {
+        // Matches the rest of this file: query values go straight into the URL, same as
+        // `list_memories`'s `status`/`project_id` and `list_docs`'s `project_id`.
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(p) = f.project_id { parts.push(format!("project_id={p}")); }
+        if let Some(s) = f.stage { parts.push(format!("stage={s}")); }
+        if let Some(a) = f.assignee { parts.push(format!("assignee={a}")); }
+        if f.ready { parts.push("ready=true".into()); }
+        if let Some(text) = f.query { parts.push(format!("q={text}")); }
+        if f.include_done { parts.push("include_done=true".into()); }
+        let q = if parts.is_empty() { String::new() } else { format!("?{}", parts.join("&")) };
+        Self::handle(self.client.get(format!("{}/tasks{q}", self.base)).header("X-Atlas-Actor", &self.actor).send().await.map_err(Self::net)?).await
+    }
+    async fn get_task(&self, id_or_key: &str) -> Result<TaskDetail> {
+        Self::handle(self.client.get(format!("{}/tasks/{id_or_key}", self.base)).header("X-Atlas-Actor", &self.actor).send().await.map_err(Self::net)?).await
+    }
+    async fn create_task(&self, t: NewTask, actor: &str) -> Result<Task> {
+        Self::handle(self.client.post(format!("{}/tasks", self.base)).header("X-Atlas-Actor", actor).json(&t).send().await.map_err(Self::net)?).await
+    }
+    async fn update_task(&self, id_or_key: &str, u: TaskUpdate, actor: &str) -> Result<Task> {
+        Self::handle(self.client.patch(format!("{}/tasks/{id_or_key}", self.base)).header("X-Atlas-Actor", actor).json(&u).send().await.map_err(Self::net)?).await
+    }
+    async fn move_task(&self, id_or_key: &str, stage: &str, expected: Option<DateTime<Utc>>, actor: &str) -> Result<Task> {
+        Self::handle(
+            self.client.post(format!("{}/tasks/{id_or_key}/move", self.base)).header("X-Atlas-Actor", actor)
+                .json(&serde_json::json!({"stage": stage, "expected_updated_at": expected}))
+                .send().await.map_err(Self::net)?,
+        )
+        .await
+    }
+    async fn comment_task(&self, id_or_key: &str, body: &str, actor: &str) -> Result<TaskEvent> {
+        Self::handle(
+            self.client.post(format!("{}/tasks/{id_or_key}/comment", self.base)).header("X-Atlas-Actor", actor)
+                .json(&serde_json::json!({"body": body})).send().await.map_err(Self::net)?,
+        )
+        .await
+    }
+    async fn claim_task(&self, id_or_key: &str, force: bool, actor: &str) -> Result<Task> {
+        Self::handle(
+            self.client.post(format!("{}/tasks/{id_or_key}/claim", self.base)).header("X-Atlas-Actor", actor)
+                .json(&serde_json::json!({"force": force})).send().await.map_err(Self::net)?,
+        )
+        .await
+    }
+    async fn set_task_blockers(&self, id_or_key: &str, blocked_by: Vec<String>, actor: &str) -> Result<Task> {
+        Self::handle(
+            self.client.put(format!("{}/tasks/{id_or_key}/blockers", self.base)).header("X-Atlas-Actor", actor)
+                .json(&serde_json::json!({"blocked_by": blocked_by})).send().await.map_err(Self::net)?,
+        )
+        .await
+    }
+    async fn delete_task(&self, id_or_key: &str, actor: &str) -> Result<()> {
+        Self::handle_empty(self.client.delete(format!("{}/tasks/{id_or_key}", self.base)).header("X-Atlas-Actor", actor).send().await.map_err(Self::net)?).await
+    }
+    async fn board_stages(&self, project_id: Option<Uuid>) -> Result<StageList> {
+        let project = project_id.map(|p| format!("?project_id={p}")).unwrap_or_default();
+        Self::handle(self.client.get(format!("{}/board/stages{project}", self.base)).header("X-Atlas-Actor", &self.actor).send().await.map_err(Self::net)?).await
+    }
+    async fn set_board_stages(&self, stages: Vec<Stage>, renames: HashMap<String, String>, actor: &str) -> Result<Vec<Stage>> {
+        Self::handle(
+            self.client.put(format!("{}/board/stages", self.base)).header("X-Atlas-Actor", actor)
+                .json(&serde_json::json!({"stages": stages, "renames": renames})).send().await.map_err(Self::net)?,
+        )
+        .await
+    }
+    async fn set_project_stages(&self, project_id: Uuid, stages: Option<Vec<Stage>>, renames: HashMap<String, String>, actor: &str) -> Result<StageList> {
+        Self::handle(
+            self.client.put(format!("{}/projects/{project_id}/stages", self.base)).header("X-Atlas-Actor", actor)
+                .json(&serde_json::json!({"stages": stages, "renames": renames})).send().await.map_err(Self::net)?,
+        )
+        .await
+    }
+    async fn task_counts(&self, project_id: Option<Uuid>) -> Result<Vec<(String, i64)>> {
+        let project = project_id.map(|p| format!("?project_id={p}")).unwrap_or_default();
+        let rows: Vec<StageCount> =
+            Self::handle(self.client.get(format!("{}/tasks/counts{project}", self.base)).header("X-Atlas-Actor", &self.actor).send().await.map_err(Self::net)?).await?;
+        Ok(rows.into_iter().map(|r| (r.stage, r.count)).collect())
+    }
 }
+
+/// The shape `GET /tasks/counts` answers with, one row per board stage.
+#[derive(serde::Deserialize)]
+struct StageCount { stage: String, count: i64 }

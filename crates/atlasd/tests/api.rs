@@ -906,3 +906,191 @@ async fn bad_query_strings_are_json_errors() {
     let body: serde_json::Value = not_dir.json().await.unwrap();
     assert!(body["error"].as_str().unwrap().contains("is not a directory"), "{body}");
 }
+
+// ---- board ----
+
+/// True for a key like `ATL-12` or `ATLAS-7`: one or more uppercase letters or
+/// digits, a dash, then one or more digits. Written by hand rather than pulling in
+/// the `regex` crate for a single check.
+fn looks_like_a_task_key(key: &str) -> bool {
+    let Some((prefix, seq)) = key.rsplit_once('-') else { return false };
+    !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) && !seq.is_empty() && seq.chars().all(|c| c.is_ascii_digit())
+}
+
+/// `POST /tasks` answers 201 with a key matching `^[A-Z0-9]+-\d+$`; `GET /tasks?stage=`
+/// filters by stage; `ready=true` excludes a task blocked by an open task and includes
+/// it once the blocker reaches a done stage; moving to an unknown stage is a 400
+/// naming the valid ones.
+#[tokio::test]
+async fn board_tasks_ready_query_and_stage_moves() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+
+    let created = c.post(format!("{base}/tasks")).header("X-Atlas-Actor", "alice").json(&serde_json::json!({"title": "the blocker"})).send().await.unwrap();
+    assert_eq!(created.status(), 201);
+    let blocker: serde_json::Value = created.json().await.unwrap();
+    assert!(looks_like_a_task_key(blocker["key"].as_str().unwrap()), "{blocker}");
+    assert_eq!(blocker["stage"], "Backlog");
+    let blocker_key = blocker["key"].as_str().unwrap().to_string();
+
+    let dependent: serde_json::Value = c.post(format!("{base}/tasks")).header("X-Atlas-Actor", "alice")
+        .json(&serde_json::json!({"title": "the dependent", "blocked_by": [blocker_key]}))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(dependent["ready"], false, "{dependent}");
+    let dependent_key = dependent["key"].as_str().unwrap().to_string();
+
+    let backlog: serde_json::Value = c.get(format!("{base}/tasks?stage=Backlog")).send().await.unwrap().json().await.unwrap();
+    let keys: Vec<&str> = backlog.as_array().unwrap().iter().map(|t| t["key"].as_str().unwrap()).collect();
+    assert!(keys.contains(&blocker_key.as_str()) && keys.contains(&dependent_key.as_str()), "{backlog:?}");
+
+    let ready: serde_json::Value = c.get(format!("{base}/tasks?ready=true")).send().await.unwrap().json().await.unwrap();
+    let ready_keys: Vec<&str> = ready.as_array().unwrap().iter().map(|t| t["key"].as_str().unwrap()).collect();
+    assert!(ready_keys.contains(&blocker_key.as_str()), "{ready:?}");
+    assert!(!ready_keys.contains(&dependent_key.as_str()), "the dependent must not be ready while its blocker is open: {ready:?}");
+
+    let bad_move = c.post(format!("{base}/tasks/{blocker_key}/move")).header("X-Atlas-Actor", "alice").json(&serde_json::json!({"stage": "Nope"})).send().await.unwrap();
+    assert_eq!(bad_move.status(), 400);
+    let body: serde_json::Value = bad_move.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("Backlog"), "{body}");
+
+    let moved = c.post(format!("{base}/tasks/{blocker_key}/move")).header("X-Atlas-Actor", "alice").json(&serde_json::json!({"stage": "Done"})).send().await.unwrap();
+    assert_eq!(moved.status(), 200);
+    let moved: serde_json::Value = moved.json().await.unwrap();
+    assert_eq!(moved["stage"], "Done");
+    assert!(!moved["closed_at"].is_null(), "a done stage stamps closed_at: {moved}");
+
+    let ready_after: serde_json::Value = c.get(format!("{base}/tasks?ready=true")).send().await.unwrap().json().await.unwrap();
+    let ready_after_keys: Vec<&str> = ready_after.as_array().unwrap().iter().map(|t| t["key"].as_str().unwrap()).collect();
+    assert!(ready_after_keys.contains(&dependent_key.as_str()), "the dependent should be ready once its blocker is done: {ready_after:?}");
+}
+
+/// A stale `expected_updated_at` on `PATCH` is a 409; claiming a task alice holds
+/// fails for bob with 409 and succeeds with `force`; a comment lands as an event in
+/// `GET /tasks/{key}` carrying the actor from the `X-Atlas-Actor` header.
+#[tokio::test]
+async fn board_stale_update_claim_conflict_and_comment_events() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+
+    let created: serde_json::Value = c.post(format!("{base}/tasks")).header("X-Atlas-Actor", "alice").json(&serde_json::json!({"title": "take this"})).send().await.unwrap().json().await.unwrap();
+    let key = created["key"].as_str().unwrap().to_string();
+    let updated_at = created["updated_at"].as_str().unwrap().to_string();
+
+    let stale = c.patch(format!("{base}/tasks/{key}")).header("X-Atlas-Actor", "alice")
+        .json(&serde_json::json!({"title": "renamed", "expected_updated_at": "2000-01-01T00:00:00Z"})).send().await.unwrap();
+    assert_eq!(stale.status(), 409);
+
+    let ok = c.patch(format!("{base}/tasks/{key}")).header("X-Atlas-Actor", "alice")
+        .json(&serde_json::json!({"title": "renamed", "expected_updated_at": updated_at})).send().await.unwrap();
+    assert_eq!(ok.status(), 200);
+
+    let claimed = c.post(format!("{base}/tasks/{key}/claim")).header("X-Atlas-Actor", "alice").json(&serde_json::json!({})).send().await.unwrap();
+    assert_eq!(claimed.status(), 200);
+    let claimed: serde_json::Value = claimed.json().await.unwrap();
+    assert_eq!(claimed["assignee"], "alice");
+    assert_eq!(claimed["stage"], "In Progress", "claiming from the first stage should advance it: {claimed}");
+
+    let bob_fails = c.post(format!("{base}/tasks/{key}/claim")).header("X-Atlas-Actor", "bob").json(&serde_json::json!({})).send().await.unwrap();
+    assert_eq!(bob_fails.status(), 409);
+
+    let bob_forces = c.post(format!("{base}/tasks/{key}/claim")).header("X-Atlas-Actor", "bob").json(&serde_json::json!({"force": true})).send().await.unwrap();
+    assert_eq!(bob_forces.status(), 200);
+    let bob_forces: serde_json::Value = bob_forces.json().await.unwrap();
+    assert_eq!(bob_forces["assignee"], "bob");
+
+    let commented = c.post(format!("{base}/tasks/{key}/comment")).header("X-Atlas-Actor", "carol").json(&serde_json::json!({"body": "looking into it"})).send().await.unwrap();
+    assert_eq!(commented.status(), 200);
+
+    let detail: serde_json::Value = c.get(format!("{base}/tasks/{key}")).send().await.unwrap().json().await.unwrap();
+    let events = detail["events"].as_array().unwrap();
+    let last = events.last().unwrap();
+    assert_eq!(last["actor"], "carol", "{detail}");
+    assert_eq!(last["kind"], "commented", "{detail}");
+    assert_eq!(last["body"], "looking into it", "{detail}");
+}
+
+/// `PUT /board/stages` refuses a list under the two-stage minimum; a project
+/// override makes `GET /board/stages?project_id=` report `overridden: true`, and
+/// clearing it with `stages: null` restores the global list and `overridden: false`.
+#[tokio::test]
+async fn board_stage_administration() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+
+    let too_few = c.put(format!("{base}/board/stages")).header("X-Atlas-Actor", "alice")
+        .json(&serde_json::json!({"stages": [{"name": "Only", "done": true}]})).send().await.unwrap();
+    assert_eq!(too_few.status(), 400);
+
+    let repo = tempfile::tempdir().unwrap();
+    fixture_repo(repo.path());
+    let p: serde_json::Value = c.post(format!("{base}/projects/connect")).json(&serde_json::json!({"root": repo.path()})).send().await.unwrap().json().await.unwrap();
+    let pid = p["id"].as_str().unwrap().to_string();
+
+    let before: serde_json::Value = c.get(format!("{base}/board/stages?project_id={pid}")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(before["overridden"], false, "{before}");
+
+    let overridden = c.put(format!("{base}/projects/{pid}/stages")).header("X-Atlas-Actor", "alice")
+        .json(&serde_json::json!({"stages": [{"name": "To Do", "done": false}, {"name": "Shipped", "done": true}]})).send().await.unwrap();
+    assert_eq!(overridden.status(), 200);
+    let overridden: serde_json::Value = overridden.json().await.unwrap();
+    assert_eq!(overridden["overridden"], true, "{overridden}");
+    assert_eq!(overridden["stages"][0]["name"], "To Do");
+
+    let after: serde_json::Value = c.get(format!("{base}/board/stages?project_id={pid}")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(after["overridden"], true, "{after}");
+
+    let cleared = c.put(format!("{base}/projects/{pid}/stages")).header("X-Atlas-Actor", "alice").json(&serde_json::json!({"stages": null})).send().await.unwrap();
+    assert_eq!(cleared.status(), 200);
+    let cleared: serde_json::Value = cleared.json().await.unwrap();
+    assert_eq!(cleared["overridden"], false, "{cleared}");
+}
+
+/// `DELETE` answers 204 and a following `GET` is 404; `X-Atlas-Actor` over 64
+/// characters is a 400; a board route without a loopback `Host` is 403, same as
+/// every other route.
+#[tokio::test]
+async fn board_delete_actor_header_limit_and_loopback_guard() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+
+    let created: serde_json::Value = c.post(format!("{base}/tasks")).json(&serde_json::json!({"title": "throwaway"})).send().await.unwrap().json().await.unwrap();
+    let key = created["key"].as_str().unwrap().to_string();
+
+    let deleted = c.delete(format!("{base}/tasks/{key}")).header("X-Atlas-Actor", "alice").send().await.unwrap();
+    assert_eq!(deleted.status(), 204);
+    let gone = c.get(format!("{base}/tasks/{key}")).send().await.unwrap();
+    assert_eq!(gone.status(), 404);
+
+    let long_actor = "a".repeat(65);
+    let refused = c.post(format!("{base}/tasks")).header("X-Atlas-Actor", long_actor).json(&serde_json::json!({"title": "x"})).send().await.unwrap();
+    assert_eq!(refused.status(), 400);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert!(body["error"].as_str().is_some(), "{body}");
+
+    let rebound = c.get(format!("{base}/tasks")).header("Host", "evil.example").send().await.unwrap();
+    assert_eq!(rebound.status(), 403, "the loopback guard must cover the board routes too");
+}
+
+/// `GET /tasks/counts` reports every stage of the effective list, zero-count stages
+/// included, for the dashboard.
+#[tokio::test]
+async fn board_task_counts_cover_every_stage() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+
+    c.post(format!("{base}/tasks")).json(&serde_json::json!({"title": "one"})).send().await.unwrap();
+    c.post(format!("{base}/tasks")).json(&serde_json::json!({"title": "two"})).send().await.unwrap();
+
+    let counts: serde_json::Value = c.get(format!("{base}/tasks/counts")).send().await.unwrap().json().await.unwrap();
+    let rows = counts.as_array().unwrap();
+    assert_eq!(rows.len(), 4, "Backlog, In Progress, Testing, Done: {counts}");
+    let backlog = rows.iter().find(|r| r["stage"] == "Backlog").unwrap();
+    assert_eq!(backlog["count"], 2, "{counts}");
+    let done = rows.iter().find(|r| r["stage"] == "Done").unwrap();
+    assert_eq!(done["count"], 0, "a stage with no tasks is still reported: {counts}");
+}
