@@ -273,7 +273,7 @@ pub struct ProjectContext {
     pub project: Project,
     pub memories: Vec<RecallHit>,
     pub practices: Vec<Doc>,
-    pub workflows: Vec<Doc>,
+    pub workflows: Vec<WorkflowSummary>,
 }
 
 /// One sync request. `root` is required unless `global` is set, in which case
@@ -537,6 +537,28 @@ pub struct Workflow {
     pub updated_at: DateTime<Utc>,
     pub last_run_at: Option<DateTime<Utc>>,
     pub last_status: Option<RunStatus>,
+}
+
+/// A workflow's shape without its graph: what an agent (over MCP) or a project's
+/// context needs to decide whether a workflow is worth looking at closer, without the
+/// weight of its full node/edge JSON. `get_workflow` (MCP) and the desktop's own
+/// `GET /api/v1/workflows/{id}` still answer with the full [`Workflow`], graph
+/// included.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkflowSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub trigger: TriggerKind,
+    pub action_count: usize,
+    pub enabled: bool,
+    pub last_status: Option<RunStatus>,
+}
+
+impl From<&Workflow> for WorkflowSummary {
+    fn from(w: &Workflow) -> Self {
+        let action_count = w.graph.nodes.iter().filter(|n| n.kind == NodeKind::Action).count();
+        WorkflowSummary { id: w.id, name: w.name.clone(), trigger: w.trigger.kind, action_count, enabled: w.enabled, last_status: w.last_status }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

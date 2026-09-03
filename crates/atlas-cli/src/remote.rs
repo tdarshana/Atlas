@@ -357,8 +357,8 @@ impl Backend for RemoteBackend {
         let detail: RunDetail = Self::handle(self.client.get(format!("{}/runs/{run_id}", self.base)).send().await.map_err(Self::net)?).await?;
         Ok((detail.run, detail.steps))
     }
-    async fn cancel_run(&self, run_id: Uuid) -> Result<WorkflowRun> {
-        Self::handle(self.client.post(format!("{}/runs/{run_id}/cancel", self.base)).send().await.map_err(Self::net)?).await
+    async fn cancel_run(&self, run_id: Uuid, actor: &str) -> Result<WorkflowRun> {
+        Self::handle(self.client.post(format!("{}/runs/{run_id}/cancel", self.base)).header("X-Atlas-Actor", actor).send().await.map_err(Self::net)?).await
     }
     async fn export_run_log(&self, run_id: Uuid) -> Result<String> {
         let r = self.client.get(format!("{}/runs/{run_id}/export", self.base)).send().await.map_err(Self::net)?;

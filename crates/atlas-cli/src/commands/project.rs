@@ -52,11 +52,12 @@ pub enum ProjectCmd {
     },
 }
 
-/// Resolves a `forget` argument to a project id. A UUID is taken as an id; anything
-/// else is matched against the known roots, exactly first and then by the absolute
-/// form of the argument, so both `atlas project forget .` and a path copied out of
-/// `atlas project list` work. Listing first also means an unknown id fails here with
-/// a readable message instead of as a bare 404.
+/// Resolves a `forget`, `log` or `set` argument to a project id. A UUID is taken as an
+/// id; anything else is matched against the known projects: their root (exactly, then
+/// by the argument's absolute form, so both `atlas project forget .` and a path copied
+/// out of `atlas project list` work) or their display name (exactly, case-insensitive).
+/// Listing first also means an unknown id fails here with a readable message instead of
+/// as a bare 404.
 async fn resolve(target: &str, backend: &RemoteBackend) -> anyhow::Result<uuid::Uuid> {
     let projects = backend.list_projects().await?;
     if let Ok(id) = uuid::Uuid::parse_str(target) {
@@ -67,11 +68,14 @@ async fn resolve(target: &str, backend: &RemoteBackend) -> anyhow::Result<uuid::
     }
     let abs = super::abs_path(Some(PathBuf::from(target)))?;
     let abs = abs.to_string_lossy().to_string();
-    let matches: Vec<_> = projects.iter().filter(|p| p.root_path == target || p.root_path == abs).collect();
+    let matches: Vec<_> = projects.iter().filter(|p| p.root_path == target || p.root_path == abs || p.name.eq_ignore_ascii_case(target)).collect();
     match matches.as_slice() {
         [p] => Ok(p.id),
-        [] => anyhow::bail!("no project with id or root '{target}'"),
-        many => anyhow::bail!("'{target}' matches {} projects; pass an id instead", many.len()),
+        [] => anyhow::bail!("no project with id, root or name '{target}'"),
+        many => {
+            let roots = many.iter().map(|p| p.root_path.as_str()).collect::<Vec<_>>().join(", ");
+            anyhow::bail!("'{target}' matches {} projects ({roots}); pass an id instead", many.len())
+        }
     }
 }
 

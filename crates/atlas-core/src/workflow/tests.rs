@@ -205,6 +205,16 @@ fn a_schedule_trigger_needs_a_cron_expression_that_parses() {
     validate_trigger(&Trigger { kind: TriggerKind::Schedule, cron: Some("0 9 * * 1".into()), prompt: None }).unwrap();
 }
 
+/// Every field out of range at once: still five fields, so it takes the "prepend a
+/// second" path, but every value overflows its field's range and the whole thing must
+/// be rejected rather than silently clamped or parsed as something else.
+#[test]
+fn a_five_field_cron_with_every_field_out_of_range_is_rejected() {
+    let err = validate_trigger(&Trigger { kind: TriggerKind::Schedule, cron: Some("99 99 99 99 99".into()), prompt: None }).unwrap_err();
+    assert!(matches!(err, AtlasError::Invalid(_)), "{err}");
+    assert!(parse_cron("99 99 99 99 99").is_err());
+}
+
 #[test]
 fn a_prompt_trigger_needs_a_prompt() {
     let blank = validate_trigger(&Trigger { kind: TriggerKind::Prompt, cron: None, prompt: Some("  ".into()) }).unwrap_err();
@@ -245,6 +255,47 @@ fn two_workflows_cannot_share_a_name() {
     let (_db, repo) = repo();
     repo.create(&new_workflow("release"), "t").unwrap();
     let err = repo.create(&new_workflow("Release"), "t").unwrap_err();
+    assert!(matches!(err, AtlasError::Invalid(_)), "{err}");
+}
+
+/// `resolve` tries a UUID parse before a name lookup, so a workflow literally named
+/// after a UUID would be unreachable by name; the name must be rejected at creation.
+#[test]
+fn a_uuid_shaped_name_is_rejected() {
+    let (_db, repo) = repo();
+    let err = repo.create(&new_workflow(&Uuid::new_v4().to_string()), "t").unwrap_err();
+    assert!(matches!(err, AtlasError::Invalid(_)), "{err}");
+
+    let w = repo.create(&new_workflow("release"), "t").unwrap();
+    let err = repo.update(&w.id.to_string(), &WorkflowPatch { name: Some(Uuid::new_v4().to_string()), ..Default::default() }, "t").unwrap_err();
+    assert!(matches!(err, AtlasError::Invalid(_)), "{err}");
+}
+
+/// `Workflow.trigger` and the graph's own trigger node must never disagree: the runner
+/// and scheduler read the former, the editor and `graph::validate` treat the latter as
+/// the source of truth.
+#[test]
+fn the_workflow_trigger_must_match_its_trigger_node() {
+    let (_db, repo) = repo();
+    let mut new = new_workflow("mismatched");
+    new.trigger = Trigger { kind: TriggerKind::Schedule, cron: Some("0 9 * * 1".into()), prompt: None };
+    // graph's trigger node is still `Trigger::manual()` from `linear()`.
+    let err = repo.create(&new, "t").unwrap_err();
+    assert!(matches!(err, AtlasError::Invalid(_)), "{err}");
+
+    let mut no_node = linear();
+    no_node.nodes[0].kind = NodeKind::Action;
+    no_node.nodes[0].data = NodeData::Action { name: "not a trigger".into(), instructions: "x".into(), agent: "desktop".into(), practices: vec![], memories: None };
+    let missing = NewWorkflow { graph: no_node, ..new_workflow("no-trigger-node") };
+    let err = repo.create(&missing, "t").unwrap_err();
+    assert!(matches!(err, AtlasError::Invalid(_)), "{err}");
+
+    // A patch that only changes the graph's trigger node, leaving `trigger` behind, is
+    // caught the same way.
+    let w = repo.create(&new_workflow("release"), "t").unwrap();
+    let mut rescheduled = w.graph.clone();
+    rescheduled.nodes[0].data = NodeData::Trigger(Trigger { kind: TriggerKind::Schedule, cron: Some("0 9 * * 1".into()), prompt: None });
+    let err = repo.update("release", &WorkflowPatch { graph: Some(rescheduled), ..Default::default() }, "t").unwrap_err();
     assert!(matches!(err, AtlasError::Invalid(_)), "{err}");
 }
 
@@ -336,25 +387,42 @@ fn a_status_change_without_a_summary_keeps_the_one_the_run_has() {
     assert_eq!(done.summary, Some(json!({"note": "kept"})));
 }
 
+/// `cancel_run`'s own audit row is attributed to whoever called it, not to the run's
+/// triggering actor: the runner writes its own row later (`run.rs`'s `cancelled_result`,
+/// stamped with the run's trigger), and this is a separate record of who actually asked
+/// to stop it.
+#[test]
+fn cancelling_a_run_audits_the_actor_who_cancelled_it() {
+    let (db, repo) = repo();
+    let w = repo.create(&new_workflow("release"), "t").unwrap();
+    let run = repo.create_run(w.id, TriggerKind::Manual).unwrap();
+    repo.cancel_run(run.id, "desktop").unwrap();
+
+    let audit = MemoryRepo::new(&db).list_audit_for_search("%cancel%").unwrap();
+    let row = audit.iter().find(|a| a.entity_id == Some(run.id)).expect("a cancel audit row for this run");
+    assert_eq!(row.actor, "desktop");
+    assert_eq!(row.action, "cancel");
+}
+
 #[test]
 fn a_queued_or_running_run_cancels_and_a_finished_one_conflicts() {
     let (_db, repo) = repo();
     let w = repo.create(&new_workflow("release"), "t").unwrap();
 
     let queued = repo.create_run(w.id, TriggerKind::Manual).unwrap();
-    let cancelled = repo.cancel_run(queued.id).unwrap();
+    let cancelled = repo.cancel_run(queued.id, "t").unwrap();
     assert_eq!(cancelled.status, RunStatus::Cancelled);
     assert!(cancelled.finished_at.is_some());
     // Cancelling twice is a conflict, not a second cancellation.
-    assert!(matches!(repo.cancel_run(queued.id), Err(AtlasError::Conflict(_))));
+    assert!(matches!(repo.cancel_run(queued.id, "t"), Err(AtlasError::Conflict(_))));
 
     let running = repo.create_run(w.id, TriggerKind::Manual).unwrap();
     repo.set_run_status(running.id, RunStatus::Running, None).unwrap();
-    assert_eq!(repo.cancel_run(running.id).unwrap().status, RunStatus::Cancelled);
+    assert_eq!(repo.cancel_run(running.id, "t").unwrap().status, RunStatus::Cancelled);
 
     let done = repo.create_run(w.id, TriggerKind::Manual).unwrap();
     repo.set_run_status(done.id, RunStatus::Success, None).unwrap();
-    let err = repo.cancel_run(done.id).unwrap_err();
+    let err = repo.cancel_run(done.id, "t").unwrap_err();
     assert!(matches!(err, AtlasError::Conflict(_)), "{err}");
     assert_eq!(repo.get_run(done.id).unwrap().0.status, RunStatus::Success);
 }
@@ -371,7 +439,7 @@ fn set_run_status_never_overwrites_a_terminal_status() {
     let w = repo.create(&new_workflow("release"), "t").unwrap();
     let run = repo.create_run(w.id, TriggerKind::Manual).unwrap();
     repo.set_run_status(run.id, RunStatus::Running, None).unwrap();
-    let cancelled = repo.cancel_run(run.id).unwrap();
+    let cancelled = repo.cancel_run(run.id, "t").unwrap();
     assert_eq!(cancelled.status, RunStatus::Cancelled);
     let cancelled_finished_at = cancelled.finished_at;
 
@@ -395,10 +463,71 @@ fn a_pending_run_is_one_that_is_queued_or_running() {
     assert!(!repo.has_pending_run(w.id).unwrap());
 }
 
+/// A run left `running` with no step in flight (the panic happened between actions, or
+/// before the first one was appended) gets a synthetic step carrying the ERR line, the
+/// same shape a run that fails re-validation gets from `fail_before_steps`.
+#[test]
+fn fail_stuck_run_on_a_run_with_no_running_step_appends_a_synthetic_one() {
+    let (_db, repo) = repo();
+    let w = repo.create(&new_workflow("release"), "t").unwrap();
+    let run = repo.create_run(w.id, TriggerKind::Manual).unwrap();
+    repo.set_run_status(run.id, RunStatus::Running, None).unwrap();
+
+    let failed = repo.fail_stuck_run(run.id, "atlasd", "internal error").unwrap();
+    assert_eq!(failed.status, RunStatus::Failed);
+    assert!(failed.finished_at.is_some());
+
+    let (_run, steps) = repo.get_run(run.id).unwrap();
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].status, StepStatus::Failed);
+    assert!(steps[0].log.iter().any(|l| l.level == LogLevel::Error && l.text == "internal error"));
+    assert!(!repo.has_pending_run(w.id).unwrap());
+}
+
+/// A run whose panic landed mid-step (a step is already `running`) has that step
+/// finished failed with the ERR line appended to whatever it had already logged,
+/// rather than getting a second, disconnected step.
+#[test]
+fn fail_stuck_run_finishes_the_step_that_was_still_running() {
+    let (_db, repo) = repo();
+    let w = repo.create(&new_workflow("release"), "t").unwrap();
+    let run = repo.create_run(w.id, TriggerKind::Manual).unwrap();
+    repo.set_run_status(run.id, RunStatus::Running, None).unwrap();
+    let step = repo.append_step(run.id, 0, "a", "first", "desktop").unwrap();
+    repo.append_log(step.id, &LogLine::now(LogLevel::Info, "request sent")).unwrap();
+
+    repo.fail_stuck_run(run.id, "atlasd", "internal error").unwrap();
+
+    let (_run, steps) = repo.get_run(run.id).unwrap();
+    assert_eq!(steps.len(), 1, "the in-flight step must be finished, not left alongside a new one");
+    assert_eq!(steps[0].status, StepStatus::Failed);
+    assert_eq!(steps[0].log.len(), 2);
+    assert_eq!(steps[0].log[0].text, "request sent");
+    assert_eq!(steps[0].log[1].text, "internal error");
+}
+
+/// A run that already reached a terminal status by some other path is left alone: the
+/// call is a no-op, matching `set_run_status`'s own compare-and-swap, so it is safe to
+/// call speculatively from both the worker and the startup sweep.
+#[test]
+fn fail_stuck_run_on_an_already_terminal_run_is_a_no_op() {
+    let (_db, repo) = repo();
+    let w = repo.create(&new_workflow("release"), "t").unwrap();
+    let run = repo.create_run(w.id, TriggerKind::Manual).unwrap();
+    repo.set_run_status(run.id, RunStatus::Success, None).unwrap();
+
+    let untouched = repo.fail_stuck_run(run.id, "atlasd", "internal error").unwrap();
+    assert_eq!(untouched.status, RunStatus::Success);
+    assert!(repo.get_run(run.id).unwrap().1.is_empty(), "no synthetic step on a run that needed no recovery");
+}
+
 // -- the scheduler's question ----------------------------------------------
 
 fn scheduled(name: &str, cron: &str) -> NewWorkflow {
-    NewWorkflow { trigger: Trigger { kind: TriggerKind::Schedule, cron: Some(cron.into()), prompt: None }, ..new_workflow(name) }
+    let trigger = Trigger { kind: TriggerKind::Schedule, cron: Some(cron.into()), prompt: None };
+    let mut graph = linear();
+    graph.nodes[0].data = NodeData::Trigger(trigger.clone());
+    NewWorkflow { trigger, graph, ..new_workflow(name) }
 }
 
 #[test]
@@ -470,6 +599,20 @@ fn each_workflow_document_becomes_a_manual_single_action_workflow() {
 
     // The documents are gone and the flag is set.
     assert_eq!(docs.list(None).unwrap().len(), 0);
+    assert_eq!(settings.get_raw(DOCS_MIGRATED_SETTING).unwrap(), Some(json!(true)));
+}
+
+/// A daemon that has never had a workflow document still must not run the pass on
+/// every start: the flag is set the first time regardless of how many documents there
+/// were to move, not only when at least one was actually moved.
+#[test]
+fn the_flag_is_set_even_when_there_were_no_documents_to_migrate() {
+    let (db, repo) = repo();
+    let docs = DocRepo::new(&db, DocKind::Workflow);
+    let settings = SettingsRepo::new(&db);
+
+    assert_eq!(settings.get_raw(DOCS_MIGRATED_SETTING).unwrap(), None);
+    assert_eq!(migrate_workflow_docs(&docs, &repo, &settings, "t").unwrap(), 0);
     assert_eq!(settings.get_raw(DOCS_MIGRATED_SETTING).unwrap(), Some(json!(true)));
 }
 

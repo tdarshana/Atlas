@@ -138,7 +138,8 @@ pub fn validate_trigger(t: &Trigger) -> Result<()> {
 }
 
 /// Names are how the CLI, MCP and the doc migration address a workflow, so they are
-/// trimmed, non-empty and bounded.
+/// trimmed, non-empty, bounded and never UUID-shaped: `resolve` tries a UUID parse
+/// first, so a workflow literally named after a UUID would be unreachable by name.
 fn check_name(name: &str) -> Result<String> {
     let name = name.trim();
     if name.is_empty() {
@@ -147,7 +148,30 @@ fn check_name(name: &str) -> Result<String> {
     if name.chars().count() > 120 {
         return Err(AtlasError::Invalid("a workflow name is at most 120 characters".into()));
     }
+    if Uuid::parse_str(name).is_ok() {
+        return Err(AtlasError::Invalid("a workflow name cannot be a UUID".into()));
+    }
     Ok(name.to_string())
+}
+
+/// The trigger carried by the graph's own trigger node. `graph::validate` already
+/// guarantees exactly one trigger node exists by the time this runs.
+fn node_trigger(graph: &Graph) -> Option<Trigger> {
+    graph.nodes.iter().find_map(|n| match &n.data {
+        NodeData::Trigger(t) => Some(t.clone()),
+        _ => None,
+    })
+}
+
+/// `Workflow.trigger` must always match the graph's own trigger node: the runner and
+/// the scheduler read `Workflow.trigger` directly, but the editor and `graph::validate`
+/// treat the node as the source of truth, so the two must never be allowed to diverge.
+fn derive_trigger(trigger: &Trigger, graph: &Graph) -> Result<Trigger> {
+    match node_trigger(graph) {
+        Some(t) if &t == trigger => Ok(t),
+        Some(_) => Err(AtlasError::Invalid("the workflow's trigger does not match its trigger node".into())),
+        None => Err(AtlasError::Invalid("the workflow's graph has no trigger node".into())),
+    }
 }
 
 pub struct WorkflowRepo {
@@ -249,6 +273,17 @@ impl WorkflowRepo {
         })
     }
 
+    /// Every run still `queued` or `running`, across every workflow. Read once at
+    /// daemon startup, alongside `JobRepo::requeue_stale`, to find a run left behind by
+    /// a process that stopped before finishing it.
+    pub fn active_runs(&self) -> Result<Vec<WorkflowRun>> {
+        self.db.with_conn(|c| {
+            let mut st = c.prepare(&format!("select {RUN_COLS} from workflow_runs where status in ('queued','running')"))?;
+            let rows = st.query_map([], row_to_run)?;
+            Ok(rows.collect::<duckdb::Result<Vec<_>>>()?)
+        })
+    }
+
     /// The enabled scheduled workflows whose cron fired in `(after, now]`, where
     /// `after` is the workflow's own `last_run_at` or, for one that has never run,
     /// `since` (the caller passes the time the daemon started, so a workflow does not
@@ -302,7 +337,8 @@ impl WorkflowRepo {
         let name = check_name(&new.name)?;
         validate_trigger(&new.trigger)?;
         graph::validate(&new.graph)?;
-        let trigger = serde_json::to_string(&new.trigger)?;
+        let derived_trigger = derive_trigger(&new.trigger, &new.graph)?;
+        let trigger = serde_json::to_string(&derived_trigger)?;
         let graph = serde_json::to_string(&new.graph)?;
         let id = Uuid::new_v4();
         self.db.with_conn(|c| {
@@ -368,6 +404,7 @@ impl WorkflowRepo {
                 }
                 None => current.graph.clone(),
             };
+            let trigger = derive_trigger(&trigger, &graph)?;
             let enabled = match patch.enabled {
                 Some(e) => {
                     detail.insert("enabled".into(), json!(e));
@@ -447,16 +484,64 @@ impl WorkflowRepo {
     }
 
     /// Stops a run that has not finished. A run that already succeeded or failed is
-    /// history and is left alone, as is one that is already cancelled.
-    pub fn cancel_run(&self, id: Uuid) -> Result<WorkflowRun> {
+    /// history and is left alone, as is one that is already cancelled. `actor` is
+    /// whoever called this route or command, not the run's own triggering actor: the
+    /// runner writes its own audit row when it later observes the cancellation
+    /// (attributed to the trigger), so this one records who actually asked to stop it.
+    pub fn cancel_run(&self, id: Uuid, actor: &str) -> Result<WorkflowRun> {
         let _gate = self.gate();
-        self.db.with_conn(|c| {
+        let run = self.db.with_conn(|c| {
             let run = self.load_run(c, id)?;
             if run.status.is_terminal() {
                 return Err(AtlasError::Conflict(format!("run {} of this workflow already {}", run.number, run.status)));
             }
             self.set_run_status_gated(c, id, RunStatus::Cancelled, None)
-        })
+        })?;
+        MemoryRepo::new(&self.db).audit(actor, "cancel", "workflow_run", Some(id), json!({"number": run.number}))?;
+        Ok(run)
+    }
+
+    /// Recovers a run that never received a terminal write of its own: the job behind
+    /// it panicked, or was found still `queued`/`running` at daemon start with no
+    /// `jobs` row left to finish it. Finishes whichever step was left `running` (or, if
+    /// none was, appends a synthetic one, the shape `fail_before_steps` in `run.rs` uses
+    /// for a run that never got to start) with one ERR line, then marks the run
+    /// `failed`. A no-op, via `set_run_status`'s own compare-and-swap, when the run
+    /// already reached a terminal status some other way, so this is safe to call
+    /// speculatively.
+    pub fn fail_stuck_run(&self, run_id: Uuid, actor: &str, message: &str) -> Result<WorkflowRun> {
+        let _gate = self.gate();
+        let run = self.db.with_conn(|c| {
+            let run = self.load_run(c, run_id)?;
+            if run.status.is_terminal() {
+                return Ok(run);
+            }
+            let mut st = c.prepare(&format!("select {STEP_COLS} from workflow_steps where run_id = ? order by \"position\" desc limit 1"))?;
+            let mut rows = st.query(params![run_id.to_string()])?;
+            let last = rows.next()?.map(row_to_step).transpose()?;
+            let line = LogLine::now(LogLevel::Error, message.to_string());
+            match last {
+                Some(step) if step.status == StepStatus::Running => {
+                    let mut log = step.log.clone();
+                    log.push(line);
+                    c.execute(
+                        "update workflow_steps set status = 'failed', log = ?::json, finished_at = now() where id = ?",
+                        params![serde_json::to_string(&log)?, step.id.to_string()],
+                    )?;
+                }
+                other => {
+                    let position = other.map(|s| s.position + 1).unwrap_or(0);
+                    c.execute(
+                        "insert into workflow_steps (id, run_id, \"position\", action_id, name, agent, status, started_at, finished_at, log) \
+                         values (?, ?, ?, '', 'recover', '', 'failed', now(), now(), ?::json)",
+                        params![Uuid::new_v4().to_string(), run_id.to_string(), position, serde_json::to_string(&vec![line])?],
+                    )?;
+                }
+            }
+            self.set_run_status_gated(c, run_id, RunStatus::Failed, None)
+        })?;
+        let _ = MemoryRepo::new(&self.db).audit(actor, "run", "workflow_run", Some(run_id), json!({"status": "failed", "reason": message}));
+        Ok(run)
     }
 
     /// Opens a step. `position` is the step's index in the run's execution order, which

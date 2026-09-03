@@ -1876,12 +1876,16 @@ async fn cancelling_during_the_last_step_still_ends_the_run_cancelled() {
     let cancelled: serde_json::Value = c.post(format!("{base}/runs/{run_id}/cancel")).send().await.unwrap().json().await.unwrap();
     assert_eq!(cancelled["status"], "cancelled", "{cancelled}");
 
-    // Give the in-flight (discarded) second action's slow reply time to come back and
-    // the runner time to fall out of its loop, then confirm the outcome was not
-    // silently overwritten to `success`.
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    let detail: serde_json::Value = c.get(format!("{base}/runs/{run_id}")).send().await.unwrap().json().await.unwrap();
-    assert_eq!(detail["run"]["status"], "cancelled", "{detail}");
+    // The in-flight (discarded) second action's slow reply comes back and the runner
+    // falls out of its loop somewhere in the next couple of seconds; poll a bounded
+    // number of times over that window, rather than betting a single fixed margin on
+    // the runner having settled by then, and fail the moment the outcome is silently
+    // overwritten to `success`.
+    for _ in 0..30 {
+        let detail: serde_json::Value = c.get(format!("{base}/runs/{run_id}")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(detail["run"]["status"], "cancelled", "{detail}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// `workflow_run` and `workflow_status` are listed, a run started by name is followed
@@ -1935,4 +1939,37 @@ async fn mcp_workflow_tools_run_and_report_status() {
     assert_eq!(steps.len(), 1, "{last}");
     assert_eq!(steps[0]["name"], "step0", "{last}");
     assert_eq!(steps[0]["status"], "success", "{last}");
+}
+
+/// `list_workflows` (MCP) answers with the `WorkflowRepo` summary shape: name,
+/// trigger, action count, enabled, last status, not the retired workflow-document
+/// listing; `get_workflow` answers with the full workflow, graph included.
+#[tokio::test]
+async fn mcp_list_and_get_workflow_read_the_workflow_repo() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let url = format!("http://127.0.0.1:{}/mcp", d.port);
+    let c = reqwest::Client::new();
+    let workflow = create_workflow(&c, &base, "repo-backed", &["one", "two"], false, false).await;
+    let wname = workflow["name"].as_str().unwrap().to_string();
+
+    let init = c.post(&url).header("Accept", "application/json, text/event-stream").header("Content-Type", "application/json")
+        .json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}))
+        .send().await.unwrap();
+    let session = init.headers().get("mcp-session-id").map(|v| v.to_str().unwrap().to_string());
+    let _ = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})).await;
+
+    let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_workflows","arguments":{}}})).await;
+    let listed = tool_json(&body);
+    let row = listed.as_array().unwrap().iter().find(|w| w["name"] == wname).expect("the workflow in the listing");
+    assert_eq!(row["trigger"], "manual", "{row}");
+    assert_eq!(row["action_count"], 2, "{row}");
+    assert_eq!(row["enabled"], true, "{row}");
+    assert_eq!(row["last_status"], serde_json::Value::Null, "{row}");
+    assert!(row.get("graph").is_none(), "the listing must not carry the full graph: {row}");
+
+    let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_workflow","arguments":{"name": wname}}})).await;
+    let got = tool_json(&body);
+    assert_eq!(got["name"], wname, "{got}");
+    assert_eq!(got["graph"]["nodes"].as_array().unwrap().len(), 4, "{got}");
 }

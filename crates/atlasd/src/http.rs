@@ -502,8 +502,8 @@ async fn get_run(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Resul
     let (run, steps) = s.backend.get_run(id).await?;
     Ok(Json(RunDetail { run, steps }))
 }
-async fn cancel_run(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Result<Json<WorkflowRun>, ApiError> {
-    Ok(Json(s.backend.cancel_run(id).await?))
+async fn cancel_run(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor): Actor) -> Result<Json<WorkflowRun>, ApiError> {
+    Ok(Json(s.backend.cancel_run(id, &actor).await?))
 }
 async fn export_run(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Result<Response, ApiError> {
     let body = s.backend.export_run_log(id).await?;

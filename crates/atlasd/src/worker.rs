@@ -9,6 +9,7 @@ use std::time::Duration;
 use atlas_core::backend::LocalBackend;
 use atlas_core::{extract, AtlasError, Result};
 use serde_json::Value;
+use uuid::Uuid;
 
 /// How long the worker sleeps when nothing wakes it. `notify_one` covers the
 /// normal path; the tick is what picks up jobs left queued by a previous run, or
@@ -35,8 +36,39 @@ async fn requeue_stale(backend: &LocalBackend) {
     }
 }
 
+/// A run left `queued` or `running` with no `workflow_run` job left to finish it (its
+/// job already reached a terminal status, or the process that would have made one
+/// never got the chance) is orphaned: `requeue_stale` above only restarts a job that is
+/// itself still `running`, so this is the sweep for the run underneath it. Run once at
+/// startup, after `requeue_stale`, so a job it just put back on the queue is not
+/// mistaken for an orphan.
+async fn sweep_orphaned_runs(backend: &LocalBackend) {
+    let runs = match backend.workflows.active_runs() {
+        Ok(runs) => runs,
+        Err(e) => {
+            tracing::warn!("could not read workflow runs at startup: {e}");
+            return;
+        }
+    };
+    let mut recovered = 0usize;
+    for run in runs {
+        match backend.jobs.workflow_run_job_active(run.id) {
+            Ok(true) => {}
+            Ok(false) => match backend.workflows.fail_stuck_run(run.id, "atlasd", "daemon restarted during the run") {
+                Ok(_) => recovered += 1,
+                Err(e) => tracing::warn!(run = %run.id, "could not mark an orphaned run failed: {e}"),
+            },
+            Err(e) => tracing::warn!(run = %run.id, "could not check the run's job at startup: {e}"),
+        }
+    }
+    if recovered > 0 {
+        tracing::info!("marked {recovered} orphaned workflow run(s) failed at startup");
+    }
+}
+
 pub async fn run(backend: Arc<LocalBackend>) {
     requeue_stale(&backend).await;
+    sweep_orphaned_runs(&backend).await;
     loop {
         drain(&backend).await;
         tokio::select! {
@@ -84,8 +116,22 @@ async fn drain(backend: &Arc<LocalBackend>) {
                 run_supervised(move || async move { extract::run_project_summary(&j, &b).await }).await
             }
             "workflow_run" => {
-                let (j, b) = (job.clone(), backend.clone());
-                run_supervised(move || async move { atlas_core::workflow::run::run_workflow(&j, &b).await }).await
+                // Under test only, a payload asking to panic skips the real runner: it
+                // proves the backstop below (not `run_workflow`'s own Err paths, which
+                // are exercised elsewhere) is what recovers a run when its job never
+                // gets the chance to write a terminal status itself.
+                #[cfg(test)]
+                if job.payload["panic_for_tests"].as_bool() == Some(true) {
+                    run_supervised(|| async { panic!("workflow_run panicked on purpose for a test") }).await
+                } else {
+                    let (j, b) = (job.clone(), backend.clone());
+                    run_supervised(move || async move { atlas_core::workflow::run::run_workflow(&j, &b).await }).await
+                }
+                #[cfg(not(test))]
+                {
+                    let (j, b) = (job.clone(), backend.clone());
+                    run_supervised(move || async move { atlas_core::workflow::run::run_workflow(&j, &b).await }).await
+                }
             }
             #[cfg(test)]
             PANIC_KIND => {
@@ -103,6 +149,20 @@ async fn drain(backend: &Arc<LocalBackend>) {
             Ok(result) => backend.jobs.mark_done(job.id, result),
             Err(e) => {
                 tracing::warn!(job = %job.id, kind = %job.kind, "job failed: {e}");
+                if job.kind == "workflow_run" {
+                    // A run's own runner (`workflow::run::run_workflow`) writes a
+                    // terminal status on every *logical* failure it sees, so this is
+                    // reached only when the job never got that far (a panic, above
+                    // all) and is a no-op via `set_run_status`'s compare-and-swap
+                    // otherwise. Without it a panicking run stays `running` forever
+                    // and blocks every later run of that workflow.
+                    if let Some(run_id) = job.payload["run_id"].as_str().and_then(|s| Uuid::parse_str(s).ok()) {
+                        let run_actor = job.payload["actor"].as_str().unwrap_or("scheduler");
+                        if let Err(e) = backend.workflows.fail_stuck_run(run_id, run_actor, INTERNAL_ERROR) {
+                            tracing::warn!(run = %run_id, "could not mark the stuck run failed: {e}");
+                        }
+                    }
+                }
                 backend.jobs.mark_failed(job.id, &e.to_string())
             }
         };
@@ -116,8 +176,28 @@ async fn drain(backend: &Arc<LocalBackend>) {
 mod tests {
     use super::*;
     use atlas_core::backend::Backend;
+    use atlas_core::models::*;
     use atlas_core::paths::AtlasPaths;
     use serde_json::json;
+
+    /// One trigger, one action, one output, wired straight through: enough for
+    /// `graph::validate` and a workflow run, with no model call actually made in the
+    /// tests that need it (the panic happens before `run_workflow` is ever called).
+    fn single_action_graph() -> Graph {
+        Graph {
+            nodes: vec![
+                Node { id: "t".into(), kind: NodeKind::Trigger, position: Position { x: 0.0, y: 0.0 }, data: NodeData::Trigger(Trigger::manual()) },
+                Node {
+                    id: "a".into(),
+                    kind: NodeKind::Action,
+                    position: Position { x: 200.0, y: 0.0 },
+                    data: NodeData::Action { name: "do it".into(), instructions: "do it".into(), agent: "desktop".into(), practices: vec![], memories: None },
+                },
+                Node { id: "o".into(), kind: NodeKind::Output, position: Position { x: 400.0, y: 0.0 }, data: NodeData::Output { propose_memories: false, file_tasks: false } },
+            ],
+            edges: vec![Edge { id: "t-a".into(), source: "t".into(), target: "a".into() }, Edge { id: "a-o".into(), source: "a".into(), target: "o".into() }],
+        }
+    }
 
     #[tokio::test]
     async fn run_supervised_turns_a_panic_into_an_error_without_its_payload() {
@@ -155,5 +235,62 @@ mod tests {
         // The panic fired inside `with_conn`; a non-poison-tolerant lock would make
         // every query from here on fail.
         assert!(backend.status().await.is_ok(), "the DuckDB connection was poisoned by the panic");
+    }
+
+    /// A `workflow_run` job whose handler panics still ends the run `failed`, not stuck
+    /// `running` forever: without the backstop in `drain`, `run_workflow`'s own Err
+    /// paths never run, nothing else ever marks the row terminal, and every later run
+    /// of the workflow is refused by `has_pending_run` for good.
+    #[tokio::test]
+    async fn a_panicking_workflow_run_job_ends_the_run_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(dir.path()), None, false).unwrap());
+        let new = NewWorkflow { name: "panics".into(), project_id: None, description: String::new(), trigger: Trigger::manual(), graph: single_action_graph(), enabled: true };
+        let workflow = backend.create_workflow(new, "t").await.unwrap();
+        let run = backend.workflows.create_run(workflow.id, TriggerKind::Manual).unwrap();
+        backend.workflows.set_run_status(run.id, RunStatus::Running, None).unwrap();
+        backend
+            .jobs
+            .enqueue("workflow_run", json!({"run_id": run.id.to_string(), "workflow_id": workflow.id.to_string(), "actor": "t", "panic_for_tests": true}))
+            .unwrap();
+
+        drain(&backend).await;
+
+        let (finished, steps) = backend.workflows.get_run(run.id).unwrap();
+        assert_eq!(finished.status, RunStatus::Failed);
+        assert!(steps.iter().any(|s| s.log.iter().any(|l| l.level == LogLevel::Error && l.text == INTERNAL_ERROR)), "{steps:?}");
+        assert!(!backend.workflows.has_pending_run(workflow.id).unwrap(), "the workflow must be runnable again");
+    }
+
+    /// A run left `queued` or `running` at startup, with its job already gone (here,
+    /// never enqueued at all), is swept to `failed` rather than blocking the workflow
+    /// forever; a run whose job is genuinely still active is left alone.
+    #[tokio::test]
+    async fn sweep_orphaned_runs_recovers_a_run_with_no_job_behind_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(dir.path()), None, false).unwrap());
+        let orphan_wf = backend
+            .create_workflow(NewWorkflow { name: "orphan".into(), project_id: None, description: String::new(), trigger: Trigger::manual(), graph: single_action_graph(), enabled: true }, "t")
+            .await
+            .unwrap();
+        let orphan_run = backend.workflows.create_run(orphan_wf.id, TriggerKind::Manual).unwrap();
+        backend.workflows.set_run_status(orphan_run.id, RunStatus::Running, None).unwrap();
+
+        let live_wf = backend
+            .create_workflow(NewWorkflow { name: "live".into(), project_id: None, description: String::new(), trigger: Trigger::manual(), graph: single_action_graph(), enabled: true }, "t")
+            .await
+            .unwrap();
+        let live_run = backend.workflows.create_run(live_wf.id, TriggerKind::Manual).unwrap();
+        backend.jobs.enqueue("workflow_run", json!({"run_id": live_run.id.to_string(), "workflow_id": live_wf.id.to_string(), "actor": "t"})).unwrap();
+
+        sweep_orphaned_runs(&backend).await;
+
+        let orphan_after = backend.workflows.get_run(orphan_run.id).unwrap().0;
+        assert_eq!(orphan_after.status, RunStatus::Failed);
+        let (_run, steps) = backend.workflows.get_run(orphan_run.id).unwrap();
+        assert!(steps.iter().any(|s| s.log.iter().any(|l| l.text == "daemon restarted during the run")), "{steps:?}");
+
+        let live_after = backend.workflows.get_run(live_run.id).unwrap().0;
+        assert_eq!(live_after.status, RunStatus::Queued, "a run whose job is still queued must be left alone");
     }
 }

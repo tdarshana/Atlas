@@ -38,16 +38,17 @@ pub fn normalize_board_key(raw: &str) -> Result<String> {
 /// project's `agent_access` rules.
 ///
 /// Those are the desktop (`desktop`), the CLI (`cli`, or `cli/NAME` for `atlas task
-/// --as NAME`) and the daemon's own default label for an HTTP caller that sent no
-/// `X-Atlas-Actor` header (`api`), which is the desktop and every hand-driven request.
-/// The rules exist to fence off *agents*, which always announce themselves.
+/// --as NAME`), the daemon's own default label for an HTTP caller that sent no
+/// `X-Atlas-Actor` header (`api`), and the workflow scheduler (`scheduler`), which fires
+/// on the user's own configured cron rather than at an agent's request. The rules exist
+/// to fence off *agents*, which always announce themselves.
 ///
 /// Matched exactly rather than by prefix: `cli` alone would also exempt `cline`, a real
 /// coding agent, along with anything else that happens to start with those letters, and
 /// such an actor would silently pass every allow-list and `require_review`.
 pub fn actor_is_user(actor: &str) -> bool {
     let a = actor.trim();
-    a == "desktop" || a == "api" || a == "cli" || a.starts_with("cli/")
+    a == "desktop" || a == "api" || a == "cli" || a.starts_with("cli/") || a == "scheduler"
 }
 
 /// Whether `actor` is on `allowed`. A `None` list means any actor. A list matches the
@@ -708,7 +709,7 @@ mod tests {
         assert!(matches!(check_task_move("codex", &p), Err(AtlasError::Conflict(_))));
         assert!(check_task_move("claude-code", &p).is_ok());
         assert!(check_task_move("claude-code/reviewer", &p).is_ok(), "a sub-agent inherits its tool's permission");
-        for exempt in ["desktop", "api", "cli", "cli/anything"] {
+        for exempt in ["desktop", "api", "cli", "cli/anything", "scheduler"] {
             assert!(check_task_move(exempt, &p).is_ok(), "{exempt} is the user's own hands");
         }
         // The exemption is an exact set, not a prefix: `cline` is a real coding agent,

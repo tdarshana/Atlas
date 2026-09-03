@@ -89,7 +89,7 @@ pub async fn run(cmd: WorkflowCmd, backend: &RemoteBackend) -> anyhow::Result<()
             Ok(())
         }
         WorkflowCmd::Cancel { run_id } => {
-            let run = backend.cancel_run(run_id).await?;
+            let run = backend.cancel_run(run_id, "cli").await?;
             println!("cancelled run #{}", run.number);
             Ok(())
         }

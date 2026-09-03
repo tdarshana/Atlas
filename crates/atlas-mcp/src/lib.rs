@@ -330,6 +330,19 @@ impl<B: Backend> AtlasMcp<B> {
         Ok(match id { Some(_) => docs, None => docs.into_iter().filter(|d| d.project_id.is_none()).collect() })
     }
 
+    /// The workflows that apply where this call is coming from, as summaries. Mirrors
+    /// `docs_here`: the project's plus the global ones, or, when no project resolves,
+    /// only the global ones.
+    async fn workflows_here(&self, project_root: Option<PathBuf>) -> Result<Vec<WorkflowSummary>, McpError> {
+        let id = self.resolve_project(project_root).await?.map(|p| p.id);
+        let workflows = self.backend.list_workflows(id).await.map_err(err)?;
+        let workflows = match id {
+            Some(_) => workflows,
+            None => workflows.into_iter().filter(|w| w.project_id.is_none()).collect(),
+        };
+        Ok(workflows.iter().map(WorkflowSummary::from).collect())
+    }
+
     /// The project id to scope by, or `None` for global. `project_id` wins over any
     /// root, so an explicit id never triggers a project lookup.
     async fn scope_id(&self, project_id: Option<Uuid>, project_root: Option<PathBuf>) -> Result<Option<Uuid>, McpError> {
@@ -564,12 +577,12 @@ impl<B: Backend> AtlasMcp<B> {
 
     #[tool(description = "List the workflows that apply here: the global ones plus any scoped to this project. Call when the user asks for a multi-step process such as a release or a review.")]
     async fn list_workflows(&self, Parameters(a): Parameters<ProjectRootArgs>) -> Result<CallToolResult, McpError> {
-        json_result(&self.docs_here(DocKind::Workflow, a.project_root).await?)
+        json_result(&self.workflows_here(a.project_root).await?)
     }
 
-    #[tool(description = "Fetch the full text of one workflow by name. Call after list_workflows to follow its steps.")]
+    #[tool(description = "Fetch one workflow by name, including its full graph. Call after list_workflows to see its trigger and actions.")]
     async fn get_workflow(&self, Parameters(a): Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
-        json_result(&self.backend.get_doc(DocKind::Workflow, &a.name).await.map_err(err)?)
+        json_result(&self.backend.get_workflow(&a.name).await.map_err(err)?)
     }
 
     #[tool(description = "Queue a conversation transcript for opt-in LLM extraction of durable memories. Returns a job id to poll; fails if extraction is not enabled and configured on the daemon.")]

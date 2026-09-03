@@ -130,6 +130,21 @@ impl JobRepo {
         self.db.with_conn(|c| Ok(c.execute("update jobs set status = 'queued', updated_at = now() where status = 'running'", [])?))
     }
 
+    /// Whether a `workflow_run` job behind this run id is still `queued` or `running`.
+    /// Read at daemon startup for every workflow run left `queued`/`running`: `false`
+    /// means the job that was going to finish it is gone (already terminal, or never
+    /// made it into the table), so the run itself is orphaned.
+    pub fn workflow_run_job_active(&self, run_id: Uuid) -> Result<bool> {
+        self.db.with_conn(|c| {
+            let n: i64 = c.query_row(
+                "select count(*) from jobs where kind = 'workflow_run' and status in ('queued','running') and json_extract_string(payload, '$.run_id') = ?",
+                params![run_id.to_string()],
+                |r| r.get(0),
+            )?;
+            Ok(n > 0)
+        })
+    }
+
     pub fn get(&self, id: Uuid) -> Result<Option<Job>> {
         self.db.with_conn(|c| {
             let mut st = c.prepare(&format!("select {SEL} from jobs where id = ?"))?;
@@ -213,6 +228,28 @@ mod tests {
     #[test]
     fn get_of_an_unknown_id_is_none() {
         assert!(repo().get(Uuid::new_v4()).unwrap().is_none());
+    }
+
+    /// A `workflow_run` job still `queued` or `running` for a run id is active; one
+    /// that is `done`/`failed`, or that names a different run, is not.
+    #[test]
+    fn workflow_run_job_active_reads_the_payloads_run_id() {
+        let r = repo();
+        let run_id = Uuid::new_v4();
+        assert!(!r.workflow_run_job_active(run_id).unwrap(), "no job at all");
+
+        let id = r.enqueue("workflow_run", json!({"run_id": run_id.to_string()})).unwrap();
+        assert!(r.workflow_run_job_active(run_id).unwrap(), "queued");
+
+        r.next_queued().unwrap();
+        assert!(r.workflow_run_job_active(run_id).unwrap(), "running");
+
+        r.mark_done(id, json!({})).unwrap();
+        assert!(!r.workflow_run_job_active(run_id).unwrap(), "done");
+
+        let other = Uuid::new_v4();
+        r.enqueue("workflow_run", json!({"run_id": other.to_string()})).unwrap();
+        assert!(!r.workflow_run_job_active(run_id).unwrap(), "a different run's job must not count");
     }
 
     /// A job stuck `running` (the daemon that claimed it never came back) is put

@@ -167,7 +167,7 @@ pub trait Backend: Send + Sync + 'static {
     async fn run_workflow(&self, id_or_name: &str, trigger: TriggerKind, actor: &str, input: Option<String>) -> Result<WorkflowRun>;
     async fn list_runs(&self, id_or_name: &str, limit: usize) -> Result<Vec<WorkflowRun>>;
     async fn get_run(&self, run_id: Uuid) -> Result<(WorkflowRun, Vec<WorkflowStep>)>;
-    async fn cancel_run(&self, run_id: Uuid) -> Result<WorkflowRun>;
+    async fn cancel_run(&self, run_id: Uuid, actor: &str) -> Result<WorkflowRun>;
     /// The run's full log as plain text: a header line, then one `ts level [step] text`
     /// line per log line, across every step in order.
     async fn export_run_log(&self, run_id: Uuid) -> Result<String>;
@@ -356,7 +356,7 @@ impl Backend for LocalBackend {
         memories.extend(recent.into_iter().filter(|m| !seen.contains(&m.id)).take(10).map(|memory| RecallHit { memory, score: 0.0 }));
         Ok(ProjectContext {
             practices: self.docs(DocKind::Practice).list(Some(project.id))?,
-            workflows: self.docs(DocKind::Workflow).list(Some(project.id))?,
+            workflows: self.workflows.list(Some(project.id))?.iter().map(WorkflowSummary::from).collect(),
             project,
             memories,
         })
@@ -609,7 +609,7 @@ impl Backend for LocalBackend {
         self.workflows.list_runs(workflow.id, limit)
     }
     async fn get_run(&self, run_id: Uuid) -> Result<(WorkflowRun, Vec<WorkflowStep>)> { self.workflows.get_run(run_id) }
-    async fn cancel_run(&self, run_id: Uuid) -> Result<WorkflowRun> { self.workflows.cancel_run(run_id) }
+    async fn cancel_run(&self, run_id: Uuid, actor: &str) -> Result<WorkflowRun> { self.workflows.cancel_run(run_id, actor) }
     async fn export_run_log(&self, run_id: Uuid) -> Result<String> {
         let (run, steps) = self.workflows.get_run(run_id)?;
         let mut out = format!("workflow run {} #{} — {}\n", run.id, run.number, run.status);
