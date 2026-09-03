@@ -27,6 +27,14 @@ export const log = $state({
 	kind: '',
 	q: '',
 	rows: [] as LogEntry[],
+	/**
+	 * The actors and kinds the two Selects offer. Captured from an unfiltered page, never
+	 * from the rows a filter left behind: a vocabulary that narrowed with the rows would
+	 * drop the very value the user picked, and a native select with no matching option
+	 * falls back to displaying the first one while the store still sends the filter.
+	 */
+	sources: [] as string[],
+	kinds: [] as string[],
 	loading: false,
 	loadingMore: false,
 	/** The last page came back full, so there is at least one more to ask for. */
@@ -56,6 +64,11 @@ export function hasFilters(filters: LogFilters): boolean {
 	return !!(filters.source || filters.kind || filters.q.trim());
 }
 
+/** Distinct sorted values of one field across a page of rows. */
+export function distinct(rows: LogEntry[], pick: (row: LogEntry) => string): string[] {
+	return [...new Set(rows.map(pick).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+}
+
 /**
  * Bumped by every load. Debouncing coalesces keystrokes but says nothing about requests
  * already in flight, so a slow early page must not land on top of a later one.
@@ -71,6 +84,8 @@ export function openLog(projectId: Uuid | ''): void {
 	log.kind = '';
 	log.q = '';
 	log.rows = [];
+	log.sources = [];
+	log.kinds = [];
 	log.more = false;
 	log.error = null;
 	log.errorLogPath = null;
@@ -81,11 +96,18 @@ export async function loadLog(): Promise<void> {
 	const g = ++generation;
 	const id = log.projectId;
 	if (!id) return;
+	const unfiltered = !hasFilters(log);
 	log.loading = true;
 	try {
 		const rows = await api().projectLog(id, logParams(log));
 		if (g !== generation) return;
 		log.rows = rows;
+		// The Selects learn their vocabulary from the page nothing was filtered out of, so
+		// picking a source cannot take the other sources off the list.
+		if (unfiltered) {
+			log.sources = distinct(rows, (r) => r.source);
+			log.kinds = distinct(rows, (r) => r.kind);
+		}
 		log.more = rows.length === LOG_PAGE;
 		log.error = null;
 		log.errorLogPath = null;

@@ -41,8 +41,8 @@
 	const id = $derived(page.params.id ?? '');
 	const name = $derived(project.current?.name ?? 'Project');
 	const rows = $derived<Row[]>(log.rows.map((entry, i) => ({ ...entry, rowId: String(i) })));
-	const sources = $derived(sourceOptions(log.rows));
-	const kinds = $derived(kindOptions(log.rows));
+	const sources = $derived(sourceOptions(log.sources, log.source));
+	const kinds = $derived(kindOptions(log.kinds, log.kind));
 	const filtered = $derived(hasFilters(log));
 
 	// Neither column is sortable: the daemon answers newest first and pages by the last

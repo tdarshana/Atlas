@@ -3,7 +3,7 @@
 	// stores nothing of its own; unticked, each field it fills in overrides the global one,
 	// field by field, and each field left blank still inherits.
 	import { Button, Checkbox, Input } from '$lib/ds';
-	import { changeBaseUrl, type ExtractionForm } from './settings';
+	import { type ExtractionForm, keyWillDrop } from './settings';
 
 	interface Props {
 		form: ExtractionForm;
@@ -15,21 +15,22 @@
 
 	let { form = $bindable(), testing, result, ontest }: Props = $props();
 
-	/** Set when a base URL edit dropped the key, so the field can say why it is empty. */
-	let keyCleared = $state(false);
+	const dropping = $derived(keyWillDrop(form));
 
 	const keyHint = $derived(
-		keyCleared
-			? 'The stored key belonged to the previous base URL. Enter the one for this endpoint.'
+		dropping
+			? 'The stored key belongs to the base URL this project was loaded with. Saving without a new key clears it.'
 			: form.storedKey
 				? 'Key stored.'
 				: 'No key stored yet.'
 	);
 
-	function onBaseUrl(next: string) {
-		const before = form.storedKey;
-		form = changeBaseUrl(form, next);
-		keyCleared = before && !form.storedKey;
+	/**
+	 * The project's own switch. Untouched it stays null, which inherits the global one, so
+	 * opening this card and setting a model does not start extraction nobody asked for.
+	 */
+	function setEnabled(on: boolean) {
+		form = { ...form, enabled: on };
 	}
 </script>
 
@@ -55,13 +56,21 @@
 				Inherited from Settings, Extraction. Untick to override for this project only.
 			</span>
 		{:else}
+			<Checkbox
+				label="Run extraction for this project"
+				checked={form.enabled === true}
+				indeterminate={form.enabled === null}
+				onchange={(e) => setEnabled(e.currentTarget.checked)}
+			/>
+			{#if form.enabled === null}
+				<span class="hint">Following the global switch until you set it here.</span>
+			{/if}
 			<div class="row">
 				<Input
 					label="Base URL"
 					mono
-					value={form.baseUrl}
 					placeholder="https://api.deepseek.com"
-					oninput={(e) => onBaseUrl(e.currentTarget.value)}
+					bind:value={form.baseUrl}
 				/>
 				<Input label="Model" mono placeholder="deepseek-chat" bind:value={form.model} />
 				<Input

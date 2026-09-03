@@ -5,29 +5,33 @@
 import { isToday } from '$lib/format';
 import type { LogEntry } from '$lib/types';
 
-/** Distinct sorted values of one field across the rows that are loaded. */
-function distinct(rows: LogEntry[], pick: (row: LogEntry) => string): string[] {
-	return [...new Set(rows.map(pick).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+export interface Option {
+	value: string;
+	label: string;
 }
 
 /**
- * The Source select's options. The list comes from the rows on screen rather than from a
- * fixed vocabulary, because the actors that touched a project are the only ones its log
- * can be filtered by.
+ * One filter select's options: the "all" row, the vocabulary the store captured from an
+ * unfiltered page, and the value in force if it is somehow not in that vocabulary. A
+ * select that does not offer its own value displays the first option instead, which would
+ * have the screen claim no filter while the store still sends one.
  */
-export function sourceOptions(rows: LogEntry[]): { value: string; label: string }[] {
+function options(allLabel: string, vocabulary: string[], selected: string): Option[] {
+	const values = vocabulary.includes(selected) || !selected ? vocabulary : [...vocabulary, selected];
 	return [
-		{ value: '', label: 'All sources' },
-		...distinct(rows, (r) => r.source).map((s) => ({ value: s, label: s }))
+		{ value: '', label: allLabel },
+		...[...values].sort((a, b) => a.localeCompare(b)).map((v) => ({ value: v, label: v }))
 	];
 }
 
-/** The Event select's options, over the kinds the loaded rows carry. */
-export function kindOptions(rows: LogEntry[]): { value: string; label: string }[] {
-	return [
-		{ value: '', label: 'All events' },
-		...distinct(rows, (r) => r.kind).map((k) => ({ value: k, label: k }))
-	];
+/** The Source select's options, over the actors that have written to this project. */
+export function sourceOptions(vocabulary: string[], selected = ''): Option[] {
+	return options('All sources', vocabulary, selected);
+}
+
+/** The Event select's options, over the kinds this project's log holds. */
+export function kindOptions(vocabulary: string[], selected = ''): Option[] {
+	return options('All events', vocabulary, selected);
 }
 
 /** The status bar's `<name> · <n> events today`. */

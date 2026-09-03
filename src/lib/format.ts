@@ -61,10 +61,20 @@ export function logTime(ts: Timestamp, now: number = Date.now()): string {
 	return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}`;
 }
 
-/** True when `ts` falls on the same local day as `now`. */
+/**
+ * True when `ts` falls on the same local day as `now`. Compared by date components
+ * rather than by a 24-hour window: a day is 23 or 25 hours long twice a year, and either
+ * one would put the window an hour out.
+ */
 export function isToday(ts: Timestamp, now: number = Date.now()): boolean {
-	const at = new Date(ts).getTime();
-	return Number.isFinite(at) && at >= startOfDay(now) && at < startOfDay(now) + 86_400_000;
+	const at = new Date(ts);
+	if (!Number.isFinite(at.getTime())) return false;
+	const today = new Date(now);
+	return (
+		at.getFullYear() === today.getFullYear() &&
+		at.getMonth() === today.getMonth() &&
+		at.getDate() === today.getDate()
+	);
 }
 
 /**

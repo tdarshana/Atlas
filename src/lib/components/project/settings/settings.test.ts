@@ -3,11 +3,12 @@ import { describe, expect, it } from 'vitest';
 import type { AgentAccess } from '$lib/types';
 import {
 	accessChecked,
-	changeBaseUrl,
+	accessIsSplit,
 	DEFAULT_ACTORS,
 	extractionForm,
 	KEY_PREFIX_RE,
 	keyPrefixConfirm,
+	keyWillDrop,
 	knownActors,
 	MASKED_KEY,
 	toAgentAccess,
@@ -34,26 +35,55 @@ describe('knownActors', () => {
 		};
 		expect(knownActors([], access)).toContain('codex/fixer');
 	});
+
+	it('reads both rules, not only the memory one', () => {
+		const access: AgentAccess = {
+			memory_writers: null,
+			task_movers: ['codex/fixer'],
+			require_review: false
+		};
+		expect(knownActors([], access)).toContain('codex/fixer');
+	});
+});
+
+describe('accessIsSplit', () => {
+	it('is false when both rules are open', () => {
+		expect(accessIsSplit(OPEN)).toBe(false);
+	});
+
+	it('is false when both rules hold the same labels in any order', () => {
+		expect(
+			accessIsSplit({
+				memory_writers: ['a', 'b'],
+				task_movers: ['b', 'a'],
+				require_review: false
+			})
+		).toBe(false);
+	});
+
+	it('is true when one rule is open and the other is a list', () => {
+		expect(
+			accessIsSplit({ memory_writers: null, task_movers: ['cli/codex'], require_review: false })
+		).toBe(true);
+	});
+
+	it('is true when the two lists differ', () => {
+		expect(
+			accessIsSplit({ memory_writers: ['a'], task_movers: ['b'], require_review: false })
+		).toBe(true);
+	});
 });
 
 describe('agent access model', () => {
 	const actors = ['cli/claude-code', 'cli/codex', 'desktop'];
+	const all = { 'cli/claude-code': true, 'cli/codex': true, desktop: true };
 
-	it('ticks everything when the lists are null', () => {
-		expect(accessChecked(actors, OPEN)).toEqual({
-			'cli/claude-code': true,
-			'cli/codex': true,
-			desktop: true
-		});
+	it('ticks everything for a null rule', () => {
+		expect(accessChecked(actors, null)).toEqual(all);
 	});
 
 	it('ticks only the listed actors', () => {
-		const access: AgentAccess = {
-			memory_writers: ['cli/codex'],
-			task_movers: ['cli/codex'],
-			require_review: true
-		};
-		expect(accessChecked(actors, access)).toEqual({
+		expect(accessChecked(actors, ['cli/codex'])).toEqual({
 			'cli/claude-code': false,
 			'cli/codex': true,
 			desktop: false
@@ -61,17 +91,27 @@ describe('agent access model', () => {
 	});
 
 	it('writes back nulls when everything is ticked', () => {
-		const checked = { 'cli/claude-code': true, 'cli/codex': true, desktop: true };
-		expect(toAgentAccess(actors, checked, false)).toEqual(OPEN);
+		expect(toAgentAccess(actors, all, all, false)).toEqual(OPEN);
 	});
 
-	it('writes the same list to both rules when some are unticked', () => {
-		const checked = { 'cli/claude-code': false, 'cli/codex': true, desktop: true };
-		expect(toAgentAccess(actors, checked, true)).toEqual({
+	it('writes each column to its own rule', () => {
+		const memories = { 'cli/claude-code': false, 'cli/codex': true, desktop: true };
+		expect(toAgentAccess(actors, memories, all, true)).toEqual({
 			memory_writers: ['cli/codex', 'desktop'],
-			task_movers: ['cli/codex', 'desktop'],
+			task_movers: null,
 			require_review: true
 		});
+	});
+
+	it('leaves a divergent pair of rules divergent', () => {
+		const access: AgentAccess = {
+			memory_writers: null,
+			task_movers: ['cli/codex'],
+			require_review: false
+		};
+		const memories = accessChecked(actors, access.memory_writers);
+		const tasks = accessChecked(actors, access.task_movers);
+		expect(toAgentAccess(actors, memories, tasks, false)).toEqual(access);
 	});
 
 	it('round-trips a list', () => {
@@ -80,12 +120,22 @@ describe('agent access model', () => {
 			task_movers: ['desktop'],
 			require_review: false
 		};
-		expect(toAgentAccess(actors, accessChecked(actors, access), false)).toEqual(access);
+		const ticks = accessChecked(actors, access.memory_writers);
+		expect(toAgentAccess(actors, ticks, ticks, false)).toEqual(access);
+	});
+
+	it('writes the lists out in full once a label was added by hand', () => {
+		const withNew = [...actors, 'workflow'];
+		const ticks = { ...all, workflow: true };
+		expect(toAgentAccess(withNew, ticks, ticks, false, true)).toEqual({
+			memory_writers: withNew,
+			task_movers: withNew,
+			require_review: false
+		});
 	});
 
 	it('carries the review rule either way', () => {
-		const all = { 'cli/claude-code': true, 'cli/codex': true, desktop: true };
-		expect(toAgentAccess(actors, all, true).require_review).toBe(true);
+		expect(toAgentAccess(actors, all, all, true).require_review).toBe(true);
 	});
 });
 
@@ -93,7 +143,9 @@ describe('extraction form', () => {
 	it('reads a missing override as "use global"', () => {
 		expect(extractionForm(null)).toEqual({
 			useGlobal: true,
+			enabled: null,
 			baseUrl: '',
+			loadedBaseUrl: '',
 			model: '',
 			apiKey: '',
 			threshold: '',
@@ -112,12 +164,31 @@ describe('extraction form', () => {
 		});
 		expect(form).toEqual({
 			useGlobal: false,
+			enabled: true,
 			baseUrl: 'http://127.0.0.1:54321/v1',
+			loadedBaseUrl: 'http://127.0.0.1:54321/v1',
 			model: 'project-model',
 			apiKey: '',
 			threshold: '0.9',
 			storedKey: true
 		});
+	});
+
+	it('leaves `enabled` inherited when the override says nothing about it', () => {
+		const form = { ...extractionForm({ base_url: 'https://a' }), useGlobal: false };
+		expect(form.enabled).toBeNull();
+		expect(toProjectExtraction(form)?.enabled).toBeNull();
+	});
+
+	it('carries a stored `enabled: false` rather than turning extraction on', () => {
+		const form = extractionForm({ enabled: false, model: 'm' });
+		expect(form.enabled).toBe(false);
+		expect(toProjectExtraction(form)?.enabled).toBe(false);
+	});
+
+	it('sends the switch the user set', () => {
+		const form = { ...extractionForm(null), useGlobal: false, enabled: true };
+		expect(toProjectExtraction(form)?.enabled).toBe(true);
 	});
 
 	it('sends the mask back for a key it did not touch', () => {
@@ -133,7 +204,7 @@ describe('extraction form', () => {
 	it('leaves a blank field null so it still inherits', () => {
 		const form = { ...extractionForm(null), useGlobal: false };
 		expect(toProjectExtraction(form)).toEqual({
-			enabled: true,
+			enabled: null,
 			base_url: null,
 			model: null,
 			api_key: null,
@@ -146,18 +217,26 @@ describe('extraction form', () => {
 		expect(toProjectExtraction(form)?.auto_accept_min_confidence).toBe(0.85);
 	});
 
-	it('clears the stored key when the base URL moves', () => {
+	it('drops the stored key when the base URL is saved away from the loaded one', () => {
 		const form = extractionForm({ base_url: 'https://a', api_key: MASKED_KEY });
-		const moved = changeBaseUrl({ ...form, apiKey: 'sk-typed' }, 'https://b');
-		expect(moved.baseUrl).toBe('https://b');
-		expect(moved.apiKey).toBe('');
-		expect(moved.storedKey).toBe(false);
+		const moved = { ...form, baseUrl: 'https://b' };
+		expect(keyWillDrop(moved)).toBe(true);
 		expect(toProjectExtraction(moved)?.api_key).toBeNull();
 	});
 
-	it('keeps the key while the base URL is only being retyped the same', () => {
+	it('keeps the key when an edit to the base URL is undone', () => {
 		const form = extractionForm({ base_url: 'https://a', api_key: MASKED_KEY });
-		expect(changeBaseUrl(form, ' https://a ').storedKey).toBe(true);
+		const typed = { ...form, baseUrl: 'https://ab' };
+		const undone = { ...typed, baseUrl: ' https://a ' };
+		expect(keyWillDrop(undone)).toBe(false);
+		expect(toProjectExtraction(undone)?.api_key).toBe(MASKED_KEY);
+	});
+
+	it('does not warn about a dropped key once a new one is typed', () => {
+		const form = extractionForm({ base_url: 'https://a', api_key: MASKED_KEY });
+		const moved = { ...form, baseUrl: 'https://b', apiKey: 'sk-new' };
+		expect(keyWillDrop(moved)).toBe(false);
+		expect(toProjectExtraction(moved)?.api_key).toBe('sk-new');
 	});
 });
 

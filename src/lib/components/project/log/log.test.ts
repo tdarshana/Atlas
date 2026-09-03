@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { logTime } from '$lib/format';
-import { hasFilters, logParams, LOG_PAGE } from '$lib/stores/log.svelte';
+import { distinct, hasFilters, logParams, LOG_PAGE } from '$lib/stores/log.svelte';
 import type { LogEntry, LogRefType } from '$lib/types';
 import {
 	eventsToday,
@@ -89,31 +89,64 @@ describe('logParams', () => {
 });
 
 describe('filter options', () => {
-	const rows = [
-		entry({ source: 'desktop', kind: 'moved' }),
-		entry({ source: 'cli/codex', kind: 'moved' }),
-		entry({ source: 'cli/codex', kind: 'created' })
-	];
-
-	it('offers every distinct source under an all-sources row', () => {
-		expect(sourceOptions(rows).map((o) => o.label)).toEqual([
+	it('offers the whole vocabulary under an all-sources row', () => {
+		expect(sourceOptions(['desktop', 'cli/codex']).map((o) => o.label)).toEqual([
 			'All sources',
 			'cli/codex',
 			'desktop'
 		]);
-		expect(sourceOptions(rows)[0].value).toBe('');
+		expect(sourceOptions(['desktop'])[0].value).toBe('');
 	});
 
-	it('offers every distinct kind under an all-events row', () => {
-		expect(kindOptions(rows).map((o) => o.label)).toEqual(['All events', 'created', 'moved']);
+	it('offers the kinds under an all-events row', () => {
+		expect(kindOptions(['moved', 'created']).map((o) => o.label)).toEqual([
+			'All events',
+			'created',
+			'moved'
+		]);
 	});
 
 	it('offers only the all row for an empty log', () => {
 		expect(sourceOptions([])).toEqual([{ value: '', label: 'All sources' }]);
 	});
+
+	it('keeps offering the value in force even when the vocabulary does not hold it', () => {
+		// Otherwise the select falls back to displaying "All sources" while the store still
+		// sends `source=workflow`.
+		expect(sourceOptions(['desktop'], 'workflow').map((o) => o.value)).toEqual([
+			'',
+			'desktop',
+			'workflow'
+		]);
+	});
+
+	it('does not repeat a selected value the vocabulary already holds', () => {
+		expect(sourceOptions(['desktop'], 'desktop').map((o) => o.value)).toEqual(['', 'desktop']);
+	});
+});
+
+describe('distinct', () => {
+	it('is the vocabulary a page of rows produces, sorted and deduplicated', () => {
+		const rows = [
+			entry({ source: 'desktop', kind: 'moved' }),
+			entry({ source: 'cli/codex', kind: 'moved' }),
+			entry({ source: 'cli/codex', kind: 'created' })
+		];
+		expect(distinct(rows, (r) => r.source)).toEqual(['cli/codex', 'desktop']);
+		expect(distinct(rows, (r) => r.kind)).toEqual(['created', 'moved']);
+	});
 });
 
 describe('eventsToday', () => {
+	it('counts by the calendar day, so a short or long day does not shift the window', () => {
+		// Local components, not midnight plus 24 hours: a DST day is 23 or 25 hours long.
+		const rows = [
+			entry({ time: new Date(2026, 8, 3, 23, 59, 59).toISOString() }),
+			entry({ time: new Date(2026, 8, 4, 0, 0, 1).toISOString() })
+		];
+		expect(eventsToday(rows, NOW)).toBe(1);
+	});
+
 	it('counts only the rows written today', () => {
 		const rows = [
 			entry({ time: new Date(2026, 8, 3, 15, 15).toISOString() }),

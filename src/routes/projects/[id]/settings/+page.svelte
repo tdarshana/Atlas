@@ -16,6 +16,7 @@
 	import ProjectCard from '$lib/components/project/settings/ProjectCard.svelte';
 	import {
 		accessChecked,
+		accessIsSplit,
 		extractionForm,
 		type ExtractionForm,
 		KEY_PREFIX_RE,
@@ -24,7 +25,7 @@
 		toAgentAccess,
 		toProjectExtraction
 	} from '$lib/components/project/settings/settings';
-	import type { Project, ProjectPatch } from '$lib/types';
+	import type { AgentAccess, Project, ProjectPatch } from '$lib/types';
 	import Dialog from '$lib/ui/Dialog.svelte';
 	import { push } from '$lib/ui/toasts.svelte';
 
@@ -33,16 +34,23 @@
 		boardKey: string;
 		remote: string;
 		actors: string[];
-		checked: Record<string, boolean>;
+		memoryWriters: Record<string, boolean>;
+		taskMovers: Record<string, boolean>;
 		requireReview: boolean;
+		/** Set once a label was added by hand, so the save writes the lists out in full. */
+		manual: boolean;
 		extraction: ExtractionForm;
 	}
 
-	/** Actor labels seen in this project's log, which is where the tick list comes from. */
+	/** Actor labels seen in this project's log. A vocabulary, never a rebuild trigger. */
 	let sources = $state<string[]>([]);
 	let form = $state<Form | null>(null);
 	/** The form as it was loaded. Dirty is a comparison against this, not a flag. */
-	let loaded = $state('');
+	let loaded = $state<Form | null>(null);
+	/** The project the form was built for, so a re-read of the same project leaves it alone. */
+	let builtFor = $state('');
+	/** True while the loaded rules differ, which is what makes the card draw two columns. */
+	let split = $state(false);
 	let saving = $state(false);
 	let savedAt = $state<string | null>(null);
 	let testing = $state(false);
@@ -53,7 +61,7 @@
 	const id = $derived(page.params.id ?? '');
 	const current = $derived(project.current);
 	const name = $derived(current?.name ?? 'Project');
-	const dirty = $derived(!!form && JSON.stringify(form) !== loaded);
+	const dirty = $derived(!!form && JSON.stringify(form) !== JSON.stringify(loaded));
 
 	function formFrom(p: Project, seen: string[]): Form {
 		const actors = knownActors(seen, p.agent_access);
@@ -62,22 +70,60 @@
 			boardKey: p.board_key ?? '',
 			remote: p.git_remote ?? '',
 			actors,
-			checked: accessChecked(actors, p.agent_access),
+			memoryWriters: accessChecked(actors, p.agent_access.memory_writers),
+			taskMovers: accessChecked(actors, p.agent_access.task_movers),
 			requireReview: p.agent_access.require_review,
+			manual: false,
 			extraction: extractionForm(p.extraction)
 		};
 	}
 
-	function reset(): void {
-		if (!current) return;
-		const next = formFrom(current, sources);
-		form = next;
-		loaded = JSON.stringify(next);
+	/** Builds the form from the project as it stands and calls that the loaded state. */
+	function build(p: Project): void {
+		form = formFrom(p, sources);
+		loaded = formFrom(p, sources);
+		split = accessIsSplit(p.agent_access);
+		builtFor = p.id;
 		testResult = null;
 	}
 
+	/**
+	 * Adds labels the form does not offer yet, to the form and to the loaded snapshot
+	 * alike. A label arriving late must not make the form look edited, and must not undo an
+	 * edit the user has already made, so this extends rather than replaces.
+	 */
+	function addLabels(labels: string[], access: AgentAccess): void {
+		const f = form;
+		const l = loaded;
+		if (!f || !l) return;
+		const added = labels.filter((a) => a && !f.actors.includes(a));
+		if (added.length === 0) return;
+		const actors = [...f.actors, ...added].sort((a, b) => a.localeCompare(b));
+		const writers = accessChecked(added, access.memory_writers);
+		const movers = accessChecked(added, access.task_movers);
+		for (const target of [f, l]) {
+			target.actors = actors;
+			target.memoryWriters = { ...target.memoryWriters, ...writers };
+			target.taskMovers = { ...target.taskMovers, ...movers };
+		}
+	}
+
+	/** Re-reads the project from the daemon, then rebuilds the form from what came back. */
+	async function reload(): Promise<void> {
+		if (!id) return;
+		try {
+			await openProject(id, true);
+		} catch (e) {
+			push('error', errorMessage(e));
+		}
+		const p = project.current;
+		if (p) build(p);
+	}
+
 	// The tick list is the project's own actors, so the log is read for the labels that have
-	// written to it. One page is plenty: this is a vocabulary, not a history.
+	// written to it. One page is plenty: this is a vocabulary, not a history. The answer only
+	// ever adds labels; it never rebuilds the form, which would throw away what was typed
+	// while it was in flight.
 	$effect(() => {
 		const pid = id;
 		if (!pid) return;
@@ -85,29 +131,27 @@
 		void api()
 			.projectLog(pid, { limit: 200 })
 			.then((rows) => {
+				const seen = [...new Set(rows.map((r) => r.source).filter(Boolean))];
+				const access = untrack(() => project.current?.agent_access);
 				if (!live) return;
-				sources = [...new Set(rows.map((r) => r.source).filter(Boolean))];
+				sources = seen;
+				if (access) untrack(() => addLabels(seen, access));
 			})
 			.catch(() => {
 				// A log that will not load costs the extra labels, not the card.
-				if (live) sources = [];
 			});
 		return () => {
 			live = false;
 		};
 	});
 
-	// Rebuild the form whenever the project or the label list lands. Untracked because
-	// `reset` reads and writes the form itself, which would otherwise loop.
+	// Build the form once per project. A later read of the same project, from the layout or
+	// from Retry, leaves whatever the user has typed alone; `reload` and a save rebuild it
+	// deliberately.
 	$effect(() => {
 		const p = current;
-		const seen = sources;
-		if (!p) return;
-		untrack(() => {
-			const next = formFrom(p, seen);
-			form = next;
-			loaded = JSON.stringify(next);
-		});
+		if (!p || p.id === builtFor) return;
+		untrack(() => build(p));
 	});
 
 	$effect(() => {
@@ -150,7 +194,9 @@
 		}
 
 		// A prefix change rewrites every task key in the project, so it is named and counted
-		// before it is sent rather than reported afterwards.
+		// before it is sent rather than reported afterwards. `taskCounts` covers every stage
+		// of the effective list, done stages included; a task parked on a stage name the
+		// list no longer holds is renamed but not counted here.
 		const from = p.board_key ?? '';
 		if (key && from && key !== from) {
 			try {
@@ -165,35 +211,54 @@
 		await commit();
 	}
 
+	/**
+	 * The three writes, each reported by name. They run in sequence because the daemon reads
+	 * them that way, but a failure in one no longer hides the ones after it, and anything
+	 * that did land is read back so the next Save does not send it again.
+	 */
 	async function commit() {
 		const f = form;
 		const p = current;
 		if (!f || !p) return;
 		renaming = null;
 		saving = true;
-		try {
-			const patch = patchOf(f, p);
-			if (Object.keys(patch).length > 0) await api().patchProject(p.id, patch);
+		let landed = false;
+		const failed: string[] = [];
 
-			const access = toAgentAccess(f.actors, f.checked, f.requireReview);
-			if (JSON.stringify(access) !== JSON.stringify(p.agent_access)) {
-				await api().setAgentAccess(p.id, access);
+		const write = async (what: string, fn: () => Promise<unknown>) => {
+			try {
+				await fn();
+				landed = true;
+			} catch (e) {
+				failed.push(`${what}: ${errorMessage(e)}`);
 			}
+		};
 
-			const before = JSON.stringify(extractionForm(p.extraction));
-			if (JSON.stringify(f.extraction) !== before) {
-				await api().setProjectExtraction(p.id, toProjectExtraction(f.extraction));
-			}
-
-			await openProject(p.id, true);
-			savedAt = clockNow();
-			reset();
-			push('success', 'Settings saved');
-		} catch (e) {
-			push('error', errorMessage(e));
-		} finally {
-			saving = false;
+		const patch = patchOf(f, p);
+		if (Object.keys(patch).length > 0) {
+			await write('Project', () => api().patchProject(p.id, patch));
 		}
+
+		// A label added by hand is only stored if the lists are written out in full: a pair
+		// of nulls says "any actor" and forgets the label the moment the save lands.
+		const access = toAgentAccess(f.actors, f.memoryWriters, f.taskMovers, f.requireReview, f.manual);
+		if (JSON.stringify(access) !== JSON.stringify(p.agent_access)) {
+			await write('Agent access', () => api().setAgentAccess(p.id, access));
+		}
+
+		if (JSON.stringify(f.extraction) !== JSON.stringify(extractionForm(p.extraction))) {
+			await write('Extraction', () =>
+				api().setProjectExtraction(p.id, toProjectExtraction(f.extraction))
+			);
+		}
+
+		if (landed) {
+			await reload();
+			savedAt = clockNow();
+		}
+		saving = false;
+		if (failed.length > 0) push('error', failed.join('; '));
+		else push('success', 'Settings saved');
 	}
 
 	async function onTest() {
@@ -267,8 +332,11 @@
 		/>
 		<AgentAccessCard
 			bind:actors={form.actors}
-			bind:checked={form.checked}
+			bind:memoryWriters={form.memoryWriters}
+			bind:taskMovers={form.taskMovers}
 			bind:requireReview={form.requireReview}
+			bind:manual={form.manual}
+			{split}
 		/>
 		<ExtractionCard bind:form={form.extraction} {testing} result={testResult} ontest={onTest} />
 		<DangerCard disabled={project.removing} onremove={() => (confirmingRemove = true)} />
@@ -282,7 +350,7 @@
 			>
 				{saving ? 'Saving…' : 'Save'}
 			</Button>
-			<Button data-testid="settings-reload" disabled={!dirty || saving} onclick={reset}>
+			<Button data-testid="settings-reload" disabled={saving} onclick={() => void reload()}>
 				Reload
 			</Button>
 		</div>
