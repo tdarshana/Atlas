@@ -11,6 +11,7 @@
 @import './tokens/engines.css';
 @import './tokens/base.css';
 @import './dbman.css';
+@import '@xyflow/svelte/dist/base.css';
 
 /* A panel is the region container: surface layer, subtle edge, its own scroll context. */
 .panel {
@@ -91,4 +92,36 @@
 	height: 22px;
 	flex: 0 0 22px;
 	padding: 0 var(--space-2);
+}
+
+/* The workflow canvas (`@xyflow/svelte`). Nodes are drawn by our own components (frame
+   08), so only the pane background, edges, handles and the built-in chrome are themed
+   here; the custom node markup carries its own card styling. */
+.svelte-flow {
+	background: var(--bg-base);
+	--xy-edge-stroke-default: var(--border-strong);
+	--xy-edge-stroke-width-default: 1.5;
+	--xy-edge-stroke-selected-default: var(--accent);
+	--xy-connectionline-stroke-default: var(--accent);
+	--xy-handle-background-color-default: var(--bg-raised);
+	--xy-background-color-default: var(--bg-base);
+}
+
+.svelte-flow__handle {
+	width: 9px;
+	height: 9px;
+	border: 1px solid var(--border-strong);
+	background: var(--bg-raised);
+}
+
+/* No minimap and no built-in Controls plugin are rendered; the zoom stack in frame 08 is
+   the app's own. Attribution stays (the free tier requires it) but is retoned and moved
+   out of the corner our own badge and zoom stack occupy. */
+.svelte-flow__attribution {
+	background: transparent;
+	font-size: 10px;
+}
+
+.svelte-flow__attribution a {
+	color: var(--text-tertiary);
 }

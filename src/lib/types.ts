@@ -385,6 +385,146 @@ export interface StageCount {
 	count: number;
 }
 
+// ---- workflows (crates/atlas-core/src/workflow, crates/atlas-core/src/models.rs) ----
+
+export type TriggerKind = 'manual' | 'schedule' | 'prompt';
+export type NodeKind = 'trigger' | 'action' | 'output';
+/** `success`, not `succeeded`: the exact wire string `str_enum!(RunStatus ...)` writes. */
+export type RunStatus = 'queued' | 'running' | 'success' | 'failed' | 'cancelled';
+export type StepStatus = 'queued' | 'running' | 'success' | 'failed' | 'skipped' | 'cancelled';
+export type LogLevel = 'INFO' | 'WARN' | 'ERR';
+
+/** `cron` is read only when `kind` is `schedule`, `prompt` only when it is `prompt`; both
+ * are carried on every trigger so the editor keeps a half-typed value across a kind switch. */
+export interface Trigger {
+	kind: TriggerKind;
+	cron: string | null;
+	prompt: string | null;
+}
+
+export interface GraphPosition {
+	x: number;
+	y: number;
+}
+
+/** Empty `kinds` or `tags` mean "no filter on that axis", not "match nothing". */
+export interface MemorySource {
+	kinds: string[];
+	tags: string[];
+	limit: number;
+	project_id: Uuid | null;
+}
+
+export interface ActionNodeData {
+	name: string;
+	instructions: string;
+	agent: string;
+	practices: string[];
+	memories: MemorySource | null;
+}
+
+export interface OutputNodeData {
+	propose_memories: boolean;
+	file_tasks: boolean;
+}
+
+/** Untagged on the wire: a trigger node's `data` is a bare `Trigger`, an action node's is
+ * `ActionNodeData`, an output node's is `OutputNodeData`. The node's own `kind` says which. */
+export type NodeData = Trigger | ActionNodeData | OutputNodeData;
+
+/** Named `WorkflowNode` here because `Node` is `@xyflow/svelte`'s own type. */
+export interface WorkflowNode {
+	id: string;
+	kind: NodeKind;
+	position: GraphPosition;
+	data: NodeData;
+}
+
+export interface WorkflowEdge {
+	id: string;
+	source: string;
+	target: string;
+}
+
+export interface Graph {
+	nodes: WorkflowNode[];
+	edges: WorkflowEdge[];
+}
+
+export interface Workflow {
+	id: Uuid;
+	name: string;
+	project_id: Uuid | null;
+	description: string;
+	trigger: Trigger;
+	graph: Graph;
+	enabled: boolean;
+	created_at: Timestamp;
+	updated_at: Timestamp;
+	last_run_at: Timestamp | null;
+	last_status: RunStatus | null;
+}
+
+export interface NewWorkflow {
+	name: string;
+	project_id?: Uuid | null;
+	description?: string;
+	trigger: Trigger;
+	graph?: Graph;
+	enabled?: boolean;
+}
+
+/** Only the fields present change; `project_id: null` clears the project (the daemon's
+ * double option), leaving it out keeps what is stored. */
+export interface WorkflowPatch {
+	name?: string;
+	project_id?: Uuid | null;
+	description?: string;
+	trigger?: Trigger;
+	graph?: Graph;
+	enabled?: boolean;
+}
+
+export interface WorkflowRun {
+	id: Uuid;
+	workflow_id: Uuid;
+	/** Per-workflow, starting at 1: the number a run is known by in the GUI and CLI. */
+	number: number;
+	trigger: TriggerKind;
+	status: RunStatus;
+	started_at: Timestamp;
+	finished_at: Timestamp | null;
+	summary: unknown;
+}
+
+export interface LogLine {
+	ts: Timestamp;
+	level: LogLevel;
+	text: string;
+}
+
+export interface WorkflowStep {
+	id: Uuid;
+	run_id: Uuid;
+	/** Zero-based index in the run's execution order. */
+	position: number;
+	/** The graph node this step ran, so a step can be traced back to the canvas. */
+	action_id: string;
+	name: string;
+	agent: string;
+	status: StepStatus;
+	started_at: Timestamp;
+	finished_at: Timestamp | null;
+	output: string | null;
+	log: LogLine[];
+}
+
+/** `GET /api/v1/runs/{id}`. */
+export interface RunDetail {
+	run: WorkflowRun;
+	steps: WorkflowStep[];
+}
+
 // ---- global search (GET /api/v1/search, crates/atlas-core/src/search/global.rs) ----
 
 /** The seven kinds a search result can hold, in the order the daemon returns them. */

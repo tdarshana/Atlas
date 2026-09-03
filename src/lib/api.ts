@@ -19,6 +19,7 @@ import type {
 	NewDoc,
 	NewMemory,
 	NewTask,
+	NewWorkflow,
 	Project,
 	ProjectExtraction,
 	ProjectPatch,
@@ -39,7 +40,12 @@ import type {
 	TaskFilter,
 	TaskUpdate,
 	Timestamp,
-	Uuid
+	TriggerKind,
+	RunDetail,
+	Uuid,
+	Workflow,
+	WorkflowPatch,
+	WorkflowRun
 } from './types';
 
 export type { MemoryListScope } from '$lib/types';
@@ -238,6 +244,67 @@ export class AtlasApi {
 
 	deleteDoc(kind: DocKind, name: string): Promise<void> {
 		return this.req('DELETE', `/api/v1/${docPath(kind)}/${encodeURIComponent(name)}`);
+	}
+
+	// ---- workflows (graph editor; crates/atlasd Task 2) ----
+
+	listWorkflows(projectId?: Uuid | null): Promise<Workflow[]> {
+		return this.workflowReq('GET', `/api/v1/workflows${query({ project_id: projectId })}`);
+	}
+
+	getWorkflow(id: Uuid): Promise<Workflow> {
+		return this.workflowReq('GET', `/api/v1/workflows/${encodeURIComponent(id)}`);
+	}
+
+	createWorkflow(w: NewWorkflow): Promise<Workflow> {
+		return this.workflowReq('POST', '/api/v1/workflows', w);
+	}
+
+	/** Only the fields in `patch` change. */
+	patchWorkflow(id: Uuid, patch: WorkflowPatch): Promise<Workflow> {
+		return this.workflowReq('PATCH', `/api/v1/workflows/${encodeURIComponent(id)}`, patch);
+	}
+
+	deleteWorkflow(id: Uuid): Promise<void> {
+		return this.workflowReq('DELETE', `/api/v1/workflows/${encodeURIComponent(id)}`);
+	}
+
+	/** 202: the run is queued, not finished. */
+	runWorkflow(id: Uuid, trigger?: TriggerKind, input?: unknown): Promise<WorkflowRun> {
+		return this.workflowReq('POST', `/api/v1/workflows/${encodeURIComponent(id)}/run`, {
+			trigger,
+			input
+		});
+	}
+
+	listRuns(workflowId: Uuid, limit?: number): Promise<WorkflowRun[]> {
+		return this.workflowReq(
+			'GET',
+			`/api/v1/workflows/${encodeURIComponent(workflowId)}/runs${query({
+				limit: limit == null ? null : String(limit)
+			})}`
+		);
+	}
+
+	getRun(id: Uuid): Promise<RunDetail> {
+		return this.workflowReq('GET', `/api/v1/runs/${encodeURIComponent(id)}`);
+	}
+
+	cancelRun(id: Uuid): Promise<WorkflowRun> {
+		return this.workflowReq('POST', `/api/v1/runs/${encodeURIComponent(id)}/cancel`);
+	}
+
+	/** The run's log as JSONL, not parsed, like `projectLogExport`. */
+	runExport(id: Uuid): Promise<string> {
+		return this.text('GET', `/api/v1/runs/${encodeURIComponent(id)}/export`);
+	}
+
+	/**
+	 * Workflow writes are recorded against whoever made them, so every workflow request
+	 * carries this app's actor label, reads included; the daemon ignores it on a read.
+	 */
+	private workflowReq<T>(method: string, path: string, body?: unknown): Promise<T> {
+		return this.req(method, path, body, { 'X-Atlas-Actor': BOARD_ACTOR });
 	}
 
 	// ---- sync and settings ----
