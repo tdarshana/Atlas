@@ -3,6 +3,7 @@
 	// select and the kind chips, with the side panel carrying the facets. The palette
 	// links here with `?id=` to point at one memory and `?remember=1` to write one.
 	import { onMount, untrack } from 'svelte';
+	import { replaceState } from '$app/navigation';
 	import { page } from '$app/state';
 	import { Badge, Button, Input, Select, Table, type TableColumn } from '$lib/ds';
 	import { api } from '$lib/daemon.svelte';
@@ -119,6 +120,18 @@
 		if (page.url.searchParams.get('remember') === '1') untrack(() => (remembering = true));
 	});
 
+	/**
+	 * Closing the dialog drops `?remember=1` with it, so the next thing that touches the
+	 * URL does not reopen a dialog the user has just dismissed.
+	 */
+	function closeRemember(): void {
+		remembering = false;
+		if (!page.url.searchParams.has('remember')) return;
+		const url = new URL(page.url);
+		url.searchParams.delete('remember');
+		replaceState(url, page.state);
+	}
+
 	// The selected row may be far down a long list, so bring it into view once it is
 	// rendered. jsdom and older webviews have no `scrollIntoView`; the row is still marked.
 	$effect(() => {
@@ -126,7 +139,7 @@
 		if (!id || !tableEl) return;
 		const row = tableEl.querySelector('.row.selected');
 		if (row && typeof row.scrollIntoView === 'function') {
-			row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+			row.scrollIntoView({ behavior: 'instant', block: 'nearest' });
 		}
 	});
 
@@ -275,7 +288,7 @@
 <RememberDialog
 	open={remembering}
 	projects={projects.items}
-	onclose={() => (remembering = false)}
+	onclose={closeRemember}
 	onsaved={() => loadMemories()}
 />
 

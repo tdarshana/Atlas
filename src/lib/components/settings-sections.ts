@@ -39,6 +39,8 @@ export function scrollToSection(
 	if (!id) return null;
 	const el = find(id);
 	if (!el) return null;
-	el.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+	// Instant, not smooth: this is a jump to a named card, and an animated one would
+	// have the page still moving while the user starts reading.
+	el.scrollIntoView?.({ behavior: 'instant', block: 'start' });
 	return id;
 }

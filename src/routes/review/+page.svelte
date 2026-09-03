@@ -17,6 +17,7 @@
 	} from '$lib/stores/review.svelte';
 	import { loadSettings, minConfidence, settingBool, settingString } from '$lib/stores/settings.svelte';
 	import type { Memory, MemoryKind } from '$lib/types';
+	import Dialog from '$lib/ui/Dialog.svelte';
 	import ErrorState from '$lib/ui/ErrorState.svelte';
 	import { push } from '$lib/ui/toasts.svelte';
 
@@ -41,6 +42,12 @@
 	const extractionEnabled = $derived(settingBool('extraction.enabled'));
 	const model = $derived(settingString('extraction.model'));
 	let accepting = $state(false);
+	let confirming = $state(false);
+
+	/** The question the confirm asks, naming both numbers the user is deciding on. */
+	const confirmText = $derived(
+		`Accept ${qualified.length} ${qualified.length === 1 ? 'memory' : 'memories'} above ${threshold.toFixed(2)}?`
+	);
 
 	/** Insight reads as information; a todo is pending work. The rest carry no tone. */
 	function kindTone(kind: MemoryKind): 'neutral' | 'info' | 'warning' {
@@ -77,7 +84,10 @@
 		}
 	}
 
+	// Accepting in bulk moves every qualifying row into recall at once and there is no
+	// undo, so it is asked for by name and by count first.
 	async function acceptAll(): Promise<void> {
+		confirming = false;
 		accepting = true;
 		try {
 			const { accepted, failed, failure } = await acceptAllAboveThreshold();
@@ -109,11 +119,26 @@
 		data-testid="review-accept-all"
 		disabled={accepting || qualified.length === 0}
 		title="Accepts every pending memory with confidence at or above {threshold.toFixed(2)}"
-		onclick={acceptAll}
+		onclick={() => (confirming = true)}
 	>
 		Accept all above threshold ({qualified.length})
 	</Button>
 </div>
+
+<Dialog open={confirming} title="Accept all above threshold?" onclose={() => (confirming = false)}>
+	<p class="prose" data-testid="review-accept-all-confirm-text">{confirmText}</p>
+	{#snippet footer()}
+		<Button onclick={() => (confirming = false)}>Cancel</Button>
+		<Button
+			variant="primary"
+			data-testid="review-accept-all-confirm"
+			disabled={accepting}
+			onclick={acceptAll}
+		>
+			{accepting ? 'Accepting…' : 'Accept'}
+		</Button>
+	{/snippet}
+</Dialog>
 
 <div class="lines">
 	<span data-testid="review-extraction-status">
@@ -214,6 +239,11 @@
 		gap: 4px;
 		flex: 0 0 auto;
 		color: var(--text-secondary);
+	}
+
+	.prose {
+		margin: 0;
+		max-width: 80ch;
 	}
 
 	.threshold {

@@ -14,6 +14,7 @@
 		iconColor?: string;
 		/** For a row that is a destination; `onclick` is for a row that is an action. */
 		href?: string;
+		/** Also runs on a row that has an `href`, for a link whose target is already open. */
 		onclick?: () => void;
 	}
 
@@ -41,7 +42,7 @@
 {/snippet}
 
 {#if href}
-	<a class="row" class:selected {href} aria-current={selected ? 'true' : undefined}>
+	<a class="row" class:selected {href} aria-current={selected ? 'true' : undefined} {onclick}>
 		{@render body()}
 	</a>
 {:else if onclick}

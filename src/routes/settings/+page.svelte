@@ -69,21 +69,44 @@
 	const online = $derived(!daemon.error);
 	const httpEndpoint = $derived(`http://127.0.0.1:${port}/mcp`);
 
+	/**
+	 * The MCP specification revision the server speaks. A constant until the MCP settings
+	 * phase, which serves it from the daemon's own handshake rather than this file.
+	 */
+	const MCP_PROTOCOL_VERSION = '2025-06-18';
+
 	const CLAUDE_SNIPPET = 'claude mcp add --scope user atlas -- atlas mcp';
 	const CODEX_SNIPPET = `# ~/.codex/config.toml
 [mcp_servers.atlas]
 command = "atlas"
 args = ["mcp"]`;
 
-	/** Copies a snippet and names which one was copied, so the feedback is on the button. */
+	/** How long the button says "Copied" before going back to its own name. */
+	const COPIED_MS = 1500;
+	let copiedTimer: ReturnType<typeof setTimeout> | null = null;
+
+	/**
+	 * Copies a snippet and names which one was copied, so the feedback is on the button.
+	 * The label goes back to "Copy" shortly after: a button that stays "Copied" reads as
+	 * its permanent name, and gives no feedback the second time it is pressed.
+	 */
 	async function copy(label: string, text: string): Promise<void> {
 		try {
 			await navigator.clipboard.writeText(text);
 			copied = label;
+			if (copiedTimer !== null) clearTimeout(copiedTimer);
+			copiedTimer = setTimeout(() => {
+				copiedTimer = null;
+				copied = null;
+			}, COPIED_MS);
 		} catch (e) {
 			push('error', `Could not copy: ${errorMessage(e)}`);
 		}
 	}
+
+	$effect(() => () => {
+		if (copiedTimer !== null) clearTimeout(copiedTimer);
+	});
 
 	/** Copies the server's values into the draft, discarding any unsaved edits. */
 	function syncDraft(): void {
@@ -337,6 +360,11 @@ args = ["mcp"]`;
 						<span class="mono value">{httpEndpoint}</span>
 						<span class="spacer"></span>
 						<Badge>loopback only</Badge>
+					</div>
+					<div class="transport" data-testid="mcp-protocol">
+						<span class="transport-name">Protocol</span>
+						<span class="mono value">{MCP_PROTOCOL_VERSION}</span>
+						<span class="spacer"></span>
 					</div>
 				</div>
 

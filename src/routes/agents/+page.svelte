@@ -3,6 +3,7 @@
 	// files Claude Code and Codex read. The editor is a dialog over this list, reached by
 	// clicking a row or `New agent`; `?sync=1` from the palette runs a Check on arrival.
 	import { onMount } from 'svelte';
+	import { replaceState } from '$app/navigation';
 	import { page } from '$app/state';
 	import { Badge, Button, Table, type TableColumn } from '$lib/ds';
 	import { daemon } from '$lib/daemon.svelte';
@@ -49,6 +50,19 @@
 		editing = name;
 		open = true;
 	});
+
+	/**
+	 * Closing the editor drops `?edit=` with it. Left in place, the param would reopen the
+	 * dialog on the next thing that touched the URL, and the back button would land on a
+	 * URL that says an editor is open when it is not.
+	 */
+	function closeEditor(): void {
+		open = false;
+		if (!page.url.searchParams.has('edit')) return;
+		const url = new URL(page.url);
+		url.searchParams.delete('edit');
+		replaceState(url, page.state);
+	}
 
 	$effect(() => {
 		setStatusItems({ right: [{ text: plural(agents.list.length, 'agent') }] });
@@ -109,7 +123,7 @@
 
 <SyncPanel {checkOnMount} />
 
-<AgentEditor {open} {editing} onclose={() => (open = false)} onchanged={() => loadAgents()} />
+<AgentEditor {open} {editing} onclose={closeEditor} onchanged={() => loadAgents()} />
 
 <style>
 	.title-row {

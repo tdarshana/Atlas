@@ -29,7 +29,7 @@ describe('scrollToSection', () => {
 		const find = vi.fn(() => ({ scrollIntoView }));
 		expect(scrollToSection('#mcp', true, find)).toBe('mcp');
 		expect(find).toHaveBeenCalledWith('mcp');
-		expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' });
+		expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'instant', block: 'start' });
 	});
 
 	it('waits until the settings have loaded', () => {

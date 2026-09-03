@@ -12,7 +12,11 @@
     "os:default",
     {
       "identifier": "fs:allow-write-text-file",
-      "allow": [{ "path": "$HOME/**" }, { "path": "$DOWNLOAD/**" }]
+      "allow": [
+        { "path": "$DOWNLOAD/**" },
+        { "path": "$DOCUMENT/**" },
+        { "path": "$DESKTOP/**" }
+      ]
     },
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
