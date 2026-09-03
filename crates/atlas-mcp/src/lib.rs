@@ -288,10 +288,10 @@ pub const TOOL_TABLE: &[ToolMeta] = &[
     ToolMeta { name: "task_update", description: "Edit a task's title, description, kind, priority, assignee or labels. Pass expected_updated_at, from a prior task_get or task_list, to fail with a conflict instead of overwriting a concurrent change.", args: "key*, title, description, kind, priority, assignee, labels, expected_updated_at, agent", scope: ToolScope::Write },
     ToolMeta { name: "board_stages", description: "List the stages this project's board moves tasks through, in order. Call before task_move so you never invent a stage name.", args: "project_root", scope: ToolScope::Read },
     ToolMeta { name: "practice_list", description: "List the coding practices that apply here: the global ones plus any scoped to this project, optionally narrowed by tag. Call before writing code so the work follows the house style.", args: "project_root, tags", scope: ToolScope::Read },
-    ToolMeta { name: "get_practice", description: "Fetch the full text of one practice by name. Call after practice_list when a practice looks relevant to the task.", args: "name*", scope: ToolScope::Read },
+    ToolMeta { name: "practice_get", description: "Fetch the full text of one practice by name. Call after practice_list when a practice looks relevant to the task.", args: "name*", scope: ToolScope::Read },
     ToolMeta { name: "agent_list", description: "List the agent roles stored in Atlas, with their descriptions. Call this to see which specialist role fits the task before doing the work yourself.", args: "project_root", scope: ToolScope::Read },
-    ToolMeta { name: "get_agent", description: "Fetch one agent role by name, including its full instructions. Call after agent_list to adopt the role.", args: "name*", scope: ToolScope::Read },
-    ToolMeta { name: "save_agent", description: "Create or update an agent role so every coding agent on this machine can use it. Call when the user describes a repeatable specialist role worth keeping.", args: "name*, description*, instructions*, model_hint, tools, tags", scope: ToolScope::Write },
+    ToolMeta { name: "agent_get", description: "Fetch one agent role by name, including its full instructions. Call after agent_list to adopt the role.", args: "name*", scope: ToolScope::Read },
+    ToolMeta { name: "agent_save", description: "Create or update an agent role so every coding agent on this machine can use it. Call when the user describes a repeatable specialist role worth keeping.", args: "name*, description*, instructions*, model_hint, tools, tags", scope: ToolScope::Write },
     ToolMeta { name: "workflow_list", description: "List the workflows that apply here: the global ones plus any scoped to this project. Call when the user asks for a multi-step process such as a release or a review.", args: "project_root", scope: ToolScope::Read },
     ToolMeta { name: "workflow_get", description: "Fetch one workflow by name, including its full graph. Call after workflow_list to see its trigger and actions.", args: "name*", scope: ToolScope::Read },
     ToolMeta { name: "workflow_run", description: "Start a workflow run by name and answer with its run id and number. Call workflow_status to follow it. Fails with a conflict if the workflow already has a run queued or running.", args: "name*, input", scope: ToolScope::Write },
@@ -712,12 +712,12 @@ impl<B: Backend> AtlasMcp<B> {
     }
 
     #[tool(description = "Fetch one agent role by name, including its full instructions. Call after agent_list to adopt the role.")]
-    async fn get_agent(&self, Parameters(a): Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
+    async fn agent_get(&self, Parameters(a): Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         json_result(&self.backend.get_agent(&a.name).await.map_err(err)?)
     }
 
     #[tool(description = "Create or update an agent role so every coding agent on this machine can use it. Call when the user describes a repeatable specialist role worth keeping.")]
-    async fn save_agent(&self, Parameters(a): Parameters<SaveAgentArgs>) -> Result<CallToolResult, McpError> {
+    async fn agent_save(&self, Parameters(a): Parameters<SaveAgentArgs>) -> Result<CallToolResult, McpError> {
         let agent = NewAgent { name: a.name, description: a.description, instructions: a.instructions, model_hint: a.model_hint, tools: a.tools.unwrap_or_default(), tags: a.tags.unwrap_or_default() };
         json_result(&self.backend.save_agent(agent, "mcp").await.map_err(err)?)
     }
@@ -734,7 +734,7 @@ impl<B: Backend> AtlasMcp<B> {
     }
 
     #[tool(description = "Fetch the full text of one practice by name. Call after practice_list when a practice looks relevant to the task.")]
-    async fn get_practice(&self, Parameters(a): Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
+    async fn practice_get(&self, Parameters(a): Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         json_result(&self.backend.get_doc(DocKind::Practice, &a.name).await.map_err(err)?)
     }
 
@@ -1075,7 +1075,7 @@ mod tests {
         let names: Vec<String> = s.tool_router.list_all().into_iter().map(|t| t.name.to_string()).collect();
         for n in ["memory_remember", "memory_search", "memory_list", "memory_forget", "memory_review",
                   "status", "project_context", "project_connect", "project_list", "project_get",
-                  "agent_list", "get_agent", "save_agent", "practice_list", "get_practice",
+                  "agent_list", "agent_get", "agent_save", "practice_list", "practice_get",
                   "workflow_list", "workflow_get", "ingest_transcript", "workflow_run", "workflow_status"] {
             assert!(names.contains(&n.to_string()), "missing {n}");
         }

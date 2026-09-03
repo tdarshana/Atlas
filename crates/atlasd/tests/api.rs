@@ -173,7 +173,7 @@ async fn mcp_over_http_lists_and_calls_tools() {
     // project_connect and memory_review are disabled by default (mcp.disabled_tools),
     // so they are not in this list; see atlas-mcp's own gating tests for that.
     for t in ["memory_remember", "memory_search", "memory_forget", "status", "project_context", "agent_list",
-              "get_agent", "save_agent", "practice_list", "get_practice", "workflow_list", "workflow_get"] {
+              "agent_get", "agent_save", "practice_list", "practice_get", "workflow_list", "workflow_get"] {
         assert!(body.contains(&format!("\"name\":\"{t}\"")), "tools/list missing {t}: {body}");
     }
 
