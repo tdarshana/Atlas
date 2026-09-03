@@ -182,6 +182,79 @@ fn a_task_with_an_open_blocker_is_not_ready_until_the_blocker_is_done() {
     assert_eq!(ready, vec![a.key.clone()], "the done blocker drops out of the ready list");
 }
 
+/// `open_blockers` counts what the ready rule counts. A blocker in a done stage is
+/// still in `blocked_by`, which is the full link list, but drops out of the count a
+/// board card draws its badge from, so the badge and `ready` never disagree.
+#[test]
+fn open_blockers_leaves_out_a_blocker_that_is_done() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    let a = repo.create(&new_task(Some(p.id), "a"), "t").unwrap();
+    let done = repo.create(&new_task(Some(p.id), "done blocker"), "t").unwrap();
+    let open = repo.create(&new_task(Some(p.id), "open blocker"), "t").unwrap();
+    let a = repo.set_blockers(&a.key, vec![done.key.clone(), open.key.clone()], "t").unwrap();
+    assert_eq!(a.open_blockers, 2);
+
+    repo.move_stage(&done.key, "Done", None, "t").unwrap();
+    let a = repo.get(&a.key).unwrap().task;
+    assert_eq!(a.blocked_by.len(), 2, "both links are still on the task");
+    assert_eq!(a.open_blockers, 1);
+    assert!(!a.ready);
+    assert_eq!(a.blocked_reason.as_deref(), Some(format!("blocked by {}", open.key).as_str()));
+
+    repo.move_stage(&open.key, "Done", None, "t").unwrap();
+    let a = repo.get(&a.key).unwrap().task;
+    assert_eq!(a.open_blockers, 0);
+    assert!(a.ready, "no open blocker left, so no badge and no reason");
+}
+
+/// The claim holder is compared the way the assignee filter matches it, so the same
+/// agent under a different capitalisation is not a conflict, and a different one
+/// still is.
+#[test]
+fn claim_matches_the_holder_case_insensitively() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    let t = repo.create(&new_task(Some(p.id), "a"), "t").unwrap();
+    repo.claim(&t.key, false, "codex").unwrap();
+    let again = repo.claim(&t.key, false, "Codex").unwrap();
+    assert_eq!(again.assignee.as_deref(), Some("Codex"));
+    assert!(matches!(repo.claim(&t.key, false, "claude").unwrap_err(), AtlasError::Conflict(_)));
+}
+
+/// Clearing the assignee is an `assigned` event whose body reads forwards.
+#[test]
+fn clearing_the_assignee_records_an_unassigned_body() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    let t = repo.create(&new_task(Some(p.id), "a"), "t").unwrap();
+    repo.update(&t.key, &TaskUpdate { assignee: Some(Some("codex".into())), ..Default::default() }, "t").unwrap();
+    repo.update(&t.key, &TaskUpdate { assignee: Some(None), ..Default::default() }, "t").unwrap();
+
+    let bodies: Vec<String> = repo
+        .get(&t.key)
+        .unwrap()
+        .events
+        .into_iter()
+        .filter(|e| e.kind == "assigned")
+        .map(|e| e.body)
+        .collect();
+    assert_eq!(bodies, vec![format!("assigned {}", t.key), format!("unassigned {}", t.key)]);
+}
+
+/// Moving a task to the stage it is already in, spelled differently, is a no-op:
+/// `find_stage` matches case-insensitively, so the no-op check does too.
+#[test]
+fn moving_to_the_same_stage_under_another_spelling_writes_no_event() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    let t = repo.create(&new_task(Some(p.id), "a"), "t").unwrap();
+    let before = repo.get(&t.key).unwrap().events.len();
+    let moved = repo.move_stage(&t.key, " backlog ", None, "t").unwrap();
+    assert_eq!(moved.stage, "Backlog");
+    assert_eq!(repo.get(&t.key).unwrap().events.len(), before, "no moved event for a stage the task is in");
+}
+
 #[test]
 fn a_parent_with_an_open_child_is_not_ready_and_says_why() {
     let (db, repo) = repo();
@@ -719,15 +792,35 @@ fn the_assignee_filter_ignores_case() {
     assert_eq!(hits.len(), 1);
 }
 
-/// Writing `null` to `board.stages` restores the built-in board.
+/// The settings route cannot touch the stage list at all: not a new list, which
+/// would skip the removal checks and the renames, and not `null`, which would leave
+/// every task in a stage the default board does not have. Going back to the default
+/// board is the board route with the default list.
 #[test]
-fn clearing_the_stages_setting_restores_the_defaults() {
+fn the_settings_route_refuses_the_stage_list() {
     let (db, repo) = repo();
     let stages = vec![stage("Todo", false), stage("Done", true)];
     repo.set_global_stages(stages.clone(), &HashMap::new(), "t").unwrap();
+    let p = project(&db, "/tmp/atlas");
+    repo.create(&new_task(Some(p.id), "parked"), "t").unwrap();
+
+    let settings = SettingsRepo::new(&db);
+    for value in [serde_json::Value::Null, serde_json::json!([{"name": "A", "done": false}, {"name": "B", "done": true}])] {
+        let values = serde_json::Map::from_iter([(STAGES_SETTING.to_string(), value)]);
+        let err = settings.set_many(&values, "t").unwrap_err();
+        assert!(
+            matches!(&err, AtlasError::Invalid(m) if m == "set board stages through PUT /api/v1/board/stages"),
+            "{err}"
+        );
+    }
+    // Nothing was written, so the list the board wrote still stands.
     assert_eq!(repo.effective_stages(None).unwrap().stages, stages);
 
-    let cleared = serde_json::Map::from_iter([(STAGES_SETTING.to_string(), serde_json::Value::Null)]);
-    SettingsRepo::new(&db).set_many(&cleared, "t").unwrap();
+    // The board route is the way back to the default, and it still refuses to strand
+    // the task sitting in `Todo`.
+    let err = repo.set_global_stages(default_stages(), &HashMap::new(), "t").unwrap_err();
+    assert!(matches!(&err, AtlasError::Invalid(m) if m.contains("Todo")), "{err}");
+    let renames = HashMap::from([("Todo".to_string(), "Backlog".to_string())]);
+    repo.set_global_stages(default_stages(), &renames, "t").unwrap();
     assert_eq!(repo.effective_stages(None).unwrap().stages, default_stages());
 }

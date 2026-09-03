@@ -84,6 +84,7 @@ fn row_to_task(r: &Row) -> duckdb::Result<Task> {
         closed_at: r.get::<_, Option<i64>>(15)?.map(|v| ts(15, v)).transpose()?,
         // Filled in by `decorate`; never stored.
         blocked_by: Vec::new(),
+        open_blockers: 0,
         ready: false,
         blocked_reason: None,
     })
@@ -387,6 +388,7 @@ impl TaskRepo {
             open_children.sort();
 
             t.blocked_by = keys;
+            t.open_blockers = open_blockers.len();
             t.ready = !done && open_blockers.is_empty() && open_children.is_empty();
             t.blocked_reason = if done {
                 None
@@ -723,9 +725,16 @@ impl TaskRepo {
 
             // One event per call. A patch that touches the assignee is an `assigned`
             // event so the history reads as a sentence; anything else is `edited`.
+            // Clearing the assignee is still an `assigned` event, but its body says
+            // `unassigned`, since "assigned ATL-1" reads backwards for an unassign.
             let kind = if upd.assignee.is_some() { "assigned" } else { "edited" };
+            let verb = match &upd.assignee {
+                Some(None) => "unassigned",
+                Some(Some(_)) => "assigned",
+                None => "edited",
+            };
             let fields = detail.keys().cloned().collect::<Vec<_>>().join(", ");
-            self.event(c, id, actor, kind, &format!("{} {}", if kind == "assigned" { "assigned" } else { "edited" }, task.key), Some(json!({"fields": fields, "to": detail})))?;
+            self.event(c, id, actor, kind, &format!("{verb} {}", task.key), Some(json!({"fields": fields, "to": detail})))?;
             self.load_one(c, id)
         })
     }
@@ -740,7 +749,10 @@ impl TaskRepo {
             Self::check_expected(&task, expected)?;
             let stages = self.stages_for(c, task.project_id)?.stages;
             let target = find_stage(&stages, stage).ok_or_else(|| unknown_stage(stage, &stages))?.clone();
-            if target.name == task.stage {
+            // `find_stage` matches case-insensitively on trimmed names, so compare the
+            // same way: moving from `in progress` to `In Progress` is the stage the
+            // task is already in, and writing a `moved` event for it reads as a no-op.
+            if target.name.trim().eq_ignore_ascii_case(task.stage.trim()) {
                 return self.load_one(c, id);
             }
             self.move_gated(c, &task, &target, actor)?;
@@ -790,7 +802,10 @@ impl TaskRepo {
             let id = self.resolve(c, id_or_key)?;
             let task = self.load_bare(c, id)?;
             if let Some(held) = &task.assignee {
-                if held != actor && !force {
+                // Case-insensitively, like the assignee filter in `list`: `Codex`
+                // retaking a task held by `codex` is the same agent, not a conflict,
+                // and neither should silently take one held by someone else.
+                if !held.eq_ignore_ascii_case(actor) && !force {
                     return Err(AtlasError::Conflict(format!("{} is assigned to {held}; claim with force to take it", task.key)));
                 }
             }
@@ -941,9 +956,9 @@ impl TaskRepo {
             self.apply_renames(c, scope, &[], renames, actor)?;
             Ok(stages)
         })?;
-        let mut values = serde_json::Map::new();
-        values.insert(STAGES_SETTING.to_string(), serde_json::to_value(&stages)?);
-        SettingsRepo::new(&self.db).set_many(&values, actor)?;
+        // Not `set_many`: that refuses `board.stages` outright, so no client can write
+        // the list without the checks and the gate this method has just taken.
+        SettingsRepo::new(&self.db).set_board_stages(&serde_json::to_value(&stages)?, actor)?;
         Ok(stages)
     }
 

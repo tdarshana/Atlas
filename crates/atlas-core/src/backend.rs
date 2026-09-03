@@ -171,6 +171,17 @@ impl LocalBackend {
     }
 
     fn projects(&self) -> ProjectRepo<'_> { ProjectRepo::new(&self.db) }
+
+    /// Deleting a project cascades to its tasks, blocker links and events, so it is a
+    /// board write and takes the same gate every `TaskRepo` write takes, before the
+    /// connection, in the order `CLAUDE.md` requires. Kept synchronous so the guard
+    /// cannot be held across an await. `ProjectRepo::delete` and `MemoryRepo::audit`
+    /// take the gate nowhere themselves, so nothing under the hold can ask for it again.
+    fn delete_project_gated(&self, id: Uuid, actor: &str) -> Result<()> {
+        let gate = self.memories.gate_handle();
+        let _gate = gate.lock().unwrap_or_else(|e| e.into_inner());
+        self.projects().delete(id, actor)
+    }
     fn agents(&self) -> AgentRepo<'_> { AgentRepo::new(&self.db) }
     fn docs(&self, kind: DocKind) -> DocRepo<'_> { DocRepo::new(&self.db, kind) }
     fn settings(&self) -> crate::settings::SettingsRepo<'_> { crate::settings::SettingsRepo::new(&self.db) }
@@ -264,7 +275,7 @@ impl Backend for LocalBackend {
         }
         Ok(updated)
     }
-    async fn delete_project(&self, id: Uuid, actor: &str) -> Result<()> { self.projects().delete(id, actor) }
+    async fn delete_project(&self, id: Uuid, actor: &str) -> Result<()> { self.delete_project_gated(id, actor) }
 
     async fn list_agents(&self) -> Result<Vec<Agent>> { self.agents().list() }
     async fn get_agent(&self, name: &str) -> Result<Agent> { self.agents().get(name) }

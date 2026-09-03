@@ -74,6 +74,13 @@ create table if not exists task_events (
 create table if not exists board_counters (scope text primary key, next_seq bigint not null);
 alter table projects add column if not exists board_key text;
 alter table projects add column if not exists board_stages json;
+"#), (4, r#"
+-- `board_counters` was added to migration 3 after an earlier build had already
+-- stamped databases at version 3 without it. `migrate` runs a migration only when
+-- its number is above the stored version, so those databases would never see that
+-- statement again and every task create would fail on a missing table. This is a
+-- no-op on a correct database and repairs a wrong one.
+create table if not exists board_counters (scope text primary key, next_seq bigint not null);
 "#)];
 
 impl Db {
@@ -119,7 +126,7 @@ mod tests {
     #[test]
     fn migrate_creates_tables_and_is_idempotent() {
         let db = Db::open_in_memory().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 3);
+        assert_eq!(db.schema_version().unwrap(), 4);
         let n: i64 = db.with_conn(|c| Ok(c.query_row(
             "select count(*) from information_schema.tables where table_name in ('memories','memory_embeddings','audit','settings','projects','agents','practices','workflows','sync_targets','jobs','tasks','task_blockers','task_events','board_counters')",
             [], |r| r.get(0))?)).unwrap();
@@ -130,8 +137,32 @@ mod tests {
             [], |r| r.get(0))?)).unwrap();
         assert_eq!(cols, 2);
         db.migrate().unwrap(); // second run is a no-op
-        assert_eq!(db.schema_version().unwrap(), 3);
+        assert_eq!(db.schema_version().unwrap(), 4);
     }
+
+    /// A database stamped 3 by the build that shipped migration 3 without
+    /// `board_counters` gets the table from migration 4 rather than failing every
+    /// task create on a missing table.
+    #[test]
+    fn migration_4_adds_board_counters_to_a_v3_database() {
+        let db = Db::open_in_memory().unwrap();
+        db.with_conn(|c| {
+            c.execute_batch("drop table board_counters; delete from schema_version where version = 4;")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(db.schema_version().unwrap(), 3);
+
+        db.migrate().unwrap();
+        assert_eq!(db.schema_version().unwrap(), 4);
+        let n: i64 = db
+            .with_conn(|c| {
+                Ok(c.query_row("select count(*) from information_schema.tables where table_name = 'board_counters'", [], |r| r.get(0))?)
+            })
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
     #[test]
     fn open_on_disk_creates_file() {
         let dir = tempfile::tempdir().unwrap();

@@ -5,6 +5,7 @@ use duckdb::params;
 use serde_json::{Map, Value};
 
 /// The only keys the settings table accepts. `set_many` rejects anything else.
+/// `board.stages` is readable here but not writable: see [`SettingsRepo::set_many`].
 pub const SETTING_KEYS: &[&str] = &[
     "extraction.enabled",
     "extraction.base_url",
@@ -19,6 +20,7 @@ pub const SETTING_KEYS: &[&str] = &[
 
 const API_KEY: &str = "extraction.api_key";
 const BASE_URL: &str = "extraction.base_url";
+const STAGES: &str = "board.stages";
 const MASKED: &str = "***";
 
 /// Whether two base urls name the same endpoint. A trailing slash is not a change
@@ -107,7 +109,8 @@ impl<'a> SettingsRepo<'a> {
     }
 
     /// Upserts each given key. Rejects the whole call with `Invalid` if any key is
-    /// unknown or holds a value of the wrong type, before writing anything. Ignores
+    /// unknown, is `board.stages`, or holds a value of the wrong type, before writing
+    /// anything. Ignores
     /// `extraction.api_key == "***"` so a masked value read back from `get_all` and
     /// sent straight back does not clobber the real key.
     ///
@@ -122,6 +125,15 @@ impl<'a> SettingsRepo<'a> {
             if !SETTING_KEYS.contains(&key.as_str()) {
                 return Err(AtlasError::Invalid(format!("unknown setting key '{key}'")));
             }
+        }
+        // The board route is the only way in. It checks that no stage being dropped
+        // still holds tasks, applies the `renames` map that carries tasks across, and
+        // takes the task write gate; this call can do none of that. A list written
+        // behind the board's back strands tasks in a stage no surface can show or
+        // count, and clearing the list back to the default is `PUT /board/stages` with
+        // the default four.
+        if values.contains_key(STAGES) {
+            return Err(AtlasError::Invalid("set board stages through PUT /api/v1/board/stages".into()));
         }
         for (key, value) in values {
             check_type(key, value)?;
@@ -143,6 +155,16 @@ impl<'a> SettingsRepo<'a> {
             tracing::info!("extraction.base_url changed without a new api key; the stored key was cleared");
         }
         Ok(clear_key)
+    }
+
+    /// Stores the global stage list. Crate-private because
+    /// [`crate::board::TaskRepo::set_global_stages`] is the only caller that has done
+    /// the removal checks, the renames and the gate hold that `set_many` refuses to
+    /// write without.
+    pub(crate) fn set_board_stages(&self, stages: &Value, actor: &str) -> Result<()> {
+        check_type(STAGES, stages)?;
+        self.write(STAGES, stages)?;
+        MemoryRepo::new(self.db).audit(actor, "set", "setting", None, serde_json::json!({"key": STAGES, "value": stages}))
     }
 
     /// Whether this call points `extraction.base_url` somewhere new while leaving the

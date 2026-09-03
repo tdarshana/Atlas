@@ -256,6 +256,10 @@ pub struct Task {
     pub closed_at: Option<DateTime<Utc>>,
     /// Keys of the tasks this one waits on.
     pub blocked_by: Vec<String>,
+    /// How many of `blocked_by` are not themselves in a done stage. The ready rule
+    /// counts these and not the rest, so a badge drawn from this number agrees with
+    /// `ready` instead of counting blockers that are already finished.
+    pub open_blockers: usize,
     /// Computed on read, never stored: not in a done stage, every blocker done,
     /// and no open subtask.
     pub ready: bool,

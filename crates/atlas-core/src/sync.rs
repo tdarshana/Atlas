@@ -537,6 +537,7 @@ mod tests {
             updated_at: now,
             closed_at: None,
             blocked_by: vec![],
+            open_blockers: 0,
             ready: true,
             blocked_reason: None,
         }
