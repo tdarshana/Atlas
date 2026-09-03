@@ -27,7 +27,13 @@
 		</div>
 		{#each VIEWS as v (v.id)}
 			{@const active = shell.view === v.id}
-			<button class="row" class:active type="button" onclick={() => open(v)}>
+			<button
+				class="row"
+				class:active
+				type="button"
+				aria-current={active ? 'page' : undefined}
+				onclick={() => open(v)}
+			>
 				<Icon
 					name={v.icon}
 					size={16}
@@ -46,6 +52,7 @@
 				class:dbm-rail__btn--active={shell.view === v.id}
 				type="button"
 				aria-label={v.label}
+				aria-current={shell.view === v.id ? 'page' : undefined}
 				title={hint(v)}
 				onclick={() => open(v)}
 			>
@@ -58,6 +65,7 @@
 			class:dbm-rail__btn--active={shell.view === SETTINGS_VIEW.id}
 			type="button"
 			aria-label={SETTINGS_VIEW.label}
+			aria-current={shell.view === SETTINGS_VIEW.id ? 'page' : undefined}
 			title={hint(SETTINGS_VIEW)}
 			onclick={() => open(SETTINGS_VIEW)}
 		>

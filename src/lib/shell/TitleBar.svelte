@@ -37,14 +37,18 @@
 	}
 </script>
 
-<div class="dbm-titlebar" data-tauri-drag-region role="banner">
+<!-- `deep` because the bar's own pixels are all consumed by children: with the bare
+     attribute Tauri only starts a drag when the mousedown lands on the bar itself, which
+     never happens. `drag.js` still refuses to drag from a button, link or field, so every
+     control below keeps its own clicks. -->
+<div class="dbm-titlebar" data-tauri-drag-region="deep" role="banner">
 	{#if platform === 'mac'}
 		<!-- The window uses the overlay title bar, so macOS draws the traffic lights here. -->
 		<span class="lights" aria-hidden="true"></span>
 	{:else}
 		<span class="dbm-titlebar__menu">
 			{#each MENUS as menu (menu)}
-				<button type="button" tabindex="-1">{menu}</button>
+				<span class="menu">{menu}</span>
 			{/each}
 		</span>
 	{/if}
@@ -78,7 +82,7 @@
 				<Icon name="minus" size={13} />
 			</button>
 			<button type="button" aria-label="Maximise" onclick={() => control('toggleMaximize')}>
-				<Icon name="square" size={11} />
+				<Icon name="maximize" size={11} />
 			</button>
 			<button type="button" aria-label="Close" onclick={() => control('close')}>
 				<Icon name="x" size={13} />
@@ -95,17 +99,24 @@
 		background: var(--bg-base);
 	}
 
-	/* Room for the traffic lights macOS paints over the webview. */
+	/* Room for the traffic lights macOS paints over the webview: 78px from the window edge,
+	   less the 8px the DS bar already pads. */
 	.lights {
-		width: 78px;
-		flex: 0 0 78px;
+		width: 70px;
+		flex: 0 0 70px;
+	}
+
+	/* Menu names are inert until they open menus; a button that does nothing is worse. */
+	.menu {
+		padding: 0 var(--space-2);
+		line-height: 22px;
+		color: var(--text-secondary);
 	}
 
 	.centre {
 		display: flex;
 		align-items: center;
 		gap: 10px;
-		-webkit-app-region: no-drag;
 	}
 
 	.nav {

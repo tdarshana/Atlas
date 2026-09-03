@@ -7,7 +7,8 @@
 	import TreeRow from '../TreeRow.svelte';
 
 	onMount(() => {
-		void loadReview();
+		// The review page loads the same list; only fetch when nothing has yet.
+		if (review.items.length === 0 && !review.loading) void loadReview();
 	});
 
 	const sources = $derived.by(() => {

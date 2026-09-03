@@ -12,7 +12,8 @@
 	const openId = $derived(page.params.id ?? '');
 
 	onMount(() => {
-		void loadProjects();
+		// The projects page loads the same list; only fetch when nothing has yet.
+		if (projects.items.length === 0 && !projects.loading) void loadProjects();
 	});
 
 	/**

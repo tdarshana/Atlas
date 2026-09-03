@@ -101,10 +101,15 @@ export async function initShell(): Promise<void> {
 	shell.platform = await resolvePlatform();
 }
 
-/** Called by the layout whenever the route changes. */
+/**
+ * Called by the layout whenever the route changes. The status items belong to the page
+ * that set them, so they are dropped here: without this a page that sets none would show
+ * the last page's counts.
+ */
 export function setView(view: ViewId): void {
 	shell.view = view;
 	shell.sidePanelTitle = panelTitle(view);
+	shell.statusItems = { left: [], right: [] };
 }
 
 /** Pages call this to fill the right-hand end of the status bar. */
