@@ -1,8 +1,10 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
 	import { daemon } from '$lib/daemon.svelte';
 	import SyncPanel from '$lib/components/SyncPanel.svelte';
+	import { setStatusItems } from '$lib/shell';
 	import { agents, loadAgents } from '$lib/stores/agents.svelte';
 	import Badge from '$lib/ui/Badge.svelte';
 	import Button from '$lib/ui/Button.svelte';
@@ -18,8 +20,19 @@
 		{ key: 'tags', label: 'Tags', width: '25%' }
 	];
 
+	let syncEl = $state<HTMLDivElement>();
+
 	onMount(() => {
 		void loadAgents();
+		// `?sync=1` (from the command palette's `⌥↵` on the Agents jump-to, or a task
+		// linking here) scrolls straight to the sync panel below the table.
+		if (page.url.searchParams.get('sync') === '1') {
+			syncEl?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+		}
+	});
+
+	$effect(() => {
+		setStatusItems({ right: [{ text: `${agents.list.length} agents` }] });
 	});
 </script>
 
@@ -70,7 +83,7 @@
 	</Table>
 {/if}
 
-<div class="sync">
+<div class="sync" bind:this={syncEl}>
 	<SyncPanel />
 </div>
 
@@ -80,11 +93,15 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: var(--space-3);
+		height: 28px;
+		flex: 0 0 28px;
 		margin-bottom: var(--space-4);
 	}
 
 	h1 {
 		margin: 0;
+		font-size: 15px;
+		font-weight: 600;
 	}
 
 	.tags {

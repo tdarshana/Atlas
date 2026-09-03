@@ -1,44 +1,20 @@
 <script lang="ts">
+	// Thin wrapper over the design system's Badge. The old tone set (neutral, accent,
+	// danger, success) is a subset of the DS component's, so it maps straight through;
+	// `variant` and `mono` are additive DS props no call site here uses yet.
+	import type { Snippet } from 'svelte';
 	import type { HTMLAttributes } from 'svelte/elements';
+	import DsBadge from '$lib/ds/Badge.svelte';
 
-	interface Props extends HTMLAttributes<HTMLSpanElement> {
+	interface Props extends Omit<HTMLAttributes<HTMLSpanElement>, 'class'> {
 		tone?: 'neutral' | 'accent' | 'danger' | 'success';
+		class?: string;
+		children?: Snippet;
 	}
 
 	let { tone = 'neutral', class: klass = '', children, ...rest }: Props = $props();
 </script>
 
-<span {...rest} class="badge {tone} {klass}">{@render children?.()}</span>
-
-<style>
-	.badge {
-		display: inline-flex;
-		align-items: center;
-		gap: var(--space-1);
-		padding: 1px 8px;
-		border: 1px solid var(--border);
-		border-radius: 999px;
-		font-size: 12px;
-		line-height: 18px;
-		white-space: nowrap;
-		color: var(--muted);
-	}
-
-	.accent {
-		border-color: transparent;
-		background: var(--accent-soft);
-		color: var(--accent);
-	}
-
-	.danger {
-		border-color: transparent;
-		background: var(--danger-soft);
-		color: var(--danger);
-	}
-
-	.success {
-		border-color: transparent;
-		background: var(--success-soft);
-		color: var(--success);
-	}
-</style>
+<DsBadge {tone} class={klass} {...rest}>
+	{@render children?.()}
+</DsBadge>

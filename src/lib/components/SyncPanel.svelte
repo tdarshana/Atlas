@@ -201,7 +201,7 @@
 
 	.field > span {
 		font-size: 13px;
-		color: var(--muted);
+		color: var(--text-secondary);
 	}
 
 	.targets {
@@ -216,7 +216,7 @@
 	legend {
 		padding: 0;
 		font-size: 13px;
-		color: var(--muted);
+		color: var(--text-secondary);
 	}
 
 	.check {
@@ -237,12 +237,12 @@
 
 	.hint {
 		margin: var(--space-3) 0 0;
-		color: var(--muted);
+		color: var(--text-secondary);
 		font-size: 13px;
 	}
 
 	.hint.bad {
-		color: var(--danger);
+		color: var(--danger-text);
 	}
 
 	.results {
@@ -251,7 +251,7 @@
 
 	.summary {
 		margin: 0 0 var(--space-2);
-		color: var(--muted);
+		color: var(--text-secondary);
 		font-size: 13px;
 	}
 

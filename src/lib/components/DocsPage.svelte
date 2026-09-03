@@ -5,6 +5,7 @@
 	import { onMount } from 'svelte';
 	import { api, daemon } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
+	import { setStatusItems } from '$lib/shell';
 	import { nameError, parseList } from '$lib/stores/agents.svelte';
 	import type { DocsStore } from '$lib/stores/docs.svelte';
 	import type { Doc, Project } from '$lib/types';
@@ -68,8 +69,12 @@
 			.catch(() => {});
 	});
 
+	$effect(() => {
+		setStatusItems({ right: [{ text: `${store.state.list.length} ${title.toLowerCase()}` }] });
+	});
+
 	function projectName(id: string | null): string {
-		if (id === null) return '—';
+		if (id === null) return '-';
 		return projects.find((p) => p.id === id)?.name ?? id;
 	}
 
@@ -242,11 +247,15 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: var(--space-3);
+		height: 28px;
+		flex: 0 0 28px;
 		margin-bottom: var(--space-4);
 	}
 
 	h1 {
 		margin: 0;
+		font-size: 15px;
+		font-weight: 600;
 	}
 
 	.tags {
@@ -256,7 +265,7 @@
 	}
 
 	.muted {
-		color: var(--muted);
+		color: var(--text-secondary);
 	}
 
 	.form {
@@ -273,12 +282,12 @@
 
 	.field > span {
 		font-size: 13px;
-		color: var(--muted);
+		color: var(--text-secondary);
 	}
 
 	.bad {
 		margin: 0;
-		color: var(--danger);
+		color: var(--danger-text);
 		font-size: 13px;
 	}
 </style>

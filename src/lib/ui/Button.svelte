@@ -1,91 +1,27 @@
 <script lang="ts">
+	// Thin wrapper over the design system's Button so the pre-shell screens compile
+	// unchanged while picking up its look. The prop surface is a subset of the DS
+	// component's, so nothing here maps or drops anything.
+	import type { Snippet } from 'svelte';
 	import type { HTMLButtonAttributes } from 'svelte/elements';
+	import DsButton from '$lib/ds/Button.svelte';
 
-	interface Props extends HTMLButtonAttributes {
+	interface Props extends Omit<HTMLButtonAttributes, 'class'> {
 		variant?: 'primary' | 'secondary' | 'danger' | 'ghost';
 		size?: 'sm' | 'md';
+		class?: string;
+		children?: Snippet;
 	}
 
 	let {
 		variant = 'secondary',
 		size = 'md',
-		type = 'button',
 		class: klass = '',
 		children,
 		...rest
 	}: Props = $props();
 </script>
 
-<button {...rest} {type} class="btn {variant} {size} {klass}">
+<DsButton {variant} {size} class={klass} {...rest}>
 	{@render children?.()}
-</button>
-
-<style>
-	.btn {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		gap: var(--space-2);
-		border: 1px solid var(--border);
-		border-radius: var(--radius);
-		background: var(--bg-elev);
-		color: var(--fg);
-		font: inherit;
-		font-weight: 500;
-		white-space: nowrap;
-		cursor: pointer;
-		transition:
-			background 0.12s ease,
-			border-color 0.12s ease;
-	}
-
-	.md {
-		padding: 7px 14px;
-	}
-
-	.sm {
-		padding: 3px 9px;
-		font-size: 13px;
-	}
-
-	.btn:hover:not(:disabled) {
-		background: var(--bg-hover);
-	}
-
-	.primary {
-		background: var(--accent);
-		border-color: var(--accent);
-		color: var(--accent-fg);
-	}
-
-	.primary:hover:not(:disabled) {
-		background: var(--accent);
-		filter: brightness(1.08);
-	}
-
-	.danger {
-		background: transparent;
-		border-color: var(--danger);
-		color: var(--danger);
-	}
-
-	.danger:hover:not(:disabled) {
-		background: var(--danger-soft);
-	}
-
-	.ghost {
-		background: transparent;
-		border-color: transparent;
-		color: var(--muted);
-	}
-
-	.ghost:hover:not(:disabled) {
-		background: var(--bg-hover);
-		color: var(--fg);
-	}
-
-	.btn:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-</style>
+</DsButton>

@@ -4,6 +4,7 @@
 	// Save sends only the keys that changed, and the API key only when one was typed,
 	// because the server hands back "***" for a stored key and treats it as "leave it".
 	import { onMount } from 'svelte';
+	import { page } from '$app/state';
 	import StageEditor from '$lib/components/StageEditor.svelte';
 	import {
 		DEFAULT_MIN_CONFIDENCE,
@@ -149,11 +150,21 @@
 	}
 
 	onMount(() => {
-		void reload();
+		// `/settings#<section>` (the side panel's SECTIONS rows) scrolls to that card
+		// once its content has loaded.
+		const hash = page.url.hash.slice(1);
+		const p = reload();
+		if (hash) {
+			void p.then(() => {
+				document.getElementById(hash)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+			});
+		}
 	});
 </script>
 
-<h1>Settings</h1>
+<div class="head">
+	<h1>Settings</h1>
+</div>
 
 {#if settings.error && !settings.loaded}
 	<ErrorState message={settings.error} logPath={settings.errorLogPath ?? undefined}>
@@ -167,7 +178,7 @@
 			void save();
 		}}
 	>
-		<Card title="Daemon">
+		<Card id="daemon" title="Daemon">
 			<div class="row">
 				<div class="field">
 					<span>Port</span>
@@ -181,7 +192,7 @@
 			<p class="hint">Both are set when the daemon starts and are shown here for reference.</p>
 		</Card>
 
-		<Card title="Extraction">
+		<Card id="extraction" title="Extraction">
 			{#snippet actions()}
 				<Button
 					data-testid="settings-test"
@@ -284,7 +295,7 @@
 	</form>
 
 	<div class="board-stages">
-		<Card title="Board stages">
+		<Card id="board-stages" title="Board stages">
 			<p class="hint">
 				The columns every project uses unless it sets its own. Renaming a stage here
 				moves the tasks standing in it.
@@ -295,10 +306,35 @@
 			<StageEditor stages={stages} onsave={saveStages} />
 		</Card>
 	</div>
+
+	<div class="mcp">
+		<Card id="mcp" title="MCP server">
+			<p class="hint">
+				Atlas serves MCP over stdio (<code>atlas mcp</code>) and loopback HTTP
+				(<code>/mcp</code>) on the daemon's port. Full tool, resource and connect-snippet
+				documentation is coming in a later phase.
+			</p>
+		</Card>
+	</div>
 {/if}
 
 <style>
-	.board-stages {
+	.head {
+		display: flex;
+		align-items: center;
+		height: 28px;
+		flex: 0 0 28px;
+		margin-bottom: var(--space-4);
+	}
+
+	.head h1 {
+		margin: 0;
+		font-size: 15px;
+		font-weight: 600;
+	}
+
+	.board-stages,
+	.mcp {
 		margin-top: var(--space-4);
 	}
 
@@ -335,15 +371,18 @@
 
 	.field > span:first-child {
 		font-size: 13px;
-		color: var(--muted);
+		color: var(--text-secondary);
 	}
 
 	.ro {
 		margin: 0;
-		padding: 7px 10px;
-		border: 1px dashed var(--border);
-		border-radius: var(--radius);
-		color: var(--fg);
+		padding: 0 var(--space-2);
+		height: var(--h-control);
+		display: flex;
+		align-items: center;
+		border: 1px dashed var(--border-default);
+		border-radius: var(--radius-sm);
+		color: var(--text-primary);
 		font-family: var(--font-mono, monospace);
 	}
 
@@ -365,19 +404,19 @@
 
 	.slider output {
 		min-width: 3.5ch;
-		color: var(--muted);
+		color: var(--text-secondary);
 		font-variant-numeric: tabular-nums;
 	}
 
 	.hint {
 		margin: 0;
-		color: var(--muted);
+		color: var(--text-secondary);
 		font-size: 12px;
 	}
 
 	/* Same size as the hint it sits under; only the colour says it is a warning. */
 	.hint.warn {
-		color: var(--danger);
+		color: var(--danger-text);
 	}
 
 	.test-result {
@@ -386,12 +425,12 @@
 	}
 
 	.test-result.bad {
-		color: var(--danger);
+		color: var(--danger-text);
 	}
 
 	.bad {
 		margin: 0;
-		color: var(--danger);
+		color: var(--danger-text);
 		font-size: 13px;
 	}
 

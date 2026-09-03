@@ -26,10 +26,10 @@
 </section>
 
 <style>
+	/* `.card` (background, border, radius) comes from `$lib/ds/index.css`. */
 	.card {
-		background: var(--bg-elev);
-		border: 1px solid var(--border);
-		border-radius: var(--radius);
+		display: flex;
+		flex-direction: column;
 	}
 
 	.head {
@@ -37,12 +37,17 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: var(--space-3);
-		padding: var(--space-3) var(--space-4);
-		border-bottom: 1px solid var(--border);
+		height: 32px;
+		flex: 0 0 32px;
+		padding: 0 var(--space-3);
+		border-bottom: 1px solid var(--border-subtle);
 	}
 
 	.title :global(h2) {
 		margin: 0;
+		font-size: 13px;
+		font-weight: 600;
+		color: var(--text-primary);
 	}
 
 	.actions {
@@ -52,6 +57,6 @@
 	}
 
 	.body {
-		padding: var(--space-4);
+		padding: var(--space-3);
 	}
 </style>

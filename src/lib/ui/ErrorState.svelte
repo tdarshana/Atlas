@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
+	import Icon from '$lib/ds/Icon.svelte';
 
 	interface Props {
 		message: string;
@@ -14,6 +15,7 @@
 </script>
 
 <div class="error {klass}" role="alert" data-testid="error-state">
+	<Icon name="circle-x" size={24} color="var(--danger-text)" />
 	<p class="title">Something went wrong</p>
 	<p class="message">{message}</p>
 	{#if logPath}
@@ -29,16 +31,16 @@
 		align-items: center;
 		gap: var(--space-2);
 		padding: var(--space-5) var(--space-4);
-		border: 1px solid var(--border);
-		border-radius: var(--radius);
-		background: var(--bg-elev);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-md);
+		background: var(--bg-raised);
 		text-align: center;
 	}
 
 	.title {
 		margin: 0;
 		font-weight: 600;
-		color: var(--danger);
+		color: var(--danger-text);
 	}
 
 	.message {
@@ -49,7 +51,7 @@
 
 	.log {
 		margin: 0;
-		color: var(--muted);
+		color: var(--text-secondary);
 		font-size: 13px;
 	}
 </style>

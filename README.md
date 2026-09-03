@@ -40,7 +40,7 @@ Atlas can optionally turn conversation transcripts into candidate memories throu
 
 ## Board
 
-A task board inside Atlas, with configurable stages, blockers and subtasks, that every agent reads and writes over MCP alongside the CLI, the TUI's Board tab and the desktop app's `/board` route. `atlas task create "Add board export"` files a task; `atlas task claim ATL-12` assigns and starts it. See [Board](docs/usage.md#board) in `docs/usage.md` for the stage rules, the ready and claim rules, every CLI form, the API routes, the MCP tools, and the optional `TASKS.md` mirror.
+A task board inside Atlas, with configurable stages, blockers and subtasks, that every agent reads and writes over MCP alongside the CLI and the TUI's Board tab. `atlas task create "Add board export"` files a task; `atlas task claim ATL-12` assigns and starts it. See [Board](docs/usage.md#board) in `docs/usage.md` for the stage rules, the ready and claim rules, every CLI form, the API routes, the MCP tools, and the optional `TASKS.md` mirror.
 
 ## CLI
 
@@ -64,7 +64,7 @@ A terminal UI over the daemon, read-mostly: browse memories, projects, agents, p
     bun install
     bun run tauri dev
 
-A Tauri 2 desktop app over the same daemon, with eight screens: Dashboard, Projects, Memories, Agents, Practices, Workflows, Review and Settings. It starts the daemon itself when none is running, and shows the log path when that fails.
+A Tauri 2 desktop app over the same daemon, with eight screens (Dashboard, Projects, Memories, Agents, Practices, Workflows, Review and Settings) inside a VS Code style shell: an activity rail, a contextual side panel, a status bar, and a `⌘K` command palette that searches everything Atlas knows about. It starts the daemon itself when none is running, and shows the log path when that fails.
 
 To package it:
 

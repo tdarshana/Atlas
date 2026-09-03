@@ -33,14 +33,15 @@
 		pointer-events: auto;
 		max-width: 360px;
 		padding: var(--space-2) var(--space-3);
-		border: 1px solid var(--border);
-		border-left: 3px solid var(--muted);
-		border-radius: var(--radius);
-		background: var(--bg-elev);
-		color: var(--fg);
-		font: inherit;
+		border: 1px solid var(--border-default);
+		border-left: 3px solid var(--text-tertiary);
+		border-radius: var(--radius-md);
+		background: var(--bg-raised);
+		color: var(--text-primary);
+		font: var(--type-ui);
+		font-size: 12px;
 		text-align: left;
-		box-shadow: var(--shadow);
+		box-shadow: var(--shadow-md);
 		cursor: pointer;
 	}
 

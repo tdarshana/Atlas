@@ -396,9 +396,9 @@
 		flex-direction: column;
 		gap: var(--space-4);
 		padding: var(--space-4);
-		border: 1px solid var(--border);
-		border-radius: var(--radius);
-		background: var(--bg-elev);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-md);
+		background: var(--bg-raised);
 	}
 
 	header {
@@ -417,7 +417,7 @@
 	.x {
 		border: none;
 		background: none;
-		color: var(--muted);
+		color: var(--text-secondary);
 		font-size: 20px;
 		line-height: 1;
 		cursor: pointer;
@@ -428,7 +428,7 @@
 	}
 
 	.x:hover:not(:disabled) {
-		color: var(--fg);
+		color: var(--text-primary);
 	}
 
 	.fields,
@@ -446,7 +446,7 @@
 
 	.field > span {
 		font-size: 13px;
-		color: var(--muted);
+		color: var(--text-secondary);
 	}
 
 	.pair {
@@ -463,10 +463,11 @@
 
 	h3 {
 		margin: 0;
-		font-size: 13px;
+		font-size: 11px;
+		font-weight: 600;
 		text-transform: uppercase;
 		letter-spacing: 0.04em;
-		color: var(--muted);
+		color: var(--text-tertiary);
 	}
 
 	.chips {
@@ -483,7 +484,7 @@
 		align-items: center;
 		gap: var(--space-1);
 		padding: 1px 4px 1px 8px;
-		border: 1px solid var(--border);
+		border: 1px solid var(--border-default);
 		border-radius: 999px;
 		font-size: 12px;
 	}
@@ -511,23 +512,23 @@
 	}
 
 	.body {
-		color: var(--muted);
+		color: var(--text-secondary);
 		overflow-wrap: anywhere;
 	}
 
 	.when {
 		margin-left: auto;
-		color: var(--muted);
+		color: var(--text-secondary);
 	}
 
 	.muted {
 		margin: 0;
-		color: var(--muted);
+		color: var(--text-secondary);
 	}
 
 	.bad {
 		margin: 0;
-		color: var(--danger);
+		color: var(--danger-text);
 		font-size: 13px;
 		overflow-wrap: anywhere;
 	}

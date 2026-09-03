@@ -1,31 +1,16 @@
 <script lang="ts">
+	// Thin wrapper over the design system's Input. The old call sites only ever bind
+	// `value` and pass native input attributes; the DS component's extra props
+	// (label, hint, error, mono, icon) are additive and simply go unused here.
 	import type { HTMLInputAttributes } from 'svelte/elements';
+	import DsInput from '$lib/ds/Input.svelte';
 
-	interface Props extends HTMLInputAttributes {
+	interface Props extends Omit<HTMLInputAttributes, 'class'> {
 		value?: string;
+		class?: string;
 	}
 
 	let { value = $bindable(''), class: klass = '', ...rest }: Props = $props();
 </script>
 
-<input {...rest} class="input {klass}" bind:value />
-
-<style>
-	.input {
-		width: 100%;
-		padding: 7px 10px;
-		border: 1px solid var(--border);
-		border-radius: var(--radius);
-		background: var(--bg-elev);
-		color: var(--fg);
-		font: inherit;
-	}
-
-	.input::placeholder {
-		color: var(--muted);
-	}
-
-	.input:disabled {
-		opacity: 0.6;
-	}
-</style>
+<DsInput bind:value class={klass} {...rest} />

@@ -12,6 +12,7 @@
 	import { loadProjects, projects } from '$lib/stores/projects.svelte';
 	import { loadSettings, minConfidence, settingBool } from '$lib/stores/settings.svelte';
 	import { errorMessage } from '$lib/errors';
+	import { setStatusItems } from '$lib/shell';
 	import type { Memory } from '$lib/types';
 	import Badge from '$lib/ui/Badge.svelte';
 	import Button from '$lib/ui/Button.svelte';
@@ -77,6 +78,10 @@
 		void loadProjects();
 		void loadSettings();
 		void loadReview();
+	});
+
+	$effect(() => {
+		setStatusItems({ right: [{ text: `${review.items.length} pending` }] });
 	});
 </script>
 
@@ -169,14 +174,19 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: var(--space-4);
+		height: 28px;
+		flex: 0 0 28px;
+		margin-bottom: var(--space-4);
 	}
 
 	.head h1 {
 		margin: 0;
+		font-size: 15px;
+		font-weight: 600;
 	}
 
 	.muted {
-		color: var(--muted);
+		color: var(--text-secondary);
 		font-size: 13px;
 	}
 

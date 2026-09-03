@@ -1,8 +1,10 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
+	import Icon from '$lib/ds/Icon.svelte';
 
 	interface Props {
 		title: string;
+		/** Kept for callers that still pass one; folded into a single line under the title. */
 		hint?: string;
 		/** Optional call to action, e.g. a Button. */
 		children?: Snippet;
@@ -13,8 +15,8 @@
 </script>
 
 <div class="empty {klass}" data-testid="empty-state">
-	<p class="title">{title}</p>
-	{#if hint}<p class="hint">{hint}</p>{/if}
+	<Icon name="info" size={24} color="var(--text-tertiary)" />
+	<p class="line">{title}{#if hint}<span class="hint"> · {hint}</span>{/if}</p>
 	{@render children?.()}
 </div>
 
@@ -28,14 +30,13 @@
 		text-align: center;
 	}
 
-	.title {
+	.line {
 		margin: 0;
-		font-weight: 600;
+		color: var(--text-tertiary);
+		font-size: var(--text-sm);
 	}
 
 	.hint {
-		margin: 0;
-		max-width: 46ch;
-		color: var(--muted);
+		color: var(--text-tertiary);
 	}
 </style>

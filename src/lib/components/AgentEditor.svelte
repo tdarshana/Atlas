@@ -189,7 +189,7 @@
 
 	.field > span {
 		font-size: 13px;
-		color: var(--muted);
+		color: var(--text-secondary);
 	}
 
 	.row {
@@ -207,7 +207,7 @@
 
 	.bad {
 		margin: 0;
-		color: var(--danger);
+		color: var(--danger-text);
 		font-size: 13px;
 	}
 </style>

@@ -17,13 +17,12 @@
 	let { items, active, onchange, class: klass = '' }: Props = $props();
 </script>
 
-<div class="tabs {klass}" role="tablist">
+<div class="tab-strip {klass}" role="tablist">
 	{#each items as item (item.id)}
 		<button
 			type="button"
 			role="tab"
-			class="tab"
-			class:active={item.id === active}
+			class="tab-strip__item"
 			aria-selected={item.id === active}
 			disabled={item.disabled}
 			data-testid="tab-{item.id}"
@@ -35,34 +34,10 @@
 </div>
 
 <style>
-	.tabs {
-		display: flex;
-		gap: var(--space-1);
-		border-bottom: 1px solid var(--border);
-	}
-
-	.tab {
-		padding: 6px 12px;
-		border: none;
-		border-bottom: 2px solid transparent;
-		margin-bottom: -1px;
-		background: none;
-		color: var(--muted);
-		font: inherit;
-		cursor: pointer;
-	}
-
-	.tab:hover:not(:disabled) {
-		color: var(--fg);
-	}
-
-	.tab.active {
-		color: var(--fg);
-		border-bottom-color: var(--accent);
-	}
-
-	.tab:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
+	/* `.tab-strip`/`.tab-strip__item` (34px, 2px inset accent underline on the active
+	   tab) come from `$lib/ds/index.css`; only the disabled state is added here. */
+	.tab-strip__item:disabled {
+		opacity: 0.4;
+		pointer-events: none;
 	}
 </style>

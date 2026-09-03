@@ -84,9 +84,9 @@
 <style>
 	.wrap {
 		overflow-x: auto;
-		border: 1px solid var(--border);
-		border-radius: var(--radius);
-		background: var(--bg-elev);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-md);
+		background: var(--bg-raised);
 	}
 
 	table {
@@ -95,20 +95,22 @@
 	}
 
 	th {
-		padding: var(--space-2) var(--space-3);
-		border-bottom: 1px solid var(--border);
-		font-size: 12px;
+		height: 32px;
+		padding: 0 var(--space-3);
+		border-bottom: 1px solid var(--border-subtle);
+		font-size: 11px;
 		font-weight: 600;
-		color: var(--muted);
+		color: var(--text-tertiary);
 		text-transform: uppercase;
 		letter-spacing: 0.04em;
 		white-space: nowrap;
 	}
 
 	td {
-		padding: var(--space-2) var(--space-3);
-		border-bottom: 1px solid var(--border);
-		vertical-align: top;
+		height: 28px;
+		padding: 0 var(--space-3);
+		border-bottom: 1px solid var(--border-subtle);
+		vertical-align: middle;
 	}
 
 	tbody tr:last-child td {
@@ -116,7 +118,7 @@
 	}
 
 	tr.clickable {
-		cursor: pointer;
+		cursor: default;
 	}
 
 	tr.clickable:hover td {

@@ -14,21 +14,39 @@
 <style>
 	.textarea {
 		width: 100%;
-		padding: 8px 10px;
-		border: 1px solid var(--border);
-		border-radius: var(--radius);
-		background: var(--bg-elev);
-		color: var(--fg);
-		font: inherit;
+		padding: var(--space-2);
+		border: var(--border-width) solid var(--border-default);
+		border-radius: var(--radius-sm);
+		background: var(--bg-base);
+		color: var(--text-primary);
+		font-family: var(--font-ui);
+		font-size: var(--text-sm);
 		resize: vertical;
+		transition: var(--transition-hover);
 	}
 
 	.textarea::placeholder {
-		color: var(--muted);
+		color: var(--text-tertiary);
+	}
+
+	.textarea:hover {
+		border-color: var(--border-strong);
+	}
+
+	.textarea:focus {
+		border-color: var(--accent);
+		outline: var(--focus-ring-width) solid var(--focus-ring);
+		outline-offset: 0;
+	}
+
+	.textarea:disabled {
+		opacity: 0.5;
+		background: var(--bg-surface);
 	}
 
 	.mono {
 		font-family: var(--font-mono);
-		font-size: 13px;
+		font-size: var(--mono-sm);
+		font-variant-numeric: var(--tabular);
 	}
 </style>

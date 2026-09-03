@@ -49,15 +49,27 @@
 	.dialog {
 		width: min(560px, calc(100vw - 32px));
 		padding: 0;
-		border: 1px solid var(--border);
-		border-radius: var(--radius);
-		background: var(--bg-elev);
-		color: var(--fg);
-		box-shadow: var(--shadow);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-lg);
+		background: var(--bg-overlay);
+		color: var(--text-primary);
+		box-shadow: var(--shadow-lg);
+		transition:
+			opacity var(--dur-modal) var(--ease-overlay),
+			transform var(--dur-modal) var(--ease-overlay);
 	}
 
+	/* Flat scrim, modals only; the palette and popovers carry none. No blur anywhere. */
 	.dialog::backdrop {
-		background: rgba(0, 0, 0, 0.5);
+		background: rgba(6, 8, 12, 0.55);
+		transition: background-color var(--dur-modal) var(--ease-overlay);
+	}
+
+	@starting-style {
+		.dialog[open] {
+			opacity: 0;
+			transform: translateY(4px);
+		}
 	}
 
 	header {
@@ -66,11 +78,13 @@
 		justify-content: space-between;
 		gap: var(--space-3);
 		padding: var(--space-3) var(--space-4);
-		border-bottom: 1px solid var(--border);
+		border-bottom: 1px solid var(--border-default);
 	}
 
 	header h2 {
 		margin: 0;
+		font-size: 15px;
+		font-weight: 600;
 	}
 
 	.x {
@@ -78,14 +92,14 @@
 		margin-left: auto;
 		border: none;
 		background: none;
-		color: var(--muted);
+		color: var(--text-secondary);
 		font-size: 20px;
 		line-height: 1;
 		cursor: pointer;
 	}
 
 	.x:hover {
-		color: var(--fg);
+		color: var(--text-primary);
 	}
 
 	.body {
@@ -99,6 +113,6 @@
 		justify-content: flex-end;
 		gap: var(--space-2);
 		padding: var(--space-3) var(--space-4);
-		border-top: 1px solid var(--border);
+		border-top: 1px solid var(--border-default);
 	}
 </style>

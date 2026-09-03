@@ -11,15 +11,22 @@
 
 <style>
 	.head {
+		display: flex;
+		align-items: center;
+		gap: var(--space-3);
+		height: 28px;
+		flex: 0 0 28px;
 		margin-bottom: var(--space-4);
 	}
 
 	h1 {
-		margin: var(--space-1) 0 0;
+		margin: 0;
+		font-size: 15px;
+		font-weight: 600;
 	}
 
 	a {
-		color: var(--muted);
+		color: var(--text-secondary);
 		font-size: 13px;
 	}
 </style>

@@ -7,6 +7,7 @@
 	import { api } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
 	import { relativeAge } from '$lib/format';
+	import { shell } from '$lib/shell';
 	import {
 		deleteProject,
 		loadProject,
@@ -46,6 +47,12 @@
 			void loadProject(id);
 			void loadStages(id);
 		}
+	});
+
+	// The side panel otherwise reads "Projects" here too; naming the open project is
+	// more useful than repeating the rail label.
+	$effect(() => {
+		shell.sidePanelTitle = project?.name ?? 'Projects';
 	});
 
 	let confirming = $state(false);
@@ -188,18 +195,18 @@
 			{:else}
 				<dl>
 					<dt>Remote</dt>
-					<dd>{project.git_remote ?? '—'}</dd>
+					<dd>{project.git_remote ?? '-'}</dd>
 					<dt>Last seen</dt>
 					<dd>{new Date(project.last_seen_at).toLocaleString()}</dd>
 					<dt>Built</dt>
 					<dd>{new Date(profile.built_at).toLocaleString()}</dd>
 					<dt>Languages</dt>
 					<dd>
-						{#each profile.languages as lang (lang)}<Badge tone="accent">{lang}</Badge>{:else}—{/each}
+						{#each profile.languages as lang (lang)}<Badge tone="accent">{lang}</Badge>{:else}-{/each}
 					</dd>
 					<dt>Frameworks</dt>
 					<dd>
-						{#each profile.frameworks as fw (fw)}<Badge tone="accent">{fw}</Badge>{:else}—{/each}
+						{#each profile.frameworks as fw (fw)}<Badge tone="accent">{fw}</Badge>{:else}-{/each}
 					</dd>
 				</dl>
 
@@ -287,7 +294,7 @@
 				{doc.name}
 			{:else if key === 'tags'}
 				{#each doc.tags as tag (tag)}<Badge tone="accent">{tag}</Badge>{:else}
-					<span class="muted">—</span>
+					<span class="muted">-</span>
 				{/each}
 			{:else}
 				<span class="muted">{relativeAge(doc.updated_at)}</span>
@@ -309,21 +316,30 @@
 	}
 
 	.head h1 {
-		margin: var(--space-1) 0 0;
+		margin: 0;
+		height: 28px;
+		line-height: 28px;
+		font-size: 15px;
+		font-weight: 600;
 	}
 
 	.actions {
 		display: flex;
+		align-items: center;
+		height: 28px;
 		gap: var(--space-2);
 	}
 
 	.back {
+		display: block;
+		margin-bottom: var(--space-1);
+		color: var(--text-secondary);
 		font-size: 13px;
 	}
 
 	.sub {
 		margin: var(--space-1) 0 0;
-		color: var(--muted);
+		color: var(--text-secondary);
 	}
 
 	.stack {
@@ -340,7 +356,7 @@
 	}
 
 	dt {
-		color: var(--muted);
+		color: var(--text-secondary);
 	}
 
 	dd {
@@ -353,10 +369,11 @@
 
 	h3 {
 		margin: var(--space-4) 0 var(--space-2);
-		font-size: 13px;
+		font-size: 11px;
+		font-weight: 600;
 		text-transform: uppercase;
 		letter-spacing: 0.04em;
-		color: var(--muted);
+		color: var(--text-tertiary);
 	}
 
 	.prose {
@@ -369,9 +386,9 @@
 		max-height: 320px;
 		overflow: auto;
 		padding: var(--space-3);
-		border: 1px solid var(--border);
+		border: 1px solid var(--border-default);
 		border-radius: var(--radius-sm);
-		background: var(--bg);
+		background: var(--bg-base);
 		font-family: var(--font-mono);
 		font-size: 12px;
 		white-space: pre-wrap;
@@ -391,17 +408,17 @@
 	}
 
 	.muted {
-		color: var(--muted);
+		color: var(--text-secondary);
 	}
 
 	.hint {
 		margin: 0 0 var(--space-3);
-		color: var(--muted);
+		color: var(--text-secondary);
 		font-size: 13px;
 	}
 
 	.bad {
 		margin: 0 0 var(--space-2);
-		color: var(--danger);
+		color: var(--danger-text);
 	}
 </style>

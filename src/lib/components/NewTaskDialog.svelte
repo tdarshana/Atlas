@@ -156,7 +156,7 @@
 
 	.field > span {
 		font-size: 13px;
-		color: var(--muted);
+		color: var(--text-secondary);
 	}
 
 	.pair {
@@ -166,13 +166,13 @@
 	}
 
 	.hint {
-		color: var(--muted);
+		color: var(--text-secondary);
 		font-size: 12px;
 	}
 
 	.target {
 		margin: 0;
-		color: var(--muted);
+		color: var(--text-secondary);
 		font-size: 13px;
 	}
 </style>

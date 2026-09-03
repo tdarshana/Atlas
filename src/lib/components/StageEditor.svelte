@@ -177,7 +177,7 @@
 		align-items: center;
 		gap: var(--space-1);
 		font-size: 13px;
-		color: var(--muted);
+		color: var(--text-secondary);
 		white-space: nowrap;
 	}
 
@@ -188,6 +188,6 @@
 
 	.bad {
 		margin: 0;
-		color: var(--danger);
+		color: var(--danger-text);
 	}
 </style>

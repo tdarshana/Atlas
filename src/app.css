@@ -3,23 +3,6 @@
 /* Everything below is what the app still needs on top of the design system.
    Colours, type, focus, selection and the box-sizing reset now come from the DS tokens. */
 
-:root {
-	/* Legacy aliases. The screens written before the design system landed read these; they
-	   are remapped onto DS tokens here and disappear as each screen is ported. */
-	--bg: var(--bg-base);
-	--bg-elev: var(--bg-surface);
-	--fg: var(--text-primary);
-	--muted: var(--text-secondary);
-	--border: var(--border-default);
-	--accent-fg: var(--text-on-accent);
-	--accent-soft: var(--accent-muted);
-	--danger-soft: var(--danger-muted);
-	--success-soft: var(--success-muted);
-	--radius: var(--radius-lg);
-	--font: var(--font-ui);
-	--shadow: var(--shadow-md);
-}
-
 html,
 body {
 	height: 100%;

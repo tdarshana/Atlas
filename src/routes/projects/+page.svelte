@@ -2,8 +2,10 @@
 	// Projects: the connected list plus Connect. Inside Tauri that opens the native
 	// folder picker; in a browser there is no picker, so the path is typed.
 	import { onMount } from 'svelte';
+	import { page } from '$app/state';
 	import { errorMessage } from '$lib/errors';
 	import { relativeAge } from '$lib/format';
+	import { setStatusItems } from '$lib/shell';
 	import {
 		connectProject,
 		inTauri,
@@ -51,6 +53,16 @@
 
 	onMount(() => {
 		void loadProjects();
+		// `?connect=1` (the palette's `⌥↵` on Connect a folder…) opens the connect flow:
+		// the native picker in Tauri, or focuses the typed-path field in a browser.
+		if (page.url.searchParams.get('connect') === '1') {
+			if (native) void connect();
+			else document.querySelector<HTMLInputElement>('[data-testid="projects-root"]')?.focus();
+		}
+	});
+
+	$effect(() => {
+		setStatusItems({ right: [{ text: `${projects.items.length} projects` }] });
 	});
 </script>
 
@@ -96,7 +108,7 @@
 			{:else if key === 'root'}
 				<code class="path">{project.root_path}</code>
 			{:else if key === 'remote'}
-				<span class="muted">{project.git_remote ?? '—'}</span>
+				<span class="muted">{project.git_remote ?? '-'}</span>
 			{:else}
 				<span class="muted">{relativeAge(project.last_seen_at)}</span>
 			{/if}
@@ -122,11 +134,15 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: var(--space-4);
+		height: 28px;
+		flex: 0 0 28px;
 		margin-bottom: var(--space-4);
 	}
 
 	.head h1 {
 		margin: 0;
+		font-size: 15px;
+		font-weight: 600;
 	}
 
 	.connect {
@@ -140,6 +156,6 @@
 	}
 
 	.muted {
-		color: var(--muted);
+		color: var(--text-secondary);
 	}
 </style>

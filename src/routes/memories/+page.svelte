@@ -2,8 +2,11 @@
 	// Memories: search or list, filtered by scope and kind, with a detail panel
 	// whose Forget supersedes the memory and drops its row.
 	import { onMount } from 'svelte';
+	import { page } from '$app/state';
+	import { api } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
 	import { relativeAge } from '$lib/format';
+	import { setStatusItems } from '$lib/shell';
 	import {
 		MEMORY_KINDS,
 		forgetMemory,
@@ -66,7 +69,7 @@
 
 	function source(hit: RecallHit): string {
 		const { source_agent, source_tool } = hit.memory;
-		return [source_agent, source_tool].filter(Boolean).join(' · ') || '—';
+		return [source_agent, source_tool].filter(Boolean).join(' · ') || '-';
 	}
 
 	async function confirmForget() {
@@ -88,12 +91,27 @@
 	onMount(() => {
 		void loadProjects();
 		void loadMemories();
+		// `?id=<uuid>` (from the command palette, or a link elsewhere) selects that
+		// memory in the detail panel even when it falls outside the current filters.
+		const id = page.url.searchParams.get('id');
+		if (id) {
+			api()
+				.getMemory(id)
+				.then((m) => (memories.selected = m))
+				.catch(() => {});
+		}
 		// A pending debounce would fire a request for a screen that is gone.
 		return cancelLoad;
 	});
+
+	$effect(() => {
+		setStatusItems({ right: [{ text: `${memories.hits.length} memories` }] });
+	});
 </script>
 
-<h1>Memories</h1>
+<div class="head">
+	<h1>Memories</h1>
+</div>
 
 <div class="filters">
 	<div class="search">
@@ -171,7 +189,7 @@
 						<span class="text">{hit.memory.text}</span>
 					{:else if key === 'tags'}
 						{#each hit.memory.tags as tag (tag)}<Badge tone="accent">{tag}</Badge>{:else}
-							<span class="muted">—</span>
+							<span class="muted">-</span>
 						{/each}
 					{:else if key === 'source'}
 						<span class="muted">{source(hit)}</span>
@@ -217,10 +235,10 @@
 				<dd>{selected.scope}{projectName ? ` · ${projectName}` : ''}</dd>
 				<dt>Tags</dt>
 				<dd>
-					{#each selected.tags as tag (tag)}<Badge tone="accent">{tag}</Badge>{:else}—{/each}
+					{#each selected.tags as tag (tag)}<Badge tone="accent">{tag}</Badge>{:else}-{/each}
 				</dd>
 				<dt>Source</dt>
-				<dd>{[selected.source_agent, selected.source_tool].filter(Boolean).join(' · ') || '—'}</dd>
+				<dd>{[selected.source_agent, selected.source_tool].filter(Boolean).join(' · ') || '-'}</dd>
 				<dt>Confidence</dt>
 				<dd>{selected.confidence.toFixed(2)}</dd>
 				<dt>Status</dt>
@@ -266,6 +284,20 @@
 </Dialog>
 
 <style>
+	.head {
+		display: flex;
+		align-items: center;
+		height: 28px;
+		flex: 0 0 28px;
+		margin-bottom: var(--space-4);
+	}
+
+	.head h1 {
+		margin: 0;
+		font-size: 15px;
+		font-weight: 600;
+	}
+
 	.filters {
 		display: flex;
 		gap: var(--space-3);
@@ -289,10 +321,10 @@
 
 	.chip {
 		padding: 2px 10px;
-		border: 1px solid var(--border);
+		border: 1px solid var(--border-default);
 		border-radius: 999px;
-		background: var(--bg-elev);
-		color: var(--muted);
+		background: var(--bg-raised);
+		color: var(--text-secondary);
 		font: inherit;
 		font-size: 13px;
 		cursor: pointer;
@@ -300,7 +332,7 @@
 
 	.chip.on {
 		border-color: transparent;
-		background: var(--accent-soft);
+		background: var(--accent-muted);
 		color: var(--accent);
 	}
 
@@ -323,9 +355,9 @@
 		flex-direction: column;
 		gap: var(--space-3);
 		padding: var(--space-4);
-		border: 1px solid var(--border);
-		border-radius: var(--radius);
-		background: var(--bg-elev);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-md);
+		background: var(--bg-raised);
 	}
 
 	.panel header {
@@ -337,7 +369,7 @@
 	.x {
 		border: none;
 		background: none;
-		color: var(--muted);
+		color: var(--text-secondary);
 		font-size: 20px;
 		line-height: 1;
 		cursor: pointer;
@@ -355,7 +387,7 @@
 	}
 
 	.muted {
-		color: var(--muted);
+		color: var(--text-secondary);
 	}
 
 	dl {
@@ -367,7 +399,7 @@
 	}
 
 	dt {
-		color: var(--muted);
+		color: var(--text-secondary);
 	}
 
 	dd {
@@ -382,6 +414,6 @@
 		display: block;
 		margin: var(--space-3) 0 var(--space-1);
 		font-size: 13px;
-		color: var(--muted);
+		color: var(--text-secondary);
 	}
 </style>

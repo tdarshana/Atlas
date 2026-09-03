@@ -80,9 +80,9 @@
 		flex-direction: column;
 		gap: var(--space-2);
 		padding: var(--space-3);
-		border: 1px solid var(--border);
-		border-radius: var(--radius);
-		background: var(--bg-elev);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-md);
+		background: var(--bg-raised);
 	}
 
 	.card:hover {
@@ -116,19 +116,19 @@
 
 	.key {
 		font-size: 12px;
-		color: var(--muted);
+		color: var(--text-secondary);
 	}
 
 	.dot {
 		width: 8px;
 		height: 8px;
 		border-radius: 999px;
-		background: var(--muted);
+		background: var(--text-secondary);
 		flex: none;
 	}
 
 	.dot.low {
-		background: var(--border);
+		background: var(--border-default);
 	}
 
 	.dot.high {
