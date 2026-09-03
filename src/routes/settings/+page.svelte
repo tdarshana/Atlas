@@ -555,23 +555,25 @@
 				<div class="pair">
 					<div class="group">
 						<span class="group-heading">Resources</span>
-						{#each mcp?.resources ?? [] as resource (resource.uri)}
-							<div class="transport">
-								<span class="mono value">{resource.uri}</span>
-								<span class="spacer"></span>
-								<span class="hint">{resource.description ?? ''}</span>
-							</div>
-						{/each}
+						<div class="resource-list">
+							{#each mcp?.resources ?? [] as resource (resource.uri)}
+								<div class="resource-row">
+									<span class="mono value">{resource.uri}</span>
+									<span class="hint">{resource.description ?? ''}</span>
+								</div>
+							{/each}
+						</div>
 					</div>
 					<div class="group">
 						<span class="group-heading">Prompts</span>
-						{#each mcp?.prompts ?? [] as prompt (prompt.name)}
-							<div class="transport">
-								<span class="mono value">{prompt.name}</span>
-								<span class="spacer"></span>
-								<span class="hint">{prompt.description ?? ''}</span>
-							</div>
-						{/each}
+						<div class="resource-list">
+							{#each mcp?.prompts ?? [] as prompt (prompt.name)}
+								<div class="resource-row">
+									<span class="mono value">{prompt.name}</span>
+									<span class="hint">{prompt.description ?? ''}</span>
+								</div>
+							{/each}
+						</div>
 					</div>
 				</div>
 			</div>
@@ -684,6 +686,28 @@
 
 	.transport-name {
 		width: 70px;
+	}
+
+	/* RESOURCES and PROMPTS rows: a URI or prompt name can run much longer than a
+	   transport value, and its description can too, so each row is its own two-column
+	   grid (name/URI, then description) instead of sharing `.transport`'s fixed-height
+	   flex row, which wrapped and overlapped once either side got long. */
+	.resource-list {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
+	.resource-row {
+		display: grid;
+		grid-template-columns: minmax(160px, 260px) 1fr;
+		gap: 12px;
+		align-items: baseline;
+		color: var(--text-secondary);
+	}
+
+	.resource-row .hint {
+		white-space: normal;
 	}
 
 	.value {
