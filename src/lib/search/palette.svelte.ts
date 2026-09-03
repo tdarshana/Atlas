@@ -298,28 +298,31 @@ function withParam(href: string, param: string): string {
 	return `${href}${href.includes('?') ? '&' : '?'}${param}`;
 }
 
-function boardHref(projectId: Uuid, key: string): string {
-	return `/projects/${projectId}/board?task=${encodeURIComponent(key)}`;
+/** The route segment for the every-project board, where a hit with no project belongs. */
+const GLOBAL_BOARD = 'global';
+
+function boardHref(projectId: Uuid | null, key: string): string {
+	return `/projects/${projectId ?? GLOBAL_BOARD}/board?task=${encodeURIComponent(key)}`;
 }
 
 /**
  * Where a hit opens. `inspector` is the same destination with `inspector=1`; `board`
- * goes to the owning project's board pre-filtered by the query text. Task 6 and
- * Phase 8 read these parameters.
+ * goes to the owning project's board pre-filtered by the query text, or to the global
+ * board when the hit belongs to no project.
  */
 export function hrefFor(hit: SearchHit, mode: OpenMode = 'open'): string {
 	const project = hit.project_id;
 
 	if (mode === 'board') {
-		if (!project) return '/projects';
 		const text = parsed().text.trim();
-		return `/projects/${project}/board${text ? `?q=${encodeURIComponent(text)}` : ''}`;
+		const id = project ?? GLOBAL_BOARD;
+		return `/projects/${id}/board${text ? `?q=${encodeURIComponent(text)}` : ''}`;
 	}
 
 	let href: string;
 	switch (hit.kind) {
 		case 'task':
-			href = project ? boardHref(project, hit.reference ?? hit.id) : '/projects';
+			href = boardHref(project, hit.reference ?? hit.id);
 			break;
 		case 'memory':
 			href = `/memories?id=${encodeURIComponent(hit.id)}`;
@@ -336,7 +339,7 @@ export function hrefFor(hit: SearchHit, mode: OpenMode = 'open'): string {
 			break;
 		case 'event':
 			// An event points at the thing it happened to; without a ref, at its project.
-			if (hit.reference && project) href = boardHref(project, hit.reference);
+			if (hit.reference) href = boardHref(project, hit.reference);
 			else href = project ? `/projects/${project}` : '/projects';
 			break;
 	}

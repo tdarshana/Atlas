@@ -9,6 +9,9 @@
 	import TreeGroup from '../TreeGroup.svelte';
 	import TreeRow from '../TreeRow.svelte';
 
+	/** The route segment the every-project board answers to. */
+	const GLOBAL_ID = 'global';
+
 	const openId = $derived(page.params.id ?? '');
 
 	onMount(() => {
@@ -37,11 +40,13 @@
 </script>
 
 <TreeGroup label="Projects" count={projects.items.length}>
+	<!-- Global is the every-project board, not the project list, so `/projects` itself
+	     leaves every row unselected. -->
 	<TreeRow
 		icon="layers"
 		label="Global"
-		selected={!openId}
-		onclick={() => goto('/projects')}
+		selected={openId === GLOBAL_ID}
+		onclick={() => goto(`/projects/${GLOBAL_ID}/board`)}
 	/>
 	{#each projects.items as project (project.id)}
 		<TreeRow

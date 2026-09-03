@@ -30,8 +30,8 @@ export const COMMANDS: PaletteCommand[] = [
 		label: 'New task…',
 		hint: '',
 		icon: 'plus',
-		run: (ctx) =>
-			ctx.goto(ctx.projectId ? `/projects/${ctx.projectId}/board?new=1` : '/projects')
+		// Off a project the new task belongs to the every-project board, not to nothing.
+		run: (ctx) => ctx.goto(`/projects/${ctx.projectId ?? 'global'}/board?new=1`)
 	},
 	{
 		id: 'remember',

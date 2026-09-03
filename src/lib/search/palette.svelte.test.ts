@@ -216,8 +216,8 @@ describe('opening an item', () => {
 		expect(goto).toHaveBeenCalledWith('/projects/p1/board?task=ATL-2');
 	});
 
-	it('sends a global task to the projects list', () => {
-		expect(hrefFor(hit('id-1', 'x'))).toBe('/projects');
+	it('sends a task with no project to the global board', () => {
+		expect(hrefFor(hit('id-1', 'x'))).toBe('/projects/global/board?task=id-1');
 	});
 
 	it('opens a memory filtered by id, and adds the inspector flag', () => {
@@ -231,5 +231,10 @@ describe('opening an item', () => {
 		expect(hrefFor(hit('id-1', 'x', { project_id: 'p1' }), 'board')).toBe(
 			'/projects/p1/board?q=duckdb'
 		);
+	});
+
+	it('falls back to the global board when the hit belongs to no project', () => {
+		palette.input = 'duckdb';
+		expect(hrefFor(hit('id-1', 'x'), 'board')).toBe('/projects/global/board?q=duckdb');
 	});
 });

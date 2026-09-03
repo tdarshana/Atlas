@@ -7,7 +7,7 @@
 	import { api } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
 	import { relativeAge } from '$lib/format';
-	import { shell } from '$lib/shell';
+	import { shell, TabStrip, type Tab } from '$lib/shell';
 	import {
 		deleteProject,
 		loadProject,
@@ -28,6 +28,12 @@
 	const project = $derived(projectDetail.project);
 	const profile = $derived(project?.profile ?? null);
 	const context = $derived(projectDetail.context);
+
+	/** The board is the other half of a project, so the header carries a tab to it. */
+	const tabs: Tab[] = $derived([
+		{ id: 'profile', label: 'Profile', icon: 'folder', href: `/projects/${id}` },
+		{ id: 'board', label: 'Board', icon: 'columns-3', href: `/projects/${id}/board` }
+	]);
 
 	const memoryColumns = [
 		{ key: 'kind', label: 'Kind', width: '110px' },
@@ -138,6 +144,7 @@
 		{/if}
 	</div>
 	<div class="actions">
+		<TabStrip items={tabs} active="profile" />
 		<Button
 			variant="primary"
 			data-testid="project-refresh"
