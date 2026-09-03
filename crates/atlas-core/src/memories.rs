@@ -188,6 +188,10 @@ impl<'a> MemoryRepo<'a> {
         self.db.with_conn(|c| Ok(c.query_row("select count(*) from memories where status='active'", [], |r| r.get(0))?))
     }
 
+    pub fn count_pending(&self) -> Result<i64> {
+        self.db.with_conn(|c| Ok(c.query_row("select count(*) from memories where status='pending'", [], |r| r.get(0))?))
+    }
+
     /// Audit rows whose action or detail (cast to text) case-insensitively contains
     /// `pattern` (a caller-built `LIKE`-escaped substring, wrapped in `%...%`), newest
     /// first, capped at 500. A SQL-level prefilter for global search, so a table that

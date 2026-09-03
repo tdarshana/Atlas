@@ -297,7 +297,14 @@ impl MemoryService {
     }
 
     pub fn status(&self, port: Option<u16>) -> Result<StatusReport> {
-        Ok(StatusReport { version: env!("CARGO_PKG_VERSION").to_string(), db_path: String::new(), memories_active: self.repo().count_active()?, embedding: self.embedding_status(), port })
+        Ok(StatusReport {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            db_path: String::new(),
+            memories_active: self.repo().count_active()?,
+            memories_pending: self.repo().count_pending()?,
+            embedding: self.embedding_status(),
+            port,
+        })
     }
 }
 

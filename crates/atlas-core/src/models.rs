@@ -77,6 +77,7 @@ pub struct StatusReport {
     pub version: String,
     pub db_path: String,
     pub memories_active: i64,
+    pub memories_pending: i64,
     pub embedding: String,
     pub port: Option<u16>,
 }

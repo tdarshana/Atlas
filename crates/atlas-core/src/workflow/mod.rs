@@ -251,6 +251,20 @@ impl WorkflowRepo {
         })
     }
 
+    /// Every run, across every workflow, whose `finished_at` is after `since`, newest
+    /// first. Read by the desktop app's notification poller (`GET /api/v1/runs`) to
+    /// find runs that finished or failed since its last tick; a run still `queued` or
+    /// `running` has no `finished_at` and so never matches.
+    pub fn runs_since(&self, since: DateTime<Utc>, limit: usize) -> Result<Vec<WorkflowRun>> {
+        self.db.with_conn(|c| {
+            let mut st = c.prepare(&format!(
+                "select {RUN_COLS} from workflow_runs where finished_at is not null and epoch_us(finished_at) > ? order by finished_at desc limit ?"
+            ))?;
+            let rows = st.query_map(params![since.timestamp_micros(), limit as i64], row_to_run)?;
+            Ok(rows.collect::<duckdb::Result<Vec<_>>>()?)
+        })
+    }
+
     pub fn get_run(&self, id: Uuid) -> Result<(WorkflowRun, Vec<WorkflowStep>)> {
         self.db.with_conn(|c| {
             let run = self.load_run(c, id)?;

@@ -17,6 +17,11 @@ pub const SETTING_KEYS: &[&str] = &[
     "board.stages",
     "board.mirror_tasks_md",
     "ui.theme",
+    "ui.autostart",
+    "ui.global_shortcut",
+    "ui.notify.review_pending",
+    "ui.notify.workflow_runs",
+    "ui.notify.daemon_errors",
     "workflows.docs_migrated",
     "mcp.disabled_tools",
 ];
@@ -67,6 +72,34 @@ const BASE_URL: &str = "extraction.base_url";
 const STAGES: &str = "board.stages";
 pub(crate) const MASKED: &str = "***";
 
+/// The modifier names `tauri-plugin-global-shortcut` accepts, lower-cased for a
+/// case-insensitive match.
+const ACCELERATOR_MODIFIERS: &[&str] =
+    &["cmd", "command", "cmdorctrl", "commandorcontrol", "ctrl", "control", "alt", "altgr", "option", "shift", "super", "meta"];
+
+/// Whether `s` is a Tauri accelerator: one or more modifiers and exactly one trailing
+/// key, joined by `+` (e.g. `"CmdOrCtrl+Shift+K"`). Checked here, before `ui.global_shortcut`
+/// ever reaches the desktop app's `shortcut_set` command, so a value that could never
+/// register with the global-shortcut plugin is refused at the settings boundary instead
+/// of failing silently in the running app.
+pub fn validate_accelerator(s: &str) -> Result<()> {
+    let bad = || AtlasError::Invalid(format!("'{s}' is not a valid shortcut: use one or more modifiers and one key joined by '+', e.g. 'CmdOrCtrl+Shift+K'"));
+    let parts: Vec<&str> = s.trim().split('+').map(str::trim).collect();
+    if parts.len() < 2 || parts.iter().any(|p| p.is_empty()) {
+        return Err(bad());
+    }
+    let (modifiers, key) = parts.split_at(parts.len() - 1);
+    for m in modifiers {
+        if !ACCELERATOR_MODIFIERS.contains(&m.to_lowercase().as_str()) {
+            return Err(bad());
+        }
+    }
+    if ACCELERATOR_MODIFIERS.contains(&key[0].to_lowercase().as_str()) {
+        return Err(bad());
+    }
+    Ok(())
+}
+
 /// Whether two base urls name the same endpoint. A trailing slash is not a change
 /// of endpoint, and `LlmClient` strips one anyway before building its request url.
 pub(crate) fn same_endpoint(a: &str, b: &str) -> bool {
@@ -116,6 +149,20 @@ fn check_type(key: &str, value: &Value) -> Result<()> {
         "ui.theme" => match value.as_str() {
             Some("dark") | Some("light") => {}
             _ => return wrong("\"dark\" or \"light\""),
+        },
+        // Mirrors of desktop-only Tauri plugin state (autostart, the notification
+        // toggles), kept here so a second client opens on the same settings.
+        "ui.autostart" | "ui.notify.review_pending" | "ui.notify.workflow_runs" | "ui.notify.daemon_errors" => {
+            if !value.is_boolean() {
+                return wrong("a boolean");
+            }
+        }
+        // Checked as an accelerator string, not just "a string": a shortcut the
+        // global-shortcut plugin could never register would otherwise be stored and
+        // fail silently in the running app.
+        "ui.global_shortcut" => match value.as_str() {
+            Some(s) => validate_accelerator(s)?,
+            None => return wrong("a keyboard accelerator string"),
         },
         // A tool name outside the known list can never match a real tool, so it would
         // silently do nothing while looking like it disabled something.
@@ -264,6 +311,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn validate_accelerator_accepts_modifiers_plus_one_key() {
+        assert!(validate_accelerator("CmdOrCtrl+Shift+K").is_ok());
+        assert!(validate_accelerator("Alt+Space").is_ok());
+        assert!(validate_accelerator(" Ctrl + Shift + P ").is_ok(), "surrounding whitespace is trimmed");
+        assert!(validate_accelerator("ctrl+shift+k").is_ok(), "modifiers are case-insensitive");
+    }
+
+    #[test]
+    fn validate_accelerator_rejects_a_bare_key_or_a_key_less_combo() {
+        assert!(validate_accelerator("K").is_err(), "no modifier");
+        assert!(validate_accelerator("").is_err());
+        assert!(validate_accelerator("Cmd+").is_err(), "trailing separator with no key");
+        assert!(validate_accelerator("Cmd+Shift").is_err(), "ends on a modifier, not a key");
+        assert!(validate_accelerator("Bogus+K").is_err(), "unknown modifier");
+    }
+
+    #[test]
     fn unknown_keys_are_rejected_before_any_write() {
         let db = Db::open_in_memory().unwrap();
         let repo = SettingsRepo::new(&db);
@@ -297,6 +361,16 @@ mod tests {
             ("mcp.disabled_tools", Value::String("memory_review".into())),
             ("mcp.disabled_tools", serde_json::json!(["memory_review", "no_such_tool"])),
             ("mcp.disabled_tools", serde_json::json!([1])),
+            ("ui.autostart", Value::String("yes".into())),
+            ("ui.notify.review_pending", Value::from(1)),
+            ("ui.notify.workflow_runs", Value::String("true".into())),
+            ("ui.notify.daemon_errors", serde_json::json!({})),
+            ("ui.global_shortcut", Value::from(1)),
+            ("ui.global_shortcut", Value::String("K".into())),
+            ("ui.global_shortcut", Value::String("Cmd+".into())),
+            ("ui.global_shortcut", Value::String("Cmd+Shift".into())),
+            ("ui.global_shortcut", Value::String("Bogus+K".into())),
+            ("ui.global_shortcut", Value::String("".into())),
         ];
         for (key, value) in bad {
             let values = Map::from_iter([((*key).to_string(), value.clone())]);
@@ -332,9 +406,15 @@ mod tests {
             ("embedding.model".to_string(), Value::Null),
             ("ui.theme".to_string(), Value::String("light".into())),
             ("mcp.disabled_tools".to_string(), serde_json::json!(["project_connect", "memory_review"])),
+            ("ui.autostart".to_string(), Value::from(true)),
+            ("ui.notify.review_pending".to_string(), Value::from(true)),
+            ("ui.notify.workflow_runs".to_string(), Value::from(false)),
+            ("ui.notify.daemon_errors".to_string(), Value::from(true)),
+            ("ui.global_shortcut".to_string(), Value::String("CmdOrCtrl+Shift+K".into())),
         ]);
         repo.set_many(&values, "t").unwrap();
         assert_eq!(repo.get_raw("ui.theme").unwrap(), Some(Value::String("light".into())));
+        assert_eq!(repo.get_raw("ui.global_shortcut").unwrap(), Some(Value::String("CmdOrCtrl+Shift+K".into())));
         assert_eq!(repo.get_raw("mcp.disabled_tools").unwrap(), Some(serde_json::json!(["project_connect", "memory_review"])));
         assert_eq!(repo.get_raw("extraction.enabled").unwrap(), Some(Value::from(true)));
         assert_eq!(repo.get_raw("daemon.port").unwrap(), Some(Value::from(7433)));

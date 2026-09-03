@@ -226,10 +226,13 @@ fn query_flag<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<boo
 
 #[derive(Deserialize)] pub struct WorkflowListQ { #[serde(default)] pub project_id: Option<Uuid> }
 #[derive(Deserialize)] pub struct RunsQ { #[serde(default)] pub limit: Option<usize> }
+#[derive(Deserialize)] pub struct AllRunsQ { #[serde(default)] pub since: Option<DateTime<Utc>>, #[serde(default)] pub limit: Option<usize> }
 #[derive(Deserialize)] pub struct RunWorkflowBody { #[serde(default)] pub trigger: Option<TriggerKind>, #[serde(default)] pub input: Option<String> }
 #[derive(Serialize)] pub struct RunDetail { pub run: WorkflowRun, pub steps: Vec<WorkflowStep> }
 /// `GET /workflows/{id}/runs?limit=` default, for a caller who leaves it off.
 const DEFAULT_RUNS_LIMIT: usize = 20;
+/// `GET /runs?since=&limit=` default, for a caller who leaves it off.
+const DEFAULT_ALL_RUNS_LIMIT: usize = 50;
 
 // ---- search ----
 
@@ -265,6 +268,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/workflows/{id}", get(get_workflow).patch(patch_workflow).delete(delete_workflow))
         .route("/api/v1/workflows/{id}/run", post(run_workflow))
         .route("/api/v1/workflows/{id}/runs", get(list_runs))
+        .route("/api/v1/runs", get(list_all_runs))
         .route("/api/v1/runs/{id}", get(get_run))
         .route("/api/v1/runs/{id}/cancel", post(cancel_run))
         .route("/api/v1/runs/{id}/export", get(export_run))
@@ -520,6 +524,13 @@ async fn run_workflow(State(s): State<AppState>, ApiPath(id): ApiPath<String>, A
 }
 async fn list_runs(State(s): State<AppState>, ApiPath(id): ApiPath<String>, ApiQuery(q): ApiQuery<RunsQ>) -> Result<Json<Vec<WorkflowRun>>, ApiError> {
     Ok(Json(s.backend.list_runs(&id, q.limit.unwrap_or(DEFAULT_RUNS_LIMIT)).await?))
+}
+/// `GET /api/v1/runs?since=&limit=`: every run across every workflow that finished
+/// after `since` (default the epoch, so an absent `since` is every finished run),
+/// newest first. The desktop app's notification poller is the only caller today.
+async fn list_all_runs(State(s): State<AppState>, ApiQuery(q): ApiQuery<AllRunsQ>) -> Result<Json<Vec<WorkflowRun>>, ApiError> {
+    let since = q.since.unwrap_or_else(|| DateTime::<Utc>::from_timestamp(0, 0).unwrap());
+    Ok(Json(s.backend.runs_since(since, q.limit.unwrap_or(DEFAULT_ALL_RUNS_LIMIT)).await?))
 }
 async fn get_run(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Result<Json<RunDetail>, ApiError> {
     let (run, steps) = s.backend.get_run(id).await?;

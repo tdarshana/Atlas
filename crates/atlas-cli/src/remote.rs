@@ -372,6 +372,11 @@ impl Backend for RemoteBackend {
         url.query_pairs_mut().append_pair("limit", &limit.to_string());
         Self::handle(self.client.get(url).send().await.map_err(Self::net)?).await
     }
+    async fn runs_since(&self, since: DateTime<Utc>, limit: usize) -> Result<Vec<WorkflowRun>> {
+        let mut url = reqwest::Url::parse(&format!("{}/runs", self.base)).map_err(|e| AtlasError::Other(e.to_string()))?;
+        url.query_pairs_mut().append_pair("since", &since.to_rfc3339()).append_pair("limit", &limit.to_string());
+        Self::handle(self.client.get(url).send().await.map_err(Self::net)?).await
+    }
     async fn get_run(&self, run_id: Uuid) -> Result<(WorkflowRun, Vec<WorkflowStep>)> {
         let detail: RunDetail = Self::handle(self.client.get(format!("{}/runs/{run_id}", self.base)).send().await.map_err(Self::net)?).await?;
         Ok((detail.run, detail.steps))

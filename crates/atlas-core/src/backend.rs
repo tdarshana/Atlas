@@ -166,6 +166,8 @@ pub trait Backend: Send + Sync + 'static {
     /// at a time.
     async fn run_workflow(&self, id_or_name: &str, trigger: TriggerKind, actor: &str, input: Option<String>) -> Result<WorkflowRun>;
     async fn list_runs(&self, id_or_name: &str, limit: usize) -> Result<Vec<WorkflowRun>>;
+    /// Every run, across every workflow, that finished after `since`, newest first.
+    async fn runs_since(&self, since: DateTime<Utc>, limit: usize) -> Result<Vec<WorkflowRun>>;
     async fn get_run(&self, run_id: Uuid) -> Result<(WorkflowRun, Vec<WorkflowStep>)>;
     async fn cancel_run(&self, run_id: Uuid, actor: &str) -> Result<WorkflowRun>;
     /// The run's full log as plain text: a header line, then one `ts level [step] text`
@@ -608,6 +610,7 @@ impl Backend for LocalBackend {
         let workflow = self.workflows.get(id_or_name)?;
         self.workflows.list_runs(workflow.id, limit)
     }
+    async fn runs_since(&self, since: DateTime<Utc>, limit: usize) -> Result<Vec<WorkflowRun>> { self.workflows.runs_since(since, limit) }
     async fn get_run(&self, run_id: Uuid) -> Result<(WorkflowRun, Vec<WorkflowStep>)> { self.workflows.get_run(run_id) }
     async fn cancel_run(&self, run_id: Uuid, actor: &str) -> Result<WorkflowRun> { self.workflows.cancel_run(run_id, actor) }
     async fn export_run_log(&self, run_id: Uuid) -> Result<String> {

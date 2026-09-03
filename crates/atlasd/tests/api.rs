@@ -131,6 +131,27 @@ async fn json_api_round_trip() {
     assert!(daemon_json.contains(&format!("\"port\":{}", d.port)) || daemon_json.contains(&format!("\"port\": {}", d.port)));
 }
 
+/// `memories_pending` counts memories set to `pending`, separately from
+/// `memories_active`, so the desktop app's notification poller can tell the two apart.
+#[tokio::test]
+async fn status_reports_the_pending_memory_count() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+
+    let st: serde_json::Value = c.get(format!("{base}/status")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(st["memories_pending"], 0, "{st}");
+
+    let created: serde_json::Value = c.post(format!("{base}/memories")).json(&serde_json::json!({"scope":"global","kind":"fact","text":"pending fact"})).send().await.unwrap().json().await.unwrap();
+    let id = created["id"].as_str().unwrap();
+    let set = c.post(format!("{base}/memories/{id}/status")).json(&serde_json::json!({"status":"pending"})).send().await.unwrap();
+    assert_eq!(set.status(), 200);
+
+    let st: serde_json::Value = c.get(format!("{base}/status")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(st["memories_pending"], 1, "{st}");
+    assert_eq!(st["memories_active"], 0, "{st}");
+}
+
 /// One JSON-RPC round trip over streamable HTTP. The reply may come back as a bare JSON
 /// body or as an SSE stream, so the raw text is returned and callers assert against it.
 async fn rpc(c: &reqwest::Client, url: &str, session: &Option<String>, body: serde_json::Value) -> String {
@@ -1805,6 +1826,49 @@ async fn workflow_run_executes_two_actions_and_succeeds() {
     assert_eq!(export.status(), 200);
     let text = export.text().await.unwrap();
     assert!(text.contains("[step0]") && text.contains("[step1]"), "{text}");
+}
+
+/// `GET /api/v1/runs?since=&limit=` lists finished runs across every workflow, newest
+/// first, and a `since` set to just after the run finished excludes it: the notification
+/// poller's own use of the parameter.
+#[tokio::test]
+async fn all_runs_route_lists_runs_finished_after_since() {
+    let stub = stub_llm_with_reply("step done").await;
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    c.put(format!("{base}/settings")).json(&serde_json::json!({
+        "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub", "extraction.api_key": "k",
+    })).send().await.unwrap();
+
+    // `Z`-suffixed rather than the `+00:00` offset form `to_rfc3339` defaults to: a raw
+    // `+` in a query string is form-decoded as a space, which would corrupt the value.
+    let before = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+
+    let workflow = create_workflow(&c, &base, "nightly-summary", &["do the thing"], false, false).await;
+    let wid = workflow["id"].as_str().unwrap();
+    let run: serde_json::Value = c.post(format!("{base}/workflows/{wid}/run")).json(&serde_json::json!({})).send().await.unwrap().json().await.unwrap();
+    let run_id = run["id"].as_str().unwrap().to_string();
+    let detail = wait_for_run(&c, &base, &run_id).await;
+    assert_eq!(detail["run"]["status"], "success", "{detail}");
+
+    // No `since`: the run is in the default (epoch-anchored) window.
+    let all: serde_json::Value = c.get(format!("{base}/runs")).send().await.unwrap().json().await.unwrap();
+    let rows = all.as_array().unwrap();
+    assert!(rows.iter().any(|r| r["id"] == run_id), "{all}");
+
+    // `since` set before the run started: still included.
+    let since_before: serde_json::Value = c.get(format!("{base}/runs?since={before}")).send().await.unwrap().json().await.unwrap();
+    assert!(since_before.as_array().unwrap().iter().any(|r| r["id"] == run_id), "{since_before}");
+
+    // `since` set after the run finished: excluded.
+    let after = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+    let since_after: serde_json::Value = c.get(format!("{base}/runs?since={after}")).send().await.unwrap().json().await.unwrap();
+    assert!(!since_after.as_array().unwrap().iter().any(|r| r["id"] == run_id), "{since_after}");
+
+    // `limit` is honoured.
+    let limited: serde_json::Value = c.get(format!("{base}/runs?limit=0")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(limited.as_array().unwrap().len(), 0, "{limited}");
 }
 
 /// The output node's trailing JSON block turns into a pending memory (its confidence
