@@ -81,16 +81,13 @@ fn project_agent_sync_export_and_import_round_trip() {
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("Imperative mood"), "the body should have been read from stdin: {out}");
 
-    let release = work.path().join("release.md");
-    std::fs::write(&release, "Tag, build, publish.\n").unwrap();
-    let (code, _, err) = run(&["workflow", "save", "release", "--body-file", release.to_str().unwrap()]);
+    // Workflows (Phase 9) are a graph-shaped API of their own now, not a document:
+    // `atlas workflow` no longer has `save`/`delete`, just `list`/`show`/`run`/`runs`/
+    // `log`/`cancel`. There is none to list yet, so this only checks the command wires
+    // up and prints its table header.
+    let (code, out, err) = run(&["workflow", "list"]);
     assert_eq!(code, 0, "{err}");
-    let (_, out, _) = run(&["workflow", "list"]);
-    assert!(out.contains("release"), "workflow list should show the saved workflow: {out}");
-    let (code, _, err) = run(&["workflow", "delete", "release"]);
-    assert_eq!(code, 0, "{err}");
-    let (_, out, _) = run(&["workflow", "list"]);
-    assert!(!out.contains("release"), "delete should have removed the workflow: {out}");
+    assert!(out.contains("NAME"), "workflow list should print a table: {out}");
 
     let (code, out, err) = run(&["project", "show", repo_path]);
     assert_eq!(code, 0, "{err}");
@@ -273,4 +270,50 @@ fn mcp_stdio_shim_lists_tools() {
     let _ = child.wait();
     let listing = listing.expect("atlas mcp produced no tools/list response within 30s");
     for t in ["remember", "recall", "forget", "status"] { assert!(listing.contains(&format!("\"name\":\"{t}\"")), "tools/list missing {t}: {listing}"); }
+}
+
+/// `atlas workflow` has no `save`: a workflow is a graph, seeded here straight against
+/// the HTTP API the way a GUI would. `atlas workflow list` must show it, and `atlas
+/// workflow run NAME` must start it and print the run number `POST .../run` answered
+/// with, even though the run itself will fail (extraction is not configured).
+#[test]
+fn workflow_list_and_run_via_the_cli() {
+    let daemon = TestDaemon::new();
+    assert!(daemon.cmd().args(["daemon", "start"]).status().unwrap().success());
+
+    let base = format!("http://127.0.0.1:{}/api/v1", daemon.port);
+    let graph = serde_json::json!({
+        "nodes": [
+            {"id": "t", "kind": "trigger", "position": {"x": 0.0, "y": 0.0}, "data": {"kind": "manual"}},
+            {"id": "a", "kind": "action", "position": {"x": 240.0, "y": 0.0}, "data": {"name": "step", "instructions": "do it", "agent": "desktop", "practices": [], "memories": null}},
+            {"id": "o", "kind": "output", "position": {"x": 480.0, "y": 0.0}, "data": {"propose_memories": false, "file_tasks": false}},
+        ],
+        "edges": [
+            {"id": "t-a", "source": "t", "target": "a"},
+            {"id": "a-o", "source": "a", "target": "o"},
+        ],
+    });
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let c = reqwest::Client::new();
+        let r = c
+            .post(format!("{base}/workflows"))
+            .json(&serde_json::json!({"name": "cli-release", "trigger": {"kind": "manual"}, "graph": graph, "enabled": true}))
+            .send()
+            .await
+            .unwrap();
+        let status = r.status();
+        assert_eq!(status, 201, "{}", r.text().await.unwrap());
+    });
+
+    let out = daemon.cmd().args(["workflow", "list"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let listed = String::from_utf8_lossy(&out.stdout);
+    assert!(listed.contains("cli-release"), "{listed}");
+
+    let out = daemon.cmd().args(["workflow", "run", "cli-release"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let ran = String::from_utf8_lossy(&out.stdout);
+    assert!(ran.contains("run #1"), "{ran}");
+
+    assert!(daemon.cmd().args(["daemon", "stop"]).status().unwrap().success());
 }

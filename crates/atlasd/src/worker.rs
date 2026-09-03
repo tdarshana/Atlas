@@ -83,6 +83,10 @@ async fn drain(backend: &Arc<LocalBackend>) {
                 let (j, b) = (job.clone(), backend.clone());
                 run_supervised(move || async move { extract::run_project_summary(&j, &b).await }).await
             }
+            "workflow_run" => {
+                let (j, b) = (job.clone(), backend.clone());
+                run_supervised(move || async move { atlas_core::workflow::run::run_workflow(&j, &b).await }).await
+            }
             #[cfg(test)]
             PANIC_KIND => {
                 // Panics while the DuckDB connection is held, which is the case that

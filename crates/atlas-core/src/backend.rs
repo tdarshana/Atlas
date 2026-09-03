@@ -155,6 +155,23 @@ pub trait Backend: Send + Sync + 'static {
     async fn set_project_stages(&self, project_id: Uuid, stages: Option<Vec<Stage>>, renames: HashMap<String, String>, actor: &str) -> Result<StageList>;
     async fn task_counts(&self, project_id: Option<Uuid>) -> Result<Vec<(String, i64)>>;
 
+    // ---- workflows (Phase 9) ----
+    async fn list_workflows(&self, project_id: Option<Uuid>) -> Result<Vec<Workflow>>;
+    async fn get_workflow(&self, id_or_name: &str) -> Result<Workflow>;
+    async fn create_workflow(&self, w: NewWorkflow, actor: &str) -> Result<Workflow>;
+    async fn update_workflow(&self, id_or_name: &str, patch: WorkflowPatch, actor: &str) -> Result<Workflow>;
+    async fn delete_workflow(&self, id_or_name: &str, actor: &str) -> Result<()>;
+    /// Creates a queued run and enqueues the job that executes it. `Conflict` when the
+    /// workflow already has a run queued or running: only one run of a workflow moves
+    /// at a time.
+    async fn run_workflow(&self, id_or_name: &str, trigger: TriggerKind, actor: &str, input: Option<String>) -> Result<WorkflowRun>;
+    async fn list_runs(&self, id_or_name: &str, limit: usize) -> Result<Vec<WorkflowRun>>;
+    async fn get_run(&self, run_id: Uuid) -> Result<(WorkflowRun, Vec<WorkflowStep>)>;
+    async fn cancel_run(&self, run_id: Uuid) -> Result<WorkflowRun>;
+    /// The run's full log as plain text: a header line, then one `ts level [step] text`
+    /// line per log line, across every step in order.
+    async fn export_run_log(&self, run_id: Uuid) -> Result<String>;
+
     // ---- search ----
     async fn search(&self, q: SearchQuery) -> Result<SearchResult>;
 }
@@ -540,6 +557,43 @@ impl Backend for LocalBackend {
         self.tasks.set_project_stages(project_id, stages, &renames, actor)
     }
     async fn task_counts(&self, project_id: Option<Uuid>) -> Result<Vec<(String, i64)>> { self.tasks.counts_by_stage(project_id) }
+
+    async fn list_workflows(&self, project_id: Option<Uuid>) -> Result<Vec<Workflow>> { self.workflows.list(project_id) }
+    async fn get_workflow(&self, id_or_name: &str) -> Result<Workflow> { self.workflows.get(id_or_name) }
+    async fn create_workflow(&self, w: NewWorkflow, actor: &str) -> Result<Workflow> { self.workflows.create(&w, actor) }
+    async fn update_workflow(&self, id_or_name: &str, patch: WorkflowPatch, actor: &str) -> Result<Workflow> {
+        self.workflows.update(id_or_name, &patch, actor)
+    }
+    async fn delete_workflow(&self, id_or_name: &str, actor: &str) -> Result<()> { self.workflows.delete(id_or_name, actor) }
+    async fn run_workflow(&self, id_or_name: &str, trigger: TriggerKind, actor: &str, input: Option<String>) -> Result<WorkflowRun> {
+        let workflow = self.workflows.get(id_or_name)?;
+        if self.workflows.has_pending_run(workflow.id)? {
+            return Err(AtlasError::Conflict(format!("workflow '{}' already has a run queued or running", workflow.name)));
+        }
+        let run = self.workflows.create_run(workflow.id, trigger)?;
+        self.jobs.enqueue(
+            "workflow_run",
+            serde_json::json!({"workflow_id": workflow.id, "run_id": run.id, "trigger": trigger.as_str(), "actor": actor, "input": input}),
+        )?;
+        self.queue.notify.notify_one();
+        Ok(run)
+    }
+    async fn list_runs(&self, id_or_name: &str, limit: usize) -> Result<Vec<WorkflowRun>> {
+        let workflow = self.workflows.get(id_or_name)?;
+        self.workflows.list_runs(workflow.id, limit)
+    }
+    async fn get_run(&self, run_id: Uuid) -> Result<(WorkflowRun, Vec<WorkflowStep>)> { self.workflows.get_run(run_id) }
+    async fn cancel_run(&self, run_id: Uuid) -> Result<WorkflowRun> { self.workflows.cancel_run(run_id) }
+    async fn export_run_log(&self, run_id: Uuid) -> Result<String> {
+        let (run, steps) = self.workflows.get_run(run_id)?;
+        let mut out = format!("workflow run {} #{} — {}\n", run.id, run.number, run.status);
+        for step in &steps {
+            for line in &step.log {
+                out.push_str(&format!("{} {} [{}] {}\n", line.ts.to_rfc3339(), line.level, step.name, line.text));
+            }
+        }
+        Ok(out)
+    }
 
     async fn search(&self, q: SearchQuery) -> Result<SearchResult> {
         let memories = crate::memories::MemoryRepo::new(&self.db);

@@ -72,6 +72,20 @@ pub struct IngestTranscriptArgs {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct WorkflowRunArgs {
+    /// The workflow's name (or id).
+    pub name: String,
+    /// Text for the first action's "Input:" line, when the workflow expects one.
+    pub input: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct WorkflowStatusArgs {
+    /// A run id returned by workflow_run.
+    pub run_id: Uuid,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ConnectProjectArgs {
     /// Absolute path to the project root. Any directory inside the repository works.
     pub root_path: PathBuf,
@@ -575,6 +589,31 @@ impl<B: Backend> AtlasMcp<B> {
         })?;
         json_result(&serde_json::json!({"job_id": job_id}))
     }
+
+    #[tool(description = "Start a workflow run by name and answer with its run id and number. Call workflow_status to follow it. Fails with a conflict if the workflow already has a run queued or running.")]
+    async fn workflow_run(&self, Parameters(a): Parameters<WorkflowRunArgs>) -> Result<CallToolResult, McpError> {
+        // Reached over MCP, a run always counts as a `prompt` trigger: it was an agent,
+        // not the schedule or a human at the CLI, that asked for it.
+        let run = self.backend.run_workflow(&a.name, TriggerKind::Prompt, &self.source_tool, a.input).await.map_err(board_err)?;
+        json_result(&serde_json::json!({"run_id": run.id, "number": run.number}))
+    }
+
+    #[tool(description = "Report a workflow run's status: the run's own state plus a summary of each step (name, status, duration, last log line). Call after workflow_run to follow progress.")]
+    async fn workflow_status(&self, Parameters(a): Parameters<WorkflowStatusArgs>) -> Result<CallToolResult, McpError> {
+        let (run, steps) = self.backend.get_run(a.run_id).await.map_err(board_err)?;
+        let steps: Vec<_> = steps
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "name": s.name,
+                    "status": s.status,
+                    "duration_ms": s.finished_at.map(|f| (f - s.started_at).num_milliseconds()),
+                    "last_log": s.log.last().map(|l| l.text.clone()),
+                })
+            })
+            .collect();
+        json_result(&serde_json::json!({"run": run, "steps": steps}))
+    }
 }
 
 const AGENTS: &str = "atlas://agents/";
@@ -716,7 +755,7 @@ mod tests {
         let names: Vec<String> = s.tool_router.list_all().into_iter().map(|t| t.name.to_string()).collect();
         for n in ["remember", "recall", "forget", "status", "project_context", "connect_project", "list_agents",
                   "get_agent", "save_agent", "list_practices", "get_practice", "list_workflows", "get_workflow",
-                  "ingest_transcript"] {
+                  "ingest_transcript", "workflow_run", "workflow_status"] {
             assert!(names.contains(&n.to_string()), "missing {n}");
         }
     }
@@ -1177,5 +1216,16 @@ mod tests {
         let untouched: atlas_core::models::Task = serde_json::from_str(&text_of(&untouched)).unwrap();
         assert_eq!(untouched.assignee, None);
         assert_eq!(untouched.title, "renamed");
+    }
+
+    /// `workflow_run` on a name nothing was ever saved under answers `invalid_params`,
+    /// the same shape every other lookup-by-name failure takes.
+    #[tokio::test]
+    async fn workflow_run_of_an_unknown_name_is_invalid_params() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(dir.path()), None, false).unwrap());
+        let s = AtlasMcp::new(backend);
+        let err = s.workflow_run(Parameters(WorkflowRunArgs { name: "does-not-exist".into(), input: None })).await.unwrap_err();
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS, "{err:?}");
     }
 }

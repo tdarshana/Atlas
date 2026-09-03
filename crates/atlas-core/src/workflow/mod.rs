@@ -14,6 +14,7 @@
 
 pub mod graph;
 pub mod migrate_docs;
+pub mod run;
 
 use crate::db::Db;
 use crate::memories::MemoryRepo;

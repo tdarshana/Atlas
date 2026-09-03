@@ -6,6 +6,7 @@ pub mod import;
 pub mod ingest;
 pub mod project;
 pub mod sync;
+pub mod workflow;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};

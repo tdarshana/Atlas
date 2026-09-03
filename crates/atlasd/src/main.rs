@@ -1,4 +1,5 @@
 mod http;
+mod scheduler;
 mod state;
 mod worker;
 
@@ -41,6 +42,18 @@ async fn main() -> anyhow::Result<()> {
     // without ever taking the port hostage.
     let mut backend = LocalBackend::open(&paths, Some(args.port), !args.no_embed).map_err(|e| db_open_error(&paths, e))?;
 
+    // One-time move from Markdown workflow documents to real workflows. Idempotent: a
+    // second daemon start finds the settings flag already set and does nothing.
+    {
+        let docs = atlas_core::library::DocRepo::new(&backend.db, atlas_core::models::DocKind::Workflow);
+        let settings = atlas_core::settings::SettingsRepo::new(&backend.db);
+        match atlas_core::workflow::migrate_docs::migrate_workflow_docs(&docs, &backend.workflows, &settings, "migrate") {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("migrated {n} workflow document(s) into real workflows"),
+            Err(e) => tracing::warn!("workflow document migration failed: {e}"),
+        }
+    }
+
     // `--port 0` asks the OS for an ephemeral port; the listener is the only way to learn
     // which one it picked, so bind before anything downstream (daemon.json, the status
     // report, the log line) needs the real port. Non-zero ports bind to the exact number
@@ -54,6 +67,9 @@ async fn main() -> anyhow::Result<()> {
     // One worker, in this process: it drains the `jobs` table the API writes into,
     // and it is the only consumer, so a job is never claimed twice.
     tokio::spawn(worker::run(backend.clone()));
+    // The workflow scheduler, ticking independently: it only enqueues jobs, the worker
+    // above still runs them.
+    tokio::spawn(scheduler::run(backend.clone(), chrono::Utc::now()));
 
     let mcp_backend = backend.clone();
     let mcp = StreamableHttpService::new(

@@ -91,6 +91,23 @@ impl RemoteBackend {
         }
         Ok(url)
     }
+
+    /// A `/workflows/{id_or_name}` URL, with `more` path segments appended (e.g.
+    /// `["run"]`), percent-encoding `id_or_name` through `Url::path_segments_mut`.
+    /// Unlike an agent or doc name, a workflow name is only bounded by length, not by
+    /// a safe character set, so it can carry a slash, a space, or anything else that
+    /// would otherwise split or mangle the path if it were interpolated raw.
+    fn workflow_url(base: &str, id_or_name: &str, more: &[&str]) -> Result<reqwest::Url> {
+        let mut url = reqwest::Url::parse(&format!("{base}/workflows")).map_err(|e| AtlasError::Other(e.to_string()))?;
+        {
+            let mut segs = url.path_segments_mut().map_err(|_| AtlasError::Other("the daemon base URL cannot be a base".into()))?;
+            segs.push(id_or_name);
+            for part in more {
+                segs.push(part);
+            }
+        }
+        Ok(url)
+    }
 }
 
 #[async_trait::async_trait]
@@ -153,13 +170,39 @@ impl Backend for RemoteBackend {
     async fn save_agent(&self, a: NewAgent, actor: &str) -> Result<Agent> { Self::handle(self.client.post(format!("{}/agents?actor={actor}", self.base)).json(&a).send().await.map_err(Self::net)?).await }
     async fn delete_agent(&self, name: &str, actor: &str) -> Result<()> { Self::handle_empty(self.client.delete(format!("{}/agents/{name}?actor={actor}", self.base)).send().await.map_err(Self::net)?).await }
 
+    // `DocKind::Workflow` used to be a Markdown document, served at `/api/v1/workflows`.
+    // The Phase 9 migration (run once at daemon startup) turns every one of those into a
+    // real workflow and deletes the document, and that HTTP path now serves the real
+    // workflow API below instead. Nothing is ever stored under this doc kind again, so
+    // these four answer it locally rather than reaching a path that no longer means what
+    // its name says: a caller (`atlas export`/`import`, and the MCP `list_workflows`/
+    // `get_workflow` tools this crate's stdio shim serves) sees an always-empty
+    // collection rather than a 404.
     async fn list_docs(&self, kind: DocKind, project_id: Option<Uuid>) -> Result<Vec<Doc>> {
+        if kind == DocKind::Workflow {
+            return Ok(vec![]);
+        }
         let project = project_id.map(|p| format!("?project_id={p}")).unwrap_or_default();
         Self::handle(self.client.get(format!("{}/{}{project}", self.base, docs_path(kind))).send().await.map_err(Self::net)?).await
     }
-    async fn get_doc(&self, kind: DocKind, name: &str) -> Result<Doc> { Self::handle(self.client.get(format!("{}/{}/{name}", self.base, docs_path(kind))).send().await.map_err(Self::net)?).await }
-    async fn save_doc(&self, kind: DocKind, d: NewDoc, actor: &str) -> Result<Doc> { Self::handle(self.client.post(format!("{}/{}?actor={actor}", self.base, docs_path(kind))).json(&d).send().await.map_err(Self::net)?).await }
-    async fn delete_doc(&self, kind: DocKind, name: &str, actor: &str) -> Result<()> { Self::handle_empty(self.client.delete(format!("{}/{}/{name}?actor={actor}", self.base, docs_path(kind))).send().await.map_err(Self::net)?).await }
+    async fn get_doc(&self, kind: DocKind, name: &str) -> Result<Doc> {
+        if kind == DocKind::Workflow {
+            return Err(AtlasError::NotFound(format!("workflow document {name}")));
+        }
+        Self::handle(self.client.get(format!("{}/{}/{name}", self.base, docs_path(kind))).send().await.map_err(Self::net)?).await
+    }
+    async fn save_doc(&self, kind: DocKind, d: NewDoc, actor: &str) -> Result<Doc> {
+        if kind == DocKind::Workflow {
+            return Err(AtlasError::Invalid("workflow documents are retired; create a workflow through the workflow API instead".into()));
+        }
+        Self::handle(self.client.post(format!("{}/{}?actor={actor}", self.base, docs_path(kind))).json(&d).send().await.map_err(Self::net)?).await
+    }
+    async fn delete_doc(&self, kind: DocKind, name: &str, actor: &str) -> Result<()> {
+        if kind == DocKind::Workflow {
+            return Err(AtlasError::NotFound(format!("workflow document {name}")));
+        }
+        Self::handle_empty(self.client.delete(format!("{}/{}/{name}?actor={actor}", self.base, docs_path(kind))).send().await.map_err(Self::net)?).await
+    }
 
     /// The daemon runs the sync, so the paths written are the daemon host's.
     async fn sync(&self, req: SyncRequest) -> Result<SyncReport> { Self::handle(self.client.post(format!("{}/sync", self.base)).json(&req).send().await.map_err(Self::net)?).await }
@@ -277,6 +320,52 @@ impl Backend for RemoteBackend {
         Ok(rows.into_iter().map(|r| (r.stage, r.count)).collect())
     }
 
+    // ---- workflows (Phase 9) ----
+
+    async fn list_workflows(&self, project_id: Option<Uuid>) -> Result<Vec<Workflow>> {
+        let project = project_id.map(|p| format!("?project_id={p}")).unwrap_or_default();
+        Self::handle(self.client.get(format!("{}/workflows{project}", self.base)).send().await.map_err(Self::net)?).await
+    }
+    async fn get_workflow(&self, id_or_name: &str) -> Result<Workflow> {
+        Self::handle(self.client.get(Self::workflow_url(&self.base, id_or_name, &[])?).send().await.map_err(Self::net)?).await
+    }
+    async fn create_workflow(&self, w: NewWorkflow, actor: &str) -> Result<Workflow> {
+        Self::handle(self.client.post(format!("{}/workflows", self.base)).header("X-Atlas-Actor", actor).json(&w).send().await.map_err(Self::net)?).await
+    }
+    async fn update_workflow(&self, id_or_name: &str, patch: WorkflowPatch, actor: &str) -> Result<Workflow> {
+        Self::handle(
+            self.client.patch(Self::workflow_url(&self.base, id_or_name, &[])?).header("X-Atlas-Actor", actor).json(&patch).send().await.map_err(Self::net)?,
+        )
+        .await
+    }
+    async fn delete_workflow(&self, id_or_name: &str, actor: &str) -> Result<()> {
+        Self::handle_empty(self.client.delete(Self::workflow_url(&self.base, id_or_name, &[])?).header("X-Atlas-Actor", actor).send().await.map_err(Self::net)?).await
+    }
+    async fn run_workflow(&self, id_or_name: &str, trigger: TriggerKind, actor: &str, input: Option<String>) -> Result<WorkflowRun> {
+        Self::handle(
+            self.client.post(Self::workflow_url(&self.base, id_or_name, &["run"])?).header("X-Atlas-Actor", actor)
+                .json(&serde_json::json!({"trigger": trigger, "input": input})).send().await.map_err(Self::net)?,
+        )
+        .await
+    }
+    async fn list_runs(&self, id_or_name: &str, limit: usize) -> Result<Vec<WorkflowRun>> {
+        let mut url = Self::workflow_url(&self.base, id_or_name, &["runs"])?;
+        url.query_pairs_mut().append_pair("limit", &limit.to_string());
+        Self::handle(self.client.get(url).send().await.map_err(Self::net)?).await
+    }
+    async fn get_run(&self, run_id: Uuid) -> Result<(WorkflowRun, Vec<WorkflowStep>)> {
+        let detail: RunDetail = Self::handle(self.client.get(format!("{}/runs/{run_id}", self.base)).send().await.map_err(Self::net)?).await?;
+        Ok((detail.run, detail.steps))
+    }
+    async fn cancel_run(&self, run_id: Uuid) -> Result<WorkflowRun> {
+        Self::handle(self.client.post(format!("{}/runs/{run_id}/cancel", self.base)).send().await.map_err(Self::net)?).await
+    }
+    async fn export_run_log(&self, run_id: Uuid) -> Result<String> {
+        let r = self.client.get(format!("{}/runs/{run_id}/export", self.base)).send().await.map_err(Self::net)?;
+        if !r.status().is_success() { return Err(Self::error(r).await); }
+        r.text().await.map_err(|e| AtlasError::Other(e.to_string()))
+    }
+
     // ---- search ----
 
     async fn search(&self, q: SearchQuery) -> Result<SearchResult> {
@@ -284,6 +373,10 @@ impl Backend for RemoteBackend {
         Self::handle(self.client.get(url).send().await.map_err(Self::net)?).await
     }
 }
+
+/// The shape `GET /runs/{id}` answers with.
+#[derive(serde::Deserialize)]
+struct RunDetail { run: WorkflowRun, steps: Vec<WorkflowStep> }
 
 /// The shape `GET /tasks/counts` answers with, one row per board stage.
 #[derive(serde::Deserialize)]

@@ -42,8 +42,8 @@ enum Cmd {
     },
     /// Manage practices
     Practice { #[command(subcommand)] action: commands::doc::DocCmd },
-    /// Manage workflows
-    Workflow { #[command(subcommand)] action: commands::doc::DocCmd },
+    /// Inspect workflows and run them
+    Workflow { #[command(subcommand)] action: commands::workflow::WorkflowCmd },
     /// Write agent files and managed instruction blocks into a project or the home directory
     Sync(commands::sync::SyncArgs),
     /// Write the whole library to DIR as JSONL and Markdown
@@ -119,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Task { actor, action } => commands::board::run_task(action, &board_backend(&paths, cli.port, actor).await?).await?,
         Cmd::Board { actor, action } => commands::board::run_board(action, &board_backend(&paths, cli.port, actor).await?).await?,
         Cmd::Practice { action } => commands::doc::run(DocKind::Practice, action, &backend(&paths, cli.port).await?).await?,
-        Cmd::Workflow { action } => commands::doc::run(DocKind::Workflow, action, &backend(&paths, cli.port).await?).await?,
+        Cmd::Workflow { action } => commands::workflow::run(action, &backend(&paths, cli.port).await?).await?,
         Cmd::Sync(args) => commands::sync::run(args, &backend(&paths, cli.port).await?).await?,
         Cmd::Export { dir, force } => commands::export::run(dir, force, &backend(&paths, cli.port).await?).await?,
         Cmd::Import { dir } => commands::import::run(dir, &backend(&paths, cli.port).await?).await?,

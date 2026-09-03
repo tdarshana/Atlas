@@ -392,8 +392,8 @@ async fn projects_agents_docs_and_sync() {
 
     let r = c.post(format!("{base}/practices")).json(&serde_json::json!({"name":"commits","body":"imperative","tags":[],"project_id": pid})).send().await.unwrap();
     assert_eq!(r.status(), 201);
-    let w = c.post(format!("{base}/workflows")).json(&serde_json::json!({"name":"release","body":"tag then publish","tags":[]})).send().await.unwrap();
-    assert_eq!(w.status(), 201);
+    // `/workflows` now serves the real, graph-shaped workflow API (Phase 9), not a
+    // Markdown document: see the dedicated `workflow_*` tests below for that surface.
     let practices: serde_json::Value = c.get(format!("{base}/practices?project_id={pid}")).send().await.unwrap().json().await.unwrap();
     assert_eq!(practices[0]["name"], "commits");
 
@@ -402,7 +402,10 @@ async fn projects_agents_docs_and_sync() {
     let ctx: serde_json::Value = c.post(format!("{base}/projects/context")).json(&serde_json::json!({"root": repo.path()})).send().await.unwrap().json().await.unwrap();
     assert_eq!(ctx["project"]["id"], pid);
     assert_eq!(ctx["practices"][0]["name"], "commits");
-    assert_eq!(ctx["workflows"][0]["name"], "release");
+    // `ctx["workflows"]` still reads the retired Markdown-document workflow kind
+    // (`ProjectContext.workflows: Vec<Doc>`), which the Phase 9 migration empties for
+    // good; it is not the new graph-shaped workflow API.
+    assert!(ctx["workflows"].as_array().unwrap().is_empty(), "{ctx}");
     assert!(ctx["memories"].as_array().unwrap().iter().any(|h| h["memory"]["text"].as_str().unwrap().contains("fly.io")), "{ctx}");
 
     let targets = serde_json::json!(["claude", "codex", "agents_md", "claude_md"]);
@@ -1615,4 +1618,277 @@ async fn memory_search_can_be_narrowed_to_one_project() {
     assert_eq!(globals.status(), 200);
     let globals: serde_json::Value = globals.json().await.unwrap();
     assert_eq!(globals.as_array().unwrap().len(), 1, "{globals}");
+}
+
+// ---- workflows (Phase 9): runner, scheduler surface, routes, MCP ----
+
+/// A linear graph: one manual trigger, one action per entry in `instructions` (named
+/// `step0`, `step1`, ...), one output with the given flags. Every action runs as the
+/// `desktop` fallback agent, which needs no saved `Agent` row.
+fn linear_workflow_graph(instructions: &[&str], propose_memories: bool, file_tasks: bool) -> serde_json::Value {
+    let mut nodes = vec![serde_json::json!({"id": "t", "kind": "trigger", "position": {"x": 0.0, "y": 0.0}, "data": {"kind": "manual"}})];
+    let mut edges = vec![];
+    let mut prev = "t".to_string();
+    for (i, text) in instructions.iter().enumerate() {
+        let id = format!("a{i}");
+        nodes.push(serde_json::json!({
+            "id": id, "kind": "action", "position": {"x": 240.0 * (i as f64 + 1.0), "y": 0.0},
+            "data": {"name": format!("step{i}"), "instructions": text, "agent": "desktop", "practices": [], "memories": null},
+        }));
+        edges.push(serde_json::json!({"id": format!("{prev}-{id}"), "source": prev, "target": id}));
+        prev = id;
+    }
+    nodes.push(serde_json::json!({
+        "id": "o", "kind": "output", "position": {"x": 240.0 * (instructions.len() as f64 + 1.0), "y": 0.0},
+        "data": {"propose_memories": propose_memories, "file_tasks": file_tasks},
+    }));
+    edges.push(serde_json::json!({"id": format!("{prev}-o"), "source": prev, "target": "o"}));
+    serde_json::json!({"nodes": nodes, "edges": edges})
+}
+
+/// Creates a manual-trigger workflow with a `linear_workflow_graph` and answers with
+/// the created `Workflow` JSON.
+async fn create_workflow(c: &reqwest::Client, base: &str, name: &str, instructions: &[&str], propose_memories: bool, file_tasks: bool) -> serde_json::Value {
+    let graph = linear_workflow_graph(instructions, propose_memories, file_tasks);
+    let r = c
+        .post(format!("{base}/workflows"))
+        .json(&serde_json::json!({"name": name, "trigger": {"kind": "manual"}, "graph": graph, "enabled": true}))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(status, 201, "{body}");
+    body
+}
+
+/// Polls `GET /runs/{id}` until the run reaches success, failed or cancelled, for up
+/// to 10 s, and answers with `{ run, steps }`.
+async fn wait_for_run(c: &reqwest::Client, base: &str, run_id: &str) -> serde_json::Value {
+    for _ in 0..100 {
+        let detail: serde_json::Value = c.get(format!("{base}/runs/{run_id}")).send().await.unwrap().json().await.unwrap();
+        if matches!(detail["run"]["status"].as_str(), Some("success") | Some("failed") | Some("cancelled")) {
+            return detail;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("run {run_id} did not finish within 10s");
+}
+
+/// A two-action workflow runs both actions in order against the stub model, and each
+/// finished step carries its output and at least one INFO log line.
+#[tokio::test]
+async fn workflow_run_executes_two_actions_and_succeeds() {
+    let stub = stub_llm_with_reply("step done").await;
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    let put = c.put(format!("{base}/settings")).json(&serde_json::json!({
+        "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub", "extraction.api_key": "k",
+    })).send().await.unwrap();
+    assert_eq!(put.status(), 200);
+
+    let workflow = create_workflow(&c, &base, "release", &["tag the release", "publish the release"], false, false).await;
+    let wid = workflow["id"].as_str().unwrap();
+
+    let run = c.post(format!("{base}/workflows/{wid}/run")).json(&serde_json::json!({})).send().await.unwrap();
+    assert_eq!(run.status(), 202);
+    let run: serde_json::Value = run.json().await.unwrap();
+    assert_eq!(run["number"], 1, "{run}");
+    let run_id = run["id"].as_str().unwrap().to_string();
+
+    let detail = wait_for_run(&c, &base, &run_id).await;
+    assert_eq!(detail["run"]["status"], "success", "{detail}");
+    assert_eq!(detail["run"]["summary"]["steps"], 2, "{detail}");
+    let steps = detail["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 2, "{detail}");
+    for step in steps {
+        assert_eq!(step["status"], "success", "{step}");
+        assert_eq!(step["output"], "step done", "{step}");
+        let log = step["log"].as_array().unwrap();
+        assert!(log.iter().any(|l| l["level"] == "INFO"), "{step}");
+    }
+
+    // The export is plain text, one `ts level [step] text` line per log line.
+    let export = c.get(format!("{base}/runs/{run_id}/export")).send().await.unwrap();
+    assert_eq!(export.status(), 200);
+    let text = export.text().await.unwrap();
+    assert!(text.contains("[step0]") && text.contains("[step1]"), "{text}");
+}
+
+/// The output node's trailing JSON block turns into a pending memory (its confidence
+/// is below the default auto-accept threshold of 1.0) stamped `workflow/<name>`, and a
+/// filed task `created_by` the same identity.
+#[tokio::test]
+async fn workflow_output_proposes_a_pending_memory_and_files_a_task() {
+    let reply = "Done.\n\n```json\n{\"memories\": [{\"text\": \"the deploy target is fly.io\", \"kind\": \"fact\", \"confidence\": 0.4}], \"tasks\": [{\"title\": \"tag the release\"}]}\n```";
+    let stub = stub_llm_with_reply(reply).await;
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    c.put(format!("{base}/settings")).json(&serde_json::json!({
+        "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub", "extraction.api_key": "k",
+    })).send().await.unwrap();
+
+    let workflow = create_workflow(&c, &base, "wrap-up", &["summarise the release"], true, true).await;
+    let wname = workflow["name"].as_str().unwrap().to_string();
+    let wid = workflow["id"].as_str().unwrap();
+
+    let run: serde_json::Value = c.post(format!("{base}/workflows/{wid}/run")).json(&serde_json::json!({})).send().await.unwrap().json().await.unwrap();
+    let run_id = run["id"].as_str().unwrap().to_string();
+    let detail = wait_for_run(&c, &base, &run_id).await;
+    assert_eq!(detail["run"]["status"], "success", "{detail}");
+    assert_eq!(detail["run"]["summary"]["memories_proposed"], 1, "{detail}");
+    assert_eq!(detail["run"]["summary"]["tasks_filed"], 1, "{detail}");
+
+    let pending: serde_json::Value = c.get(format!("{base}/memories?status=pending")).send().await.unwrap().json().await.unwrap();
+    let rows = pending.as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{pending}");
+    assert_eq!(rows[0]["source_agent"], format!("workflow/{wname}"), "{pending}");
+    assert_eq!(rows[0]["source_tool"], "workflow", "{pending}");
+    assert_eq!(rows[0]["text"], "the deploy target is fly.io");
+
+    let tasks: serde_json::Value = c.get(format!("{base}/tasks")).send().await.unwrap().json().await.unwrap();
+    let trows = tasks.as_array().unwrap();
+    assert_eq!(trows.len(), 1, "{tasks}");
+    assert_eq!(trows[0]["created_by"], format!("workflow/{wname}"), "{tasks}");
+    assert_eq!(trows[0]["title"], "tag the release", "{tasks}");
+}
+
+/// A workflow run against a daemon with extraction off fails on its first action, and
+/// the step's log carries the same "extraction is disabled" text `POST /ingest`
+/// answers 409 with, as an ERR line.
+#[tokio::test]
+async fn workflow_run_fails_with_an_err_line_when_extraction_is_disabled() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    let workflow = create_workflow(&c, &base, "no-model", &["do the thing"], false, false).await;
+    let wid = workflow["id"].as_str().unwrap();
+
+    let run: serde_json::Value = c.post(format!("{base}/workflows/{wid}/run")).json(&serde_json::json!({})).send().await.unwrap().json().await.unwrap();
+    let run_id = run["id"].as_str().unwrap().to_string();
+    let detail = wait_for_run(&c, &base, &run_id).await;
+    assert_eq!(detail["run"]["status"], "failed", "{detail}");
+    let steps = detail["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 1, "{detail}");
+    let log = steps[0]["log"].as_array().unwrap();
+    assert!(
+        log.iter().any(|l| l["level"] == "ERR" && l["text"].as_str().unwrap().contains("extraction is disabled")),
+        "{steps:?}"
+    );
+}
+
+/// A second `POST .../run` while the first run of the same workflow is still queued
+/// or running is a 409, not a second run.
+#[tokio::test]
+async fn a_second_run_of_the_same_workflow_while_one_is_pending_is_a_conflict() {
+    let stub = stub_llm_with_delay("slow reply", Duration::from_secs(2)).await;
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    c.put(format!("{base}/settings")).json(&serde_json::json!({
+        "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub", "extraction.api_key": "k",
+    })).send().await.unwrap();
+    let workflow = create_workflow(&c, &base, "slow", &["take a while"], false, false).await;
+    let wid = workflow["id"].as_str().unwrap();
+
+    let first = c.post(format!("{base}/workflows/{wid}/run")).json(&serde_json::json!({})).send().await.unwrap();
+    assert_eq!(first.status(), 202);
+
+    let second = c.post(format!("{base}/workflows/{wid}/run")).json(&serde_json::json!({})).send().await.unwrap();
+    let status = second.status();
+    let body: serde_json::Value = second.json().await.unwrap();
+    assert_eq!(status, 409, "{body}");
+}
+
+/// Cancelling a run that is still queued behind another workflow's slow run leaves it
+/// `cancelled` with no steps at all: the worker sees the cancellation before it ever
+/// starts the first action.
+#[tokio::test]
+async fn cancelling_a_queued_run_is_skipped_by_the_worker() {
+    let stub = stub_llm_with_delay("slow reply", Duration::from_secs(2)).await;
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    c.put(format!("{base}/settings")).json(&serde_json::json!({
+        "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub", "extraction.api_key": "k",
+    })).send().await.unwrap();
+
+    // Two different workflows: the worker runs one job at a time, so the occupier's
+    // slow model call is what keeps the victim's job genuinely `queued` long enough to
+    // cancel it before the worker ever looks at it.
+    let occupier = create_workflow(&c, &base, "occupier", &["take a while"], false, false).await;
+    let occupier_run: serde_json::Value =
+        c.post(format!("{base}/workflows/{}/run", occupier["id"].as_str().unwrap())).json(&serde_json::json!({})).send().await.unwrap().json().await.unwrap();
+
+    let victim = create_workflow(&c, &base, "victim", &["never runs"], false, false).await;
+    let victim_run: serde_json::Value =
+        c.post(format!("{base}/workflows/{}/run", victim["id"].as_str().unwrap())).json(&serde_json::json!({})).send().await.unwrap().json().await.unwrap();
+    let victim_run_id = victim_run["id"].as_str().unwrap().to_string();
+
+    let cancelled: serde_json::Value = c.post(format!("{base}/runs/{victim_run_id}/cancel")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(cancelled["status"], "cancelled", "{cancelled}");
+
+    let detail: serde_json::Value = c.get(format!("{base}/runs/{victim_run_id}")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(detail["run"]["status"], "cancelled", "{detail}");
+    assert!(detail["steps"].as_array().unwrap().is_empty(), "the worker must not have started it: {detail}");
+
+    // The occupier still finishes normally once its slow call returns.
+    let occupier_run_id = occupier_run["id"].as_str().unwrap().to_string();
+    let finished = wait_for_run(&c, &base, &occupier_run_id).await;
+    assert_eq!(finished["run"]["status"], "success", "{finished}");
+}
+
+/// `workflow_run` and `workflow_status` are listed, a run started by name is followed
+/// to success, and `workflow_run` on a name nothing was ever saved under is
+/// `invalid_params` (JSON-RPC -32602), not an internal error.
+#[tokio::test]
+async fn mcp_workflow_tools_run_and_report_status() {
+    let stub = stub_llm_with_reply("ok").await;
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let url = format!("http://127.0.0.1:{}/mcp", d.port);
+    let c = reqwest::Client::new();
+    c.put(format!("{base}/settings")).json(&serde_json::json!({
+        "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub", "extraction.api_key": "k",
+    })).send().await.unwrap();
+    let workflow = create_workflow(&c, &base, "mcp-flow", &["do the thing"], false, false).await;
+    let wname = workflow["name"].as_str().unwrap().to_string();
+
+    let init = c.post(&url).header("Accept", "application/json, text/event-stream").header("Content-Type", "application/json")
+        .json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}))
+        .send().await.unwrap();
+    assert!(init.status().is_success(), "initialize failed: {}", init.status());
+    let session = init.headers().get("mcp-session-id").map(|v| v.to_str().unwrap().to_string());
+    let _ = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})).await;
+
+    let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).await;
+    for t in ["workflow_run", "workflow_status"] {
+        assert!(body.contains(&format!("\"name\":\"{t}\"")), "tools/list missing {t}: {body}");
+    }
+
+    let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"workflow_run","arguments":{"name":"does-not-exist"}}})).await;
+    let reply = rpc_json(&body);
+    assert_eq!(reply["error"]["code"], -32602, "{reply}");
+
+    let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"workflow_run","arguments":{"name": wname}}})).await;
+    let started = tool_json(&body);
+    assert_eq!(started["number"], 1, "{started}");
+    let run_id = started["run_id"].as_str().unwrap().to_string();
+
+    let mut last = serde_json::Value::Null;
+    for _ in 0..100 {
+        let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"workflow_status","arguments":{"run_id": run_id}}})).await;
+        last = tool_json(&body);
+        if matches!(last["run"]["status"].as_str(), Some("success") | Some("failed") | Some("cancelled")) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(last["run"]["status"], "success", "{last}");
+    let steps = last["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 1, "{last}");
+    assert_eq!(steps[0]["name"], "step0", "{last}");
+    assert_eq!(steps[0]["status"], "success", "{last}");
 }

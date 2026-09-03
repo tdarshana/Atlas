@@ -202,6 +202,15 @@ fn query_flag<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<boo
 #[derive(Deserialize)] pub struct SetProjectStagesBody { #[serde(default)] pub stages: Option<Vec<Stage>>, #[serde(default)] pub renames: HashMap<String, String> }
 #[derive(Serialize)] pub struct StageCount { pub stage: String, pub count: i64 }
 
+// ---- workflows (Phase 9) ----
+
+#[derive(Deserialize)] pub struct WorkflowListQ { #[serde(default)] pub project_id: Option<Uuid> }
+#[derive(Deserialize)] pub struct RunsQ { #[serde(default)] pub limit: Option<usize> }
+#[derive(Deserialize)] pub struct RunWorkflowBody { #[serde(default)] pub trigger: Option<TriggerKind>, #[serde(default)] pub input: Option<String> }
+#[derive(Serialize)] pub struct RunDetail { pub run: WorkflowRun, pub steps: Vec<WorkflowStep> }
+/// `GET /workflows/{id}/runs?limit=` default, for a caller who leaves it off.
+const DEFAULT_RUNS_LIMIT: usize = 20;
+
 // ---- search ----
 
 #[derive(Deserialize)] pub struct SearchQ {
@@ -232,8 +241,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/agents/{name}", get(get_agent).delete(delete_agent))
         .route("/api/v1/practices", get(list_practices).post(save_practice))
         .route("/api/v1/practices/{name}", get(get_practice).delete(delete_practice))
-        .route("/api/v1/workflows", get(list_workflows).post(save_workflow))
-        .route("/api/v1/workflows/{name}", get(get_workflow).delete(delete_workflow))
+        .route("/api/v1/workflows", get(list_workflows).post(create_workflow))
+        .route("/api/v1/workflows/{id}", get(get_workflow).patch(patch_workflow).delete(delete_workflow))
+        .route("/api/v1/workflows/{id}/run", post(run_workflow))
+        .route("/api/v1/workflows/{id}/runs", get(list_runs))
+        .route("/api/v1/runs/{id}", get(get_run))
+        .route("/api/v1/runs/{id}/cancel", post(cancel_run))
+        .route("/api/v1/runs/{id}/export", get(export_run))
         .route("/api/v1/sync", post(sync))
         .route("/api/v1/settings", get(get_settings).put(set_settings))
         .route("/api/v1/ingest", post(ingest))
@@ -338,13 +352,9 @@ async fn delete_agent(State(s): State<AppState>, ApiPath(name): ApiPath<String>,
 // route's handler is where the kind comes from: it isn't in the path or the body.
 
 async fn list_practices(s: State<AppState>, q: ApiQuery<ProjectQ>) -> Result<Json<Vec<Doc>>, ApiError> { list_docs(DocKind::Practice, s, q).await }
-async fn list_workflows(s: State<AppState>, q: ApiQuery<ProjectQ>) -> Result<Json<Vec<Doc>>, ApiError> { list_docs(DocKind::Workflow, s, q).await }
 async fn get_practice(s: State<AppState>, n: ApiPath<String>) -> Result<Json<Doc>, ApiError> { get_doc(DocKind::Practice, s, n).await }
-async fn get_workflow(s: State<AppState>, n: ApiPath<String>) -> Result<Json<Doc>, ApiError> { get_doc(DocKind::Workflow, s, n).await }
 async fn save_practice(s: State<AppState>, q: ApiQuery<ActorQ>, d: ApiJson<NewDoc>) -> Result<(StatusCode, Json<Doc>), ApiError> { save_doc(DocKind::Practice, s, q, d).await }
-async fn save_workflow(s: State<AppState>, q: ApiQuery<ActorQ>, d: ApiJson<NewDoc>) -> Result<(StatusCode, Json<Doc>), ApiError> { save_doc(DocKind::Workflow, s, q, d).await }
 async fn delete_practice(s: State<AppState>, n: ApiPath<String>, q: ApiQuery<ActorQ>) -> Result<StatusCode, ApiError> { delete_doc(DocKind::Practice, s, n, q).await }
-async fn delete_workflow(s: State<AppState>, n: ApiPath<String>, q: ApiQuery<ActorQ>) -> Result<StatusCode, ApiError> { delete_doc(DocKind::Workflow, s, n, q).await }
 
 async fn list_docs(kind: DocKind, State(s): State<AppState>, ApiQuery(q): ApiQuery<ProjectQ>) -> Result<Json<Vec<Doc>>, ApiError> {
     Ok(Json(s.backend.list_docs(kind, q.project_id).await?))
@@ -459,6 +469,45 @@ async fn put_project_stages(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid
 async fn task_counts(State(s): State<AppState>, ApiQuery(q): ApiQuery<BoardStagesQ>) -> Result<Json<Vec<StageCount>>, ApiError> {
     let counts = s.backend.task_counts(q.project_id).await?;
     Ok(Json(counts.into_iter().map(|(stage, count)| StageCount { stage, count }).collect()))
+}
+
+// ---- workflows (Phase 9) ----
+
+async fn list_workflows(State(s): State<AppState>, ApiQuery(q): ApiQuery<WorkflowListQ>) -> Result<Json<Vec<Workflow>>, ApiError> {
+    Ok(Json(s.backend.list_workflows(q.project_id).await?))
+}
+async fn create_workflow(State(s): State<AppState>, Actor(actor): Actor, ApiJson(w): ApiJson<NewWorkflow>) -> Result<(StatusCode, Json<Workflow>), ApiError> {
+    Ok((StatusCode::CREATED, Json(s.backend.create_workflow(w, &actor).await?)))
+}
+async fn get_workflow(State(s): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Json<Workflow>, ApiError> {
+    Ok(Json(s.backend.get_workflow(&id).await?))
+}
+async fn patch_workflow(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor): Actor, ApiJson(p): ApiJson<WorkflowPatch>) -> Result<Json<Workflow>, ApiError> {
+    Ok(Json(s.backend.update_workflow(&id, p, &actor).await?))
+}
+async fn delete_workflow(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor): Actor) -> Result<StatusCode, ApiError> {
+    s.backend.delete_workflow(&id, &actor).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+/// Queues a run and answers 202 with it: the run itself takes as long as the model
+/// call, the same asynchronous shape `POST /ingest` uses.
+async fn run_workflow(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor): Actor, ApiJson(b): ApiJson<RunWorkflowBody>) -> Result<(StatusCode, Json<WorkflowRun>), ApiError> {
+    let trigger = b.trigger.unwrap_or(TriggerKind::Manual);
+    Ok((StatusCode::ACCEPTED, Json(s.backend.run_workflow(&id, trigger, &actor, b.input).await?)))
+}
+async fn list_runs(State(s): State<AppState>, ApiPath(id): ApiPath<String>, ApiQuery(q): ApiQuery<RunsQ>) -> Result<Json<Vec<WorkflowRun>>, ApiError> {
+    Ok(Json(s.backend.list_runs(&id, q.limit.unwrap_or(DEFAULT_RUNS_LIMIT)).await?))
+}
+async fn get_run(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Result<Json<RunDetail>, ApiError> {
+    let (run, steps) = s.backend.get_run(id).await?;
+    Ok(Json(RunDetail { run, steps }))
+}
+async fn cancel_run(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Result<Json<WorkflowRun>, ApiError> {
+    Ok(Json(s.backend.cancel_run(id).await?))
+}
+async fn export_run(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Result<Response, ApiError> {
+    let body = s.backend.export_run_log(id).await?;
+    Ok(([(header::CONTENT_TYPE, "text/plain")], body).into_response())
 }
 
 // ---- search ----
