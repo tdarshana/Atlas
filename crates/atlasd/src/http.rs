@@ -152,7 +152,7 @@ pub fn cors_layer() -> CorsLayer {
             origin.to_str().is_ok_and(is_cors_origin)
         }))
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE, Method::OPTIONS])
-        .allow_headers([header::CONTENT_TYPE, header::ACCEPT])
+        .allow_headers([header::CONTENT_TYPE, header::ACCEPT, header::HeaderName::from_static("x-atlas-actor")])
         .allow_credentials(false)
         .max_age(std::time::Duration::from_secs(600))
 }

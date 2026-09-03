@@ -273,12 +273,13 @@ async fn cors_headers_cover_allowed_and_reject_other_origins() {
     let preflight = c.request(reqwest::Method::OPTIONS, format!("{base}/memories/search"))
         .header("Origin", "tauri://localhost")
         .header("Access-Control-Request-Method", "POST")
-        .header("Access-Control-Request-Headers", "content-type")
+        .header("Access-Control-Request-Headers", "content-type, x-atlas-actor")
         .send().await.unwrap();
     assert!(preflight.status().is_success(), "{}", preflight.status());
     assert_eq!(preflight.headers().get("access-control-allow-origin").unwrap(), "tauri://localhost");
     let allow_headers = preflight.headers().get("access-control-allow-headers").unwrap_or_else(|| panic!("no access-control-allow-headers")).to_str().unwrap().to_ascii_lowercase();
     assert!(allow_headers.contains("content-type"), "{allow_headers}");
+    assert!(allow_headers.contains("x-atlas-actor"), "the board actor header must pass preflight: {allow_headers}");
 
     // A local page on another port is allowed through the guard, but must not be able to
     // read what came back: the request runs, the allow-origin header is absent.
