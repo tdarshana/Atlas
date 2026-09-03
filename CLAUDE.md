@@ -12,7 +12,8 @@ Atlas is a local, Rust-based shared memory and agent hub for coding agents (Clau
 - `crates/atlas-mcp`: the rmcp tool router, generic over `Backend`, served from both the daemon and the stdio shim.
 - `crates/atlasd`: the daemon binary. The only process that opens the DuckDB file. Loopback only, default port 7433, writes `~/.atlas/daemon.json`.
 - `crates/atlas-cli`: the `atlas` binary. `atlas mcp` is the stdio MCP server Claude Code and Codex launch; it talks to the daemon over HTTP and starts it if needed.
-- `src-tauri` and `src/`: the desktop app (package `atlas-desktop`, Svelte 5, bun). Not yet wired to the daemon.
+- `src-tauri` and `src/`: the desktop app (package `atlas-desktop`, Svelte 5, bun). Talks to the daemon over its JSON API and bundles `atlasd` as a sidecar.
+- `references/Atlas Desktop UI Design File/`: the desktop UI design. `requirements.md` is the written spec, `Atlas Desktop UI.dc.html` holds every screen as a 1440x900 frame, and `_ds/` is the DBMan design system (tokens under `tokens/`, React components in `_ds_bundle.js`). When the desktop UI and this design disagree, the design wins; the Svelte components in `src/lib/ds` re-implement the DBMan components against its tokens.
 
 ## Commands
 
@@ -42,7 +43,25 @@ Before saying a change is done: `cargo test --workspace` green and warning-free,
 
 ## Working in this repo
 
-Say in a line what you are about to do; close with a recap that stands alone. Batch independent tool calls. The request sets the scope; do not widen it, and report pre-existing problems as follow-ups instead of fixing them uninvited. Edit surgically. Write plainly: short sentences, no em dashes, lists only for parallel items.
+These lines follow Anthropic's guidance for prompting Claude Fable 5.1 and the general prompting best practices. Each one names the behaviour it exists to shape.
+
+Progress and closing. Before you start, say in a line what you are about to do; brief updates while you work help the user follow along. Close with a short recap that stands on its own: what you found, what you did, and what is next, so a reader who only sees the last message has the full picture. The user's terminal shows at most a few lines of a command's output; if they need to read any of it, put it in your reply.
+
+Batching. First privately list what you need next; then request every item that does not depend on another's result in one response. One tool call per turn is the failure mode this guards against.
+
+Finish the task. The user is not watching in real time. Do not ask permission for work the request already covers, and carry out the next steps you have stated instead of describing them. Stop only for destructive actions, actions outside this repository (a push, a publish, a change to files under the home directory), or a genuine scope decision. When a subagent is running, keep working on independent parts rather than idling.
+
+Scope. The request sets the deliverable. Do not fix nearby code, extend behaviour the task did not mention, or commit more test files than the change warrants. Report pre-existing problems as follow-ups. If a task turns out to be blocked, finish every other part and say what was left out and why.
+
+Edits. Prefer surgical edits to whole-file rewrites; the tokens spent rewriting a file are wasted when a targeted edit gives the same result. Match the surrounding style.
+
+Verification before claims. Run the quality gates above and quote the actual numbers. Never say "should work". If something could not be verified, say so first. Do not use the Playwright MCP against the Tauri window; verify web pieces against `bun run dev` where useful and ask the user to check the packaged app by hand.
+
+Writing. Plain sentences, sentence case, no em dashes, no mannered prose: when a literal phrase is available, use it. Use lists only for parallel items and headings only above about 500 words. Anything the system or the user produced (paths, keys, hosts, counts) goes in inline code or a code block. Do not quote a source's wording without marking it as a quotation.
+
+Compaction. When the conversation is summarised, the summary must keep: the user's exact constraints and rulings, the current branch and last commit, the ledger path for the plan in progress, every file path touched in the current task, unresolved findings with their severity, and the verification numbers last observed.
+
+Subagents. Give a subagent one task, the exact file paths it owns, the global constraints that bind it, and a report path; never the session history. Forbid `git stash`, `git checkout` and `git reset` in the shared worktree. Review every task diff before the next dependent task starts.
 
 # context-mode — MANDATORY routing rules
 
