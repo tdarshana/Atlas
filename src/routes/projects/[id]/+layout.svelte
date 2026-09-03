@@ -8,6 +8,8 @@
 	import { daemon } from '$lib/daemon.svelte';
 	import { shell, TabStrip } from '$lib/shell';
 	import { GLOBAL_ID, openProject, project, tabForPath, tabsFor } from '$lib/stores/project.svelte';
+	import Button from '$lib/ds/Button.svelte';
+	import ErrorState from '$lib/ui/ErrorState.svelte';
 
 	let { children, data }: { children: Snippet; data: { id: string; isGlobal: boolean } } =
 		$props();
@@ -42,9 +44,23 @@
 	<div class="actions">{@render project.actions?.()}</div>
 </div>
 
-<TabStrip items={tabs} {active} />
+<!-- A project that would not load has no tabs worth offering: every one of them reads the
+     project this route names, so the whole hub is the failure, not the open tab. -->
+{#if project.error}
+	<ErrorState message={project.error} logPath={project.errorLogPath ?? undefined}>
+		<Button
+			variant="primary"
+			data-testid="project-retry"
+			onclick={() => void openProject(id, true)}
+		>
+			Retry
+		</Button>
+	</ErrorState>
+{:else}
+	<TabStrip items={tabs} {active} />
 
-{@render children()}
+	{@render children()}
+{/if}
 
 <style>
 	.head {

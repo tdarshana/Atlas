@@ -20,7 +20,6 @@
 	import { projects } from '$lib/stores/projects.svelte';
 	import type { Task } from '$lib/types';
 	import Dialog from '$lib/ui/Dialog.svelte';
-	import ErrorState from '$lib/ui/ErrorState.svelte';
 	import { push } from '$lib/ui/toasts.svelte';
 
 	let tasks = $state<Task[]>([]);
@@ -101,7 +100,9 @@
 {#snippet reading(label: string, value: string)}
 	<div class="reading">
 		<span class="label">{label}</span>
-		<span class="mono value">{value}</span>
+		<!-- An empty reading takes the token the design system keeps for one, so "Remote ·"
+		     does not read with the weight of a real remote. -->
+		<span class="mono value" class:nothing={value === NOTHING}>{value}</span>
 	</div>
 {/snippet}
 
@@ -124,112 +125,108 @@
 	{/snippet}
 </Dialog>
 
-{#if project.error}
-	<ErrorState message={project.error} logPath={project.errorLogPath ?? undefined} />
-{:else}
-	<div class="cards">
-		<div class="card pad" data-testid="project-profile">
-			<span class="group-heading head-row">Profile</span>
-			{@render reading('Remote', current?.git_remote ?? NOTHING)}
-			{@render reading('Last seen', dateTime(current?.last_seen_at))}
-			{@render reading('Built', dateTime(profile?.built_at))}
-			{@render reading('Key prefix', current?.board_key ?? NOTHING)}
-		</div>
-
-		<div class="card pad" data-testid="project-stack">
-			<span class="group-heading head-row">Stack</span>
-			<div class="reading">
-				<span class="label">Languages</span>
-				<div class="badges">
-					{#each profile?.languages ?? [] as lang (lang)}
-						<Badge tone="accent" mono>{lang}</Badge>
-					{:else}
-						<span class="mono value">{NOTHING}</span>
-					{/each}
-				</div>
-			</div>
-			<div class="reading">
-				<span class="label">Frameworks</span>
-				<div class="badges">
-					{#each profile?.frameworks ?? [] as fw (fw)}
-						<Badge tone="accent" mono>{fw}</Badge>
-					{:else}
-						<span class="mono value">{NOTHING}</span>
-					{/each}
-				</div>
-			</div>
-			<div class="reading">
-				<span class="label">Agents</span>
-				<div class="badges">
-					{#each agents as agent (agent)}
-						<span class="mono value">{agent}</span>
-						<Badge tone="success">active</Badge>
-					{:else}
-						<span class="mono value">{NOTHING}</span>
-					{/each}
-				</div>
-			</div>
-			{@render reading('Tasks', taskSummary(tasks))}
-		</div>
+<div class="cards">
+	<div class="card pad" data-testid="project-profile">
+		<span class="group-heading head-row">Profile</span>
+		{@render reading('Remote', current?.git_remote ?? NOTHING)}
+		{@render reading('Last seen', dateTime(current?.last_seen_at))}
+		{@render reading('Built', dateTime(profile?.built_at))}
+		{@render reading('Key prefix', current?.board_key ?? NOTHING)}
 	</div>
 
-	<div class="panes">
-		<section class="card pane" data-testid="project-tree">
-			<header>
-				<span class="group-heading">Tree</span>
-				<span class="spacer"></span>
-				<span class="mono meta">{plural(rows.length, 'entry', 'entries')}</span>
-			</header>
-			<div class="scroll rows">
-				{#each rows as row (row.path)}
-					<div class="tree-row mono" style="padding-left:{8 + row.depth * 16}px">
-						<Icon
-							name={row.kind === 'folder' ? 'folder' : 'file'}
-							size={13}
-							color="var(--text-tertiary)"
-						/>
-						<span class="clip">{row.name}</span>
-					</div>
+	<div class="card pad" data-testid="project-stack">
+		<span class="group-heading head-row">Stack</span>
+		<div class="reading">
+			<span class="label">Languages</span>
+			<div class="badges">
+				{#each profile?.languages ?? [] as lang (lang)}
+					<Badge tone="accent" mono>{lang}</Badge>
 				{:else}
-					<p class="empty">No tree yet. Refresh scans this root.</p>
+					<span class="mono value nothing">{NOTHING}</span>
 				{/each}
 			</div>
-		</section>
-
-		<section class="card pane" data-testid="project-readme">
-			<header>
-				<span class="group-heading">Readme</span>
-				<span class="spacer"></span>
-				<span class="mono meta">README.md</span>
-			</header>
-			<div class="scroll readme">
-				{#if profile?.readme_head}
-					<pre class="mono">{profile.readme_head}</pre>
+		</div>
+		<div class="reading">
+			<span class="label">Frameworks</span>
+			<div class="badges">
+				{#each profile?.frameworks ?? [] as fw (fw)}
+					<Badge tone="accent" mono>{fw}</Badge>
 				{:else}
-					<p class="empty">No readme in this root.</p>
-				{/if}
-			</div>
-		</section>
-
-		<section class="card pane" data-testid="project-commits">
-			<header>
-				<span class="group-heading">Recent commits</span>
-				<span class="spacer"></span>
-				<span class="mono meta">main</span>
-			</header>
-			<div class="scroll rows">
-				{#each commits as commit, i (i)}
-					<div class="commit">
-						<Icon name="git-commit-horizontal" size={12} color="var(--text-tertiary)" />
-						<span class="clip">{commit}</span>
-					</div>
-				{:else}
-					<p class="empty">No commits read from this root.</p>
+					<span class="mono value nothing">{NOTHING}</span>
 				{/each}
 			</div>
-		</section>
+		</div>
+		<div class="reading">
+			<span class="label">Agents</span>
+			<div class="badges">
+				{#each agents as agent (agent)}
+					<span class="mono value">{agent}</span>
+					<Badge tone="success">active</Badge>
+				{:else}
+					<span class="mono value nothing">{NOTHING}</span>
+				{/each}
+			</div>
+		</div>
+		{@render reading('Tasks', taskSummary(tasks))}
 	</div>
-{/if}
+</div>
+
+<div class="panes">
+	<section class="card pane" data-testid="project-tree">
+		<header>
+			<span class="group-heading">Tree</span>
+			<span class="spacer"></span>
+			<span class="mono meta">{plural(rows.length, 'entry', 'entries')}</span>
+		</header>
+		<div class="scroll rows">
+			{#each rows as row (row.path)}
+				<div class="tree-row mono" style="padding-left:{8 + row.depth * 16}px">
+					<Icon
+						name={row.kind === 'folder' ? 'folder' : 'file'}
+						size={13}
+						color="var(--text-tertiary)"
+					/>
+					<span class="clip">{row.name}</span>
+				</div>
+			{:else}
+				<p class="empty">No tree yet. Refresh scans this root.</p>
+			{/each}
+		</div>
+	</section>
+
+	<section class="card pane" data-testid="project-readme">
+		<header>
+			<span class="group-heading">Readme</span>
+			<span class="spacer"></span>
+			<span class="mono meta">README.md</span>
+		</header>
+		<div class="scroll readme">
+			{#if profile?.readme_head}
+				<pre class="mono">{profile.readme_head}</pre>
+			{:else}
+				<p class="empty">No readme in this root.</p>
+			{/if}
+		</div>
+	</section>
+
+	<section class="card pane" data-testid="project-commits">
+		<header>
+			<span class="group-heading">Recent commits</span>
+			<span class="spacer"></span>
+			<span class="mono meta">main</span>
+		</header>
+		<div class="scroll rows">
+			{#each commits as commit, i (i)}
+				<div class="commit">
+					<Icon name="git-commit-horizontal" size={12} color="var(--text-tertiary)" />
+					<span class="clip">{commit}</span>
+				</div>
+			{:else}
+				<p class="empty">No commits read from this root.</p>
+			{/each}
+		</div>
+	</section>
+</div>
 
 <style>
 	.cards {
@@ -272,6 +269,10 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 		color: var(--text-primary);
+	}
+
+	.value.nothing {
+		color: var(--text-null);
 	}
 
 	.badges {

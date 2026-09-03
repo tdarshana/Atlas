@@ -5,12 +5,11 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import type { IconName } from '$lib/ds';
 	import { daemon } from '$lib/daemon.svelte';
 	import { board, scheduleRefresh } from '$lib/stores/board.svelte';
 	import { connectProject, loadProjects, pickProjectRoot, projects } from '$lib/stores/projects.svelte';
 	import { GLOBAL_ID } from '$lib/stores/project.svelte';
-	import type { Stage } from '$lib/types';
+	import { countInStage, groupAssignees, stageIcon } from './boardFilters';
 	import TreeGroup from '../TreeGroup.svelte';
 	import TreeRow from '../TreeRow.svelte';
 
@@ -19,38 +18,11 @@
 	const stages = $derived(board.stages);
 	const tasks = $derived(board.tasks);
 
-	/** Every assignee holding a task, with its count, then the tasks nobody has claimed. */
-	const assignees = $derived.by(() => {
-		const counts = new Map<string, number>();
-		let unassigned = 0;
-		for (const task of tasks) {
-			const name = task.assignee?.trim();
-			if (name) counts.set(name, (counts.get(name) ?? 0) + 1);
-			else unassigned++;
-		}
-		return {
-			named: [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0])),
-			unassigned
-		};
-	});
+	const assignees = $derived(groupAssignees(tasks));
 
 	onMount(() => {
 		if (projects.items.length === 0 && !projects.loading) void loadProjects();
 	});
-
-	/**
-	 * The frame's glyphs by stage. A board's stages are the user's own, so the three the
-	 * design names are matched by name and the rest fall back on their place in the list.
-	 */
-	function stageIcon(stage: Stage, i: number): IconName {
-		if (stage.name.toLowerCase() === 'testing') return 'flask-conical';
-		if (stage.done) return 'circle-check';
-		return i === 0 ? 'circle' : 'circle-dot';
-	}
-
-	function countFor(stage: string): number {
-		return tasks.filter((t) => t.stage === stage).length;
-	}
 
 	/** A second click on the lit column clears the filter rather than re-setting it. */
 	function toggleStage(name: string) {
@@ -110,7 +82,7 @@
 		<TreeRow
 			icon={stageIcon(stage, i)}
 			label={stage.name}
-			meta={countFor(stage.name)}
+			meta={countInStage(tasks, stage.name)}
 			selected={board.filters.stage === stage.name}
 			iconColor={stageIcon(stage, i) === 'flask-conical' ? 'var(--accent)' : undefined}
 			onclick={() => toggleStage(stage.name)}

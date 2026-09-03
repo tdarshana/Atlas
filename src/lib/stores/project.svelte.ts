@@ -133,11 +133,14 @@ export function setHeaderActions(actions: Snippet | null): void {
 	hub.actions = actions;
 }
 
-/** Called by the layout on every route change. `global` has no project to fetch. */
-export async function openProject(id: string): Promise<void> {
+/**
+ * Called by the layout on every route change, and again by its Retry button with `force`.
+ * `global` has no project to fetch.
+ */
+export async function openProject(id: string, force = false): Promise<void> {
 	hub.id = id;
 	if (!id || id === GLOBAL_ID) return;
-	if (projectDetail.project?.id === id) return;
+	if (!force && projectDetail.project?.id === id) return;
 	await loadProject(id);
 }
 

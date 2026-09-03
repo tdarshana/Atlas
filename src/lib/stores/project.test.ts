@@ -1,16 +1,33 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
 	ACTIVE_WINDOW_DAYS,
 	activeAgents,
 	hubTitle,
 	idForPath,
+	openProject,
+	project,
 	tabForPath,
 	tabsFor,
 	taskSummary,
 	treeRows
 } from './project.svelte';
+import { projectDetail } from './projects.svelte';
 import type { Project, Task } from '$lib/types';
+
+// The hub load goes through the projects store, which reaches the daemon.
+const daemon = vi.hoisted(() => ({ calls: 0, fail: true }));
+
+vi.mock('$lib/daemon.svelte', () => ({
+	api: () => ({
+		getProject: async (id: string) => {
+			daemon.calls++;
+			if (daemon.fail) throw new Error('no such project');
+			return { id, name: 'atlas', root_path: '/tmp/atlas' } as Project;
+		},
+		projectContext: async () => ({ memories: [], practices: [], workflows: [] })
+	})
+}));
 
 const DAY_MS = 86_400_000;
 
@@ -131,6 +148,39 @@ describe('activeAgents', () => {
 	it('drops an actor whose last touch is older than the window', () => {
 		const stale = new Date(now - (ACTIVE_WINDOW_DAYS + 1) * DAY_MS).toISOString();
 		expect(activeAgents([task({ updated_at: stale, created_by: 'cli/claude' })], now)).toEqual([]);
+	});
+});
+
+describe('openProject', () => {
+	beforeEach(() => {
+		daemon.calls = 0;
+		daemon.fail = true;
+		projectDetail.project = null;
+		projectDetail.error = null;
+	});
+
+	it('records the failure so the layout can show it instead of the tabs', async () => {
+		await openProject('does-not-exist');
+		expect(project.error).toBe('no such project');
+		expect(project.current).toBeNull();
+	});
+
+	it('fetches again when Retry forces it, and clears the error', async () => {
+		await openProject('x');
+		expect(daemon.calls).toBe(1);
+
+		daemon.fail = false;
+		await openProject('x', true);
+		expect(daemon.calls).toBe(2);
+		expect(project.error).toBeNull();
+		expect(project.current?.name).toBe('atlas');
+	});
+
+	it('does not refetch a project it already holds', async () => {
+		daemon.fail = false;
+		await openProject('x');
+		await openProject('x');
+		expect(daemon.calls).toBe(1);
 	});
 });
 
