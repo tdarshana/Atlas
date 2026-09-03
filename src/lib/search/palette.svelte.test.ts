@@ -17,10 +17,13 @@ vi.mock('$lib/daemon.svelte', () => ({
 	boot: async () => {}
 }));
 
-import { filterCommands } from './commands';
+import { projects } from '$lib/stores/projects.svelte';
+import { COMMANDS, filterCommands } from './commands';
 import {
 	closePalette,
 	hrefFor,
+	loadRecent,
+	mergeResults,
 	openItem,
 	palette,
 	pushRecent,
@@ -56,6 +59,7 @@ beforeEach(() => {
 	localStorage.clear();
 	closePalette();
 	palette.recent = [];
+	projects.items = [];
 });
 
 describe('debounced search', () => {
@@ -88,6 +92,48 @@ describe('debounced search', () => {
 		setInput('>tog');
 		await vi.advanceTimersByTimeAsync(120);
 		expect(mocks.globalSearch).not.toHaveBeenCalled();
+	});
+
+	it('leaves an unknown scope out of the request rather than narrowing it', async () => {
+		mocks.globalSearch.mockResolvedValue(result('one'));
+		palette.scopes = ['nowhere'];
+		palette.input = 'duckdb';
+
+		await runSearch();
+
+		expect(mocks.globalSearch).toHaveBeenCalledTimes(1);
+		expect(mocks.globalSearch).toHaveBeenCalledWith({ q: 'duckdb', kinds: undefined });
+	});
+});
+
+describe('mergeResults', () => {
+	const part = (id: string, score: number, took: number) => ({
+		groups: [{ kind: 'task' as const, items: [hit(id, id, { score })] }],
+		total: 99,
+		took_ms: took
+	});
+
+	it('counts the rows it returns, not the daemon totals', () => {
+		expect(mergeResults([part('t1', 3, 4)]).total).toBe(1);
+	});
+
+	it('dedupes across scopes and keeps the slowest timing', () => {
+		const merged = mergeResults([part('t1', 3, 4), part('t1', 3, 9)]);
+
+		expect(merged.total).toBe(1);
+		expect(merged.groups[0].items.map((h) => h.id)).toEqual(['t1']);
+		expect(merged.took_ms).toBe(9);
+	});
+
+	it('unions distinct rows and orders them by score', () => {
+		const merged = mergeResults([part('t1', 1, 2), part('t2', 5, 3)]);
+
+		expect(merged.total).toBe(2);
+		expect(merged.groups[0].items.map((h) => h.id)).toEqual(['t2', 't1']);
+	});
+
+	it('survives being handed nothing', () => {
+		expect(mergeResults([])).toEqual({ groups: [], total: 0, took_ms: 0 });
 	});
 });
 
@@ -131,13 +177,36 @@ describe('recent', () => {
 
 		expect(palette.recent.map((h) => h.id)).toEqual(['t1', 't2']);
 	});
+
+	it('drops the highlights, which belong to the query that found the row', () => {
+		pushRecent(hit('t1', 'Move DuckDB', { highlights: [[5, 11]] }));
+		expect(palette.recent[0].highlights).toEqual([]);
+	});
+
+	it('skips stored rows that are missing the fields the list draws with', () => {
+		localStorage.setItem(
+			RECENT_KEY,
+			JSON.stringify([{ kind: 'task', id: 't1' }, { kind: 'nope', id: 't2', title: 'x' }, null, hit('t3', 'good')])
+		);
+
+		loadRecent();
+
+		expect(palette.recent.map((h) => h.id)).toEqual(['t3']);
+	});
 });
 
 describe('commands', () => {
 	it('filters by case-insensitive substring over the label and the hint', () => {
 		expect(filterCommands('THEME').map((c) => c.id)).toEqual(['toggle-theme']);
 		expect(filterCommands('by hand').map((c) => c.id)).toEqual(['remember']);
-		expect(filterCommands('')).toHaveLength(filterCommands('').length);
+	});
+
+	it('keeps every command on a blank filter', () => {
+		expect(filterCommands('  ').map((c) => c.id)).toEqual(COMMANDS.map((c) => c.id));
+	});
+
+	it('finds nothing for a string no command carries', () => {
+		expect(filterCommands('zzzz')).toEqual([]);
 	});
 });
 

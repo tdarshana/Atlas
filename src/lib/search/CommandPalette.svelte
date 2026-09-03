@@ -13,7 +13,7 @@
 	import { loadProjects, projects } from '$lib/stores/projects.svelte';
 	import type { Project, SearchHit, SearchKind } from '$lib/types';
 	import { filterCommands, type PaletteCommand } from './commands';
-	import { TYPE_PREFIXES } from './parse';
+	import { highlightSegments, TYPE_PREFIXES } from './parse';
 	import {
 		chooseScope,
 		choosePrefix,
@@ -31,16 +31,40 @@
 	} from './palette.svelte';
 
 	interface Props {
-		/** The title bar element the palette lines up with. */
-		anchor?: string;
+		/**
+		 * The title bar's command box. The palette lines its input up with this element
+		 * and hands focus back to it on close. When it is not passed the element is
+		 * looked up once and kept as a reference; see `commandBox` below.
+		 */
+		anchor?: HTMLElement | null;
 	}
 
-	let { anchor = '[data-testid="titlebar-command"]' }: Props = $props();
+	let { anchor = null }: Props = $props();
 
 	const WIDTH = 640;
+	const LIST_ID = 'palette-list';
+	const rowId = (i: number) => `palette-row-${i}`;
 
+	let root: HTMLDivElement | undefined = $state();
 	let box: HTMLInputElement | undefined = $state();
 	let left = $state(0);
+
+	/**
+	 * The command box, held as an element reference rather than looked up on every use.
+	 * Without an `anchor` prop it is resolved once from the title bar's own markup;
+	 * `data-command-box` is the intended contract and the test id is the fallback until
+	 * `TitleBar.svelte` carries one.
+	 */
+	let resolved: HTMLElement | null = null;
+
+	function commandBox(): HTMLElement | null {
+		if (anchor) return anchor;
+		if (resolved?.isConnected) return resolved;
+		resolved = document.querySelector<HTMLElement>(
+			'[data-command-box], [data-testid="titlebar-command"]'
+		);
+		return resolved;
+	}
 
 	// ---- rows ----
 
@@ -189,10 +213,25 @@
 		if (palette.selected >= flat.length) palette.selected = Math.max(0, flat.length - 1);
 	});
 
+	// The list scrolls inside a 520px panel, so a selection moved past the fold has to
+	// be brought back or the highlight disappears and Enter becomes a guess.
+	$effect(() => {
+		const i = palette.selected;
+		if (!palette.open || !flat.length) return;
+		root?.querySelector(`#${rowId(i)}`)?.scrollIntoView({ block: 'nearest' });
+	});
+
+	// Keeps the box in step when the store rewrites the text under it, which one-way
+	// binding misses whenever the stripped remainder happens to equal the old value.
+	$effect(() => {
+		const value = palette.input;
+		if (box && box.value !== value) box.value = value;
+	});
+
 	// ---- opening and closing ----
 
 	function measure() {
-		const el = document.querySelector<HTMLElement>(anchor);
+		const el = commandBox();
 		if (!el) return;
 		left = el.getBoundingClientRect().left;
 	}
@@ -207,15 +246,27 @@
 
 	function close() {
 		closePalette();
-		document.querySelector<HTMLElement>(anchor)?.focus();
+		commandBox()?.focus();
+	}
+
+	/** With no scrim there is nothing to click through, so the window reports it. */
+	function onpointerdown(e: PointerEvent) {
+		if (!palette.open) return;
+		const target = e.target;
+		if (!(target instanceof Node)) return;
+		// A click on the command box itself re-opens the palette; leave it alone.
+		if (root?.contains(target) || commandBox()?.contains(target)) return;
+		close();
 	}
 
 	$effect(() => {
 		window.addEventListener(PALETTE_EVENT, open);
 		window.addEventListener('resize', measure);
+		window.addEventListener('pointerdown', onpointerdown);
 		return () => {
 			window.removeEventListener(PALETTE_EVENT, open);
 			window.removeEventListener('resize', measure);
+			window.removeEventListener('pointerdown', onpointerdown);
 		};
 	});
 
@@ -261,6 +312,11 @@
 		return 'open';
 	}
 
+	/**
+	 * Bound to the panel, not the input, so Escape still works when focus has moved to
+	 * a chip's remove button or a row. A focused button keeps its own Enter and
+	 * Backspace; the list keys are the palette's everywhere else.
+	 */
 	function onkeydown(e: KeyboardEvent) {
 		if (e.key === 'Escape') {
 			e.preventDefault();
@@ -277,6 +333,10 @@
 			move(-1);
 			return;
 		}
+
+		const onButton = e.target instanceof HTMLElement && e.target.tagName === 'BUTTON';
+		if (onButton) return;
+
 		if (e.key === 'Enter') {
 			e.preventDefault();
 			const row = flat[palette.selected];
@@ -289,33 +349,19 @@
 		}
 	}
 
-	// ---- highlighting ----
-
-	interface Segment {
-		text: string;
-		mark: boolean;
-	}
-
-	/** Splits a title on the daemon's char offsets, so a multi-byte title still lines up. */
-	function segments(title: string, highlights: [number, number][]): Segment[] {
-		const chars = Array.from(title);
-		if (!highlights.length) return [{ text: title, mark: false }];
-		const out: Segment[] = [];
-		let at = 0;
-		for (const [s, e] of [...highlights].sort((a, b) => a[0] - b[0])) {
-			const start = Math.max(at, Math.min(s, chars.length));
-			const end = Math.max(start, Math.min(e, chars.length));
-			if (start > at) out.push({ text: chars.slice(at, start).join(''), mark: false });
-			if (end > start) out.push({ text: chars.slice(start, end).join(''), mark: true });
-			at = end;
-		}
-		if (at < chars.length) out.push({ text: chars.slice(at).join(''), mark: false });
-		return out;
-	}
 </script>
 
 {#if palette.open}
-	<div class="palette" style="left:{left}px;width:{WIDTH}px" data-testid="command-palette">
+	<div
+		bind:this={root}
+		class="palette"
+		style="left:{left}px;width:{WIDTH}px"
+		role="dialog"
+		aria-label="Search Atlas"
+		tabindex="-1"
+		data-testid="command-palette"
+		{onkeydown}
+	>
 		<div class="box">
 			<Icon name="search" size={13} color="var(--text-tertiary)" />
 			{#each chips as chip (chip.name)}
@@ -342,16 +388,20 @@
 				type="text"
 				autocomplete="off"
 				spellcheck="false"
+				role="combobox"
 				aria-label="Search Atlas"
+				aria-expanded="true"
+				aria-controls={LIST_ID}
+				aria-autocomplete="list"
+				aria-activedescendant={flat.length ? rowId(palette.selected) : undefined}
 				placeholder="Search tasks, memories, projects, files, commands…"
 				value={palette.input}
 				oninput={(e) => setInput(e.currentTarget.value)}
-				{onkeydown}
 			/>
 			<KeyHint combo="Escape" platform={shell.platform} />
 		</div>
 
-		<div class="list" role="listbox" tabindex="-1" aria-label="Search results">
+		<div class="list" id={LIST_ID} role="listbox" tabindex="-1" aria-label="Search results">
 			{#each laidOut as group (group.label)}
 				<div class="head">
 					<span>{group.label}</span>
@@ -362,6 +412,7 @@
 					<button
 						class="row"
 						class:row--on={i === palette.selected}
+						id={rowId(i)}
 						type="button"
 						role="option"
 						aria-selected={i === palette.selected}
@@ -373,7 +424,7 @@
 							<span class="label">
 								{#if row.hit.reference && row.hit.kind === 'task'}<span class="mono"
 										>{row.hit.reference}</span
-									> · {/if}{#each segments(row.hit.title, row.hit.highlights) as seg, si (si)}{#if seg.mark}<mark
+									> · {/if}{#each highlightSegments(row.hit.title, row.hit.highlights) as seg, si (si)}{#if seg.mark}<mark
 										>{seg.text}</mark
 									>{:else}{seg.text}{/if}{/each}{#if row.hit.subtitle}<span class="meta"
 										>{row.hit.subtitle}</span
@@ -447,6 +498,14 @@
 				<span class="spacer"></span>
 				{#if palette.results}
 					<span class="mono">{palette.total} results · {palette.took_ms} ms</span>
+				{:else if !query.text.trim()}
+					<!-- Frame 01.1: the prefixes only announce themselves on the empty box. -->
+					<span class="legend">
+						<KeyHint combo="@" platform={shell.platform} /> project
+						<KeyHint combo="#" platform={shell.platform} /> task
+						<KeyHint combo="~" platform={shell.platform} /> memory
+						<KeyHint combo=">" platform={shell.platform} /> command
+					</span>
 				{/if}
 			{/if}
 		</div>
@@ -648,5 +707,11 @@
 		display: flex;
 		align-items: center;
 		gap: 4px;
+	}
+
+	.legend {
+		display: flex;
+		align-items: center;
+		gap: 6px;
 	}
 </style>

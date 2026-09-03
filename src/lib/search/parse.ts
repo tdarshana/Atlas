@@ -71,6 +71,40 @@ export function stripScopes(input: string): string {
 	return kept.join(' ');
 }
 
+/** One run of a title, either inside a match or outside it. */
+export interface HighlightSegment {
+	text: string;
+	mark: boolean;
+}
+
+/**
+ * Splits a title on the daemon's `highlights`, which are char offsets (not byte
+ * offsets) into `title`, so a title with astral characters still lines up. Ranges are
+ * sorted and clamped into what is left of the string, so a negative, reversed,
+ * overlapping or past-the-end range from the daemon degrades to plain text.
+ */
+export function highlightSegments(
+	title: string,
+	highlights: [number, number][]
+): HighlightSegment[] {
+	const text = title ?? '';
+	const ranges = Array.isArray(highlights) ? highlights : [];
+	if (!ranges.length) return [{ text, mark: false }];
+
+	const chars = Array.from(text);
+	const out: HighlightSegment[] = [];
+	let at = 0;
+	for (const [s, e] of [...ranges].sort((a, b) => a[0] - b[0])) {
+		const start = Math.max(at, Math.min(s, chars.length));
+		const end = Math.max(start, Math.min(e, chars.length));
+		if (start > at) out.push({ text: chars.slice(at, start).join(''), mark: false });
+		if (end > start) out.push({ text: chars.slice(start, end).join(''), mark: true });
+		at = end;
+	}
+	if (at < chars.length) out.push({ text: chars.slice(at).join(''), mark: false });
+	return out;
+}
+
 /** A scope as the input renders it: resolved to a project, or unknown and ignored. */
 export interface ScopeChip {
 	name: string;

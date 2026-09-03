@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from 'vitest';
 import type { Project } from '$lib/types';
-import { parseQuery, resolveScopes, stripScopes } from './parse';
+import { highlightSegments, parseQuery, resolveScopes, stripScopes } from './parse';
 
 function project(id: string, name: string): Project {
 	return {
@@ -67,6 +67,20 @@ describe('parseQuery', () => {
 	it('treats an empty query as all', () => {
 		expect(parseQuery('')).toEqual({ scopes: [], type: 'all', text: '' });
 	});
+
+	it('leaves a prefix alone once it is inside the text', () => {
+		expect(parseQuery('fix #12')).toEqual({ scopes: [], type: 'all', text: 'fix #12' });
+	});
+
+	it('ignores leading whitespace', () => {
+		expect(parseQuery('   @atlas duckdb')).toEqual({
+			scopes: ['atlas'],
+			type: 'all',
+			text: 'duckdb'
+		});
+		expect(parseQuery('  #ready')).toEqual({ scopes: [], type: 'task', text: 'ready' });
+		expect(parseQuery('   ')).toEqual({ scopes: [], type: 'all', text: '' });
+	});
 });
 
 describe('stripScopes', () => {
@@ -88,5 +102,45 @@ describe('resolveScopes', () => {
 
 	it('leaves an unknown name unresolved so the chip can warn', () => {
 		expect(resolveScopes(['nope'], items)).toEqual([{ name: 'nope', id: null }]);
+	});
+});
+
+describe('highlightSegments', () => {
+	const text = (segs: { text: string; mark: boolean }[]) => segs.map((s) => s.text).join('');
+
+	it('returns the whole title when there is nothing to mark', () => {
+		expect(highlightSegments('plain', [])).toEqual([{ text: 'plain', mark: false }]);
+	});
+
+	it('marks the range and keeps the text either side', () => {
+		expect(highlightSegments('Move DuckDB now', [[5, 11]])).toEqual([
+			{ text: 'Move ', mark: false },
+			{ text: 'DuckDB', mark: true },
+			{ text: ' now', mark: false }
+		]);
+	});
+
+	it('counts code points, not UTF-16 units', () => {
+		// The rocket is one char to the daemon but two UTF-16 units here.
+		expect(highlightSegments('🚀 duckdb', [[2, 8]])).toEqual([
+			{ text: '🚀 ', mark: false },
+			{ text: 'duckdb', mark: true }
+		]);
+	});
+
+	it('clamps a range that runs past the end', () => {
+		expect(highlightSegments('short', [[3, 99]])).toEqual([
+			{ text: 'sho', mark: false },
+			{ text: 'rt', mark: true }
+		]);
+	});
+
+	it('drops a negative or reversed range without losing the title', () => {
+		expect(text(highlightSegments('short', [[-4, -1]]))).toBe('short');
+		expect(text(highlightSegments('short', [[4, 1]]))).toBe('short');
+	});
+
+	it('sorts and merges overlapping ranges instead of repeating text', () => {
+		expect(text(highlightSegments('abcdef', [[3, 5], [0, 4]]))).toBe('abcdef');
 	});
 });

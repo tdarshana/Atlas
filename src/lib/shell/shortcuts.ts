@@ -21,7 +21,9 @@ function hasMod(e: KeyboardEvent): boolean {
 }
 
 export function handleKeydown(e: KeyboardEvent): void {
-	if (!hasMod(e) || e.altKey) return;
+	// Shift is not part of any combo here, so a shifted press belongs to whatever else
+	// claims it. Add the exception alongside the combo when one declares Shift.
+	if (!hasMod(e) || e.altKey || e.shiftKey) return;
 
 	if (e.key.toLowerCase() === 'k') {
 		e.preventDefault();

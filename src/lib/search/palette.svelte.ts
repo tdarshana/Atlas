@@ -201,9 +201,15 @@ export async function runSearch(): Promise<void> {
 	}
 }
 
-/** Union by `kind:id`, kinds in the fixed order, each group by score then title. */
+/**
+ * Union by `kind:id`, kinds in the fixed order, each group by score then title.
+ *
+ * `total` is always the number of rows this returns, not the daemon's own `total`.
+ * The daemon counts every candidate that scored, capped per source, so passing it
+ * through for one scope and recounting for two would make stacking a scope look like
+ * it narrowed the search. One meaning, in every case: how many rows are on screen.
+ */
 export function mergeResults(parts: SearchResult[]): SearchResult {
-	if (parts.length === 1) return parts[0];
 	const byKind = new Map<SearchKind, Map<string, SearchHit>>();
 	for (const part of parts) {
 		for (const group of part.groups) {
@@ -223,10 +229,27 @@ export function mergeResults(parts: SearchResult[]): SearchResult {
 		total += items.length;
 		groups.push({ kind, items });
 	}
-	return { groups, total, took_ms: Math.max(...parts.map((p) => p.took_ms)) };
+	const took = parts.length ? Math.max(...parts.map((p) => p.took_ms)) : 0;
+	return { groups, total, took_ms: took };
 }
 
 // ---- recent ----
+
+/**
+ * A stored row only counts if it still has the three fields the list draws with. An
+ * older or hand-edited `atlas.recent` must cost the user their history, never the
+ * palette: a row without a title would throw inside the render.
+ */
+function isStoredHit(value: unknown): value is SearchHit {
+	if (!value || typeof value !== 'object') return false;
+	const row = value as Record<string, unknown>;
+	return (
+		typeof row.id === 'string' &&
+		typeof row.title === 'string' &&
+		typeof row.kind === 'string' &&
+		KIND_ORDER.includes(row.kind as SearchKind)
+	);
+}
 
 /** Reads `atlas.recent`. A webview with site data blocked simply has no history. */
 export function loadRecent(): void {
@@ -234,8 +257,12 @@ export function loadRecent(): void {
 		if (typeof localStorage === 'undefined') return;
 		const raw = localStorage.getItem(RECENT_KEY);
 		if (!raw) return;
-		const parsedRaw: unknown = JSON.parse(raw);
-		if (Array.isArray(parsedRaw)) palette.recent = parsedRaw.slice(0, RECENT_MAX) as SearchHit[];
+		const stored: unknown = JSON.parse(raw);
+		if (!Array.isArray(stored)) return;
+		palette.recent = stored
+			.filter(isStoredHit)
+			.slice(0, RECENT_MAX)
+			.map((hit) => ({ ...hit, highlights: [] }));
 	} catch {
 		/* unreadable or unparseable history is no history */
 	}
@@ -250,10 +277,15 @@ function saveRecent(): void {
 	}
 }
 
-/** Newest first, deduped by `kind:id`, capped at eight. */
+/**
+ * Newest first, deduped by `kind:id`, capped at eight. The highlights are dropped on
+ * the way in: they belong to the query that found the row, and the empty state that
+ * draws the recent list has no query to highlight against.
+ */
 export function pushRecent(hit: SearchHit): void {
 	const key = `${hit.kind}:${hit.id}`;
-	palette.recent = [hit, ...palette.recent.filter((h) => `${h.kind}:${h.id}` !== key)].slice(
+	const row: SearchHit = { ...hit, highlights: [] };
+	palette.recent = [row, ...palette.recent.filter((h) => `${h.kind}:${h.id}` !== key)].slice(
 		0,
 		RECENT_MAX
 	);
