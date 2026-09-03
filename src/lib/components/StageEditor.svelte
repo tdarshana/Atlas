@@ -3,10 +3,9 @@
 	// the daemon can only do that if it is told which old name became which new one,
 	// so each row remembers the name it arrived with.
 	import { untrack } from 'svelte';
+	import { Button, Checkbox, IconButton, Input } from '$lib/ds';
 	import { stageRenames, validateStages } from '$lib/stores/board.svelte';
 	import type { Stage } from '$lib/types';
-	import Button from '$lib/ui/Button.svelte';
-	import Input from '$lib/ui/Input.svelte';
 
 	interface Props {
 		stages: Stage[];
@@ -93,40 +92,34 @@
 					data-testid="stage-name-{i}"
 					oninput={() => (dirty = true)}
 				/>
-				<label class="done">
-					<input
-						type="checkbox"
-						bind:checked={row.done}
-						data-testid="stage-done-{i}"
-						onchange={() => (dirty = true)}
-					/>
-					<span>Done</span>
-				</label>
-				<Button
+				<Checkbox
+					label="Done"
+					bind:checked={row.done}
+					data-testid="stage-done-{i}"
+					onchange={() => (dirty = true)}
+				/>
+				<IconButton
+					icon="arrow-up"
 					size="sm"
-					aria-label="Move stage {i + 1} up"
+					label="Move stage {i + 1} up"
 					disabled={i === 0}
 					onclick={() => swap(i, -1)}
-				>
-					↑
-				</Button>
-				<Button
+				/>
+				<IconButton
+					icon="arrow-down"
 					size="sm"
-					aria-label="Move stage {i + 1} down"
+					label="Move stage {i + 1} down"
 					disabled={i === rows.length - 1}
 					onclick={() => swap(i, 1)}
-				>
-					↓
-				</Button>
-				<Button
+				/>
+				<IconButton
+					icon="x"
 					size="sm"
-					variant="ghost"
-					aria-label="Remove stage {i + 1}"
+					tone="danger"
+					label="Remove stage {i + 1}"
 					data-testid="stage-remove-{i}"
 					onclick={() => remove(i)}
-				>
-					×
-				</Button>
+				/>
 			</li>
 		{/each}
 	</ul>
@@ -170,15 +163,6 @@
 		grid-template-columns: 1fr auto auto auto auto;
 		align-items: center;
 		gap: var(--space-2);
-	}
-
-	.done {
-		display: flex;
-		align-items: center;
-		gap: var(--space-1);
-		font-size: 13px;
-		color: var(--text-secondary);
-		white-space: nowrap;
 	}
 
 	.foot {

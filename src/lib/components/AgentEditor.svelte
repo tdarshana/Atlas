@@ -1,66 +1,83 @@
 <script lang="ts">
-	// The agent form, shared by /agents/new and /agents/edit/[name]. The name is the
-	// identity the API saves under, so it is fixed once an agent exists.
-
-	import { onMount, untrack } from 'svelte';
-	import { goto } from '$app/navigation';
+	// The agent editor (frame 06). A dialog rather than a page of its own: the Agents
+	// table is the only way in, and the frame keeps the list on screen behind it. The
+	// name is the identity the API saves under, so it is fixed once an agent exists.
+	import { Button, Input } from '$lib/ds';
 	import { api } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
 	import { deleteAgent, nameError, parseList, saveAgent } from '$lib/stores/agents.svelte';
-	import Button from '$lib/ui/Button.svelte';
-	import Card from '$lib/ui/Card.svelte';
 	import Dialog from '$lib/ui/Dialog.svelte';
-	import ErrorState from '$lib/ui/ErrorState.svelte';
-	import Input from '$lib/ui/Input.svelte';
 	import Textarea from '$lib/ui/Textarea.svelte';
 	import { push } from '$lib/ui/toasts.svelte';
 
-	/** The agent to edit; undefined creates a new one. */
-	let { name: editing }: { name?: string } = $props();
+	interface Props {
+		open: boolean;
+		/** The agent to edit, or null to create one. */
+		editing: string | null;
+		onclose: () => void;
+		/** Fired after a successful save or delete, so the list can refresh. */
+		onchanged: () => void | Promise<void>;
+	}
 
-	// The route keys the editor on the name, so a fresh instance is mounted for a
-	// different agent and seeding state from the prop once is deliberate.
-	const initial = untrack(() => editing);
+	let { open, editing, onclose, onchanged }: Props = $props();
 
-	let name = $state(initial ?? '');
+	let name = $state('');
 	let description = $state('');
 	let instructions = $state('');
 	let modelHint = $state('');
 	let tools = $state('');
 	let tags = $state('');
 
-	let loading = $state(!!initial);
+	let loading = $state(false);
 	let saving = $state(false);
-	let loadError = $state<string | null>(null);
-	let saveError = $state<string | null>(null);
+	let error = $state<string | null>(null);
 	let confirming = $state(false);
 
 	const invalid = $derived(nameError(name));
 
-	onMount(async () => {
-		if (!editing) return;
-		try {
-			const agent = await api().getAgent(editing);
-			name = agent.name;
-			description = agent.description;
-			instructions = agent.instructions;
-			modelHint = agent.model_hint ?? '';
-			tools = agent.tools.join(', ');
-			tags = agent.tags.join(', ');
-		} catch (e) {
-			loadError = errorMessage(e);
-		} finally {
-			loading = false;
-		}
+	/**
+	 * Opening seeds the form: blank for a new agent, the stored agent for an edit. It
+	 * keys on `editing` as well as `open` so picking a second agent while the dialog is
+	 * up refills it rather than showing the first one's instructions.
+	 */
+	$effect(() => {
+		if (!open) return;
+		const target = editing;
+		name = target ?? '';
+		description = '';
+		instructions = '';
+		modelHint = '';
+		tools = '';
+		tags = '';
+		error = null;
+		confirming = false;
+		if (!target) return;
+		loading = true;
+		api()
+			.getAgent(target)
+			.then((agent) => {
+				name = agent.name;
+				description = agent.description;
+				instructions = agent.instructions;
+				modelHint = agent.model_hint ?? '';
+				tools = agent.tools.join(', ');
+				tags = agent.tags.join(', ');
+			})
+			.catch((e) => (error = errorMessage(e)))
+			.finally(() => (loading = false));
 	});
+
+	function cancel(): void {
+		onclose();
+	}
 
 	async function save(): Promise<void> {
 		if (invalid) {
-			saveError = invalid;
+			error = invalid;
 			return;
 		}
 		saving = true;
-		saveError = null;
+		error = null;
 		try {
 			await saveAgent({
 				name,
@@ -71,11 +88,12 @@
 				tags: parseList(tags)
 			});
 			push('success', `Saved ${name}`);
-			if (!editing) await goto(`/agents/edit/${encodeURIComponent(name)}`);
+			onclose();
+			await onchanged();
 		} catch (e) {
 			// The daemon's `error` string is the useful message on a 400.
-			saveError = errorMessage(e);
-			push('error', saveError);
+			error = errorMessage(e);
+			push('error', error);
 		} finally {
 			saving = false;
 		}
@@ -87,86 +105,81 @@
 		try {
 			await deleteAgent(editing);
 			push('success', `Deleted ${editing}`);
-			await goto('/agents');
+			onclose();
+			await onchanged();
 		} catch (e) {
 			push('error', errorMessage(e));
 		}
 	}
 </script>
 
-{#if loadError}
-	<ErrorState message={loadError}>
-		<Button onclick={() => goto('/agents')}>Back to agents</Button>
-	</ErrorState>
-{:else}
-	<Card title={editing ? `Edit ${editing}` : 'New agent'}>
-		{#snippet actions()}
-			<Button
-				variant="primary"
-				data-testid="agent-save"
-				disabled={saving || loading}
-				onclick={save}
-			>
-				Save
-			</Button>
-			{#if editing}
-				<Button variant="danger" data-testid="agent-delete" onclick={() => (confirming = true)}>
-					Delete
-				</Button>
+<Dialog {open} title={editing ? `Edit ${editing}` : 'New agent'} onclose={cancel}>
+	<div class="form">
+		<label class="field">
+			<span>Name</span>
+			<Input
+				bind:value={name}
+				mono
+				disabled={!!editing}
+				placeholder="code-reviewer"
+				data-testid="agent-name"
+			/>
+			{#if !editing && name !== '' && invalid}
+				<span class="bad">{invalid}</span>
 			{/if}
-		{/snippet}
+		</label>
 
-		<div class="form">
+		<label class="field">
+			<span>Description</span>
+			<Input bind:value={description} placeholder="Reviews diffs for correctness" />
+		</label>
+
+		<label class="field">
+			<span>Instructions</span>
+			<Textarea bind:value={instructions} mono rows={12} data-testid="agent-instructions" />
+		</label>
+
+		<div class="pair">
 			<label class="field">
-				<span>Name</span>
-				<Input
-					bind:value={name}
-					disabled={!!editing}
-					placeholder="code-reviewer"
-					data-testid="agent-name"
-				/>
-				{#if !editing && name !== '' && invalid}
-					<span class="bad">{invalid}</span>
-				{/if}
+				<span>Model hint</span>
+				<Input bind:value={modelHint} mono placeholder="claude-sonnet" />
 			</label>
-
 			<label class="field">
-				<span>Description</span>
-				<Input bind:value={description} placeholder="Reviews diffs for correctness" />
+				<span>Tools</span>
+				<Input bind:value={tools} mono placeholder="read, grep, bash" />
 			</label>
-
-			<label class="field">
-				<span>Instructions</span>
-				<Textarea bind:value={instructions} mono rows={14} data-testid="agent-instructions" />
-			</label>
-
-			<div class="row">
-				<label class="field">
-					<span>Model hint</span>
-					<Input bind:value={modelHint} placeholder="claude-sonnet" />
-				</label>
-				<label class="field">
-					<span>Tools</span>
-					<Input bind:value={tools} placeholder="read, grep, bash" />
-				</label>
-				<label class="field">
-					<span>Tags</span>
-					<Input bind:value={tags} placeholder="review, rust" />
-				</label>
-			</div>
-
-			{#if saveError}
-				<p class="bad" role="alert" data-testid="agent-error">{saveError}</p>
-			{/if}
 		</div>
-	</Card>
-{/if}
 
-<Dialog
-	open={confirming}
-	title="Delete agent"
-	onclose={() => (confirming = false)}
->
+		<label class="field">
+			<span>Tags</span>
+			<Input bind:value={tags} placeholder="review, rust" />
+		</label>
+
+		{#if error}
+			<p class="bad" role="alert" data-testid="agent-error">{error}</p>
+		{/if}
+	</div>
+
+	{#snippet footer()}
+		{#if editing}
+			<Button variant="danger" data-testid="agent-delete" onclick={() => (confirming = true)}>
+				Delete
+			</Button>
+		{/if}
+		<span class="spacer"></span>
+		<Button onclick={cancel}>Cancel</Button>
+		<Button
+			variant="primary"
+			data-testid="agent-save"
+			disabled={saving || loading}
+			onclick={save}
+		>
+			{saving ? 'Saving…' : 'Save'}
+		</Button>
+	{/snippet}
+</Dialog>
+
+<Dialog open={confirming} title="Delete agent" onclose={() => (confirming = false)}>
 	<p>Delete <strong>{editing}</strong>? Files already synced to disk stay where they are.</p>
 	{#snippet footer()}
 		<Button onclick={() => (confirming = false)}>Cancel</Button>
@@ -178,31 +191,27 @@
 	.form {
 		display: flex;
 		flex-direction: column;
-		gap: var(--space-4);
+		gap: 10px;
 	}
 
 	.field {
 		display: flex;
 		flex-direction: column;
-		gap: var(--space-1);
+		gap: 4px;
 	}
 
 	.field > span {
-		font-size: 13px;
 		color: var(--text-secondary);
 	}
 
-	.row {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-4);
+	.pair {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 12px;
 	}
 
-	/* Only fields laid out side by side share the row's width. Inside `.form`, which
-	   stacks its children, the same basis is read as a height and stretches every
-	   field to 200px. */
-	.row > .field {
-		flex: 1 1 200px;
+	.spacer {
+		flex: 1;
 	}
 
 	.bad {

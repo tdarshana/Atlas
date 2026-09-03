@@ -26,7 +26,7 @@
 			label={agent.name}
 			mono
 			meta={`v${agent.version}`}
-			onclick={() => goto(`/agents/edit/${encodeURIComponent(agent.name)}`)}
+			onclick={() => goto(`/agents?edit=${encodeURIComponent(agent.name)}`)}
 		/>
 	{/each}
 </TreeGroup>

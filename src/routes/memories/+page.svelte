@@ -1,56 +1,50 @@
 <script lang="ts">
-	// Memories: search or list, filtered by scope and kind, with a detail panel
-	// whose Forget supersedes the memory and drops its row.
+	// Memories (frame 05): search or list the global memory set, narrowed by a scope
+	// select and the kind chips, with the side panel carrying the facets. The palette
+	// links here with `?id=` to point at one memory and `?remember=1` to write one.
 	import { onMount, untrack } from 'svelte';
 	import { page } from '$app/state';
+	import { Badge, Button, Input, Select, Table, type TableColumn } from '$lib/ds';
 	import { api } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
-	import { plural, relativeAge } from '$lib/format';
+	import { NOTHING, plural, relativeAge } from '$lib/format';
 	import { setStatusItems } from '$lib/shell';
+	import { scopeOptions, scopeSelection, scopeValue } from '$lib/components/memory-scope';
+	import RememberDialog from '$lib/components/RememberDialog.svelte';
 	import {
 		MEMORY_KINDS,
-		clearKinds,
-		forgetMemory,
 		cancelLoad,
+		forgetMemory,
 		loadMemories,
 		memories,
 		scheduleLoad,
-		toggleKind,
-		type ScopeFilter
+		toggleKind
 	} from '$lib/stores/memories.svelte';
 	import { loadProjects, projects } from '$lib/stores/projects.svelte';
 	import type { MemoryKind, RecallHit } from '$lib/types';
-	import Badge from '$lib/ui/Badge.svelte';
-	import Button from '$lib/ui/Button.svelte';
 	import Dialog from '$lib/ui/Dialog.svelte';
-	import EmptyState from '$lib/ui/EmptyState.svelte';
 	import ErrorState from '$lib/ui/ErrorState.svelte';
-	import Input from '$lib/ui/Input.svelte';
-	import Select from '$lib/ui/Select.svelte';
-	import Table from '$lib/ui/Table.svelte';
 	import Textarea from '$lib/ui/Textarea.svelte';
 	import { push } from '$lib/ui/toasts.svelte';
 
-	const scopeOptions = [
-		{ value: 'all', label: 'All' },
-		{ value: 'global', label: 'Global' },
-		{ value: 'project', label: 'Project' }
+	const columns: TableColumn<RecallHit>[] = [
+		{ key: 'kind', label: 'Kind', width: '110px', sortable: true, sort: (a, b) => a.memory.kind.localeCompare(b.memory.kind) },
+		{ key: 'text', label: 'Text', mono: true },
+		{ key: 'tags', label: 'Tags', width: '200px', mono: true },
+		{ key: 'source', label: 'Source', width: '120px', mono: true },
+		{
+			key: 'age',
+			label: 'Age',
+			width: '80px',
+			align: 'right',
+			mono: true,
+			sortable: true,
+			sort: (a, b) => a.memory.created_at.localeCompare(b.memory.created_at)
+		}
 	];
 
-	const projectOptions = $derived([
-		{ value: '', label: 'Any project' },
-		...projects.items.map((p) => ({ value: p.id, label: p.name }))
-	]);
-
-	const columns = $derived([
-		...(memories.scored ? [{ key: 'score', label: 'Score', width: '70px' }] : []),
-		{ key: 'kind', label: 'Kind', width: '110px' },
-		{ key: 'text', label: 'Text' },
-		{ key: 'tags', label: 'Tags', width: '160px' },
-		{ key: 'source', label: 'Source', width: '140px' },
-		{ key: 'age', label: 'Age', width: '80px', align: 'right' as const }
-	]);
-
+	const options = $derived(scopeOptions(projects.items));
+	const scope = $derived(scopeValue(memories.scope, memories.projectId));
 	const selected = $derived(memories.selected);
 	const projectName = $derived(
 		selected?.project_id
@@ -58,22 +52,32 @@
 			: null
 	);
 
+	let remembering = $state(false);
 	let confirming = $state(false);
 	let reason = $state('');
 	let forgetting = $state(false);
+	let tableEl = $state<HTMLDivElement>();
 
-	function onScope(value: string) {
-		memories.scope = value as ScopeFilter;
-		if (memories.scope !== 'project') memories.projectId = '';
+	/** Insight reads as information; a todo is pending work. The rest carry no tone. */
+	function kindTone(kind: MemoryKind): 'accent' | 'info' | 'warning' {
+		if (kind === 'insight') return 'info';
+		if (kind === 'todo') return 'warning';
+		return 'accent';
+	}
+
+	function onScope(value: string): void {
+		const chosen = scopeSelection(value);
+		memories.scope = chosen.scope;
+		memories.projectId = chosen.projectId;
 		scheduleLoad(0);
 	}
 
 	function source(hit: RecallHit): string {
 		const { source_agent, source_tool } = hit.memory;
-		return [source_agent, source_tool].filter(Boolean).join(' · ') || '-';
+		return [source_agent, source_tool].filter(Boolean).join(' · ') || NOTHING;
 	}
 
-	async function confirmForget() {
+	async function confirmForget(): Promise<void> {
 		if (!selected) return;
 		forgetting = true;
 		try {
@@ -96,10 +100,9 @@
 		return cancelLoad;
 	});
 
-	// `?id=<uuid>` (from the command palette, or a link elsewhere) selects that memory in
-	// the detail panel even when it falls outside the current filters. It reads the URL
-	// rather than running once, so a second palette hit while this page is already open
-	// re-points the panel instead of doing nothing.
+	// `?id=<uuid>` (from the command palette, or a link elsewhere) selects that memory even
+	// when it falls outside the current filters. It reads the URL rather than running once,
+	// so a second palette hit while this page is already open re-points the selection.
 	$effect(() => {
 		const id = page.url.searchParams.get('id');
 		if (!id) return;
@@ -111,157 +114,170 @@
 		});
 	});
 
+	// `?remember=1` opens the write dialog straight from the palette.
+	$effect(() => {
+		if (page.url.searchParams.get('remember') === '1') untrack(() => (remembering = true));
+	});
+
+	// The selected row may be far down a long list, so bring it into view once it is
+	// rendered. jsdom and older webviews have no `scrollIntoView`; the row is still marked.
+	$effect(() => {
+		const id = memories.selected?.id;
+		if (!id || !tableEl) return;
+		const row = tableEl.querySelector('.row.selected');
+		if (row && typeof row.scrollIntoView === 'function') {
+			row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+		}
+	});
+
 	$effect(() => {
 		setStatusItems({ right: [{ text: plural(memories.hits.length, 'memory', 'memories') }] });
 	});
 </script>
 
-<div class="head">
-	<h1>Memories</h1>
-</div>
-
-<div class="filters">
+<div class="title-row">
+	<span class="title">Memories</span>
+	<span class="spacer"></span>
 	<div class="search">
 		<Input
 			bind:value={memories.query}
+			icon="search"
 			data-testid="memories-search"
 			placeholder="Search memories…"
 			aria-label="Search memories"
 			oninput={() => scheduleLoad()}
 		/>
 	</div>
-
 	<div class="scope">
 		<Select
-			value={memories.scope}
-			options={scopeOptions}
+			value={scope}
+			{options}
 			aria-label="Scope"
+			data-testid="memories-scope"
 			onchange={(e) => onScope(e.currentTarget.value)}
 		/>
 	</div>
-
-	{#if memories.scope === 'project'}
-		<div class="scope">
-			<Select
-				bind:value={memories.projectId}
-				options={projectOptions}
-				aria-label="Project"
-				data-testid="memories-project"
-				onchange={() => scheduleLoad(0)}
-			/>
-		</div>
-	{/if}
 </div>
 
 <div class="chips">
 	{#each MEMORY_KINDS as kind (kind)}
+		{@const on = memories.kinds.includes(kind)}
 		<button
 			type="button"
 			class="chip"
-			class:on={memories.kinds.includes(kind)}
-			aria-pressed={memories.kinds.includes(kind)}
+			aria-pressed={on}
 			data-testid="kind-{kind}"
 			onclick={() => toggleKind(kind)}
 		>
-			{kind}
+			<Badge tone={on ? kindTone(kind) : 'neutral'} variant={on ? 'soft' : 'outline'}>
+				{kind}
+			</Badge>
 		</button>
 	{/each}
-	{#if memories.kinds.length > 0}
-		<button type="button" class="chip clear" onclick={clearKinds}>
-			clear
-		</button>
-	{/if}
 </div>
 
 <div class="split" class:detail={!!selected}>
-	<div>
+	<div class="list" bind:this={tableEl} data-testid="memories-table">
 		{#if memories.error}
 			<ErrorState message={memories.error} logPath={memories.errorLogPath ?? undefined}>
 				<Button variant="primary" onclick={() => loadMemories()}>Retry</Button>
 			</ErrorState>
 		{:else}
 			<Table
+				id="memories"
 				{columns}
 				rows={memories.hits}
-				data-testid="memories-table"
 				rowKey={(hit: RecallHit) => hit.memory.id}
-				onrowclick={(hit: RecallHit) => (memories.selected = hit.memory)}
+				selectedKey={selected?.id ?? null}
+				onRowClick={(hit: RecallHit) => (memories.selected = hit.memory)}
+				defaultSort={{ key: 'age', dir: 'desc' }}
 			>
-				{#snippet cell(hit: RecallHit, key: string)}
-					{#if key === 'score'}
-						<span class="muted">{hit.score.toFixed(2)}</span>
-					{:else if key === 'kind'}
-						<Badge>{hit.memory.kind}</Badge>
-					{:else if key === 'text'}
-						<span class="text">{hit.memory.text}</span>
-					{:else if key === 'tags'}
-						{#each hit.memory.tags as tag (tag)}<Badge tone="accent">{tag}</Badge>{:else}
-							<span class="muted">-</span>
-						{/each}
-					{:else if key === 'source'}
+				{#snippet cell(hit: RecallHit, column: TableColumn<RecallHit>)}
+					{#if column.key === 'kind'}
+						<Badge tone={kindTone(hit.memory.kind)}>{hit.memory.kind}</Badge>
+					{:else if column.key === 'text'}
+						{hit.memory.text}
+					{:else if column.key === 'tags'}
+						<span class="tags">
+							{#each hit.memory.tags as tag (tag)}<Badge tone="accent" mono>{tag}</Badge>{:else}
+								<span class="muted">{NOTHING}</span>
+							{/each}
+						</span>
+					{:else if column.key === 'source'}
 						<span class="muted">{source(hit)}</span>
 					{:else}
 						<span class="muted">{relativeAge(hit.memory.created_at)}</span>
 					{/if}
 				{/snippet}
 				{#snippet empty()}
-					{#if memories.loading}
-						<EmptyState title="Loading…" />
-					{:else if memories.query.trim()}
-						<EmptyState
-							title="No matches"
-							hint="Nothing active matches that query with the current filters."
-						/>
-					{:else}
-						<EmptyState
-							title="No memories yet"
-							hint="Agents write memories through the MCP tools, or add one with atlas remember."
-						/>
-					{/if}
+					<div class="empty">
+						{#if memories.loading}
+							<span class="empty-title">Loading…</span>
+						{:else if memories.query.trim()}
+							<span class="empty-title">No matches</span>
+							<span class="empty-hint">
+								Nothing active matches that query with the current filters.
+							</span>
+						{:else}
+							<span class="empty-title">No memories yet</span>
+							<span class="empty-hint">
+								Agents write memories through the MCP tools, or add one with atlas remember.
+							</span>
+						{/if}
+					</div>
 				{/snippet}
 			</Table>
 		{/if}
 	</div>
 
 	{#if selected}
-		<aside class="panel" data-testid="memory-detail">
-			<header>
-				<Badge>{selected.kind}</Badge>
-				<button
-					type="button"
-					class="x"
-					aria-label="Close detail"
-					onclick={() => (memories.selected = null)}>×</button
-				>
-			</header>
+		<aside class="card panel-detail" data-testid="memory-detail">
+			<div class="detail-head">
+				<Badge tone={kindTone(selected.kind)}>{selected.kind}</Badge>
+				<span class="spacer"></span>
+				<Button variant="ghost" size="sm" onclick={() => (memories.selected = null)}>Close</Button>
+			</div>
 
-			<p class="body">{selected.text}</p>
+			<div class="detail-body">
+				<p class="detail-text">{selected.text}</p>
 
-			<dl>
-				<dt>Scope</dt>
-				<dd>{selected.scope}{projectName ? ` · ${projectName}` : ''}</dd>
-				<dt>Tags</dt>
-				<dd>
-					{#each selected.tags as tag (tag)}<Badge tone="accent">{tag}</Badge>{:else}-{/each}
-				</dd>
-				<dt>Source</dt>
-				<dd>{[selected.source_agent, selected.source_tool].filter(Boolean).join(' · ') || '-'}</dd>
-				<dt>Confidence</dt>
-				<dd>{selected.confidence.toFixed(2)}</dd>
-				<dt>Status</dt>
-				<dd>{selected.status}</dd>
-				<dt>Created</dt>
-				<dd>{new Date(selected.created_at).toLocaleString()}</dd>
-				<dt>Id</dt>
-				<dd><code>{selected.id}</code></dd>
-			</dl>
+				<dl>
+					<dt>Scope</dt>
+					<dd>{selected.scope}{projectName ? ` · ${projectName}` : ''}</dd>
+					<dt>Tags</dt>
+					<dd>
+						{#each selected.tags as tag (tag)}<Badge tone="accent" mono>{tag}</Badge>{:else}
+							{NOTHING}
+						{/each}
+					</dd>
+					<dt>Source</dt>
+					<dd class="mono">
+						{[selected.source_agent, selected.source_tool].filter(Boolean).join(' · ') || NOTHING}
+					</dd>
+					<dt>Confidence</dt>
+					<dd class="mono">{selected.confidence.toFixed(2)}</dd>
+					<dt>Status</dt>
+					<dd>{selected.status}</dd>
+					<dt>Created</dt>
+					<dd class="mono">{new Date(selected.created_at).toLocaleString()}</dd>
+					<dt>Id</dt>
+					<dd class="mono id">{selected.id}</dd>
+				</dl>
 
-			<Button variant="danger" data-testid="memory-forget" onclick={() => (confirming = true)}>
-				Forget
-			</Button>
+				<Button variant="danger" data-testid="memory-forget" onclick={() => (confirming = true)}>
+					Forget…
+				</Button>
+			</div>
 		</aside>
 	{/if}
 </div>
+
+<RememberDialog
+	open={remembering}
+	projects={projects.items}
+	onclose={() => (remembering = false)}
+	onsaved={() => loadMemories()}
+/>
 
 <Dialog
 	open={confirming}
@@ -271,14 +287,24 @@
 		reason = '';
 	}}
 >
-	<p class="muted">
-		Nothing is deleted; the memory is superseded and stops appearing in recall.
-	</p>
-	<label class="label" for="forget-reason">Reason (optional)</label>
-	<Textarea id="forget-reason" bind:value={reason} rows={3} placeholder="Why is this no longer true?" />
+	<p class="muted">Nothing is deleted; the memory is superseded and stops appearing in recall.</p>
+	<label class="reason" for="forget-reason">Reason (optional)</label>
+	<Textarea
+		id="forget-reason"
+		bind:value={reason}
+		rows={3}
+		placeholder="Why is this no longer true?"
+	/>
 
 	{#snippet footer()}
-		<Button onclick={() => { confirming = false; reason = ''; }}>Cancel</Button>
+		<Button
+			onclick={() => {
+				confirming = false;
+				reason = '';
+			}}
+		>
+			Cancel
+		</Button>
 		<Button
 			variant="danger"
 			data-testid="memory-forget-confirm"
@@ -291,118 +317,117 @@
 </Dialog>
 
 <style>
-	.head {
+	.title-row {
 		display: flex;
 		align-items: center;
+		gap: 8px;
 		height: 28px;
 		flex: 0 0 28px;
-		margin-bottom: var(--space-4);
 	}
 
-	.head h1 {
-		margin: 0;
+	.title {
 		font-size: 15px;
 		font-weight: 600;
 	}
 
-	.filters {
-		display: flex;
-		gap: var(--space-3);
-		margin-bottom: var(--space-3);
-	}
-
-	.search {
+	.spacer {
 		flex: 1;
 	}
 
+	.search {
+		width: 300px;
+	}
+
 	.scope {
-		width: 180px;
+		width: 120px;
 	}
 
 	.chips {
 		display: flex;
 		flex-wrap: wrap;
-		gap: var(--space-2);
-		margin-bottom: var(--space-4);
+		gap: 4px;
+		flex: 0 0 auto;
 	}
 
+	/* The Badge carries the whole look; the button is only here so a chip is a control
+	   a keyboard can reach and a screen reader reads as pressed or not. */
 	.chip {
-		padding: 2px 10px;
-		border: 1px solid var(--border-default);
-		border-radius: 999px;
-		background: var(--bg-raised);
-		color: var(--text-secondary);
+		padding: 0;
+		border: 0;
+		background: none;
 		font: inherit;
-		font-size: 13px;
-		cursor: pointer;
-	}
-
-	.chip.on {
-		border-color: transparent;
-		background: var(--accent-muted);
-		color: var(--accent);
-	}
-
-	.chip.clear {
-		border-style: dashed;
+		cursor: default;
 	}
 
 	.split {
+		flex: 1;
+		min-height: 0;
 		display: grid;
-		gap: var(--space-4);
-		align-items: start;
+		grid-template-columns: 1fr;
+		gap: 12px;
 	}
 
 	.split.detail {
 		grid-template-columns: 1fr 320px;
 	}
 
-	.panel {
+	.list {
+		min-width: 0;
+		min-height: 0;
 		display: flex;
 		flex-direction: column;
-		gap: var(--space-3);
-		padding: var(--space-4);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-md);
-		background: var(--bg-raised);
+		overflow: hidden;
 	}
 
-	.panel header {
+	.panel-detail {
+		display: flex;
+		flex-direction: column;
+		min-height: 0;
+		overflow: hidden;
+	}
+
+	.detail-head {
+		height: 32px;
+		flex: 0 0 32px;
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
+		gap: 8px;
+		padding: 0 12px;
+		border-bottom: 1px solid var(--border-subtle);
 	}
 
-	.x {
-		border: none;
-		background: none;
-		color: var(--text-secondary);
-		font-size: 20px;
-		line-height: 1;
-		cursor: pointer;
+	.detail-body {
+		padding: 12px;
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		overflow-y: auto;
 	}
 
-	.body {
+	.detail-text {
 		margin: 0;
 		overflow-wrap: anywhere;
 	}
 
-	.text {
-		display: block;
-		max-width: 60ch;
-		overflow-wrap: anywhere;
+	.tags {
+		display: inline-flex;
+		flex-wrap: wrap;
+		gap: 4px;
 	}
 
 	.muted {
 		color: var(--text-secondary);
 	}
 
+	.mono {
+		font-family: var(--font-mono);
+	}
+
 	dl {
 		display: grid;
 		grid-template-columns: auto 1fr;
-		gap: var(--space-1) var(--space-3);
+		gap: 4px 12px;
 		margin: 0;
-		font-size: 13px;
 	}
 
 	dt {
@@ -413,14 +438,33 @@
 		margin: 0;
 		display: flex;
 		flex-wrap: wrap;
-		gap: var(--space-1);
+		gap: 4px;
 		overflow-wrap: anywhere;
 	}
 
-	.label {
+	.id {
+		font-size: 11px;
+	}
+
+	.reason {
 		display: block;
-		margin: var(--space-3) 0 var(--space-1);
-		font-size: 13px;
+		margin: 12px 0 4px;
+		color: var(--text-secondary);
+	}
+
+	.empty {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 6px;
+		padding: 28px 0;
+	}
+
+	.empty-title {
+		font-weight: 600;
+	}
+
+	.empty-hint {
 		color: var(--text-secondary);
 	}
 </style>

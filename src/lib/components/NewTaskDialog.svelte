@@ -1,13 +1,11 @@
 <script lang="ts">
 	// New task. The stage is left to the daemon, which puts a new task in the first
 	// stage of the project's list; everything else here is optional but the title.
+	import { Button, Input, Select } from '$lib/ds';
 	import { api } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
 	import type { TaskKind, TaskPriority, Uuid } from '$lib/types';
-	import Button from '$lib/ui/Button.svelte';
 	import Dialog from '$lib/ui/Dialog.svelte';
-	import Input from '$lib/ui/Input.svelte';
-	import Select from '$lib/ui/Select.svelte';
 	import Textarea from '$lib/ui/Textarea.svelte';
 	import { push } from '$lib/ui/toasts.svelte';
 

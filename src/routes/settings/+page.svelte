@@ -1,10 +1,16 @@
 <script lang="ts">
-	// Settings: the seven keys the daemon stores. Port and embedding model are read
-	// only here (they are daemon startup facts); the extraction block is editable.
-	// Save sends only the keys that changed, and the API key only when one was typed,
-	// because the server hands back "***" for a stored key and treats it as "leave it".
+	// Settings (frame 10): the seven keys the daemon stores, the global board stages, and
+	// how agents reach the MCP server. Port and embedding model are read only because the
+	// daemon sets them at startup. Save sends only the keys that changed, and the API key
+	// only when one was typed: the server hands back "***" for a stored key and reads a
+	// missing key as "leave it alone".
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
+	import { Badge, Button, Checkbox, Input } from '$lib/ds';
+	import { api, daemon } from '$lib/daemon.svelte';
+	import { errorMessage } from '$lib/errors';
+	import { setStatusItems } from '$lib/shell';
+	import { scrollToSection } from '$lib/components/settings-sections';
 	import StageEditor from '$lib/components/StageEditor.svelte';
 	import {
 		DEFAULT_MIN_CONFIDENCE,
@@ -16,13 +22,8 @@
 		settingString,
 		settings
 	} from '$lib/stores/settings.svelte';
-	import { api, daemon } from '$lib/daemon.svelte';
-	import { errorMessage } from '$lib/errors';
 	import type { ExtractionTestResult, Stage } from '$lib/types';
-	import Button from '$lib/ui/Button.svelte';
-	import Card from '$lib/ui/Card.svelte';
 	import ErrorState from '$lib/ui/ErrorState.svelte';
-	import Input from '$lib/ui/Input.svelte';
 	import { push } from '$lib/ui/toasts.svelte';
 
 	/** Draft values. The API key starts blank on every load: blank means unchanged. */
@@ -42,10 +43,10 @@
 	let stages = $state<Stage[]>([]);
 	let stagesError = $state<string | null>(null);
 
+	let copied = $state<string | null>(null);
+
 	/** The button needs extraction on and both endpoint fields filled to mean anything. */
-	const testDisabled = $derived(
-		!enabled || baseUrl.trim() === '' || model.trim() === '' || testing
-	);
+	const testDisabled = $derived(!enabled || baseUrl.trim() === '' || model.trim() === '' || testing);
 
 	/** True once the daemon holds a key, which is all `"***"` tells us. */
 	const keyStored = $derived(settings.values['extraction.api_key'] === MASKED);
@@ -62,11 +63,30 @@
 			apiKey === '' &&
 			trimTrailingSlash(baseUrl) !== trimTrailingSlash(settingString('extraction.base_url'))
 	);
+
 	const port = $derived(settingString('daemon.port', String(daemon.port)));
 	const embeddingModel = $derived(settingString('embedding.model', 'not set') || 'not set');
+	const online = $derived(!daemon.error);
+	const httpEndpoint = $derived(`http://127.0.0.1:${port}/mcp`);
+
+	const CLAUDE_SNIPPET = 'claude mcp add --scope user atlas -- atlas mcp';
+	const CODEX_SNIPPET = `# ~/.codex/config.toml
+[mcp_servers.atlas]
+command = "atlas"
+args = ["mcp"]`;
+
+	/** Copies a snippet and names which one was copied, so the feedback is on the button. */
+	async function copy(label: string, text: string): Promise<void> {
+		try {
+			await navigator.clipboard.writeText(text);
+			copied = label;
+		} catch (e) {
+			push('error', `Could not copy: ${errorMessage(e)}`);
+		}
+	}
 
 	/** Copies the server's values into the draft, discarding any unsaved edits. */
-	function syncDraft() {
+	function syncDraft(): void {
 		const d = draftFromSettings();
 		enabled = d.enabled;
 		baseUrl = d.baseUrl;
@@ -75,9 +95,9 @@
 		threshold = d.threshold;
 	}
 
-	async function save() {
-		// The diff lives in the store so it can be unit tested; a blank API key box
-		// means "leave the stored key alone" and sends nothing for that key.
+	async function save(): Promise<void> {
+		// The diff lives in the store so it can be unit tested; a blank API key box means
+		// "leave the stored key alone" and sends nothing for that key.
 		const partial = changedSettings({ enabled, baseUrl, apiKey, model, threshold });
 		if (Object.keys(partial).length === 0) {
 			push('info', 'No changes to save');
@@ -98,13 +118,13 @@
 		}
 	}
 
-	async function reload() {
+	async function reload(): Promise<void> {
 		await loadSettings();
 		syncDraft();
 		await loadStages();
 	}
 
-	async function loadStages() {
+	async function loadStages(): Promise<void> {
 		try {
 			stages = (await api().boardStages()).stages;
 			stagesError = null;
@@ -114,7 +134,7 @@
 		}
 	}
 
-	async function saveStages(next: Stage[], renames: Record<string, string>) {
+	async function saveStages(next: Stage[], renames: Record<string, string>): Promise<void> {
 		try {
 			stages = await api().setBoardStages(next, renames);
 			stagesError = null;
@@ -126,7 +146,7 @@
 	}
 
 	/** Saves the form first when it is dirty, then calls `/extraction/test`. */
-	async function testConnection() {
+	async function testConnection(): Promise<void> {
 		if (Object.keys(changedSettings({ enabled, baseUrl, apiKey, model, threshold })).length > 0) {
 			await save();
 			if (saveError) return;
@@ -135,11 +155,8 @@
 		testResult = null;
 		try {
 			testResult = await api().testExtraction();
-			if (testResult.ok) {
-				push('success', `Connected. Reply: ${testResult.reply}`);
-			} else {
-				push('error', testResult.error ?? 'Connection failed');
-			}
+			if (testResult.ok) push('success', `Connected. Reply: ${testResult.reply}`);
+			else push('error', testResult.error ?? 'Connection failed');
 		} catch (e) {
 			const message = errorMessage(e);
 			testResult = { ok: false, error: message };
@@ -153,62 +170,47 @@
 		void reload();
 	});
 
-	// `/settings#<section>` (the side panel's Sections rows) scrolls to that card once
-	// its content has loaded. It reads the hash rather than running once, so a second
-	// row picked while this page is already open scrolls too.
+	// `/settings#<section>` (the side panel's Sections rows) scrolls to that card once its
+	// content has loaded. It reads the hash rather than running once, so a second row
+	// picked while this page is already open scrolls too.
 	$effect(() => {
-		const hash = page.url.hash.slice(1);
-		if (!hash || !settings.loaded) return;
-		const el = document.getElementById(hash);
-		// jsdom and older webviews have no smooth scrolling; the anchor still resolves.
-		if (el && typeof el.scrollIntoView === 'function') {
-			el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-		}
+		scrollToSection(page.url.hash, settings.loaded, (id) => document.getElementById(id));
+	});
+
+	$effect(() => {
+		setStatusItems({ right: [{ text: 'settings' }] });
 	});
 </script>
 
-<div class="head">
-	<h1>Settings</h1>
-</div>
+<div class="title-row"><span class="title">Settings</span></div>
 
 {#if settings.error && !settings.loaded}
 	<ErrorState message={settings.error} logPath={settings.errorLogPath ?? undefined}>
 		<Button variant="primary" onclick={reload}>Retry</Button>
 	</ErrorState>
 {:else}
-	<form
-		data-testid="settings-form"
-		onsubmit={(e: SubmitEvent) => {
-			e.preventDefault();
-			void save();
-		}}
-	>
-		<Card id="daemon" title="Daemon">
-			<div class="row">
-				<div class="field">
-					<span>Port</span>
-					<p class="ro" data-testid="settings-port">{port}</p>
+	<div class="pane" data-testid="settings-form">
+		<section class="card" id="daemon">
+			<div class="card-head"><span class="card-title">Daemon</span></div>
+			<div class="card-body">
+				<div class="pair">
+					<Input label="Port" mono readonly value={port} data-testid="settings-port" />
+					<Input
+						label="Embedding model"
+						mono
+						readonly
+						value={embeddingModel}
+						data-testid="settings-embedding"
+					/>
 				</div>
-				<div class="field">
-					<span>Embedding model</span>
-					<p class="ro" data-testid="settings-embedding">{embeddingModel}</p>
-				</div>
+				<span class="hint">Both are set when the daemon starts and are shown here for reference.</span>
 			</div>
-			<p class="hint">Both are set when the daemon starts and are shown here for reference.</p>
-		</Card>
+		</section>
 
-		<Card id="extraction" title="Extraction">
-			{#snippet actions()}
-				<Button
-					data-testid="settings-test"
-					disabled={testDisabled}
-					title={testDisabled
-						? 'Enable extraction and set a base URL and model first'
-						: 'Send a test request to the configured endpoint'}
-					onclick={testConnection}
-				>
-					{testing ? 'Testing…' : 'Test connection'}
-				</Button>
+		<section class="card" id="extraction">
+			<div class="card-head">
+				<span class="card-title">Extraction</span>
+				<span class="spacer"></span>
 				{#if testResult}
 					<span
 						class="test-result"
@@ -219,204 +221,301 @@
 						{testResult.ok ? `Connected. Reply: ${testResult.reply}` : testResult.error}
 					</span>
 				{/if}
-			{/snippet}
+				<Button
+					variant="ghost"
+					size="sm"
+					data-testid="settings-test"
+					disabled={testDisabled}
+					title={testDisabled
+						? 'Enable extraction and set a base URL and model first'
+						: 'Send a test request to the configured endpoint'}
+					onclick={testConnection}
+				>
+					{testing ? 'Testing…' : 'Test connection'}
+				</Button>
+			</div>
 
-			<div class="form">
-				<label class="toggle">
-					<input type="checkbox" bind:checked={enabled} data-testid="settings-enabled" />
-					<span>Enable extraction</span>
-				</label>
+			<div class="card-body">
+				<Checkbox label="Enable extraction" bind:checked={enabled} data-testid="settings-enabled" />
 
-				<label class="field">
-					<span>Base URL</span>
+				<div class="pair">
 					<Input
+						label="Base URL"
+						mono
 						bind:value={baseUrl}
 						data-testid="settings-base-url"
 						placeholder="https://api.deepseek.com"
 					/>
-				</label>
-
-				<label class="field">
-					<span>API key</span>
 					<Input
-						type="password"
-						bind:value={apiKey}
-						data-testid="settings-api-key"
-						autocomplete="off"
-						placeholder={keyStored ? 'unchanged' : 'sk-…'}
+						label="Model"
+						mono
+						bind:value={model}
+						data-testid="settings-model"
+						placeholder="deepseek-chat"
 					/>
-					<span class="hint">
-						{keyStored
-							? 'A key is stored. Leave this blank to keep it.'
-							: 'No key stored yet.'}
+				</div>
+
+				<Input
+					label="API key"
+					type="password"
+					mono
+					bind:value={apiKey}
+					autocomplete="off"
+					data-testid="settings-api-key"
+					placeholder={keyStored ? 'unchanged' : 'sk-…'}
+					hint={keyStored ? 'A key is stored. Leave this blank to keep it.' : 'No key stored yet.'}
+				/>
+				{#if keyWillBeCleared}
+					<span class="hint warn" role="status" data-testid="settings-key-cleared-note">
+						Changing the base URL clears the stored key; enter it again.
 					</span>
-					{#if keyWillBeCleared}
-						<span class="hint warn" role="status" data-testid="settings-key-cleared-note">
-							Changing the base URL clears the stored key; enter it again.
-						</span>
-					{/if}
-				</label>
+				{/if}
 
-				<label class="field">
-					<span>Model</span>
-					<Input bind:value={model} data-testid="settings-model" placeholder="deepseek-chat" />
-				</label>
-
-				<label class="field">
-					<span>Auto-accept threshold</span>
-					<span class="slider">
+				<div class="field">
+					<span class="label">Auto-accept threshold</span>
+					<div class="slider">
 						<input
 							type="range"
 							min="0"
 							max="1"
 							step="0.05"
 							bind:value={threshold}
+							aria-label="Auto-accept threshold"
 							data-testid="settings-threshold"
 						/>
-						<output data-testid="settings-threshold-value">{threshold.toFixed(2)}</output>
-					</span>
-					<span class="hint">
-						Review's "Accept all above threshold" uses this value.
-					</span>
-				</label>
+						<output class="mono" data-testid="settings-threshold-value">
+							{threshold.toFixed(2)}
+						</output>
+					</div>
+					<span class="hint">Review's "Accept all above threshold" uses this value.</span>
+				</div>
 
-				<p class="hint" data-testid="extraction-key-note">
-					The API key is stored in the local Atlas database, sent only to the base URL
-					above, and never logged.
-				</p>
+				<span class="hint" data-testid="extraction-key-note">
+					The API key is stored in the local Atlas database, sent only to the base URL above,
+					and never logged.
+				</span>
 
 				{#if saveError}
 					<p class="bad" role="alert" data-testid="settings-error">{saveError}</p>
 				{/if}
 			</div>
-		</Card>
+		</section>
+
+		<section class="card" id="board-stages">
+			<div class="card-head"><span class="card-title">Board stages</span></div>
+			<div class="card-body">
+				<span class="hint">
+					The columns every project uses unless it sets its own. Renaming a stage here moves
+					the tasks standing in it.
+				</span>
+				{#if stagesError}
+					<p class="bad" role="alert" data-testid="board-stages-error">{stagesError}</p>
+				{/if}
+				<StageEditor {stages} onsave={saveStages} />
+			</div>
+		</section>
+
+		<section class="card" id="mcp">
+			<div class="card-head">
+				<span class="card-title">MCP server</span>
+				<Badge tone={online ? 'success' : 'neutral'} icon={online ? 'circle-check' : 'circle'}>
+					{online ? 'running' : 'offline'}
+				</Badge>
+			</div>
+
+			<div class="card-body">
+				<div class="group">
+					<span class="group-heading">Transports</span>
+					<div class="transport">
+						<span class="transport-name">stdio</span>
+						<span class="mono value">atlas mcp</span>
+						<span class="spacer"></span>
+						<Badge>default</Badge>
+					</div>
+					<div class="transport">
+						<span class="transport-name">HTTP</span>
+						<span class="mono value">{httpEndpoint}</span>
+						<span class="spacer"></span>
+						<Badge>loopback only</Badge>
+					</div>
+				</div>
+
+				<div class="group">
+					<span class="group-heading">Connect</span>
+
+					<div class="snippet">
+						<pre class="mono">{CLAUDE_SNIPPET}</pre>
+						<Button
+							variant="ghost"
+							size="sm"
+							data-testid="mcp-copy-claude"
+							onclick={() => copy('claude', CLAUDE_SNIPPET)}
+						>
+							{copied === 'claude' ? 'Copied' : 'Copy'}
+						</Button>
+					</div>
+
+					<div class="snippet">
+						<pre class="mono">{CODEX_SNIPPET}</pre>
+						<Button
+							variant="ghost"
+							size="sm"
+							data-testid="mcp-copy-codex"
+							onclick={() => copy('codex', CODEX_SNIPPET)}
+						>
+							{copied === 'codex' ? 'Copied' : 'Copy'}
+						</Button>
+					</div>
+				</div>
+
+				<span class="hint">The full tools table arrives with the MCP settings phase.</span>
+			</div>
+		</section>
 
 		<div class="foot">
-			<Button variant="primary" type="submit" data-testid="settings-save" disabled={saving}>
+			<Button variant="primary" data-testid="settings-save" disabled={saving} onclick={save}>
 				{saving ? 'Saving…' : 'Save'}
 			</Button>
 			<Button onclick={reload} disabled={saving || settings.loading}>Reload</Button>
 		</div>
-	</form>
-
-	<div class="board-stages">
-		<Card id="board-stages" title="Board stages">
-			<p class="hint">
-				The columns every project uses unless it sets its own. Renaming a stage here
-				moves the tasks standing in it.
-			</p>
-			{#if stagesError}
-				<p class="bad" role="alert" data-testid="board-stages-error">{stagesError}</p>
-			{/if}
-			<StageEditor stages={stages} onsave={saveStages} />
-		</Card>
-	</div>
-
-	<div class="mcp">
-		<Card id="mcp" title="MCP server">
-			<p class="hint">
-				Atlas serves MCP over stdio (<code>atlas mcp</code>) and loopback HTTP
-				(<code>/mcp</code>) on the daemon's port. Full tool, resource and connect-snippet
-				documentation is coming in a later phase.
-			</p>
-		</Card>
 	</div>
 {/if}
 
 <style>
-	.head {
+	.title-row {
 		display: flex;
 		align-items: center;
 		height: 28px;
 		flex: 0 0 28px;
-		margin-bottom: var(--space-4);
 	}
 
-	.head h1 {
-		margin: 0;
+	.title {
 		font-size: 15px;
 		font-weight: 600;
 	}
 
-	.board-stages,
-	.mcp {
-		margin-top: var(--space-4);
-	}
-
-	form {
+	/* Frame 10's content panel scrolls; the shell's panel never does. */
+	.pane {
+		flex: 1;
+		min-height: 0;
+		overflow-y: auto;
 		display: flex;
 		flex-direction: column;
-		gap: var(--space-4);
+		gap: 12px;
 	}
 
-	.form {
+	.card {
+		flex: 0 0 auto;
+		overflow: hidden;
+	}
+
+	.card-head {
+		height: 32px;
+		flex: 0 0 32px;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 0 12px;
+		border-bottom: 1px solid var(--border-subtle);
+	}
+
+	.card-title {
+		font-weight: 600;
+	}
+
+	.card-body {
+		padding: 12px;
 		display: flex;
 		flex-direction: column;
-		gap: var(--space-4);
+		gap: 10px;
 	}
 
-	.row {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-4);
+	.pair {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 12px;
 	}
 
 	.field {
 		display: flex;
 		flex-direction: column;
-		gap: var(--space-1);
+		gap: 4px;
 	}
 
-	/* Only fields laid out side by side share the row's width. Inside `.form`, which
-	   stacks its children, the same basis is read as a height and stretches every
-	   field to 240px. */
-	.row > .field {
-		flex: 1 1 240px;
-	}
-
-	.field > span:first-child {
-		font-size: 13px;
+	.label {
 		color: var(--text-secondary);
-	}
-
-	.ro {
-		margin: 0;
-		padding: 0 var(--space-2);
-		height: var(--h-control);
-		display: flex;
-		align-items: center;
-		border: 1px dashed var(--border-default);
-		border-radius: var(--radius-sm);
-		color: var(--text-primary);
-		font-family: var(--font-mono, monospace);
-	}
-
-	.toggle {
-		display: flex;
-		align-items: center;
-		gap: var(--space-2);
 	}
 
 	.slider {
 		display: flex;
 		align-items: center;
-		gap: var(--space-3);
+		gap: 10px;
+		height: 28px;
 	}
 
 	.slider input {
 		flex: 1;
+		accent-color: var(--accent);
 	}
 
 	.slider output {
-		min-width: 3.5ch;
+		min-width: 4ch;
+		text-align: right;
+	}
+
+	.group {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+
+	.transport {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		height: 22px;
 		color: var(--text-secondary);
-		font-variant-numeric: tabular-nums;
+	}
+
+	.transport-name {
+		width: 70px;
+	}
+
+	.value {
+		color: var(--text-primary);
+	}
+
+	.snippet {
+		display: flex;
+		align-items: flex-start;
+		gap: 8px;
+	}
+
+	.snippet pre {
+		flex: 1;
+		margin: 0;
+		padding: 6px 8px;
+		background: var(--bg-base);
+		border: 1px solid var(--border-default);
+		border-radius: 3px;
+		font-size: 12px;
+		line-height: 18px;
+		color: var(--text-secondary);
+		white-space: pre;
+		overflow-x: auto;
+	}
+
+	.spacer {
+		flex: 1;
+	}
+
+	.mono {
+		font-family: var(--font-mono);
 	}
 
 	.hint {
-		margin: 0;
-		color: var(--text-secondary);
-		font-size: 12px;
+		font-size: 11px;
+		color: var(--text-tertiary);
 	}
 
 	/* Same size as the hint it sits under; only the colour says it is a warning. */
@@ -425,7 +524,6 @@
 	}
 
 	.test-result {
-		font-size: 13px;
 		color: var(--accent);
 	}
 
@@ -441,6 +539,8 @@
 
 	.foot {
 		display: flex;
-		gap: var(--space-2);
+		gap: 8px;
+		flex: 0 0 auto;
+		padding-bottom: 4px;
 	}
 </style>

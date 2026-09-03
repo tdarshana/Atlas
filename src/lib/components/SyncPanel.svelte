@@ -1,59 +1,48 @@
 <script lang="ts">
-	// Exports agents into the files coding agents read. A global sync writes into
-	// the home directory and the daemon drops the managed-block targets there, so
-	// this panel only offers the two agent exporters in global mode.
-
+	// The global Agents screen's Sync card (frame 06). Exports agents into the files
+	// coding agents read, either into the home directory or into one connected project.
+	// A global sync has no repository to splice a managed block into, so the two
+	// managed-block targets are disabled there and say why.
 	import { onMount } from 'svelte';
+	import { Badge, Button, Checkbox, Icon, Select, Table, type TableColumn } from '$lib/ds';
 	import { api } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
+	import { GLOBAL_SCOPE, PROJECT_ONLY_HINT, SYNC_TARGETS, chosenKinds, syncRequest, targetEnabled } from './sync';
 	import type { Project, SyncKind, SyncOp, SyncReport } from '$lib/types';
 	import { skipReason } from '$lib/types';
-	import Button from '$lib/ui/Button.svelte';
-	import Card from '$lib/ui/Card.svelte';
-	import EmptyState from '$lib/ui/EmptyState.svelte';
-	import ErrorState from '$lib/ui/ErrorState.svelte';
-	import Select from '$lib/ui/Select.svelte';
-	import Table, { type TableColumn } from '$lib/ui/Table.svelte';
 	import { push } from '$lib/ui/toasts.svelte';
 
-	const GLOBAL = 'global';
+	interface Props {
+		/** Runs a Check as soon as the card mounts, for `/agents?sync=1`. */
+		checkOnMount?: boolean;
+	}
 
-	const TARGETS: { kind: SyncKind; label: string; projectOnly: boolean }[] = [
-		{ kind: 'claude', label: 'Claude agents', projectOnly: false },
-		{ kind: 'codex', label: 'Codex agents', projectOnly: false },
-		{ kind: 'agents_md', label: 'AGENTS.md block', projectOnly: true },
-		{ kind: 'claude_md', label: 'CLAUDE.md block', projectOnly: true }
-	];
-
-	const COLUMNS: TableColumn[] = [
-		{ key: 'path', label: 'Path' },
-		{ key: 'action', label: 'Action', width: '30%' }
-	];
+	let { checkOnMount = false }: Props = $props();
 
 	let projects = $state<Project[]>([]);
-	let scope = $state(GLOBAL);
-	let chosen = $state<SyncKind[]>(TARGETS.map((t) => t.kind));
+	let scope = $state(GLOBAL_SCOPE);
+	let chosen = $state<SyncKind[]>(SYNC_TARGETS.map((t) => t.kind));
 	let running = $state(false);
 	let report = $state<SyncReport | null>(null);
 	let wasDryRun = $state(true);
-	/** A failed sync. Kept apart from `listError` so the results only ever show sync outcomes. */
+	/** A failed sync. Kept apart from `listError` so the results only show sync outcomes. */
 	let error = $state<string | null>(null);
 	/** A failed project list, which leaves a global sync perfectly usable. */
 	let listError = $state<string | null>(null);
 
-	const isGlobal = $derived(scope === GLOBAL);
+	const isGlobal = $derived(scope === GLOBAL_SCOPE);
 	const project = $derived(projects.find((p) => p.id === scope) ?? null);
-
-	// Global mode has no repository to splice a managed block into.
-	const enabled = $derived(
-		TARGETS.filter((t) => !(isGlobal && t.projectOnly)).map((t) => t.kind)
-	);
-	const targets = $derived(chosen.filter((k) => enabled.includes(k)));
+	const targets = $derived(chosenKinds(chosen, scope));
 
 	const options = $derived([
-		{ value: GLOBAL, label: 'Global (home directory)' },
-		...projects.map((p) => ({ value: p.id, label: `${p.name} · ${p.root_path}` }))
+		{ value: GLOBAL_SCOPE, label: 'Global (home directory)' },
+		...projects.map((p) => ({ value: p.id, label: `Project: ${p.name}` }))
 	]);
+
+	const columns: TableColumn<SyncOp>[] = [
+		{ key: 'path', label: 'Path', mono: true },
+		{ key: 'action', label: 'Action', width: '180px' }
+	];
 
 	onMount(async () => {
 		try {
@@ -61,6 +50,7 @@
 		} catch (e) {
 			listError = errorMessage(e);
 		}
+		if (checkOnMount) await run(true);
 	});
 
 	function toggle(kind: SyncKind): void {
@@ -73,12 +63,7 @@
 		running = true;
 		error = null;
 		try {
-			report = await api().sync({
-				root: isGlobal ? null : (project?.root_path ?? null),
-				global: isGlobal,
-				targets,
-				check_only: checkOnly
-			});
+			report = await api().sync(syncRequest(scope, project?.root_path ?? null, chosen, checkOnly));
 			wasDryRun = checkOnly;
 			if (!checkOnly) {
 				const r = report;
@@ -100,164 +85,225 @@
 	}
 </script>
 
-<Card title="Sync">
-	<div class="controls">
-		<label class="field">
-			<span>Scope</span>
-			<Select bind:value={scope} {options} data-testid="sync-scope" />
-		</label>
+<div class="card" id="sync">
+	<div class="head">
+		<span class="title">Sync</span>
+	</div>
 
-		<fieldset class="targets">
-			<legend>Targets</legend>
-			{#each TARGETS as target (target.kind)}
-				{@const off = isGlobal && target.projectOnly}
-				<label class="check" class:off>
-					<input
-						type="checkbox"
-						checked={chosen.includes(target.kind)}
-						disabled={off}
-						onchange={() => toggle(target.kind)}
-					/>
-					{target.label}
-				</label>
-			{/each}
-		</fieldset>
+	<div class="body">
+		<div class="controls">
+			<div class="scope">
+				<Select label="Scope" bind:value={scope} {options} data-testid="sync-scope" />
+			</div>
 
-		<div class="buttons">
-			<Button
-				data-testid="sync-check"
-				disabled={running || targets.length === 0}
-				onclick={() => run(true)}
-			>
-				Check
-			</Button>
-			<Button
-				variant="primary"
-				data-testid="sync-run"
-				disabled={running || targets.length === 0}
-				onclick={() => run(false)}
-			>
-				Sync
-			</Button>
+			<div class="targets">
+				<span class="label">Targets</span>
+				<div class="checks">
+					{#each SYNC_TARGETS as target (target.kind)}
+						{@const on = targetEnabled(target, scope)}
+						<span class="check" class:off={!on} title={on ? undefined : PROJECT_ONLY_HINT}>
+							<Checkbox
+								label={target.label}
+								checked={chosen.includes(target.kind)}
+								disabled={!on}
+								data-testid="sync-target-{target.kind}"
+								onchange={() => toggle(target.kind)}
+							/>
+							{#if !on}<Badge>{PROJECT_ONLY_HINT}</Badge>{/if}
+						</span>
+					{/each}
+				</div>
+			</div>
+
+			<span class="spacer"></span>
+
+			<div class="buttons">
+				<Button
+					data-testid="sync-check"
+					disabled={running || targets.length === 0}
+					onclick={() => run(true)}
+				>
+					Check
+				</Button>
+				<Button
+					variant="primary"
+					data-testid="sync-run"
+					disabled={running || targets.length === 0}
+					onclick={() => run(false)}
+				>
+					Sync
+				</Button>
+			</div>
+		</div>
+
+		{#if listError}
+			<p class="hint bad" role="alert" data-testid="sync-list-error">
+				Projects could not be listed ({listError}); only a global sync is available.
+			</p>
+		{/if}
+
+		{#if isGlobal}
+			<p class="hint">A global sync writes agent files into your home directory.</p>
+		{:else if project}
+			<p class="hint">Writes into <span class="mono">{project.root_path}</span>.</p>
+		{/if}
+
+		<div class="results" data-testid="sync-results">
+			{#if error}
+				<p class="bad" role="alert" data-testid="sync-error">{error}</p>
+			{:else if report}
+				<p class="summary" data-testid="sync-summary">
+					{wasDryRun ? 'Planned' : 'Done'}: {report.created} created, {report.updated} updated,
+					{report.unchanged} unchanged, {report.skipped} skipped
+				</p>
+				<Table
+					id="global-sync-ops"
+					{columns}
+					rows={report.ops}
+					rowKey={(op: SyncOp) => op.path}
+					emptyText="No target produced a file for this scope."
+				>
+					{#snippet cell(op: SyncOp, column: TableColumn<SyncOp>)}
+						{#if column.key === 'path'}
+							{op.path}
+						{:else}
+							{actionLabel(op)}
+						{/if}
+					{/snippet}
+				</Table>
+			{:else}
+				<div class="empty">
+					<Icon name="info" size={20} color="var(--text-tertiary)" />
+					<span class="empty-title">No sync run yet</span>
+					<span class="empty-hint">
+						Check shows what would be written without touching any file.
+					</span>
+				</div>
+			{/if}
 		</div>
 	</div>
-
-	{#if listError}
-		<p class="hint bad" role="alert" data-testid="sync-list-error">
-			Projects could not be listed ({listError}); only a global sync is available.
-		</p>
-	{/if}
-
-	{#if isGlobal}
-		<p class="hint">A global sync writes agent files into your home directory.</p>
-	{:else if project}
-		<p class="hint">Writes into <code>{project.root_path}</code>.</p>
-	{/if}
-
-	<div class="results" data-testid="sync-results">
-		{#if error}
-			<ErrorState message={error} />
-		{:else if report}
-			<p class="summary" data-testid="sync-summary">
-				{wasDryRun ? 'Planned' : 'Done'}: {report.created} created, {report.updated} updated,
-				{report.unchanged} unchanged, {report.skipped} skipped
-			</p>
-			<Table columns={COLUMNS} rows={report.ops} rowKey={(op) => op.path}>
-				{#snippet cell(op: SyncOp, key: string)}
-					{#if key === 'path'}
-						<code class="path">{op.path}</code>
-					{:else}
-						{actionLabel(op)}
-					{/if}
-				{/snippet}
-				{#snippet empty()}
-					<EmptyState title="Nothing to write" hint="No target produced a file for this scope." />
-				{/snippet}
-			</Table>
-		{:else}
-			<EmptyState
-				title="No sync run yet"
-				hint="Check shows what would be written without touching any file."
-			/>
-		{/if}
-	</div>
-</Card>
+</div>
 
 <style>
+	.card {
+		background: var(--bg-raised);
+		border: 1px solid var(--border-default);
+		border-radius: 5px;
+		overflow: hidden;
+		display: flex;
+		flex-direction: column;
+		flex: 0 0 auto;
+	}
+
+	.head {
+		height: 32px;
+		flex: 0 0 32px;
+		display: flex;
+		align-items: center;
+		padding: 0 12px;
+		border-bottom: 1px solid var(--border-subtle);
+	}
+
+	.title {
+		font-weight: 600;
+	}
+
+	.body {
+		padding: 12px;
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+	}
+
 	.controls {
 		display: flex;
 		flex-wrap: wrap;
 		align-items: flex-end;
-		gap: var(--space-4);
+		gap: 16px;
 	}
 
-	.field {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-1);
-		min-width: 280px;
-		flex: 1 1 280px;
-	}
-
-	.field > span {
-		font-size: 13px;
-		color: var(--text-secondary);
+	.scope {
+		width: 320px;
 	}
 
 	.targets {
 		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-3);
-		margin: 0;
-		padding: 0;
-		border: 0;
+		flex-direction: column;
+		gap: 4px;
 	}
 
-	legend {
-		padding: 0;
-		font-size: 13px;
+	.label {
 		color: var(--text-secondary);
+	}
+
+	.checks {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 14px;
+		min-height: 28px;
 	}
 
 	.check {
 		display: inline-flex;
 		align-items: center;
-		gap: var(--space-1);
+		gap: 6px;
 		white-space: nowrap;
 	}
 
 	.check.off {
-		opacity: 0.5;
+		opacity: 0.6;
+	}
+
+	.spacer {
+		flex: 1;
 	}
 
 	.buttons {
 		display: flex;
-		gap: var(--space-2);
+		gap: 8px;
 	}
 
 	.hint {
-		margin: var(--space-3) 0 0;
-		color: var(--text-secondary);
-		font-size: 13px;
+		margin: 0;
+		font-size: 11px;
+		color: var(--text-tertiary);
 	}
 
 	.hint.bad {
 		color: var(--danger-text);
 	}
 
-	.results {
-		margin-top: var(--space-4);
+	.mono {
+		font-family: var(--font-mono);
+	}
+
+	.bad {
+		margin: 0;
+		color: var(--danger-text);
+		font-size: 13px;
 	}
 
 	.summary {
-		margin: 0 0 var(--space-2);
+		margin: 0 0 8px;
 		color: var(--text-secondary);
 		font-size: 13px;
 	}
 
-	.path {
-		font-family: var(--font-mono);
-		font-size: 12px;
-		overflow-wrap: anywhere;
+	.empty {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 4px;
+		padding: 20px 0;
+		border-top: 1px solid var(--border-subtle);
+	}
+
+	.empty-title {
+		font-weight: 600;
+	}
+
+	.empty-hint {
+		color: var(--text-secondary);
 	}
 </style>
