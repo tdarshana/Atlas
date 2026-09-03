@@ -10,6 +10,18 @@
 # (`rustup target add`).
 set -euo pipefail
 
+# `tauri.conf.json`'s `beforeBuildCommand` also runs this, with no target argument, on
+# every `tauri build`. The release workflow already stages the right triple explicitly
+# (see release.yml) before calling `tauri-action`, which reruns beforeBuildCommand once
+# per matrix job; without this a cross-compiling job (building x86_64-apple-darwin on an
+# aarch64-apple-darwin runner, say) would rebuild and stage an unwanted host-triple
+# sidecar on top of the one already staged for the requested target. The workflow sets
+# this env var right after its own explicit staging step so that rerun is a no-op; a
+# plain local `bun run tauri build` never sets it, so this still runs there as before.
+if [ -n "${ATLAS_SIDECAR_STAGED:-}" ]; then
+  exit 0
+fi
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 triple="${1:-}"
 if [ -z "$triple" ]; then
@@ -36,9 +48,18 @@ if ! cargo build "${build_args[@]}" >"$log" 2>&1; then
   exit 1
 fi
 
-src="$target_dir/atlasd"
+# Windows binaries carry `.exe`; cargo produces it on the built binary, and Tauri's
+# `externalBin` resolver expects it on the staged sidecar's name too (mirrors
+# `std::env::consts::EXE_SUFFIX`, which `sidecar_atlasd` in `src-tauri/src/lib.rs` uses
+# at runtime to find it).
+ext=""
+case "$triple" in
+  *-pc-windows-*) ext=".exe" ;;
+esac
+
+src="$target_dir/atlasd$ext"
 dest_dir="$root/src-tauri/binaries"
-dest="$dest_dir/atlasd-$triple"
+dest="$dest_dir/atlasd-$triple$ext"
 
 # Nothing to do when the staged sidecar is already this binary, so a repeated run neither
 # rewrites it nor claims to have staged anything.

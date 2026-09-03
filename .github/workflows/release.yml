@@ -76,12 +76,20 @@ jobs:
       - name: Build the atlasd sidecar
         run: bash scripts/prepare-sidecar.sh ${{ matrix.target }}
 
+      # tauri-action's `tauri build` reruns tauri.conf.json's beforeBuildCommand (which
+      # calls prepare-sidecar.sh with no target), once per matrix job; without
+      # ATLAS_SIDECAR_STAGED that rerun would build and stage a second, host-triple
+      # sidecar on top of the one just staged above for the actual matrix target — wrong
+      # on a job that cross-compiles (x86_64-apple-darwin on the arm64 macos-latest
+      # runner, say). The env var tells the script to no-op instead, since the sidecar
+      # for this job's target is already in place.
       - name: Build and draft the release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          ATLAS_SIDECAR_STAGED: '1'
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Atlas ${{ github.ref_name }}'
