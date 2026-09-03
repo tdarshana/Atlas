@@ -10,8 +10,19 @@ export { default as Input } from './Input.svelte';
 export { default as KeyHint, resolvePlatform, comboKeys } from './KeyHint.svelte';
 export { default as Select } from './Select.svelte';
 export { default as Skeleton } from './Skeleton.svelte';
+export { default as Table } from './Table.svelte';
 export { default as Tooltip } from './Tooltip.svelte';
 
 export type { Platform } from './KeyHint.svelte';
 export type { SelectOption } from './Select.svelte';
 export { icons, resolveIcon, type IconName } from './icons';
+export {
+	applySort,
+	loadTableState,
+	nextSort,
+	reorder,
+	saveTableState,
+	type SortState,
+	type TableColumn,
+	type TableState
+} from './table';
