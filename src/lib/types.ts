@@ -79,6 +79,10 @@ export interface Project {
 	profile: ProjectProfile | null;
 	created_at: Timestamp;
 	last_seen_at: Timestamp;
+	/** Key prefix for this project's task keys, the `ATL` in `ATL-12`. */
+	board_key: string | null;
+	/** Stage override; null means the project follows the global list. */
+	board_stages: Stage[] | null;
 }
 
 export interface ProjectContext {
@@ -185,4 +189,110 @@ export interface ExtractionTestResult {
 /** The reason on a skipped op, or null when the action is not a skip. */
 export function skipReason(action: SyncAction): string | null {
 	return typeof action === 'object' ? action.Skip : null;
+}
+
+// ---- board ----
+
+export type TaskKind = 'task' | 'bug' | 'feature' | 'chore';
+export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent';
+
+/** One column of the board. `done` stages stamp `closed_at` on the tasks that land in them. */
+export interface Stage {
+	name: string;
+	done: boolean;
+}
+
+/** The stages in force for a project, and whether they are the project's own. */
+export interface StageList {
+	stages: Stage[];
+	overridden: boolean;
+}
+
+export interface Task {
+	id: Uuid;
+	/** The human handle, e.g. `ATL-12`. Every route takes this or the id. */
+	key: string;
+	project_id: Uuid | null;
+	seq: number;
+	title: string;
+	description: string;
+	stage: string;
+	kind: TaskKind;
+	priority: TaskPriority;
+	assignee: string | null;
+	labels: string[];
+	parent_id: Uuid | null;
+	created_by: string;
+	created_at: Timestamp;
+	updated_at: Timestamp;
+	closed_at: Timestamp | null;
+	/** Keys of the tasks this one waits on. */
+	blocked_by: string[];
+	/** Computed on read: open, every blocker done, and no open subtask. */
+	ready: boolean;
+	blocked_reason: string | null;
+}
+
+export interface NewTask {
+	project_id?: Uuid | null;
+	title: string;
+	description?: string;
+	kind?: TaskKind;
+	priority?: TaskPriority;
+	assignee?: string | null;
+	labels?: string[];
+	/** Parent task, by id or key. */
+	parent?: string;
+	/** Blocking tasks, by id or key. */
+	blocked_by?: string[];
+	stage?: string;
+}
+
+/**
+ * Only the fields present are changed. `assignee: null` and `parent: null` clear
+ * the field; leaving either out keeps what is stored.
+ */
+export interface TaskUpdate {
+	title?: string;
+	description?: string;
+	kind?: TaskKind;
+	priority?: TaskPriority;
+	assignee?: string | null;
+	labels?: string[];
+	parent?: string | null;
+	expected_updated_at?: Timestamp;
+}
+
+/** One line of a task's history: created, edited, moved, commented and the rest. */
+export interface TaskEvent {
+	id: Uuid;
+	task_id: Uuid;
+	actor: string;
+	kind: string;
+	body: string;
+	detail: unknown;
+	created_at: Timestamp;
+}
+
+export interface TaskDetail {
+	task: Task;
+	children: Task[];
+	events: TaskEvent[];
+}
+
+export interface TaskFilter {
+	project_id?: Uuid | null;
+	stage?: string | null;
+	assignee?: string | null;
+	/** Keep only the tasks that are ready to be worked on. */
+	ready?: boolean;
+	/** Case-insensitive substring match over key, title and description. */
+	query?: string | null;
+	include_done?: boolean;
+}
+
+/** One row of `GET /tasks/counts`; every stage appears, including empty ones. */
+export interface StageCount {
+	stage: string;
+	count: number;
 }

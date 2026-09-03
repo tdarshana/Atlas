@@ -18,6 +18,7 @@
 	const nav = [
 		{ name: 'dashboard', href: '/', label: 'Dashboard' },
 		{ name: 'projects', href: '/projects', label: 'Projects' },
+		{ name: 'board', href: '/board', label: 'Board' },
 		{ name: 'memories', href: '/memories', label: 'Memories' },
 		{ name: 'agents', href: '/agents', label: 'Agents' },
 		{ name: 'practices', href: '/practices', label: 'Practices' },

@@ -4,6 +4,7 @@
 	// Save sends only the keys that changed, and the API key only when one was typed,
 	// because the server hands back "***" for a stored key and treats it as "leave it".
 	import { onMount } from 'svelte';
+	import StageEditor from '$lib/components/StageEditor.svelte';
 	import {
 		DEFAULT_MIN_CONFIDENCE,
 		MASKED,
@@ -16,7 +17,7 @@
 	} from '$lib/stores/settings.svelte';
 	import { api, daemon } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
-	import type { ExtractionTestResult } from '$lib/types';
+	import type { ExtractionTestResult, Stage } from '$lib/types';
 	import Button from '$lib/ui/Button.svelte';
 	import Card from '$lib/ui/Card.svelte';
 	import ErrorState from '$lib/ui/ErrorState.svelte';
@@ -35,6 +36,10 @@
 
 	let testing = $state(false);
 	let testResult = $state<ExtractionTestResult | null>(null);
+
+	/** The global stage list, which every project without an override follows. */
+	let stages = $state<Stage[]>([]);
+	let stagesError = $state<string | null>(null);
 
 	/** The button needs extraction on and both endpoint fields filled to mean anything. */
 	const testDisabled = $derived(
@@ -95,6 +100,28 @@
 	async function reload() {
 		await loadSettings();
 		syncDraft();
+		await loadStages();
+	}
+
+	async function loadStages() {
+		try {
+			stages = (await api().boardStages()).stages;
+			stagesError = null;
+		} catch (e) {
+			stages = [];
+			stagesError = errorMessage(e);
+		}
+	}
+
+	async function saveStages(next: Stage[], renames: Record<string, string>) {
+		try {
+			stages = await api().setBoardStages(next, renames);
+			stagesError = null;
+			push('success', 'Board stages saved');
+		} catch (e) {
+			stagesError = errorMessage(e);
+			push('error', stagesError);
+		}
 	}
 
 	/** Saves the form first when it is dirty, then calls `/extraction/test`. */
@@ -255,9 +282,26 @@
 			<Button onclick={reload} disabled={saving || settings.loading}>Reload</Button>
 		</div>
 	</form>
+
+	<div class="board-stages">
+		<Card title="Board stages">
+			<p class="hint">
+				The columns every project uses unless it sets its own. Renaming a stage here
+				moves the tasks standing in it.
+			</p>
+			{#if stagesError}
+				<p class="bad" role="alert" data-testid="board-stages-error">{stagesError}</p>
+			{/if}
+			<StageEditor stages={stages} onsave={saveStages} />
+		</Card>
+	</div>
 {/if}
 
 <style>
+	.board-stages {
+		margin-top: var(--space-4);
+	}
+
 	form {
 		display: flex;
 		flex-direction: column;

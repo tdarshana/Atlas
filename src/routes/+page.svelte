@@ -7,7 +7,7 @@
 	import { errorLogPath, errorMessage } from '$lib/errors';
 	import { relativeAge } from '$lib/format';
 	import { status } from '$lib/stores/status.svelte';
-	import type { Memory } from '$lib/types';
+	import type { Memory, StageCount } from '$lib/types';
 	import Badge from '$lib/ui/Badge.svelte';
 	import Button from '$lib/ui/Button.svelte';
 	import Card from '$lib/ui/Card.svelte';
@@ -28,6 +28,7 @@
 		agents: null as number | null
 	});
 	let recent = $state<Memory[]>([]);
+	let openTasks = $state<StageCount[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let loadErrorLogPath = $state<string | null>(null);
@@ -62,7 +63,30 @@
 		}
 	}
 
-	onMount(load);
+	/**
+	 * The board counts on their own, so a board that cannot answer costs this page one
+	 * card rather than all of it. The card just stays empty; the board screen is where
+	 * a board failure is worth explaining.
+	 */
+	async function loadTasks() {
+		try {
+			const client = api();
+			const [stageList, stageCounts] = await Promise.all([
+				client.boardStages(),
+				client.taskCounts()
+			]);
+			// A done column is finished work, so only the other stages are open tasks.
+			const doneStages = new Set(stageList.stages.filter((s) => s.done).map((s) => s.name));
+			openTasks = stageCounts.filter((c) => !doneStages.has(c.stage));
+		} catch {
+			openTasks = [];
+		}
+	}
+
+	onMount(() => {
+		void load();
+		void loadTasks();
+	});
 </script>
 
 <h1>Dashboard</h1>
@@ -78,6 +102,19 @@
 
 	<Card title="Agents">
 		<p class="metric" data-testid="count-agents">{counts.agents ?? '—'}</p>
+	</Card>
+
+	<Card title="Open tasks" data-testid="dashboard-tasks">
+		{#if openTasks.length === 0}
+			<p class="muted">{loading ? 'Loading…' : 'No open tasks.'}</p>
+		{:else}
+			<dl>
+				{#each openTasks as row (row.stage)}
+					<dt>{row.stage}</dt>
+					<dd>{row.count}</dd>
+				{/each}
+			</dl>
+		{/if}
 	</Card>
 
 	<Card title="Daemon">
@@ -103,7 +140,16 @@
 <div class="recent">
 	<Card title="Recent memories" data-testid="dashboard-recent">
 		{#snippet actions()}
-			<Button size="sm" onclick={load} disabled={loading}>Refresh</Button>
+			<Button
+				size="sm"
+				disabled={loading}
+				onclick={() => {
+					void load();
+					void loadTasks();
+				}}
+			>
+				Refresh
+			</Button>
 		{/snippet}
 
 		{#if error}

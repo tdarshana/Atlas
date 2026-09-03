@@ -3,6 +3,8 @@
 	// this root (memories, practices, workflows). Refresh rebuilds the profile.
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
+	import StageEditor from '$lib/components/StageEditor.svelte';
+	import { api } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
 	import { relativeAge } from '$lib/format';
 	import {
@@ -11,7 +13,7 @@
 		projectDetail,
 		refreshProject
 	} from '$lib/stores/projects.svelte';
-	import type { Doc, RecallHit } from '$lib/types';
+	import type { Doc, RecallHit, Stage } from '$lib/types';
 	import Badge from '$lib/ui/Badge.svelte';
 	import Button from '$lib/ui/Button.svelte';
 	import Card from '$lib/ui/Card.svelte';
@@ -40,10 +42,57 @@
 
 	// Re-fetches when the route parameter changes.
 	$effect(() => {
-		if (id) void loadProject(id);
+		if (id) {
+			void loadProject(id);
+			void loadStages(id);
+		}
 	});
 
 	let confirming = $state(false);
+
+	/** The stages this project works to, and whether they are its own. */
+	let stages = $state<Stage[]>([]);
+	let overridden = $state(false);
+	let stagesError = $state<string | null>(null);
+
+	async function loadStages(projectId: string) {
+		try {
+			const list = await api().boardStages(projectId);
+			stages = list.stages;
+			overridden = list.overridden;
+			stagesError = null;
+		} catch (e) {
+			stages = [];
+			stagesError = errorMessage(e);
+		}
+	}
+
+	async function saveStages(next: Stage[], renames: Record<string, string>) {
+		try {
+			const list = await api().setProjectStages(id, next, renames);
+			stages = list.stages;
+			overridden = list.overridden;
+			stagesError = null;
+			push('success', 'Board stages saved');
+		} catch (e) {
+			stagesError = errorMessage(e);
+			push('error', stagesError);
+		}
+	}
+
+	/** Drops the override so the project follows the global list again. */
+	async function useGlobalStages() {
+		try {
+			const list = await api().setProjectStages(id, null);
+			stages = list.stages;
+			overridden = list.overridden;
+			stagesError = null;
+			push('success', 'Using the global stages');
+		} catch (e) {
+			stagesError = errorMessage(e);
+			push('error', stagesError);
+		}
+	}
 
 	async function refresh() {
 		try {
@@ -73,7 +122,12 @@
 		<a class="back" href="/projects">← Projects</a>
 		<h1>{project?.name ?? 'Project'}</h1>
 		{#if project}
-			<p class="sub"><code>{project.root_path}</code></p>
+			<p class="sub">
+				<code>{project.root_path}</code>
+				<span data-testid="project-board-key">
+					· Board key {project.board_key ?? 'not assigned yet'}
+				</span>
+			</p>
 		{/if}
 	</div>
 	<div class="actions">
@@ -99,8 +153,8 @@
 <Dialog open={confirming} title="Remove this project?" onclose={() => (confirming = false)}>
 	<p class="prose">
 		Atlas forgets <strong>{project?.name ?? 'this project'}</strong> and stops offering it as
-		a scope. Its memories are kept, and connecting the same root again re-adds it. Nothing on
-		disk is touched.
+		a scope. Its memories are kept, its tasks are deleted, and connecting the same root again
+		re-adds it. Nothing on disk is touched.
 	</p>
 	{#snippet footer()}
 		<Button onclick={() => (confirming = false)}>Cancel</Button>
@@ -197,6 +251,23 @@
 					/>
 				{/snippet}
 			</Table>
+		</Card>
+
+		<Card title="Board stages" data-testid="project-stages">
+			{#snippet actions()}
+				<Button size="sm" data-testid="project-stages-global" disabled={!overridden} onclick={useGlobalStages}>
+					Use global stages
+				</Button>
+			{/snippet}
+			<p class="hint">
+				{overridden
+					? 'This project has its own stages. Saving keeps the override.'
+					: 'This project follows the global stages. Saving gives it its own.'}
+			</p>
+			{#if stagesError}
+				<p class="bad" role="alert" data-testid="project-stages-error">{stagesError}</p>
+			{/if}
+			<StageEditor stages={stages} onsave={saveStages} />
 		</Card>
 
 		<Card title="Practices" data-testid="project-practices">
@@ -321,5 +392,16 @@
 
 	.muted {
 		color: var(--muted);
+	}
+
+	.hint {
+		margin: 0 0 var(--space-3);
+		color: var(--muted);
+		font-size: 13px;
+	}
+
+	.bad {
+		margin: 0 0 var(--space-2);
+		color: var(--danger);
 	}
 </style>
