@@ -1,14 +1,15 @@
 <script lang="ts">
 	// Memories: search or list, filtered by scope and kind, with a detail panel
 	// whose Forget supersedes the memory and drops its row.
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { page } from '$app/state';
 	import { api } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
-	import { relativeAge } from '$lib/format';
+	import { plural, relativeAge } from '$lib/format';
 	import { setStatusItems } from '$lib/shell';
 	import {
 		MEMORY_KINDS,
+		clearKinds,
 		forgetMemory,
 		cancelLoad,
 		loadMemories,
@@ -91,21 +92,27 @@
 	onMount(() => {
 		void loadProjects();
 		void loadMemories();
-		// `?id=<uuid>` (from the command palette, or a link elsewhere) selects that
-		// memory in the detail panel even when it falls outside the current filters.
-		const id = page.url.searchParams.get('id');
-		if (id) {
-			api()
-				.getMemory(id)
-				.then((m) => (memories.selected = m))
-				.catch(() => {});
-		}
 		// A pending debounce would fire a request for a screen that is gone.
 		return cancelLoad;
 	});
 
+	// `?id=<uuid>` (from the command palette, or a link elsewhere) selects that memory in
+	// the detail panel even when it falls outside the current filters. It reads the URL
+	// rather than running once, so a second palette hit while this page is already open
+	// re-points the panel instead of doing nothing.
 	$effect(() => {
-		setStatusItems({ right: [{ text: `${memories.hits.length} memories` }] });
+		const id = page.url.searchParams.get('id');
+		if (!id) return;
+		untrack(() => {
+			api()
+				.getMemory(id)
+				.then((m) => (memories.selected = m))
+				.catch(() => {});
+		});
+	});
+
+	$effect(() => {
+		setStatusItems({ right: [{ text: plural(memories.hits.length, 'memory', 'memories') }] });
 	});
 </script>
 
@@ -160,7 +167,7 @@
 		</button>
 	{/each}
 	{#if memories.kinds.length > 0}
-		<button type="button" class="chip clear" onclick={() => { memories.kinds = []; scheduleLoad(0); }}>
+		<button type="button" class="chip clear" onclick={clearKinds}>
 			clear
 		</button>
 	{/if}
@@ -208,7 +215,7 @@
 					{:else}
 						<EmptyState
 							title="No memories yet"
-							hint="Agents write memories through the MCP tools, or add one with `atlas remember`."
+							hint="Agents write memories through the MCP tools, or add one with atlas remember."
 						/>
 					{/if}
 				{/snippet}

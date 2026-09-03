@@ -3,6 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { daemon } from '$lib/daemon.svelte';
+	import { plural } from '$lib/format';
 	import SyncPanel from '$lib/components/SyncPanel.svelte';
 	import { setStatusItems } from '$lib/shell';
 	import { agents, loadAgents } from '$lib/stores/agents.svelte';
@@ -24,15 +25,22 @@
 
 	onMount(() => {
 		void loadAgents();
-		// `?sync=1` (from the command palette's `⌥↵` on the Agents jump-to, or a task
-		// linking here) scrolls straight to the sync panel below the table.
-		if (page.url.searchParams.get('sync') === '1') {
-			syncEl?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+	});
+
+	// `?sync=1` (from the command palette's `⌥↵` on the Agents jump-to, or a task linking
+	// here) scrolls straight to the sync panel below the table. It reads the URL rather
+	// than running once, so a second palette action while this page is open works too.
+	$effect(() => {
+		const wanted = page.url.searchParams.get('sync') === '1';
+		if (!wanted) return;
+		// jsdom and older webviews have no smooth scrolling; the panel is still there.
+		if (syncEl && typeof syncEl.scrollIntoView === 'function') {
+			syncEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
 		}
 	});
 
 	$effect(() => {
-		setStatusItems({ right: [{ text: `${agents.list.length} agents` }] });
+		setStatusItems({ right: [{ text: plural(agents.list.length, 'agent') }] });
 	});
 </script>
 

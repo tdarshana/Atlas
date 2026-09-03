@@ -7,6 +7,7 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { Icon, KeyHint, type IconName } from '$lib/ds';
+	import { plural } from '$lib/format';
 	import { shell } from '$lib/shell/shell.svelte';
 	import { PALETTE_EVENT } from '$lib/shell/shortcuts';
 	import { VIEWS, type ViewDef } from '$lib/shell/views';
@@ -33,8 +34,8 @@
 	interface Props {
 		/**
 		 * The title bar's command box. The palette lines its input up with this element
-		 * and hands focus back to it on close. When it is not passed the element is
-		 * looked up once and kept as a reference; see `commandBox` below.
+		 * and hands focus back to it on close. The layout binds the element and passes it
+		 * here; without one the palette still opens, at the window's left edge.
 		 */
 		anchor?: HTMLElement | null;
 	}
@@ -48,23 +49,6 @@
 	let root: HTMLDivElement | undefined = $state();
 	let box: HTMLInputElement | undefined = $state();
 	let left = $state(0);
-
-	/**
-	 * The command box, held as an element reference rather than looked up on every use.
-	 * Without an `anchor` prop it is resolved once from the title bar's own markup;
-	 * `data-command-box` is the intended contract and the test id is the fallback until
-	 * `TitleBar.svelte` carries one.
-	 */
-	let resolved: HTMLElement | null = null;
-
-	function commandBox(): HTMLElement | null {
-		if (anchor) return anchor;
-		if (resolved?.isConnected) return resolved;
-		resolved = document.querySelector<HTMLElement>(
-			'[data-command-box], [data-testid="titlebar-command"]'
-		);
-		return resolved;
-	}
 
 	// ---- rows ----
 
@@ -218,7 +202,9 @@
 	$effect(() => {
 		const i = palette.selected;
 		if (!palette.open || !flat.length) return;
-		root?.querySelector(`#${rowId(i)}`)?.scrollIntoView({ block: 'nearest' });
+		const el = root?.querySelector(`#${rowId(i)}`);
+		// jsdom and older webviews have no `scrollIntoView`; the highlight is still drawn.
+		if (el && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'nearest' });
 	});
 
 	// Keeps the box in step when the store rewrites the text under it, which one-way
@@ -231,9 +217,8 @@
 	// ---- opening and closing ----
 
 	function measure() {
-		const el = commandBox();
-		if (!el) return;
-		left = el.getBoundingClientRect().left;
+		if (!anchor) return;
+		left = anchor.getBoundingClientRect().left;
 	}
 
 	async function open() {
@@ -246,7 +231,13 @@
 
 	function close() {
 		closePalette();
-		commandBox()?.focus();
+		anchor?.focus();
+	}
+
+	/** ⌘K or a click on the command box while the palette is open means "put it away". */
+	function toggle() {
+		if (palette.open) close();
+		else void open();
 	}
 
 	/** With no scrim there is nothing to click through, so the window reports it. */
@@ -254,17 +245,17 @@
 		if (!palette.open) return;
 		const target = e.target;
 		if (!(target instanceof Node)) return;
-		// A click on the command box itself re-opens the palette; leave it alone.
-		if (root?.contains(target) || commandBox()?.contains(target)) return;
+		// A click on the command box itself toggles the palette; leave it to that handler.
+		if (root?.contains(target) || anchor?.contains(target)) return;
 		close();
 	}
 
 	$effect(() => {
-		window.addEventListener(PALETTE_EVENT, open);
+		window.addEventListener(PALETTE_EVENT, toggle);
 		window.addEventListener('resize', measure);
 		window.addEventListener('pointerdown', onpointerdown);
 		return () => {
-			window.removeEventListener(PALETTE_EVENT, open);
+			window.removeEventListener(PALETTE_EVENT, toggle);
 			window.removeEventListener('resize', measure);
 			window.removeEventListener('pointerdown', onpointerdown);
 		};
@@ -497,7 +488,7 @@
 				>
 				<span class="spacer"></span>
 				{#if palette.results}
-					<span class="mono">{palette.total} results · {palette.took_ms} ms</span>
+					<span class="mono">{plural(palette.total, 'result')} · {palette.took_ms} ms</span>
 				{:else if !query.text.trim()}
 					<!-- Frame 01.1: the prefixes only announce themselves on the empty box. -->
 					<span class="legend">

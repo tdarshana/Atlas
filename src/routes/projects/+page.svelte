@@ -1,10 +1,10 @@
 <script lang="ts">
 	// Projects: the connected list plus Connect. Inside Tauri that opens the native
 	// folder picker; in a browser there is no picker, so the path is typed.
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { page } from '$app/state';
 	import { errorMessage } from '$lib/errors';
-	import { relativeAge } from '$lib/format';
+	import { plural, relativeAge } from '$lib/format';
 	import { setStatusItems } from '$lib/shell';
 	import {
 		connectProject,
@@ -53,16 +53,22 @@
 
 	onMount(() => {
 		void loadProjects();
-		// `?connect=1` (the palette's `⌥↵` on Connect a folder…) opens the connect flow:
-		// the native picker in Tauri, or focuses the typed-path field in a browser.
-		if (page.url.searchParams.get('connect') === '1') {
+	});
+
+	// `?connect=1` (the palette's `⌥↵` on Connect a folder…) opens the connect flow: the
+	// native picker in Tauri, or the typed-path field in a browser. It reads the URL rather
+	// than running once, so a second palette action while this page is open works too.
+	$effect(() => {
+		const wanted = page.url.searchParams.get('connect') === '1';
+		if (!wanted) return;
+		untrack(() => {
 			if (native) void connect();
 			else document.querySelector<HTMLInputElement>('[data-testid="projects-root"]')?.focus();
-		}
+		});
 	});
 
 	$effect(() => {
-		setStatusItems({ right: [{ text: `${projects.items.length} projects` }] });
+		setStatusItems({ right: [{ text: plural(projects.items.length, 'project') }] });
 	});
 </script>
 

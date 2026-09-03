@@ -13,9 +13,21 @@
 		commandBox?: Snippet;
 		right?: Snippet;
 		oncommand?: () => void;
+		/**
+		 * The default command box element. The palette lines its input up with this and
+		 * hands focus back to it on close, so the layout binds it and passes it along.
+		 */
+		commandRef?: HTMLElement | null;
 	}
 
-	let { platform, title, commandBox, right, oncommand }: Props = $props();
+	let {
+		platform,
+		title,
+		commandBox,
+		right,
+		oncommand,
+		commandRef = $bindable(null)
+	}: Props = $props();
 
 	const MENUS = ['File', 'Edit', 'View', 'Window', 'Help'];
 
@@ -65,7 +77,14 @@
 		{#if commandBox}
 			{@render commandBox()}
 		{:else}
-			<button class="command" type="button" data-testid="titlebar-command" onclick={oncommand}>
+			<button
+				bind:this={commandRef}
+				class="command"
+				type="button"
+				data-command-box
+				data-testid="titlebar-command"
+				onclick={oncommand}
+			>
 				<Icon name="search" size={12} />
 				<span>Atlas · {title}</span>
 			</button>

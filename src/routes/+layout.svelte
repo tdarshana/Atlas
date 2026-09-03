@@ -51,12 +51,20 @@
 	function openPalette() {
 		window.dispatchEvent(new CustomEvent(PALETTE_EVENT));
 	}
+
+	/** The title bar's command box, handed to the palette as its anchor. */
+	let commandRef = $state<HTMLElement | null>(null);
 </script>
 
-<TitleBar platform={shell.platform} title={viewLabel(shell.view)} oncommand={openPalette} />
+<TitleBar
+	platform={shell.platform}
+	title={viewLabel(shell.view)}
+	oncommand={openPalette}
+	bind:commandRef
+/>
 
-<!-- Drops out of the title bar over the command box; it measures the box itself. -->
-<CommandPalette />
+<!-- Drops out of the title bar, lined up with the command box above. -->
+<CommandPalette anchor={commandRef} />
 
 <div class="body">
 	<ActivityRail />

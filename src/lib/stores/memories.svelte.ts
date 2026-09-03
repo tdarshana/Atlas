@@ -20,6 +20,12 @@ export const memories = $state({
 	/** Empty means "no project chosen"; `Select` binds a string. */
 	projectId: '' as Uuid | '',
 	kinds: [] as MemoryKind[],
+	/**
+	 * Every hit the load returned, narrowed by scope and project but not by kind. The
+	 * kind filter is a client-side view over this, so toggling a kind costs no request
+	 * and the side panel can count the kinds the user just filtered out.
+	 */
+	all: [] as RecallHit[],
 	hits: [] as RecallHit[],
 	scored: false,
 	loading: false,
@@ -42,13 +48,20 @@ function activeProjectId(): Uuid | null {
 }
 
 /** Client-side backstop: the list route takes neither a scope nor kinds. */
-function visible(hit: RecallHit): boolean {
+function inScope(hit: RecallHit): boolean {
 	const m = hit.memory;
 	if (memories.scope !== 'all' && m.scope !== memories.scope) return false;
 	const projectId = activeProjectId();
 	if (projectId && m.project_id !== projectId) return false;
-	if (memories.kinds.length > 0 && !memories.kinds.includes(m.kind)) return false;
 	return true;
+}
+
+/** Re-derives `hits` from `all`. The only place the kind filter is applied. */
+function applyKinds(): void {
+	const kinds = memories.kinds;
+	memories.hits =
+		kinds.length > 0 ? memories.all.filter((h) => kinds.includes(h.memory.kind)) : [...memories.all];
+	reselect(memories.hits);
 }
 
 /** Re-points the detail panel at the fresh row, or closes it when it is gone. */
@@ -67,6 +80,8 @@ export async function loadMemories(): Promise<void> {
 		let hits: RecallHit[];
 		let scored: boolean;
 		if (query) {
+			// No `kinds` here on purpose: one fetch per load, and the side panel needs the
+			// counts for the kinds the filter is currently hiding.
 			hits = await api().search({
 				query,
 				limit: SEARCH_LIMIT,
@@ -76,8 +91,7 @@ export async function loadMemories(): Promise<void> {
 					memories.scope === 'all' || (memories.scope === 'project' && !projectId)
 						? null
 						: memories.scope,
-				project_id: projectId,
-				kinds: memories.kinds.length > 0 ? memories.kinds : undefined
+				project_id: projectId
 			});
 			scored = true;
 		} else {
@@ -86,13 +100,14 @@ export async function loadMemories(): Promise<void> {
 			scored = false;
 		}
 		if (g !== generation) return;
-		memories.hits = hits.filter(visible);
+		memories.all = hits.filter(inScope);
 		memories.scored = scored;
-		reselect(memories.hits);
+		applyKinds();
 		memories.error = null;
 		memories.errorLogPath = null;
 	} catch (e) {
 		if (g !== generation) return;
+		memories.all = [];
 		memories.hits = [];
 		memories.selected = null;
 		memories.error = errorMessage(e);
@@ -119,11 +134,17 @@ export function cancelLoad(): void {
 	timer = null;
 }
 
+/** The kind filter is a view over `all`, so a toggle costs no request. */
 export function toggleKind(kind: MemoryKind): void {
 	const i = memories.kinds.indexOf(kind);
 	if (i >= 0) memories.kinds.splice(i, 1);
 	else memories.kinds.push(kind);
-	scheduleLoad(0);
+	applyKinds();
+}
+
+export function clearKinds(): void {
+	memories.kinds = [];
+	applyKinds();
 }
 
 /**
@@ -133,7 +154,9 @@ export function toggleKind(kind: MemoryKind): void {
  */
 export async function forgetMemory(id: Uuid, reason?: string): Promise<void> {
 	await api().forget(id, reason?.trim() || undefined);
-	const i = memories.hits.findIndex((h) => h.memory.id === id);
-	if (i >= 0) memories.hits.splice(i, 1);
+	const i = memories.all.findIndex((h) => h.memory.id === id);
+	if (i >= 0) memories.all.splice(i, 1);
+	const j = memories.hits.findIndex((h) => h.memory.id === id);
+	if (j >= 0) memories.hits.splice(j, 1);
 	if (memories.selected?.id === id) memories.selected = null;
 }

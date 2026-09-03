@@ -8,7 +8,7 @@
 	import { api } from '$lib/daemon.svelte';
 	import { Badge, Button, Table, type TableColumn } from '$lib/ds';
 	import { errorLogPath, errorMessage } from '$lib/errors';
-	import { relativeAge } from '$lib/format';
+	import { plural, relativeAge } from '$lib/format';
 	import { setStatusItems } from '$lib/shell';
 	import { status } from '$lib/stores/status.svelte';
 	import type { Memory, MemoryKind, StageCount } from '$lib/types';
@@ -119,7 +119,7 @@
 				status.error
 					? { text: status.error, tone: 'danger' }
 					: { text: `embedding ${embeddingWord || 'unknown'}`, tone: embeddingWord === 'ready' ? 'success' : undefined },
-				{ text: `${n} ${n === 1 ? 'memory' : 'memories'}` }
+				{ text: plural(n, 'memory', 'memories') }
 			]
 		});
 	});
@@ -210,7 +210,7 @@
 			{#snippet empty()}
 				<EmptyState
 					title="No memories yet"
-					hint="Agents write memories through the MCP tools, or add one with `atlas remember`."
+					hint="Agents write memories through the MCP tools, or add one with atlas remember."
 				/>
 			{/snippet}
 		</Table>

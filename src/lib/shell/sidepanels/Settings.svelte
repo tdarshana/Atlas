@@ -1,6 +1,6 @@
 <script lang="ts">
-	// The settings sections, and where the daemon keeps its files. Task 6 gives the sections
-	// anchors on the settings page; until then the rows name what the page contains.
+	// The settings sections, and where the daemon keeps its files. Each row is a link to
+	// the matching card's anchor on the settings page, which scrolls itself to the hash.
 	import { status } from '$lib/stores/status.svelte';
 	import TreeGroup from '../TreeGroup.svelte';
 	import TreeRow from '../TreeRow.svelte';
@@ -14,10 +14,10 @@
 </script>
 
 <TreeGroup label="Sections">
-	<TreeRow icon="cpu" label="Daemon" />
-	<TreeRow icon="wand-sparkles" label="Extraction" />
-	<TreeRow icon="columns-3" label="Board stages" />
-	<TreeRow icon="plug" label="MCP server" />
+	<TreeRow icon="cpu" label="Daemon" href="/settings#daemon" />
+	<TreeRow icon="wand-sparkles" label="Extraction" href="/settings#extraction" />
+	<TreeRow icon="columns-3" label="Board stages" href="/settings#board-stages" />
+	<TreeRow icon="plug" label="MCP server" href="/settings#mcp" />
 </TreeGroup>
 
 <span class="spacer"></span>

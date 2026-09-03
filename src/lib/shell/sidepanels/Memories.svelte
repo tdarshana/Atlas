@@ -1,42 +1,13 @@
 <script lang="ts">
 	// Facets over the whole active set. The store's `hits` are already narrowed by the kind
 	// filter, so counting those would zero every kind the user just filtered out and leave
-	// them nothing to widen back to. The panel keeps its own unfiltered copy instead, taken
-	// from the same list route without a kind filter, and refreshes it whenever the list
-	// settles or its scope moves.
-	import { api } from '$lib/daemon.svelte';
+	// them nothing to widen back to. `memories.all` is the same load before the kind filter,
+	// so the panel reads that and issues no request of its own.
 	import { MEMORY_KINDS, memories, toggleKind } from '$lib/stores/memories.svelte';
-	import type { Memory } from '$lib/types';
 	import TreeGroup from '../TreeGroup.svelte';
 	import TreeRow from '../TreeRow.svelte';
 
-	let facets = $state<Memory[]>([]);
-
-	/** The scope filter the list is under, minus the kinds. */
-	function scopedProject(): string | null {
-		return memories.scope === 'project' && memories.projectId ? memories.projectId : null;
-	}
-
-	function inScope(memory: Memory): boolean {
-		return memories.scope === 'all' || memory.scope === memories.scope;
-	}
-
-	async function refresh(): Promise<void> {
-		try {
-			const all = await api().listMemories('active', scopedProject());
-			facets = all.filter(inScope);
-		} catch {
-			// A facet list is not worth an error state; the last good counts stay up.
-		}
-	}
-
-	$effect(() => {
-		// Re-read once the store settles, and whenever the scope it reads under changes.
-		const busy = memories.loading;
-		void memories.scope;
-		void memories.projectId;
-		if (!busy) void refresh();
-	});
+	const facets = $derived(memories.all);
 
 	/** Descending by count, then alphabetical, so the panel does not jump about. */
 	function ranked(counts: Map<string, number>): [string, number][] {
@@ -45,22 +16,22 @@
 
 	const kindCounts = $derived.by(() => {
 		const counts = new Map<string, number>(MEMORY_KINDS.map((k) => [k, 0]));
-		for (const memory of facets) counts.set(memory.kind, (counts.get(memory.kind) ?? 0) + 1);
+		for (const hit of facets) counts.set(hit.memory.kind, (counts.get(hit.memory.kind) ?? 0) + 1);
 		return counts;
 	});
 
 	const tags = $derived.by(() => {
 		const counts = new Map<string, number>();
-		for (const memory of facets) {
-			for (const tag of memory.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1);
+		for (const hit of facets) {
+			for (const tag of hit.memory.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1);
 		}
 		return ranked(counts);
 	});
 
 	const sources = $derived.by(() => {
 		const counts = new Map<string, number>();
-		for (const memory of facets) {
-			const source = memory.source_agent ?? memory.source_tool ?? 'unknown';
+		for (const hit of facets) {
+			const source = hit.memory.source_agent ?? hit.memory.source_tool ?? 'unknown';
 			counts.set(source, (counts.get(source) ?? 0) + 1);
 		}
 		return ranked(counts);

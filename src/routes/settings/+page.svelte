@@ -150,14 +150,19 @@
 	}
 
 	onMount(() => {
-		// `/settings#<section>` (the side panel's SECTIONS rows) scrolls to that card
-		// once its content has loaded.
+		void reload();
+	});
+
+	// `/settings#<section>` (the side panel's Sections rows) scrolls to that card once
+	// its content has loaded. It reads the hash rather than running once, so a second
+	// row picked while this page is already open scrolls too.
+	$effect(() => {
 		const hash = page.url.hash.slice(1);
-		const p = reload();
-		if (hash) {
-			void p.then(() => {
-				document.getElementById(hash)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-			});
+		if (!hash || !settings.loaded) return;
+		const el = document.getElementById(hash);
+		// jsdom and older webviews have no smooth scrolling; the anchor still resolves.
+		if (el && typeof el.scrollIntoView === 'function') {
+			el.scrollIntoView({ behavior: 'smooth', block: 'start' });
 		}
 	});
 </script>

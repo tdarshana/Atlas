@@ -1,12 +1,12 @@
 // Window-level shortcuts. Mod is ⌘ on mac and Ctrl elsewhere, matching what the rail
 // prints. Typing in a field must not navigate, so every combo but Mod+K is ignored while
-// the focus is in an editable control; Mod+K opens the palette from anywhere.
+// the focus is in an editable control; Mod+K reaches the palette from anywhere.
 
 import { goto } from '$app/navigation';
 import { shell, toggleRail, toggleSidePanel } from './shell.svelte';
 import { MAIN_VIEWS, SETTINGS_VIEW } from './views';
 
-/** Task 5 listens for this on `window` and opens the command palette. */
+/** The palette listens for this on `window` and toggles: Mod+K again puts it away. */
 export const PALETTE_EVENT = 'atlas:palette';
 
 function isEditable(target: EventTarget | null): boolean {
