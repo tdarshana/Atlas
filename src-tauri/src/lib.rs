@@ -12,10 +12,11 @@ mod notify_poller;
 
 use commands::platform::{
     about_info, app_exit, app_relaunch, autostart_get, autostart_set, clipboard_write,
-    install_shortcut, log_dir, notification_permission, notify, open_log_folder, shortcut_set,
-    ui_state_all, ui_state_get, ui_state_set, update_check, update_install, vault_list,
-    vault_lock, vault_put_key, vault_reapply, vault_set_passphrase, vault_status, vault_unlock,
-    window_center, window_move, ShortcutRegistration, UpdateState, VaultState,
+    install_shortcut, log_dir, notification_permission, notification_request_permission, notify,
+    open_log_folder, shortcut_set, ui_state_all, ui_state_get, ui_state_set, update_check,
+    update_install, vault_list, vault_lock, vault_put_key, vault_reapply, vault_set_passphrase,
+    vault_status, vault_unlock, window_center, window_move, ShortcutRegistration, UpdateState,
+    VaultState,
 };
 
 const DEFAULT_PORT: u16 = 7433;
@@ -120,6 +121,7 @@ pub fn run() {
         // plugin's state as not yet set up when a second launch hands off to it.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
                 let _ = window.show();
                 let _ = window.set_focus();
             }
@@ -203,6 +205,7 @@ pub fn run() {
             shortcut_set,
             notify,
             notification_permission,
+            notification_request_permission,
             clipboard_write,
             about_info,
             open_log_folder,

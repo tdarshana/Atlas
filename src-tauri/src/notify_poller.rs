@@ -27,9 +27,12 @@ use tauri_plugin_notification::NotificationExt;
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 struct State {
-    /// The pending-memory count as of the last tick; a notification fires only when the
-    /// new count is greater than this.
-    last_pending: i64,
+    /// The pending-memory count as of the last successful `/status` read, or `None`
+    /// before the first one. `None` only seeds the baseline: comparing the first read
+    /// against a starting `0` would report the whole pre-existing queue as growth, the
+    /// same way a `None` seed for `since` (below) avoids reporting every run that
+    /// finished before this app process existed.
+    last_pending: Option<i64>,
     /// The start of the window `GET /api/v1/runs?since=` is asked about; advanced to
     /// "now" at the end of every tick regardless of whether anything was found.
     since: chrono::DateTime<chrono::Utc>,
@@ -48,7 +51,7 @@ struct State {
 pub fn spawn<R: Runtime>(app: AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
         let client = reqwest::Client::builder().timeout(Duration::from_secs(5)).build().unwrap_or_default();
-        let mut state = State { last_pending: 0, since: chrono::Utc::now(), was_unreachable: false, notify_daemon_errors: false };
+        let mut state = State { last_pending: None, since: chrono::Utc::now(), was_unreachable: false, notify_daemon_errors: false };
         loop {
             tick(&app, &client, &mut state).await;
             tokio::time::sleep(POLL_INTERVAL).await;
@@ -112,10 +115,15 @@ async fn tick<R: Runtime>(app: &AppHandle<R>, client: &reqwest::Client, state: &
     if flag("ui.notify.review_pending") {
         if let Some(status) = get_json(client, &format!("{base}/status")).await {
             let pending = status.get("memories_pending").and_then(|v| v.as_i64()).unwrap_or(0);
-            if pending > state.last_pending {
-                show(app, &format!("{pending} memories waiting for review"));
+            // `None` means this is the first successful read (of the app's life, or
+            // since the toggle was last turned on): seed the baseline rather than
+            // notifying for whatever backlog already existed.
+            if let Some(previous) = state.last_pending {
+                if pending > previous {
+                    show(app, &format!("{pending} memories waiting for review"));
+                }
             }
-            state.last_pending = pending;
+            state.last_pending = Some(pending);
         }
     }
 
