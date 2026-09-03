@@ -165,6 +165,9 @@ export interface SyncReport {
 /** `GET/PUT /api/v1/settings` is a flat key/value map; `extraction.api_key` reads back as `"***"`. */
 export type Settings = Record<string, unknown>;
 
+/** The desktop theme, mirrored into the daemon so a second client agrees. */
+export const UI_THEME_KEY = 'ui.theme';
+
 export type JobStatus = 'queued' | 'running' | 'done' | 'failed';
 
 /** A background extraction job, returned by `POST /ingest` (as `job_id`) and `GET /jobs/{id}`. */

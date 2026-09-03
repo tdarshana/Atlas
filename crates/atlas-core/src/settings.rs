@@ -16,6 +16,7 @@ pub const SETTING_KEYS: &[&str] = &[
     "daemon.port",
     "board.stages",
     "board.mirror_tasks_md",
+    "ui.theme",
 ];
 
 const API_KEY: &str = "extraction.api_key";
@@ -66,6 +67,11 @@ fn check_type(key: &str, value: &Value) -> Result<()> {
                 return wrong("a boolean");
             }
         }
+        // The desktop mirrors its theme here so a second client opens on the same ramp.
+        "ui.theme" => match value.as_str() {
+            Some("dark") | Some("light") => {}
+            _ => return wrong("\"dark\" or \"light\""),
+        },
         _ => {}
     }
     Ok(())
@@ -227,6 +233,8 @@ mod tests {
             ("daemon.port", Value::String("7433".into())),
             ("daemon.port", Value::from(0)),
             ("daemon.port", Value::from(70000)),
+            ("ui.theme", Value::String("solarized".into())),
+            ("ui.theme", Value::from(1)),
         ];
         for (key, value) in bad {
             let values = Map::from_iter([((*key).to_string(), value.clone())]);
@@ -260,8 +268,10 @@ mod tests {
             ("extraction.auto_accept_min_confidence".to_string(), Value::from(0.8)),
             ("daemon.port".to_string(), Value::from(7433)),
             ("embedding.model".to_string(), Value::Null),
+            ("ui.theme".to_string(), Value::String("light".into())),
         ]);
         repo.set_many(&values, "t").unwrap();
+        assert_eq!(repo.get_raw("ui.theme").unwrap(), Some(Value::String("light".into())));
         assert_eq!(repo.get_raw("extraction.enabled").unwrap(), Some(Value::from(true)));
         assert_eq!(repo.get_raw("daemon.port").unwrap(), Some(Value::from(7433)));
         // The bounds are inclusive at both ends.

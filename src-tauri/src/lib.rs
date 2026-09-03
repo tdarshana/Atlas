@@ -47,6 +47,17 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_os::init())
+        // macOS keeps its own chrome under the overlay title bar; Windows and Linux draw
+        // none, so the webview's title bar is the only one there.
+        .setup(|app| {
+            if cfg!(not(target_os = "macos")) {
+                if let Some(window) = app.get_webview_window("main") {
+                    window.set_decorations(false)?;
+                }
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![daemon_ensure, daemon_info, log_path])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

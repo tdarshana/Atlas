@@ -8,6 +8,16 @@
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">
+    <script>
+      // Paint the stored theme before anything renders, so the window never flashes the
+      // wrong ramp. Dark is the default; storage can throw when site data is blocked.
+      try {
+        var t = localStorage.getItem('atlas.theme');
+        document.documentElement.dataset.theme = t === 'light' ? 'light' : 'dark';
+      } catch (e) {
+        document.documentElement.dataset.theme = 'dark';
+      }
+    </script>
     <div style="display: contents">%sveltekit.body%</div>
   </body>
 </html>

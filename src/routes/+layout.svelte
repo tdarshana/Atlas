@@ -1,39 +1,31 @@
 <script lang="ts">
+	// The window shell: title bar, then the rail, the contextual side panel and the content
+	// panel inset on the window background, then the status bar. The page never scrolls;
+	// panels scroll inside themselves.
 	import { onMount, type Snippet } from 'svelte';
 	import { page } from '$app/state';
 	import '../app.css';
 	import { boot, daemon } from '$lib/daemon.svelte';
-	import {
-		startStatusPolling,
-		status,
-		statusDetail,
-		statusLabel
-	} from '$lib/stores/status.svelte';
+	import { startStatusPolling } from '$lib/stores/status.svelte';
+	import { loadSettings, settings } from '$lib/stores/settings.svelte';
+	import { UI_THEME_KEY } from '$lib/types';
 	import Button from '$lib/ui/Button.svelte';
 	import ErrorState from '$lib/ui/ErrorState.svelte';
 	import Toast from '$lib/ui/Toast.svelte';
+	import ActivityRail from '$lib/shell/ActivityRail.svelte';
+	import SidePanel from '$lib/shell/SidePanel.svelte';
+	import StatusBar from '$lib/shell/StatusBar.svelte';
+	import TitleBar from '$lib/shell/TitleBar.svelte';
+	import { applyDaemonTheme, initShell, setView, shell } from '$lib/shell/shell.svelte';
+	import { installShortcuts, PALETTE_EVENT } from '$lib/shell/shortcuts';
+	import { viewForPath, viewLabel } from '$lib/shell/views';
 
 	let { children }: { children: Snippet } = $props();
 
-	const nav = [
-		{ name: 'dashboard', href: '/', label: 'Dashboard' },
-		{ name: 'projects', href: '/projects', label: 'Projects' },
-		{ name: 'board', href: '/board', label: 'Board' },
-		{ name: 'memories', href: '/memories', label: 'Memories' },
-		{ name: 'agents', href: '/agents', label: 'Agents' },
-		{ name: 'practices', href: '/practices', label: 'Practices' },
-		{ name: 'workflows', href: '/workflows', label: 'Workflows' },
-		{ name: 'review', href: '/review', label: 'Review' },
-		{ name: 'settings', href: '/settings', label: 'Settings' }
-	];
-
-	function isActive(href: string): boolean {
-		const path = page.url.pathname;
-		return href === '/' ? path === '/' : path === href || path.startsWith(`${href}/`);
-	}
-
 	onMount(() => {
+		void initShell();
 		void boot();
+		return installShortcuts();
 	});
 
 	// Polling starts once the daemon answers and stops if the connection is lost.
@@ -41,35 +33,33 @@
 		if (!daemon.ready) return;
 		return startStatusPolling();
 	});
+
+	// The daemon holds the shared theme, so read it once the daemon is up and reconcile.
+	$effect(() => {
+		if (daemon.ready && !settings.loaded) void loadSettings();
+	});
+
+	$effect(() => {
+		if (settings.loaded) applyDaemonTheme(settings.values[UI_THEME_KEY]);
+	});
+
+	$effect(() => {
+		setView(viewForPath(page.url.pathname));
+	});
+
+	function openPalette() {
+		window.dispatchEvent(new CustomEvent(PALETTE_EVENT));
+	}
 </script>
 
-<div class="shell">
-	<aside class="sidebar" data-testid="sidebar">
-		<div class="brand">Atlas</div>
-		<nav>
-			{#each nav as item (item.href)}
-				<a
-					href={item.href}
-					data-testid="nav-{item.name}"
-					aria-current={isActive(item.href) ? 'page' : undefined}
-				>
-					{item.label}
-				</a>
-			{/each}
-		</nav>
-		<div class="foot">
-			<span
-				class="pill"
-				class:offline={!!status.error || !!daemon.error}
-				data-testid="status-pill"
-				title={statusDetail()}
-			>
-				{daemon.error ? 'daemon offline' : statusLabel()}
-			</span>
-		</div>
-	</aside>
+<TitleBar platform={shell.platform} title={viewLabel(shell.view)} oncommand={openPalette} />
 
-	<main class="content">
+<div class="body">
+	<ActivityRail />
+	{#if shell.sidePanel && shell.view !== 'dashboard'}
+		<SidePanel />
+	{/if}
+	<main class="panel content">
 		{#if daemon.error}
 			<div class="fill" data-testid="daemon-error">
 				<ErrorState message={daemon.error} logPath={daemon.logPath}>
@@ -84,84 +74,34 @@
 	</main>
 </div>
 
+<StatusBar />
+
 <Toast />
 
 <style>
-	.shell {
-		display: grid;
-		grid-template-columns: 210px 1fr;
+	:global(body) {
+		display: flex;
+		flex-direction: column;
 		height: 100vh;
-	}
-
-	.sidebar {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-4);
-		padding: var(--space-4) var(--space-3);
-		border-right: 1px solid var(--border);
-		background: var(--bg-elev);
-		overflow-y: auto;
-	}
-
-	.brand {
-		padding: 0 var(--space-2);
-		font-size: 16px;
-		font-weight: 700;
-		letter-spacing: 0.02em;
-	}
-
-	nav {
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-	}
-
-	nav a {
-		padding: 6px var(--space-2);
-		border-radius: var(--radius-sm);
-		color: var(--muted);
-		text-decoration: none;
-	}
-
-	nav a:hover {
-		background: var(--bg-hover);
-		color: var(--fg);
-	}
-
-	nav a[aria-current='page'] {
-		background: var(--accent-soft);
-		color: var(--accent);
-		font-weight: 500;
-	}
-
-	.foot {
-		margin-top: auto;
-		padding: 0 var(--space-1);
-	}
-
-	.pill {
-		display: inline-block;
-		max-width: 100%;
-		padding: 2px 8px;
-		border: 1px solid var(--border);
-		border-radius: 999px;
-		background: var(--bg);
-		color: var(--muted);
-		font-size: 12px;
 		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
+		background: var(--bg-base);
 	}
 
-	.pill.offline {
-		border-color: transparent;
-		background: var(--danger-soft);
-		color: var(--danger);
+	.body {
+		flex: 1;
+		display: flex;
+		min-height: 0;
+		gap: 6px;
+		padding: 6px 6px 6px 0;
 	}
 
 	.content {
-		padding: var(--space-5);
-		overflow-y: auto;
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		padding: 16px;
+		gap: 12px;
 	}
 
 	.fill {
@@ -173,6 +113,6 @@
 
 	.booting {
 		margin: 0;
-		color: var(--muted);
+		color: var(--text-secondary);
 	}
 </style>

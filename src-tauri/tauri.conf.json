@@ -14,10 +14,12 @@
     "windows": [
       {
         "title": "Atlas",
-        "width": 1200,
-        "height": 800,
-        "minWidth": 900,
-        "minHeight": 600
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 640,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ],
     "security": {
