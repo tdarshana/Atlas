@@ -36,6 +36,17 @@ fn daemon_info() -> Option<serde_json::Value> {
     daemon_ctl::daemon_info(&AtlasPaths::discover())
 }
 
+/// Restart the daemon: stop it the way `atlas daemon stop` does, then start it again
+/// through `daemon_ensure`. The Settings screen's MCP card offers this as `Restart`.
+#[tauri::command]
+async fn daemon_restart(app: tauri::AppHandle, port: Option<u16>) -> Result<u16, String> {
+    let paths = AtlasPaths::discover();
+    daemon_ctl::stop_daemon(&paths).await.map_err(|e| e.to_string())?;
+    daemon_ctl::ensure_daemon_with(&paths, port.unwrap_or(DEFAULT_PORT), sidecar_atlasd(&app))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Where to look when the daemon fails to start.
 #[tauri::command]
 fn log_path() -> String {
@@ -59,7 +70,7 @@ pub fn run() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![daemon_ensure, daemon_info, log_path])
+        .invoke_handler(tauri::generate_handler![daemon_ensure, daemon_info, daemon_restart, log_path])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

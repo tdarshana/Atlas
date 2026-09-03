@@ -579,6 +579,68 @@ export interface SearchResult {
 	took_ms: number;
 }
 
+// ---- MCP (Phase 10) ----
+// `GET /api/v1/mcp/status` (crates/atlasd/src/http.rs: McpStatusReport). `McpResource`
+// and `McpPrompt` mirror the rmcp `Resource` and `Prompt` wire shapes (camelCase,
+// optional fields omitted rather than null).
+
+export type McpToolScope = 'read' | 'write';
+
+export interface McpToolRow {
+	name: string;
+	description: string;
+	args: string;
+	scope: McpToolScope;
+	enabled: boolean;
+}
+
+export interface McpResource {
+	uri: string;
+	name: string;
+	title?: string;
+	description?: string;
+	mimeType?: string;
+	size?: number;
+}
+
+export interface McpPromptArgument {
+	name: string;
+	title?: string;
+	description?: string;
+	required?: boolean;
+}
+
+export interface McpPrompt {
+	name: string;
+	title?: string;
+	description?: string;
+	arguments?: McpPromptArgument[];
+}
+
+export type McpTransportKind = 'stdio' | 'http';
+
+export interface McpClient {
+	id: string;
+	transport: McpTransportKind;
+	client_name: string;
+	client_version: string | null;
+	first_seen: Timestamp;
+	last_seen: Timestamp;
+	tool_calls: number;
+}
+
+export interface McpStatusReport {
+	transports: {
+		stdio: { command: string };
+		http: { url: string; protocol_version: string };
+	};
+	counts: { tools: number; resources: number; prompts: number; clients: number };
+	tools: McpToolRow[];
+	resources: McpResource[];
+	prompts: McpPrompt[];
+	clients: McpClient[];
+}
+
 /** Query string for `GET /api/v1/search`. `project_id` takes one project, not a list. */
 export interface GlobalSearchQuery {
 	q: string;

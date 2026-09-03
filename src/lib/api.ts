@@ -12,6 +12,7 @@ import type {
 	Job,
 	LogEntry,
 	LogFilter,
+	McpStatusReport,
 	Memory,
 	MemoryListScope,
 	MemoryStatus,
@@ -319,6 +320,13 @@ export class AtlasApi {
 
 	setSettings(partial: Settings): Promise<Settings> {
 		return this.req('PUT', '/api/v1/settings', partial);
+	}
+
+	// ---- MCP ----
+
+	/** Transports, counts, the tools table, resources, prompts and connected clients. */
+	mcpStatus(): Promise<McpStatusReport> {
+		return this.req('GET', '/api/v1/mcp/status');
 	}
 
 	// ---- extraction ----

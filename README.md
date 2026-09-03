@@ -17,7 +17,7 @@ Codex, in `~/.codex/config.toml`:
     command = "atlas"
     args = ["mcp"]
 
-Any MCP client that speaks streamable HTTP can use `http://127.0.0.1:7433/mcp` once `atlas daemon start` has run.
+Any MCP client that speaks streamable HTTP can use `http://127.0.0.1:7433/mcp` once `atlas daemon start` has run. Atlas serves 29 tools, plus resources (agents, practices, workflows, project context and boards, recent memories) and prompts (`atlas.bootstrap`, `atlas.handoff`, `board-workflow`, and one per saved agent); `mcp.disabled_tools` can turn any tool off (`project_connect` and `memory_review` are off by default), and `GET /api/v1/mcp/status` reports the live tool table alongside who is connected over stdio or HTTP. The desktop app's Settings screen has an MCP server card for all of this: the connect snippets, the tools table with its enable checkboxes, connected clients, and a `Restart` button. See [MCP tools](docs/usage.md#mcp-tools) in `docs/usage.md` for the full tool table, the resources, the prompts and the status route.
 
 ## Connect a project
 
