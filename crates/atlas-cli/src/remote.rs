@@ -57,6 +57,26 @@ impl RemoteBackend {
         }
     }
     fn net(e: reqwest::Error) -> AtlasError { AtlasError::Other(format!("daemon unreachable: {e}")) }
+
+    /// Builds the `GET /search` URL with `reqwest::Url`'s query-pair encoder rather
+    /// than string interpolation: `q` can carry `#`, `&`, spaces or non-ASCII text a
+    /// caller typed, and raw interpolation would either truncate it (`#` starts a URL
+    /// fragment reqwest never sends) or split it into bogus extra parameters (`&`).
+    fn search_url(base: &str, q: &SearchQuery) -> Result<reqwest::Url> {
+        let mut url = reqwest::Url::parse(&format!("{base}/search")).map_err(|e| AtlasError::Other(e.to_string()))?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            pairs.append_pair("q", &q.q);
+            pairs.append_pair("limit", &q.limit.to_string());
+            if let Some(p) = q.project_id {
+                pairs.append_pair("project_id", &p.to_string());
+            }
+            if let Some(kinds) = &q.kinds {
+                pairs.append_pair("kinds", &kinds.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(","));
+            }
+        }
+        Ok(url)
+    }
 }
 
 #[async_trait::async_trait]
@@ -216,19 +236,42 @@ impl Backend for RemoteBackend {
     // ---- search ----
 
     async fn search(&self, q: SearchQuery) -> Result<SearchResult> {
-        // Matches the rest of this file: query values go straight into the URL rather
-        // than through a query-builder, same as `list_tasks`.
-        let mut parts = vec![format!("q={}", q.q), format!("limit={}", q.limit)];
-        if let Some(p) = q.project_id {
-            parts.push(format!("project_id={p}"));
-        }
-        if let Some(kinds) = &q.kinds {
-            parts.push(format!("kinds={}", kinds.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(",")));
-        }
-        Self::handle(self.client.get(format!("{}/search?{}", self.base, parts.join("&"))).send().await.map_err(Self::net)?).await
+        let url = Self::search_url(&self.base, &q)?;
+        Self::handle(self.client.get(url).send().await.map_err(Self::net)?).await
     }
 }
 
 /// The shape `GET /tasks/counts` answers with, one row per board stage.
 #[derive(serde::Deserialize)]
 struct StageCount { stage: String, count: i64 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `#`, `&`, a space and non-ASCII text must all survive a round trip through
+    /// `search_url`'s percent-encoding: decoding the built URL's own query pairs must
+    /// hand back exactly what was typed. `#` is the case that broke before this fix
+    /// (reqwest treats an unencoded `#` as the start of a URL fragment and never sends
+    /// what follows it); `&` would otherwise split into a bogus extra parameter.
+    #[test]
+    fn search_url_round_trips_special_characters_in_q() {
+        for raw in ["C#", "a&b", "space here", "héllo wörld", "100%_done"] {
+            let q = SearchQuery { q: raw.into(), project_id: None, kinds: None, limit: 20 };
+            let url = RemoteBackend::search_url("http://127.0.0.1:1/api/v1", &q).unwrap();
+            let decoded: HashMap<String, String> = url.query_pairs().into_owned().collect();
+            assert_eq!(decoded.get("q").map(String::as_str), Some(raw), "{url}");
+        }
+    }
+
+    #[test]
+    fn search_url_carries_project_id_and_kinds() {
+        let pid = Uuid::new_v4();
+        let q = SearchQuery { q: "x".into(), project_id: Some(pid), kinds: Some(vec![atlas_core::search::global::SearchKind::Task, atlas_core::search::global::SearchKind::Memory]), limit: 5 };
+        let url = RemoteBackend::search_url("http://127.0.0.1:1/api/v1", &q).unwrap();
+        let decoded: HashMap<String, String> = url.query_pairs().into_owned().collect();
+        assert_eq!(decoded.get("project_id").map(String::as_str), Some(pid.to_string().as_str()));
+        assert_eq!(decoded.get("kinds").map(String::as_str), Some("task,memory"));
+        assert_eq!(decoded.get("limit").map(String::as_str), Some("5"));
+    }
+}

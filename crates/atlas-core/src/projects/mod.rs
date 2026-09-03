@@ -7,7 +7,7 @@ use crate::db::Db;
 use crate::models::{Project, ProjectProfile};
 use crate::{AtlasError, Result};
 use duckdb::types::Type;
-use duckdb::{params, Row};
+use duckdb::{params, params_from_iter, Row};
 use uuid::Uuid;
 
 pub struct ProjectRepo<'a> {
@@ -159,6 +159,25 @@ impl<'a> ProjectRepo<'a> {
         self.db.with_conn(|c| {
             let mut st = c.prepare(&format!("select {SEL} from projects order by last_seen_at desc"))?;
             Ok(st.query_map([], row)?.collect::<duckdb::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// Projects whose name or root path case-insensitively contain `pattern` (a
+    /// caller-built `LIKE`-escaped substring, wrapped in `%...%`), restricted to a
+    /// single project when `project_id` is given, most-recently-seen first, capped at
+    /// 500. A SQL-level prefilter for global search's own "project" group; unrelated
+    /// to `list`, which the rest of the daemon still uses for the unfiltered list.
+    pub fn search_candidates(&self, project_id: Option<Uuid>, pattern: &str) -> Result<Vec<Project>> {
+        self.db.with_conn(|c| {
+            let mut sql = format!("select {SEL} from projects where (lower(name) like ? escape '\\' or lower(root_path) like ? escape '\\')");
+            let mut args: Vec<String> = vec![pattern.to_string(), pattern.to_string()];
+            if let Some(p) = project_id {
+                sql.push_str(" and id = ?");
+                args.push(p.to_string());
+            }
+            sql.push_str(" order by last_seen_at desc limit 500");
+            let mut st = c.prepare(&sql)?;
+            Ok(st.query_map(params_from_iter(args.iter()), row)?.collect::<duckdb::Result<Vec<_>>>()?)
         })
     }
 

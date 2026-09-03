@@ -489,6 +489,29 @@ impl TaskRepo {
         })
     }
 
+    /// Rows whose key, title or description case-insensitively contain `pattern` (a
+    /// caller-built `LIKE`-escaped substring, wrapped in `%...%`), newest-updated
+    /// first, capped at 500. A SQL-level prefilter for global search: the caller
+    /// re-scores and re-ranks the candidates in memory, this only bounds how many rows
+    /// it has to look at, so a board with far more than 500 matches still answers in
+    /// bounded time rather than scanning every task on every keystroke.
+    pub fn search_candidates(&self, project_id: Option<Uuid>, pattern: &str) -> Result<Vec<Task>> {
+        self.db.with_conn(|c| {
+            let mut sql = format!(
+                "select {TASK_COLS} from tasks where (lower(key) like ? escape '\\' or lower(title) like ? escape '\\' or lower(description) like ? escape '\\')"
+            );
+            let mut args: Vec<String> = vec![pattern.to_string(), pattern.to_string(), pattern.to_string()];
+            if let Some(p) = project_id {
+                sql.push_str(" and project_id = ?");
+                args.push(p.to_string());
+            }
+            sql.push_str(" order by updated_at desc limit 500");
+            let mut st = c.prepare(&sql)?;
+            let tasks: Vec<Task> = st.query_map(params_from_iter(args.iter()), row_to_task)?.collect::<duckdb::Result<Vec<_>>>()?;
+            Ok(tasks)
+        })
+    }
+
     /// One row per stage of the effective list, in board order, counting the tasks
     /// sitting in it. Stages with no tasks are present with a zero.
     pub fn counts_by_stage(&self, project_id: Option<Uuid>) -> Result<Vec<(String, i64)>> {
@@ -514,18 +537,22 @@ impl TaskRepo {
         })
     }
 
-    /// Task key, owning project id, and one event, across every task in scope (or
-    /// every task, when `project_id` is `None`), newest first. Feeds the daemon's
-    /// global search event group; not used by any board route.
-    pub fn events_for_search(&self, project_id: Option<Uuid>) -> Result<Vec<(String, Option<Uuid>, TaskEvent)>> {
+    /// Task key, owning project id, and one event whose kind or body case-insensitively
+    /// contains `pattern` (a caller-built `LIKE`-escaped substring, wrapped in
+    /// `%...%`), across every task in scope (or every task, when `project_id` is
+    /// `None`), newest first, capped at 500. A SQL-level prefilter for global search;
+    /// not used by any board route.
+    pub fn events_for_search(&self, project_id: Option<Uuid>, pattern: &str) -> Result<Vec<(String, Option<Uuid>, TaskEvent)>> {
         self.db.with_conn(|c| {
-            let mut sql = format!("select {EVENT_SEARCH_COLS} from task_events e join tasks t on t.id = e.task_id");
-            let mut args: Vec<String> = Vec::new();
+            let mut sql = format!(
+                "select {EVENT_SEARCH_COLS} from task_events e join tasks t on t.id = e.task_id where (lower(e.kind) like ? escape '\\' or lower(e.body) like ? escape '\\')"
+            );
+            let mut args: Vec<String> = vec![pattern.to_string(), pattern.to_string()];
             if let Some(p) = project_id {
-                sql.push_str(" where t.project_id = ?");
+                sql.push_str(" and t.project_id = ?");
                 args.push(p.to_string());
             }
-            sql.push_str(" order by e.created_at desc");
+            sql.push_str(" order by e.created_at desc limit 500");
             let mut st = c.prepare(&sql)?;
             let rows = st.query_map(params_from_iter(args.iter()), row_to_event_for_search)?;
             Ok(rows.collect::<duckdb::Result<Vec<_>>>()?)

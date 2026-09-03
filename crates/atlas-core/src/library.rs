@@ -275,6 +275,27 @@ impl<'a> DocRepo<'a> {
         })
     }
 
+    /// Docs of this kind whose name or body case-insensitively contain `pattern` (a
+    /// caller-built `LIKE`-escaped substring, wrapped in `%...%`), scoped like `list`
+    /// (a project given also matches every global doc), newest-updated first, capped
+    /// at 500. A SQL-level prefilter for global search.
+    pub fn search_candidates(&self, project_id: Option<Uuid>, pattern: &str) -> Result<Vec<Doc>> {
+        let table = table_for(self.kind);
+        let kind = self.kind;
+        self.db.with_conn(|c| {
+            let mut sql = format!("select {DOC_SEL} from {table} where (lower(name) like ? escape '\\' or lower(body) like ? escape '\\')");
+            let mut args: Vec<String> = vec![pattern.to_string(), pattern.to_string()];
+            if let Some(p) = project_id {
+                sql.push_str(" and (project_id = ? or project_id is null)");
+                args.push(p.to_string());
+            }
+            sql.push_str(" order by updated_at desc limit 500");
+            let mut st = c.prepare(&sql)?;
+            let rows = st.query_map(duckdb::params_from_iter(args.iter()), |r| row_to_doc(kind, r))?;
+            Ok(rows.collect::<duckdb::Result<Vec<_>>>()?)
+        })
+    }
+
     pub fn delete(&self, name: &str, actor: &str) -> Result<()> {
         let d = self.get(name)?;
         let table = table_for(self.kind);

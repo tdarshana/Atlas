@@ -131,6 +131,25 @@ impl<'a> MemoryRepo<'a> {
         })
     }
 
+    /// Active memories whose text case-insensitively contains `pattern` (a
+    /// caller-built `LIKE`-escaped substring, wrapped in `%...%`), scoped like
+    /// `list_by_status` (a project given also matches every global memory), newest
+    /// first, capped at 500. A SQL-level prefilter for global search.
+    pub fn search_candidates(&self, project_id: Option<Uuid>, pattern: &str) -> Result<Vec<Memory>> {
+        self.db.with_conn(|c| {
+            let mut sql = format!("select {} from memories where status = 'active' and lower(text) like ? escape '\\'", select_cols());
+            let mut args: Vec<String> = vec![pattern.to_string()];
+            if let Some(p) = project_id {
+                sql.push_str(" and (project_id = ? or scope = 'global')");
+                args.push(p.to_string());
+            }
+            sql.push_str(" order by updated_at desc limit 500");
+            let mut st = c.prepare(&sql)?;
+            let rows = st.query_map(duckdb::params_from_iter(args.iter()), row_to_memory)?;
+            Ok(rows.collect::<duckdb::Result<Vec<_>>>()?)
+        })
+    }
+
     pub fn set_status(&self, id: Uuid, status: MemoryStatus, actor: &str) -> Result<Memory> {
         self.get(id)?;
         self.db.with_conn(|c| { c.execute("update memories set status = ?, updated_at = now() where id = ?", params![status.as_str(), id.to_string()])?; Ok(()) })?;
@@ -149,12 +168,19 @@ impl<'a> MemoryRepo<'a> {
         self.db.with_conn(|c| Ok(c.query_row("select count(*) from memories where status='active'", [], |r| r.get(0))?))
     }
 
-    /// Every audit row, newest first. Used only by global search; `"at"` is quoted
-    /// because it's a reserved word.
-    pub fn list_audit_for_search(&self) -> Result<Vec<AuditEntry>> {
+    /// Audit rows whose action or detail (cast to text) case-insensitively contains
+    /// `pattern` (a caller-built `LIKE`-escaped substring, wrapped in `%...%`), newest
+    /// first, capped at 500. A SQL-level prefilter for global search, so a table that
+    /// only ever grows (nothing is hard-deleted from `audit`) still answers in bounded
+    /// time. `"at"` is quoted because it's a reserved word.
+    pub fn list_audit_for_search(&self, pattern: &str) -> Result<Vec<AuditEntry>> {
         self.db.with_conn(|c| {
-            let mut st = c.prepare("select id::text, actor, action, entity, entity_id::text, detail::text, \"at\"::text from audit order by \"at\" desc")?;
-            let rows = st.query_map([], row_to_audit)?;
+            let mut st = c.prepare(
+                "select id::text, actor, action, entity, entity_id::text, detail::text, \"at\"::text from audit \
+                 where (lower(action) like ? escape '\\' or lower(detail::text) like ? escape '\\') \
+                 order by \"at\" desc limit 500",
+            )?;
+            let rows = st.query_map(params![pattern, pattern], row_to_audit)?;
             Ok(rows.collect::<duckdb::Result<Vec<_>>>()?)
         })
     }

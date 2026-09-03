@@ -3,15 +3,23 @@
 //!
 //! Every group is scored independently with the same rule (an exact key/name match
 //! beats a title substring beats a body substring; ties break by recency) and capped
-//! at the caller's limit; `total` counts every match before that cap so a caller can
-//! tell "there were more" from "that's everything". `highlights` are **char** offsets
-//! (not byte offsets) into `title`, so a multi-byte character in a title still lines
-//! up correctly for a caller that indexes by character rather than by byte.
+//! at the caller's limit. Tasks, memories, task/audit events and workflows are first
+//! prefiltered in SQL with a bound, escaped `LIKE '%...%'` over their text columns,
+//! newest first, capped at 500 rows per source (see each repo's `search_candidates` /
+//! `events_for_search` / `list_audit_for_search`) before this module re-scores and
+//! re-ranks them in memory; `total` counts every one of *those* (already-capped)
+//! candidates that scored, not every true match in the table, so a source with more
+//! than 500 matches reports the 500 newest rather than scanning it whole on every
+//! keystroke. Files and commits are the exception: they come straight from the
+//! (scoped) projects' already-loaded profiles, since there's no table row to prefilter.
+//! `highlights` are **char** offsets (not byte offsets) into `title`, so a multi-byte
+//! character in a title still lines up correctly for a caller that indexes by
+//! character rather than by byte.
 
 use crate::board::TaskRepo;
 use crate::library::DocRepo;
 use crate::memories::MemoryRepo;
-use crate::models::{MemoryStatus, Project, TaskFilter};
+use crate::models::Project;
 use crate::projects::ProjectRepo;
 use crate::{AtlasError, Result};
 use chrono::{DateTime, Utc};
@@ -158,8 +166,9 @@ fn score_of(q: &str, exact: Option<&str>, title: Option<&str>, body: Option<&str
 
 /// The char range of the first case-insensitive match of `q` in `title`, or empty
 /// when `title` doesn't contain it (the hit scored on a different field) or when
-/// lower-casing `title` changed its character count (a rare case-folding expansion
-/// such as German `ß` -> `ss`, where a byte/char-safe match can't be recovered).
+/// lower-casing `title` changed its character count (a rare case-folding expansion:
+/// `'İ'` (U+0130, LATIN CAPITAL LETTER I WITH DOT ABOVE) lowers to two chars, `i`
+/// plus a combining dot above, where a byte/char-safe match can't be recovered).
 fn highlight(q: &str, title: &str) -> Vec<(usize, usize)> {
     if q.is_empty() {
         return Vec::new();
@@ -182,8 +191,44 @@ fn project_scoped(project_id: Option<Uuid>, candidate: Uuid) -> bool {
     project_id.map(|p| p == candidate).unwrap_or(true)
 }
 
-fn search_tasks(q: &str, project_id: Option<Uuid>, tasks: &TaskRepo, name_of: &HashMap<Uuid, String>) -> Result<Vec<Candidate>> {
-    let list = tasks.list(&TaskFilter { project_id, include_done: true, ..Default::default() })?;
+/// Turns `q` (already trimmed and lowercased) into a `%...%` pattern safe to bind
+/// into a `LIKE ... ESCAPE '\'` clause: `%`, `_` and the escape character itself are
+/// each escaped so they act as literal characters in the query rather than wildcards.
+fn like_pattern(q: &str) -> String {
+    let mut escaped = String::with_capacity(q.len());
+    for c in q.chars() {
+        if c == '\\' || c == '%' || c == '_' {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    format!("%{escaped}%")
+}
+
+/// Shifts each highlight range by `by` chars, for a field matched inside a larger
+/// concatenated title (an event's `"<actor> <mid> <tail>"`) rather than at the
+/// title's own start.
+fn shift(highlights: Vec<(usize, usize)>, by: usize) -> Vec<(usize, usize)> {
+    highlights.into_iter().map(|(s, e)| (s + by, e + by)).collect()
+}
+
+/// Highlights for an event's `"<actor> <mid> <tail>"` title (`mid` is `kind`/`action`,
+/// `tail` is `body`/`detail`), computed against whichever of the two actually produced
+/// `score` and then shifted to that field's offset inside the full title — never
+/// against the concatenation itself, so a coincidental match inside `actor` can't be
+/// reported as the reason this hit scored. `score_of` never passes `exact` for an
+/// event, so `score` is always 3.0 (matched `mid`), 1.0 (matched `tail`), or this is
+/// never called (0.0, already filtered out by the caller).
+fn event_highlights(q: &str, actor: &str, mid: &str, tail: &str, score: f64) -> Vec<(usize, usize)> {
+    if score >= 3.0 {
+        shift(highlight(q, mid), actor.chars().count() + 1)
+    } else {
+        shift(highlight(q, tail), actor.chars().count() + 1 + mid.chars().count() + 1)
+    }
+}
+
+fn search_tasks(q: &str, pattern: &str, project_id: Option<Uuid>, tasks: &TaskRepo, name_of: &HashMap<Uuid, String>) -> Result<Vec<Candidate>> {
+    let list = tasks.search_candidates(project_id, pattern)?;
     let mut out = Vec::with_capacity(list.len());
     for t in list {
         let score = score_of(q, Some(&t.key), Some(&t.title), Some(&t.description));
@@ -209,11 +254,11 @@ fn search_tasks(q: &str, project_id: Option<Uuid>, tasks: &TaskRepo, name_of: &H
     Ok(out)
 }
 
-fn search_memories(q: &str, project_id: Option<Uuid>, memories: &MemoryRepo, name_of: &HashMap<Uuid, String>) -> Result<Vec<Candidate>> {
-    // `list_by_status` already widens rather than narrows: with a project given it
-    // matches that project's memories plus every global one, which is exactly the
-    // scoping rule this group needs.
-    let list = memories.list_by_status(MemoryStatus::Active, None, project_id)?;
+fn search_memories(q: &str, pattern: &str, project_id: Option<Uuid>, memories: &MemoryRepo, name_of: &HashMap<Uuid, String>) -> Result<Vec<Candidate>> {
+    // `search_candidates` widens rather than narrows: with a project given it matches
+    // that project's memories plus every global one, which is exactly the scoping
+    // rule this group needs.
+    let list = memories.search_candidates(project_id, pattern)?;
     let mut out = Vec::with_capacity(list.len());
     for m in list {
         let score = score_of(q, None, None, Some(&m.text));
@@ -239,9 +284,10 @@ fn search_memories(q: &str, project_id: Option<Uuid>, memories: &MemoryRepo, nam
     Ok(out)
 }
 
-fn search_projects(q: &str, project_id: Option<Uuid>, all: &[Project]) -> Vec<Candidate> {
-    let mut out = Vec::new();
-    for p in all.iter().filter(|p| project_scoped(project_id, p.id)) {
+fn search_projects(q: &str, pattern: &str, project_id: Option<Uuid>, projects: &ProjectRepo) -> Result<Vec<Candidate>> {
+    let list = projects.search_candidates(project_id, pattern)?;
+    let mut out = Vec::with_capacity(list.len());
+    for p in list {
         let body = p.profile.as_ref().and_then(|pr| pr.summary.clone().or_else(|| Some(pr.readme_head.clone())));
         let score = score_of(q, Some(&p.name), Some(&p.name), body.as_deref());
         if score <= 0.0 {
@@ -263,7 +309,7 @@ fn search_projects(q: &str, project_id: Option<Uuid>, all: &[Project]) -> Vec<Ca
             recency: p.last_seen_at,
         });
     }
-    out
+    Ok(out)
 }
 
 fn search_files(q: &str, project_id: Option<Uuid>, all: &[Project]) -> Vec<Candidate> {
@@ -324,15 +370,15 @@ fn search_commits(q: &str, project_id: Option<Uuid>, all: &[Project]) -> Vec<Can
     out
 }
 
-fn search_events(q: &str, project_id: Option<Uuid>, tasks: &TaskRepo, memories: &MemoryRepo, name_of: &HashMap<Uuid, String>) -> Result<Vec<Candidate>> {
+fn search_events(q: &str, pattern: &str, project_id: Option<Uuid>, tasks: &TaskRepo, memories: &MemoryRepo, name_of: &HashMap<Uuid, String>) -> Result<Vec<Candidate>> {
     let mut out = Vec::new();
-    for (key, task_project, ev) in tasks.events_for_search(project_id)? {
+    for (key, task_project, ev) in tasks.events_for_search(project_id, pattern)? {
         let score = score_of(q, None, Some(&ev.kind), Some(&ev.body));
         if score <= 0.0 {
             continue;
         }
         let title = format!("{} {} {}", ev.actor, ev.kind, ev.body);
-        let highlights = highlight(q, &title);
+        let highlights = event_highlights(q, &ev.actor, &ev.kind, &ev.body, score);
         out.push(Candidate {
             hit: SearchHit {
                 kind: SearchKind::Event,
@@ -353,14 +399,14 @@ fn search_events(q: &str, project_id: Option<Uuid>, tasks: &TaskRepo, memories: 
     // out entirely rather than showing every project's audit trail under one project's
     // results.
     if project_id.is_none() {
-        for a in memories.list_audit_for_search()? {
+        for a in memories.list_audit_for_search(pattern)? {
             let detail_text = a.detail.as_ref().map(|d| d.to_string()).unwrap_or_default();
             let score = score_of(q, None, Some(&a.action), Some(&detail_text));
             if score <= 0.0 {
                 continue;
             }
             let title = format!("{} {} {}", a.actor, a.action, detail_text);
-            let highlights = highlight(q, &title);
+            let highlights = event_highlights(q, &a.actor, &a.action, &detail_text, score);
             out.push(Candidate {
                 hit: SearchHit {
                     kind: SearchKind::Event,
@@ -380,8 +426,8 @@ fn search_events(q: &str, project_id: Option<Uuid>, tasks: &TaskRepo, memories: 
     Ok(out)
 }
 
-fn search_workflows(q: &str, project_id: Option<Uuid>, docs: &DocRepo, name_of: &HashMap<Uuid, String>) -> Result<Vec<Candidate>> {
-    let list = docs.list(project_id)?;
+fn search_workflows(q: &str, pattern: &str, project_id: Option<Uuid>, docs: &DocRepo, name_of: &HashMap<Uuid, String>) -> Result<Vec<Candidate>> {
+    let list = docs.search_candidates(project_id, pattern)?;
     let mut out = Vec::with_capacity(list.len());
     for d in list {
         let score = score_of(q, Some(&d.name), Some(&d.name), Some(&d.body));
@@ -412,6 +458,10 @@ fn search_workflows(q: &str, project_id: Option<Uuid>, docs: &DocRepo, name_of: 
 ///
 /// A blank or whitespace-only `q` answers with no groups and a total of 0, without
 /// touching the database: an empty search is not "everything", it's nothing yet.
+///
+/// Every other kind's SQL prefilter caps at 500 rows per source (newest first; see
+/// the module doc comment), so `total` reflects at most 500 candidates from any one
+/// of them even when the table holds far more true matches.
 pub fn search(query: &SearchQuery, tasks: &TaskRepo, memories: &MemoryRepo, projects: &ProjectRepo, docs: &DocRepo) -> Result<SearchResult> {
     let start = std::time::Instant::now();
     let q = query.q.trim().to_lowercase();
@@ -420,7 +470,12 @@ pub fn search(query: &SearchQuery, tasks: &TaskRepo, memories: &MemoryRepo, proj
     }
     let limit = query.limit.min(MAX_LIMIT);
     let wanted: &[SearchKind] = query.kinds.as_deref().unwrap_or(&ORDER);
+    let pattern = like_pattern(&q);
 
+    // Files and commits read a project's already-loaded profile rather than a SQL
+    // prefilter (see the module doc comment), so they still need the full, unfiltered
+    // (scoped) project list; `name_of` (subtitles elsewhere) is built from the same
+    // fetch rather than a second one.
     let all_projects = projects.list()?;
     let name_of: HashMap<Uuid, String> = all_projects.iter().map(|p| (p.id, p.name.clone())).collect();
 
@@ -428,13 +483,13 @@ pub fn search(query: &SearchQuery, tasks: &TaskRepo, memories: &MemoryRepo, proj
     let mut groups = Vec::new();
     for kind in ORDER.into_iter().filter(|k| wanted.contains(k)) {
         let mut candidates = match kind {
-            SearchKind::Task => search_tasks(&q, query.project_id, tasks, &name_of)?,
-            SearchKind::Memory => search_memories(&q, query.project_id, memories, &name_of)?,
-            SearchKind::Project => search_projects(&q, query.project_id, &all_projects),
+            SearchKind::Task => search_tasks(&q, &pattern, query.project_id, tasks, &name_of)?,
+            SearchKind::Memory => search_memories(&q, &pattern, query.project_id, memories, &name_of)?,
+            SearchKind::Project => search_projects(&q, &pattern, query.project_id, projects)?,
             SearchKind::File => search_files(&q, query.project_id, &all_projects),
             SearchKind::Commit => search_commits(&q, query.project_id, &all_projects),
-            SearchKind::Event => search_events(&q, query.project_id, tasks, memories, &name_of)?,
-            SearchKind::Workflow => search_workflows(&q, query.project_id, docs, &name_of)?,
+            SearchKind::Event => search_events(&q, &pattern, query.project_id, tasks, memories, &name_of)?,
+            SearchKind::Workflow => search_workflows(&q, &pattern, query.project_id, docs, &name_of)?,
         };
         candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal).then_with(|| b.recency.cmp(&a.recency)));
         total += candidates.len();
@@ -452,7 +507,7 @@ mod tests {
     use super::*;
     use crate::board::TaskRepo;
     use crate::db::Db;
-    use crate::models::{DocKind, NewMemory, NewTask, MemoryKind, MemoryScope};
+    use crate::models::{DocKind, NewMemory, NewTask, MemoryKind, MemoryScope, MemoryStatus};
     use crate::projects::detect::Detected;
     use std::sync::{Arc, Mutex};
 
@@ -594,5 +649,56 @@ mod tests {
         // "café zeta": c-a-f-é-space-z-e-t-a -> "zeta" starts at char index 5, not
         // byte index 6, since 'é' is a two-byte char.
         assert_eq!(items[0].highlights, vec![(5, 9)], "{items:?}");
+    }
+
+    #[test]
+    fn event_highlights_land_in_the_field_that_actually_matched() {
+        let db = env();
+        let tasks = task_repo(&db);
+        // `move_stage` writes one event whose kind is "moved" and whose body is
+        // "moved <key> from Backlog to Done" (the board's own wording, which happens
+        // to repeat "moved" but also carries "to Done" nowhere in the kind). A
+        // highlight computed against the concatenated title instead of the field that
+        // actually scored would land inside the "zeta-actor " actor prefix.
+        let t = tasks.create(&NewTask { title: "task one".into(), ..Default::default() }, "zeta-actor").unwrap();
+        tasks.move_stage(&t.key, "Done", None, "zeta-actor").unwrap();
+
+        // Matched on `kind` ("moved"): highlight must sit right after "zeta-actor ".
+        let r = run(&db, &q("moved"));
+        let items = &group(&r, SearchKind::Event).unwrap().items;
+        assert_eq!(items.len(), 1, "{items:?}");
+        let kind_start = "zeta-actor ".chars().count();
+        assert_eq!(items[0].highlights, vec![(kind_start, kind_start + "moved".chars().count())], "{items:?}");
+
+        // Matched on `body` only ("...Backlog to Done"): highlight must sit at or
+        // after "zeta-actor moved ", not inside the actor/kind prefix.
+        let r = run(&db, &q("to done"));
+        let items = &group(&r, SearchKind::Event).unwrap().items;
+        assert_eq!(items.len(), 1, "{items:?}");
+        let body_start = "zeta-actor moved ".chars().count();
+        assert!(items[0].highlights[0].0 >= body_start, "highlight must not land before the body field starts: {items:?}");
+    }
+
+    #[test]
+    fn more_than_500_matches_from_one_source_still_returns_capped_at_500() {
+        let db = env();
+        // Audit rows aren't produced through a public write API 600 times over, so
+        // insert them directly, mirroring how other repos' tests hand-build rows for a
+        // scenario the public API offers no shortcut for.
+        db.with_conn(|c| {
+            for i in 0..600 {
+                c.execute(
+                    "insert into audit (id, actor, action, entity, entity_id, detail) values (?, 't', 'noted', 'thing', null, ?::json)",
+                    duckdb::params![Uuid::new_v4().to_string(), serde_json::json!({"note": format!("capword {i}")}).to_string()],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        let query = SearchQuery { q: "capword".into(), project_id: None, kinds: Some(vec![SearchKind::Event]), limit: MAX_LIMIT };
+        let r = run(&db, &query);
+        assert_eq!(r.total, 500, "the SQL prefilter caps each source at 500 candidates before scoring: {}", r.total);
+        assert_eq!(group(&r, SearchKind::Event).unwrap().items.len(), MAX_LIMIT);
     }
 }
