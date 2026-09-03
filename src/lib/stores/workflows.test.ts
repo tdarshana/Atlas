@@ -371,6 +371,30 @@ describe('loadRunHistory / loadRunDetail', () => {
 		expect(workflow.runDetail).toEqual(detail);
 		expect(workflow.runDetailError).toBeNull();
 	});
+
+	it('drops a stale response that resolves after a newer selection\'s response already landed', async () => {
+		// Run A is selected first (its request is slow, e.g. still running), then the user
+		// quickly selects run B (whose request is fast). A's response arriving late must
+		// not clobber B's, even though A's request started first.
+		const detailA = { run: sampleRun({ id: 'run-a', status: 'running', finished_at: null }), steps: [] };
+		const detailB = { run: sampleRun({ id: 'run-b', status: 'success' }), steps: [] };
+		let resolveA!: (v: typeof detailA) => void;
+		const pendingA = new Promise<typeof detailA>((resolve) => {
+			resolveA = resolve;
+		});
+		mocks.getRun.mockImplementationOnce(() => pendingA);
+		mocks.getRun.mockImplementationOnce(async () => detailB);
+
+		const callA = loadRunDetail('run-a');
+		const callB = loadRunDetail('run-b');
+		await callB;
+		expect(workflow.runDetail?.run.id).toBe('run-b');
+
+		resolveA(detailA);
+		await callA;
+		// A's late response is dropped: B's selection is still what is shown.
+		expect(workflow.runDetail?.run.id).toBe('run-b');
+	});
 });
 
 describe('cancelRun', () => {

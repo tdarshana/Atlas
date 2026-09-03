@@ -108,7 +108,8 @@
 	.columns,
 	.run-row {
 		display: grid;
-		grid-template-columns: 40px 120px 90px 90px 1fr;
+		/* Frame 08.1's own runs-table grid (`#`/Started/Trigger/Status/Duration). */
+		grid-template-columns: 32px 100px 76px 62px 1fr;
 		align-items: center;
 		column-gap: 10px;
 		height: 28px;

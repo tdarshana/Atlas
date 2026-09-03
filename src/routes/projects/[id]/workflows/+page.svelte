@@ -95,9 +95,15 @@
 	});
 
 	$effect(() => {
+		// `recentRuns` is capped at `RECENT_RUNS` per workflow (see `loadRecentRuns`), not a
+		// true project-wide total, and there is no cheap way to ask the daemon for one
+		// without a further route: `listRuns` returns a bare array, no total count. Labelled
+		// "recent runs" rather than "runs" so the number never reads as a claim it isn't.
 		setStatusItems({
 			right: [
-				{ text: `${name} · ${plural(rows.length, 'workflow')} · ${plural(recentRuns.length, 'run')}` }
+				{
+					text: `${name} · ${plural(rows.length, 'workflow')} · ${plural(recentRuns.length, 'recent run')}`
+				}
 			]
 		});
 	});

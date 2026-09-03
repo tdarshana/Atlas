@@ -517,18 +517,31 @@ export async function loadRunHistory(limit = 200): Promise<void> {
 	}
 }
 
+/** Bumped by every `loadRunDetail` call and captured per request, so a response that
+ * outlives a newer one (the poll's own tick racing a fresh selection) never lands: only
+ * the reply belonging to the highest generation issued so far is allowed to write
+ * `workflow.runDetail`. Selecting run A, then quickly run B, then A's slow `GET
+ * /runs/A` resolving after B's fast one, is exactly the race this exists for. */
+let runDetailGeneration = 0;
+
 /** One run's full detail (the run plus every step and its log), for the run detail
  * card. Errors are kept on `runDetailError` rather than thrown, since a poll tick
- * failing should not blow up the caller. */
+ * failing should not blow up the caller. A response for a request superseded by a
+ * later call to this function (a different run selected, or the next poll tick already
+ * under way) is dropped rather than applied. */
 export async function loadRunDetail(runId: string): Promise<void> {
+	const generation = ++runDetailGeneration;
 	workflow.runDetailLoading = true;
 	try {
-		workflow.runDetail = await api().getRun(runId);
+		const detail = await api().getRun(runId);
+		if (generation !== runDetailGeneration) return;
+		workflow.runDetail = detail;
 		workflow.runDetailError = null;
 	} catch (e) {
+		if (generation !== runDetailGeneration) return;
 		workflow.runDetailError = errorMessage(e);
 	} finally {
-		workflow.runDetailLoading = false;
+		if (generation === runDetailGeneration) workflow.runDetailLoading = false;
 	}
 }
 

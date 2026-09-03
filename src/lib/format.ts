@@ -93,14 +93,22 @@ export function logPath(): string {
 }
 
 /**
- * A run or step's wall time as `1m 42s`, whole seconds only. `n/a` before `finishedAt`
- * is set (still queued or running) or if the pair does not parse to a sane span.
+ * A run or step's wall time as `1m 42s`, whole seconds only: `finishedAt` to
+ * `startedAt` once it is set, else `now` to `startedAt`, so a still-running run or step
+ * reads as elapsed time instead of `n/a` (and keeps climbing as `RunDetail`'s 2s poll
+ * feeds a fresh `now` in). `n/a` only when `startedAt` itself does not parse, or the
+ * span it would produce runs backwards. `now` defaults to the wall clock; a caller
+ * passes one in to test a fixed instant, the same way `relativeAge`/`logTime` do.
  */
-export function duration(startedAt: Timestamp, finishedAt: Timestamp | null): string {
-	if (!finishedAt) return 'n/a';
+export function duration(
+	startedAt: Timestamp,
+	finishedAt: Timestamp | null,
+	now: number = Date.now()
+): string {
 	const startMs = new Date(startedAt).getTime();
-	const endMs = new Date(finishedAt).getTime();
-	if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) return 'n/a';
+	if (!Number.isFinite(startMs)) return 'n/a';
+	const endMs = finishedAt ? new Date(finishedAt).getTime() : now;
+	if (!Number.isFinite(endMs) || endMs < startMs) return 'n/a';
 	const totalSeconds = Math.floor((endMs - startMs) / 1000);
 	const minutes = Math.floor(totalSeconds / 60);
 	const seconds = totalSeconds % 60;
