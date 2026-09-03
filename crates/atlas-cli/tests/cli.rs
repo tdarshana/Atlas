@@ -210,6 +210,10 @@ fn hook_mode_stays_quiet_when_the_daemon_cannot_be_reached() {
 fn ingest_from_a_pipe_fails_when_extraction_is_off() {
     use std::io::Write;
     let daemon = TestDaemon::new();
+    // Start the daemon first, so what this test observes is the refusal and not a
+    // handshake that lost a race against a loaded machine.
+    let started = daemon.cmd().args(["daemon", "start"]).output().unwrap();
+    assert!(started.status.success(), "{}", String::from_utf8_lossy(&started.stderr));
     let mut child = daemon
         .cmd()
         .args(["ingest", "--tool", "test"])
