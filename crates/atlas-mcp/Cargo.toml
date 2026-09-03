@@ -19,6 +19,9 @@ uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# Test-only: the in-memory client/server pair the access tests run over is a
+# `tokio::io::duplex`, which the crate itself never needs.
+tokio = { workspace = true, features = ["io-util"] }
 # Test-only: an in-memory client/server round trip needs the client half of rmcp,
 # which the daemon and stdio shim never link.
 rmcp = { version = "3.2", features = ["client"] }

@@ -85,6 +85,16 @@ pub trait Backend: Send + Sync + 'static {
     async fn get_project(&self, id: Uuid) -> Result<Project>;
     async fn refresh_project(&self, id: Uuid) -> Result<Project>;
     async fn delete_project(&self, id: Uuid, actor: &str) -> Result<()>;
+    /// Renames a project, its board key (and with it every task key on that board) or
+    /// its remote. `Invalid` on a malformed or already-used board key.
+    async fn update_project(&self, id: Uuid, patch: ProjectPatch, actor: &str) -> Result<Project>;
+    async fn set_agent_access(&self, id: Uuid, access: AgentAccess, actor: &str) -> Result<Project>;
+    /// Replaces the project's extraction override, or clears it with `None`. The
+    /// project comes back with the key masked.
+    async fn set_project_extraction(&self, id: Uuid, over: Option<ProjectExtraction>, actor: &str) -> Result<Project>;
+    async fn project_log(&self, id: Uuid, f: LogFilter) -> Result<Vec<LogEntry>>;
+    /// The whole log as JSON lines, uncapped.
+    async fn project_log_export(&self, id: Uuid) -> Result<String>;
 
     // ---- library ----
     async fn list_agents(&self) -> Result<Vec<Agent>>;
@@ -110,10 +120,11 @@ pub trait Backend: Send + Sync + 'static {
     /// worker could not run.
     async fn ingest_transcript(&self, text: String, source_tool: String, project_root: Option<PathBuf>) -> Result<Uuid>;
     async fn get_job(&self, id: Uuid) -> Result<Option<Job>>;
-    /// Sends a minimal connectivity check to the configured model and answers with
-    /// its reply, trimmed. `Conflict` when extraction is off or half configured, the
-    /// same gate `ingest_transcript` checks.
-    async fn test_extraction(&self) -> Result<String>;
+    /// Sends a minimal connectivity check to the model configured for `project_id`
+    /// (or the global one when it is `None`) and answers with its reply, trimmed.
+    /// `Conflict` when extraction is off or half configured, the same gate
+    /// `ingest_transcript` checks.
+    async fn test_extraction_for(&self, project_id: Option<Uuid>) -> Result<String>;
 
     // ---- board (Phase 6) ----
     async fn list_tasks(&self, f: TaskFilter) -> Result<Vec<Task>>;
@@ -186,6 +197,26 @@ impl LocalBackend {
         let _gate = gate.lock().unwrap_or_else(|e| e.into_inner());
         self.projects().delete(id, actor)
     }
+    /// Refuses an agent the project has not admitted, and says whether a memory it
+    /// writes has to wait for review. A project id that no longer resolves is not a
+    /// refusal: there is no rule to apply.
+    fn memory_gate(&self, project_id: Option<Uuid>, actor: &str) -> Result<bool> {
+        let Some(pid) = project_id.filter(|_| !crate::projects::actor_is_user(actor)) else { return Ok(false) };
+        let project = self.projects().get(pid)?;
+        crate::projects::check_memory_write(actor, &project)?;
+        Ok(project.agent_access.require_review)
+    }
+
+    /// Refuses an agent that may not move tasks on this task's board. The task read is
+    /// skipped entirely for the user's own hands, which are always exempt.
+    fn task_move_gate(&self, id_or_key: &str, actor: &str) -> Result<()> {
+        if crate::projects::actor_is_user(actor) {
+            return Ok(());
+        }
+        let Some(pid) = self.tasks.get(id_or_key)?.task.project_id else { return Ok(()) };
+        crate::projects::check_task_move(actor, &self.projects().get(pid)?)
+    }
+
     fn agents(&self) -> AgentRepo<'_> { AgentRepo::new(&self.db) }
     fn docs(&self, kind: DocKind) -> DocRepo<'_> { DocRepo::new(&self.db, kind) }
     fn settings(&self) -> crate::settings::SettingsRepo<'_> { crate::settings::SettingsRepo::new(&self.db) }
@@ -214,7 +245,16 @@ impl Backend for LocalBackend {
         s.db_path = self.paths.db_path().display().to_string();
         Ok(s)
     }
-    async fn remember(&self, m: NewMemory, actor: &str) -> Result<Memory> { self.memories.remember(m, actor) }
+    /// The project's `agent_access` is enforced here rather than in the MCP router,
+    /// because MCP reaches the daemon over HTTP and the shim cannot see the rule. An
+    /// actor the project has not admitted is refused, and `require_review` turns an
+    /// agent's memory into a pending one.
+    async fn remember(&self, mut m: NewMemory, actor: &str) -> Result<Memory> {
+        if self.memory_gate(m.project_id, actor)? {
+            m.status = MemoryStatus::Pending;
+        }
+        self.memories.remember(m, actor)
+    }
     async fn recall(&self, q: RecallQuery) -> Result<Vec<RecallHit>> { self.memories.recall(&q) }
     async fn forget(&self, id: Uuid, reason: Option<String>, actor: &str) -> Result<Memory> { self.memories.forget(id, reason, actor) }
     async fn get_memory(&self, id: Uuid) -> Result<Memory> { self.memories.get(id) }
@@ -280,6 +320,23 @@ impl Backend for LocalBackend {
         Ok(updated)
     }
     async fn delete_project(&self, id: Uuid, actor: &str) -> Result<()> { self.delete_project_gated(id, actor) }
+
+    /// Gated: a board key rename rewrites every `tasks.key` on the board, which is a
+    /// board write and takes the same mutex in the same order as every other one.
+    /// Kept synchronous so the guard cannot be held across an await.
+    async fn update_project(&self, id: Uuid, patch: ProjectPatch, actor: &str) -> Result<Project> {
+        let gate = self.memories.gate_handle();
+        let _gate = gate.lock().unwrap_or_else(|e| e.into_inner());
+        self.projects().update(id, &patch, actor)
+    }
+    async fn set_agent_access(&self, id: Uuid, access: AgentAccess, actor: &str) -> Result<Project> {
+        self.projects().set_agent_access(id, &access, actor)
+    }
+    async fn set_project_extraction(&self, id: Uuid, over: Option<ProjectExtraction>, actor: &str) -> Result<Project> {
+        self.projects().set_project_extraction(id, over, actor)
+    }
+    async fn project_log(&self, id: Uuid, f: LogFilter) -> Result<Vec<LogEntry>> { crate::projects::log::project_log(&self.db, id, &f) }
+    async fn project_log_export(&self, id: Uuid) -> Result<String> { crate::projects::log::project_log_export(&self.db, id) }
 
     async fn list_agents(&self) -> Result<Vec<Agent>> { self.agents().list() }
     async fn get_agent(&self, name: &str) -> Result<Agent> { self.agents().get(name) }
@@ -390,7 +447,14 @@ impl Backend for LocalBackend {
     /// transcript, which would spend a model call on nothing; and the character cap,
     /// which bounds how much any one caller can push into a single model call.
     async fn ingest_transcript(&self, text: String, source_tool: String, project_root: Option<PathBuf>) -> Result<Uuid> {
-        crate::extract::extraction_config(&self.db)?;
+        // The project is resolved first: it decides both which endpoint the transcript
+        // would go to and whether this caller may write memories here at all.
+        let project_id = match &project_root {
+            Some(root) => self.projects().by_root(std::path::Path::new(root))?.map(|p| p.id),
+            None => None,
+        };
+        self.memory_gate(project_id, &source_tool)?;
+        crate::extract::resolve_extraction(&self.db, project_id)?;
         if text.trim().is_empty() {
             return Err(AtlasError::Invalid("ingest text is empty".into()));
         }
@@ -406,8 +470,8 @@ impl Backend for LocalBackend {
 
     async fn get_job(&self, id: Uuid) -> Result<Option<Job>> { self.jobs.get(id) }
 
-    async fn test_extraction(&self) -> Result<String> {
-        let cfg = crate::extract::extraction_config(&self.db)?;
+    async fn test_extraction_for(&self, project_id: Option<Uuid>) -> Result<String> {
+        let cfg = crate::extract::resolve_extraction(&self.db, project_id)?;
         let client = crate::extract::build_client(&cfg)?;
         let reply = client.chat("You are a connectivity check.", "Reply with the single word OK").await?;
         Ok(reply.trim().to_string())
@@ -418,10 +482,15 @@ impl Backend for LocalBackend {
     async fn create_task(&self, t: NewTask, actor: &str) -> Result<Task> { self.tasks.create(&t, actor) }
     async fn update_task(&self, id_or_key: &str, u: TaskUpdate, actor: &str) -> Result<Task> { self.tasks.update(id_or_key, &u, actor) }
     async fn move_task(&self, id_or_key: &str, stage: &str, expected: Option<DateTime<Utc>>, actor: &str) -> Result<Task> {
+        self.task_move_gate(id_or_key, actor)?;
         self.tasks.move_stage(id_or_key, stage, expected, actor)
     }
     async fn comment_task(&self, id_or_key: &str, body: &str, actor: &str) -> Result<TaskEvent> { self.tasks.comment(id_or_key, body, actor) }
-    async fn claim_task(&self, id_or_key: &str, force: bool, actor: &str) -> Result<Task> { self.tasks.claim(id_or_key, force, actor) }
+    async fn claim_task(&self, id_or_key: &str, force: bool, actor: &str) -> Result<Task> {
+        // A claim moves the task out of the first stage, so it is a move.
+        self.task_move_gate(id_or_key, actor)?;
+        self.tasks.claim(id_or_key, force, actor)
+    }
     async fn set_task_blockers(&self, id_or_key: &str, blocked_by: Vec<String>, actor: &str) -> Result<Task> {
         self.tasks.set_blockers(id_or_key, blocked_by, actor)
     }

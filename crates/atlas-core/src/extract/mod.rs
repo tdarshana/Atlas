@@ -49,36 +49,61 @@ impl std::fmt::Debug for ExtractionConfig {
     }
 }
 
-/// Reads the extraction settings, or reports the feature as disabled. Extraction
-/// is off by default and stays off unless `extraction.enabled` is true and both
-/// `extraction.base_url` and `extraction.model` are set; the api key may be empty,
+/// The extraction settings for a scope, or the feature reported as disabled.
+///
+/// A project may override the global `extraction.*` settings field by field: an
+/// absent field on the override falls back to the global value, so a project can
+/// point one endpoint elsewhere without restating the model or the threshold.
+/// Extraction is off by default and stays off unless the resolved `enabled` is true
+/// and both `base_url` and `model` resolve to something; the api key may be empty,
 /// since a local endpoint does not ask for one.
 ///
-/// The values come from `SettingsRepo::get_raw`, not `get_all`: `get_all` masks
-/// `extraction.api_key` to `"***"`, which is not a key the worker could use. The
-/// key is never logged and never put in an error.
-pub fn extraction_config(db: &Db) -> Result<ExtractionConfig> {
+/// The global values come from `SettingsRepo::get_raw` and the project's from
+/// `ProjectRepo::extraction_raw`, not from the masking read paths: a `"***"` is not
+/// a key the worker could use. The key is never logged and never put in an error.
+pub fn resolve_extraction(db: &Db, project_id: Option<Uuid>) -> Result<ExtractionConfig> {
+    let over = match project_id {
+        Some(id) => ProjectRepo::new(db).extraction_raw(id)?,
+        None => None,
+    };
     let settings = SettingsRepo::new(db);
     let disabled = || AtlasError::Conflict(DISABLED.to_string());
-    if settings.get_raw("extraction.enabled")?.and_then(|v| v.as_bool()) != Some(true) {
+    let global_text = |key: &str| -> Result<Option<String>> {
+        Ok(settings.get_raw(key)?.and_then(|v| v.as_str().map(str::to_string)).filter(|s| !s.trim().is_empty()))
+    };
+    let enabled = match over.as_ref().and_then(|o| o.enabled) {
+        Some(v) => v,
+        None => settings.get_raw("extraction.enabled")?.and_then(|v| v.as_bool()) == Some(true),
+    };
+    if !enabled {
         return Err(disabled());
     }
-    let text = |key: &str| -> Result<String> {
-        settings.get_raw(key)?
-            .and_then(|v| v.as_str().map(str::to_string))
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(disabled)
+    let text = |value: Option<&String>, key: &str| -> Result<String> {
+        match value.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            Some(v) => Ok(v.to_string()),
+            None => global_text(key)?.ok_or_else(disabled),
+        }
+    };
+    let api_key = match over.as_ref().and_then(|o| o.api_key.as_deref()).filter(|k| !k.is_empty()) {
+        Some(k) => k.to_string(),
+        None => settings.get_raw("extraction.api_key")?.and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default(),
     };
     Ok(ExtractionConfig {
-        base_url: text("extraction.base_url")?,
-        model: text("extraction.model")?,
-        api_key: settings.get_raw("extraction.api_key")?.and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default(),
+        base_url: text(over.as_ref().and_then(|o| o.base_url.as_ref()), "extraction.base_url")?,
+        model: text(over.as_ref().and_then(|o| o.model.as_ref()), "extraction.model")?,
+        api_key,
         // Defaulting to 1.0 means nothing is auto-accepted until the user lowers it.
-        auto_accept_min_confidence: settings
-            .get_raw("extraction.auto_accept_min_confidence")?
-            .and_then(|v| v.as_f64())
+        auto_accept_min_confidence: over
+            .as_ref()
+            .and_then(|o| o.auto_accept_min_confidence)
+            .or_else(|| settings.get_raw("extraction.auto_accept_min_confidence").ok().flatten().and_then(|v| v.as_f64()))
             .unwrap_or(1.0),
     })
+}
+
+/// The global extraction settings, with no project override in play.
+pub fn extraction_config(db: &Db) -> Result<ExtractionConfig> {
+    resolve_extraction(db, None)
 }
 
 /// A memory extracted from a transcript by the model, before it is turned
@@ -274,7 +299,7 @@ fn project_for(db: &Db, root: Option<PathBuf>) -> Result<Option<Uuid>> {
 }
 
 /// Builds the client extraction talks to, from an already-read `ExtractionConfig`.
-/// Both `run_ingest` and `Backend::test_extraction` go through this rather than
+/// Both `run_ingest` and `Backend::test_extraction_for` go through this rather than
 /// each constructing an `LlmClient` of their own, so the two ways of reaching the
 /// model never drift apart.
 pub fn build_client(cfg: &ExtractionConfig) -> Result<LlmClient> {
@@ -288,16 +313,19 @@ pub fn build_client(cfg: &ExtractionConfig) -> Result<LlmClient> {
 /// write gate is never held across an await. Each insert then goes through
 /// `MemoryService::remember`, which takes the gate itself.
 pub async fn run_ingest(job: &Job, backend: &LocalBackend) -> Result<Value> {
-    let cfg = extraction_config(&backend.db)?;
     let text = job.payload["text"].as_str().ok_or_else(|| AtlasError::Invalid("ingest job has no text".into()))?;
     let source_tool = job.payload["source_tool"].as_str().unwrap_or("ingest").to_string();
     let root = job.payload["project_root"].as_str().map(PathBuf::from);
 
+    // The project is resolved before the settings are read, because the project may
+    // override them: an ingest for a project with its own endpoint must not go to the
+    // global one.
+    let project_id = project_for(&backend.db, root)?;
+    let cfg = resolve_extraction(&backend.db, project_id)?;
     let client = build_client(&cfg)?;
     let candidates = extract_candidates(text, &client).await?;
     let found = candidates.len();
 
-    let project_id = project_for(&backend.db, root)?;
     let keep = dedupe(candidates, &backend.memories, project_id)?;
     let skipped_duplicates = found - keep.len();
 
@@ -356,7 +384,8 @@ pub async fn run_project_summary(job: &Job, backend: &LocalBackend) -> Result<Va
         .and_then(|s| Uuid::parse_str(s).ok())
         .ok_or_else(|| AtlasError::Invalid("project_summary job has no project_id".into()))?;
 
-    let cfg = extraction_config(&backend.db)?;
+    // The project's own override applies to its summary, the same as to an ingest.
+    let cfg = resolve_extraction(&backend.db, Some(project_id))?;
     let client = build_client(&cfg)?;
 
     let repo = ProjectRepo::new(&backend.db);
@@ -389,6 +418,76 @@ pub async fn run_project_summary(job: &Job, backend: &LocalBackend) -> Result<Va
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The project override wins field by field; every field it leaves out falls back
+    /// to the global setting, and a project may switch extraction on where the global
+    /// setting has it off.
+    #[test]
+    fn resolve_extraction_prefers_the_project_field_by_field() {
+        use crate::models::ProjectExtraction;
+        use crate::projects::{Detected, ProjectRepo};
+        let db = Db::open_in_memory().unwrap();
+        let settings = SettingsRepo::new(&db);
+        settings
+            .set_many(
+                &serde_json::Map::from_iter([
+                    ("extraction.enabled".to_string(), serde_json::Value::from(true)),
+                    ("extraction.base_url".to_string(), "https://global.example/v1".into()),
+                    ("extraction.model".to_string(), "global-model".into()),
+                    ("extraction.api_key".to_string(), "sk-global".into()),
+                    ("extraction.auto_accept_min_confidence".to_string(), serde_json::Value::from(0.5)),
+                ]),
+                "t",
+            )
+            .unwrap();
+        let projects = ProjectRepo::new(&db);
+        let p = projects.upsert(&Detected { root: "/tmp/over".into(), remote: None }, None, "t").unwrap();
+
+        // No override: the global values, unchanged.
+        let global = resolve_extraction(&db, Some(p.id)).unwrap();
+        assert_eq!(global.base_url, "https://global.example/v1");
+        assert_eq!(global.model, "global-model");
+        assert_eq!(global.api_key, "sk-global");
+        assert_eq!(global.auto_accept_min_confidence, 0.5);
+
+        // A partial override replaces only the fields it names.
+        projects
+            .set_project_extraction(
+                p.id,
+                Some(ProjectExtraction { model: Some("project-model".into()), api_key: Some("sk-project".into()), ..Default::default() }),
+                "t",
+            )
+            .unwrap();
+        let merged = resolve_extraction(&db, Some(p.id)).unwrap();
+        assert_eq!(merged.model, "project-model");
+        assert_eq!(merged.api_key, "sk-project");
+        assert_eq!(merged.base_url, "https://global.example/v1", "an absent field falls back");
+        assert_eq!(merged.auto_accept_min_confidence, 0.5);
+        // The global scope never sees the project's values.
+        assert_eq!(resolve_extraction(&db, None).unwrap().model, "global-model");
+
+        // The global switch off, the project's own switch on.
+        settings.set_many(&serde_json::Map::from_iter([("extraction.enabled".to_string(), serde_json::Value::from(false))]), "t").unwrap();
+        assert!(matches!(resolve_extraction(&db, None), Err(AtlasError::Conflict(_))));
+        assert!(matches!(resolve_extraction(&db, Some(p.id)), Err(AtlasError::Conflict(_))));
+        projects
+            .set_project_extraction(
+                p.id,
+                Some(ProjectExtraction {
+                    enabled: Some(true),
+                    base_url: Some("http://localhost:1234/v1".into()),
+                    model: Some("project-model".into()),
+                    api_key: Some("sk-project".into()),
+                    auto_accept_min_confidence: Some(0.9),
+                }),
+                "t",
+            )
+            .unwrap();
+        let on = resolve_extraction(&db, Some(p.id)).unwrap();
+        assert_eq!(on.base_url, "http://localhost:1234/v1");
+        assert_eq!(on.auto_accept_min_confidence, 0.9);
+        assert!(matches!(resolve_extraction(&db, None), Err(AtlasError::Conflict(_))), "the global scope stays off");
+    }
 
     #[test]
     fn parses_bare_array() {

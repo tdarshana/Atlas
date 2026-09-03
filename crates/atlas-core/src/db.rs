@@ -81,6 +81,12 @@ alter table projects add column if not exists board_stages json;
 -- statement again and every task create would fail on a missing table. This is a
 -- no-op on a correct database and repairs a wrong one.
 create table if not exists board_counters (scope text primary key, next_seq bigint not null);
+"#), (5, r#"
+-- Phase 8 widens `projects` in place, the same `if not exists` shape migration 3
+-- used for `board_key`, so a re-run on a database that already has the columns is
+-- a no-op rather than an error.
+alter table projects add column if not exists agent_access json;
+alter table projects add column if not exists extraction json;
 "#)];
 
 impl Db {
@@ -126,18 +132,33 @@ mod tests {
     #[test]
     fn migrate_creates_tables_and_is_idempotent() {
         let db = Db::open_in_memory().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 4);
+        assert_eq!(db.schema_version().unwrap(), 5);
         let n: i64 = db.with_conn(|c| Ok(c.query_row(
             "select count(*) from information_schema.tables where table_name in ('memories','memory_embeddings','audit','settings','projects','agents','practices','workflows','sync_targets','jobs','tasks','task_blockers','task_events','board_counters')",
             [], |r| r.get(0))?)).unwrap();
         assert_eq!(n, 14);
-        // Migration 3 widens `projects` in place.
+        // Migrations 3 and 5 widen `projects` in place.
         let cols: i64 = db.with_conn(|c| Ok(c.query_row(
-            "select count(*) from information_schema.columns where table_name='projects' and column_name in ('board_key','board_stages')",
+            "select count(*) from information_schema.columns where table_name='projects' and column_name in ('board_key','board_stages','agent_access','extraction')",
             [], |r| r.get(0))?)).unwrap();
-        assert_eq!(cols, 2);
+        assert_eq!(cols, 4);
         db.migrate().unwrap(); // second run is a no-op
+        assert_eq!(db.schema_version().unwrap(), 5);
+    }
+
+    /// Migration 5 adds its columns with `if not exists`, so replaying it over a
+    /// database that already has them is a no-op rather than a failure.
+    #[test]
+    fn migration_5_is_a_no_op_on_a_database_that_already_has_the_columns() {
+        let db = Db::open_in_memory().unwrap();
+        db.with_conn(|c| {
+            c.execute_batch("delete from schema_version where version = 5;")?;
+            Ok(())
+        })
+        .unwrap();
         assert_eq!(db.schema_version().unwrap(), 4);
+        db.migrate().unwrap();
+        assert_eq!(db.schema_version().unwrap(), 5);
     }
 
     /// A database stamped 3 by the build that shipped migration 3 without
@@ -147,14 +168,14 @@ mod tests {
     fn migration_4_adds_board_counters_to_a_v3_database() {
         let db = Db::open_in_memory().unwrap();
         db.with_conn(|c| {
-            c.execute_batch("drop table board_counters; delete from schema_version where version = 4;")?;
+            c.execute_batch("drop table board_counters; delete from schema_version where version >= 4;")?;
             Ok(())
         })
         .unwrap();
         assert_eq!(db.schema_version().unwrap(), 3);
 
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 4);
+        assert_eq!(db.schema_version().unwrap(), 5);
         let n: i64 = db
             .with_conn(|c| {
                 Ok(c.query_row("select count(*) from information_schema.tables where table_name = 'board_counters'", [], |r| r.get(0))?)

@@ -163,6 +163,13 @@ pub fn cors_layer() -> CorsLayer {
 #[derive(Deserialize)] pub struct StatusBody { pub status: String }
 #[derive(Deserialize)] pub struct ProjectQ { pub project_id: Option<Uuid> }
 #[derive(Deserialize)] pub struct ListMemoriesQ { pub status: Option<String>, pub project_id: Option<Uuid> }
+#[derive(Deserialize)] pub struct LogQ {
+    #[serde(default)] pub source: Option<String>,
+    #[serde(default)] pub kind: Option<String>,
+    #[serde(default)] pub q: Option<String>,
+    #[serde(default)] pub after: Option<DateTime<Utc>>,
+    #[serde(default)] pub limit: Option<usize>,
+}
 #[derive(Deserialize)] pub struct IngestBody { pub text: String, pub source_tool: String, #[serde(default)] pub project_root: Option<std::path::PathBuf> }
 
 fn actor(q: &ActorQ) -> &str { q.actor.as_deref().unwrap_or("api") }
@@ -215,8 +222,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/projects", get(list_projects))
         .route("/api/v1/projects/connect", post(connect_project))
         .route("/api/v1/projects/context", post(project_context))
-        .route("/api/v1/projects/{id}", get(get_project).delete(delete_project))
+        .route("/api/v1/projects/{id}", get(get_project).patch(patch_project).delete(delete_project))
         .route("/api/v1/projects/{id}/refresh", post(refresh_project))
+        .route("/api/v1/projects/{id}/agent-access", put(put_agent_access))
+        .route("/api/v1/projects/{id}/extraction", put(put_project_extraction))
+        .route("/api/v1/projects/{id}/log", get(get_project_log))
+        .route("/api/v1/projects/{id}/log/export", get(export_project_log))
         .route("/api/v1/agents", get(list_agents).post(save_agent))
         .route("/api/v1/agents/{name}", get(get_agent).delete(delete_agent))
         .route("/api/v1/practices", get(list_practices).post(save_practice))
@@ -278,6 +289,27 @@ async fn refresh_project(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) 
 async fn delete_project(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, ApiQuery(q): ApiQuery<ActorQ>) -> Result<StatusCode, ApiError> {
     s.backend.delete_project(id, actor(&q)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+async fn patch_project(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor): Actor, ApiJson(p): ApiJson<ProjectPatch>) -> Result<Json<Project>, ApiError> {
+    Ok(Json(s.backend.update_project(id, p, &actor).await?))
+}
+async fn put_agent_access(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor): Actor, ApiJson(a): ApiJson<AgentAccess>) -> Result<Json<Project>, ApiError> {
+    Ok(Json(s.backend.set_agent_access(id, a, &actor).await?))
+}
+/// A body of `null` clears the override and puts the project back on the global
+/// extraction settings.
+async fn put_project_extraction(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor): Actor, ApiJson(e): ApiJson<Option<ProjectExtraction>>) -> Result<Json<Project>, ApiError> {
+    Ok(Json(s.backend.set_project_extraction(id, e, &actor).await?))
+}
+async fn get_project_log(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, ApiQuery(q): ApiQuery<LogQ>) -> Result<Json<Vec<LogEntry>>, ApiError> {
+    let f = LogFilter { source: q.source, kind: q.kind, q: q.q, after: q.after, limit: q.limit };
+    Ok(Json(s.backend.project_log(id, f).await?))
+}
+/// JSON lines rather than a JSON array: an export is read a line at a time, and the
+/// log has no cap here.
+async fn export_project_log(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Result<Response, ApiError> {
+    let body = s.backend.project_log_export(id).await?;
+    Ok(([(header::CONTENT_TYPE, "application/x-ndjson")], body).into_response())
 }
 async fn connect_project(State(s): State<AppState>, ApiQuery(q): ApiQuery<ActorQ>, ApiJson(b): ApiJson<RootBody>) -> Result<Json<Project>, ApiError> {
     Ok(Json(s.backend.connect_project(b.root, actor(&q)).await?))
@@ -374,8 +406,8 @@ async fn get_job(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Resul
 /// `{"ok": false, "error": ...}`, not the plain `{"error": ...}` every other route
 /// answers with, so the caller can render it inline as a failed check rather than
 /// a fatal one.
-async fn test_extraction(State(s): State<AppState>) -> Response {
-    match s.backend.test_extraction().await {
+async fn test_extraction(State(s): State<AppState>, ApiQuery(q): ApiQuery<ProjectQ>) -> Response {
+    match s.backend.test_extraction_for(q.project_id).await {
         Ok(reply) => (StatusCode::OK, Json(serde_json::json!({"ok": true, "reply": reply}))).into_response(),
         Err(e @ AtlasError::Conflict(_)) => ApiError(e).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"ok": false, "error": e.to_string()}))).into_response(),

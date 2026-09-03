@@ -58,6 +58,20 @@ impl RemoteBackend {
     }
     fn net(e: reqwest::Error) -> AtlasError { AtlasError::Other(format!("daemon unreachable: {e}")) }
 
+    /// Builds a URL under the daemon's base with `reqwest::Url`'s query-pair encoder,
+    /// for the same reason `search_url` uses it: a caller's text can carry `#`, `&`,
+    /// spaces or non-ASCII, and raw interpolation would truncate or split it.
+    fn url_with(base: &str, path: &str, pairs: &[(&str, String)]) -> Result<reqwest::Url> {
+        let mut url = reqwest::Url::parse(&format!("{base}{path}")).map_err(|e| AtlasError::Other(e.to_string()))?;
+        {
+            let mut q = url.query_pairs_mut();
+            for (k, v) in pairs {
+                q.append_pair(k, v);
+            }
+        }
+        Ok(url)
+    }
+
     /// Builds the `GET /search` URL with `reqwest::Url`'s query-pair encoder rather
     /// than string interpolation: `q` can carry `#`, `&`, spaces or non-ASCII text a
     /// caller typed, and raw interpolation would either truncate it (`#` starts a URL
@@ -104,6 +118,31 @@ impl Backend for RemoteBackend {
     async fn get_project(&self, id: Uuid) -> Result<Project> { Self::handle(self.client.get(format!("{}/projects/{id}", self.base)).send().await.map_err(Self::net)?).await }
     async fn refresh_project(&self, id: Uuid) -> Result<Project> { Self::handle(self.client.post(format!("{}/projects/{id}/refresh", self.base)).send().await.map_err(Self::net)?).await }
     async fn delete_project(&self, id: Uuid, actor: &str) -> Result<()> { Self::handle_empty(self.client.delete(format!("{}/projects/{id}?actor={actor}", self.base)).send().await.map_err(Self::net)?).await }
+    async fn update_project(&self, id: Uuid, patch: ProjectPatch, actor: &str) -> Result<Project> {
+        Self::handle(self.client.patch(format!("{}/projects/{id}", self.base)).header("X-Atlas-Actor", actor).json(&patch).send().await.map_err(Self::net)?).await
+    }
+    async fn set_agent_access(&self, id: Uuid, access: AgentAccess, actor: &str) -> Result<Project> {
+        Self::handle(self.client.put(format!("{}/projects/{id}/agent-access", self.base)).header("X-Atlas-Actor", actor).json(&access).send().await.map_err(Self::net)?).await
+    }
+    async fn set_project_extraction(&self, id: Uuid, over: Option<ProjectExtraction>, actor: &str) -> Result<Project> {
+        Self::handle(self.client.put(format!("{}/projects/{id}/extraction", self.base)).header("X-Atlas-Actor", actor).json(&over).send().await.map_err(Self::net)?).await
+    }
+    async fn project_log(&self, id: Uuid, f: LogFilter) -> Result<Vec<LogEntry>> {
+        let mut pairs: Vec<(&str, String)> = Vec::new();
+        if let Some(v) = f.source { pairs.push(("source", v)); }
+        if let Some(v) = f.kind { pairs.push(("kind", v)); }
+        if let Some(v) = f.q { pairs.push(("q", v)); }
+        if let Some(v) = f.after { pairs.push(("after", v.to_rfc3339())); }
+        if let Some(v) = f.limit { pairs.push(("limit", v.to_string())); }
+        let url = Self::url_with(&self.base, &format!("/projects/{id}/log"), &pairs)?;
+        Self::handle(self.client.get(url).send().await.map_err(Self::net)?).await
+    }
+    /// The export is JSON lines, not JSON, so the body comes back as text.
+    async fn project_log_export(&self, id: Uuid) -> Result<String> {
+        let r = self.client.get(format!("{}/projects/{id}/log/export", self.base)).send().await.map_err(Self::net)?;
+        if !r.status().is_success() { return Err(Self::error(r).await); }
+        r.text().await.map_err(|e| AtlasError::Other(e.to_string()))
+    }
 
     async fn list_agents(&self) -> Result<Vec<Agent>> { Self::handle(self.client.get(format!("{}/agents", self.base)).send().await.map_err(Self::net)?).await }
     async fn get_agent(&self, name: &str) -> Result<Agent> { Self::handle(self.client.get(format!("{}/agents/{name}", self.base)).send().await.map_err(Self::net)?).await }
@@ -146,8 +185,9 @@ impl Backend for RemoteBackend {
     /// The daemon runs the connectivity check, so a 409 here is its "extraction is
     /// disabled" and a 400 is the model endpoint's own error, both carried back
     /// through the same `error` field `Self::error` already reads.
-    async fn test_extraction(&self) -> Result<String> {
-        let r = self.client.post(format!("{}/extraction/test", self.base)).send().await.map_err(Self::net)?;
+    async fn test_extraction_for(&self, project_id: Option<Uuid>) -> Result<String> {
+        let project = project_id.map(|p| format!("?project_id={p}")).unwrap_or_default();
+        let r = self.client.post(format!("{}/extraction/test{project}", self.base)).send().await.map_err(Self::net)?;
         let v: serde_json::Value = Self::handle(r).await?;
         v["reply"].as_str().map(str::to_string).ok_or_else(|| AtlasError::Other(format!("extraction test response had no reply: {v}")))
     }

@@ -3,8 +3,10 @@ pub mod profile;
 pub use detect::{detect_root, Detected};
 pub use profile::build_profile;
 
+pub mod log;
+
 use crate::db::Db;
-use crate::models::{Project, ProjectProfile};
+use crate::models::{AgentAccess, Project, ProjectExtraction, ProjectPatch, ProjectProfile};
 use crate::{AtlasError, Result};
 use duckdb::types::Type;
 use duckdb::{params, params_from_iter, Row};
@@ -14,7 +16,66 @@ pub struct ProjectRepo<'a> {
     db: &'a Db,
 }
 
-const SEL: &str = "id::text, name, root_path, git_remote, profile::text, created_at::text, last_seen_at::text, board_key, board_stages::text";
+const SEL: &str = "id::text, name, root_path, git_remote, profile::text, created_at::text, last_seen_at::text, board_key, board_stages::text, \
+     agent_access::text, extraction::text";
+
+/// A board key: two to six characters, a letter first, then letters or digits.
+/// Uppercased before the check, so `atl` is accepted and stored as `ATL`.
+pub fn normalize_board_key(raw: &str) -> Result<String> {
+    let key = raw.trim().to_uppercase();
+    let shaped = (2..=6).contains(&key.len())
+        && key.starts_with(|c: char| c.is_ascii_uppercase())
+        && key.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+    if !shaped {
+        return Err(AtlasError::Invalid(format!(
+            "board key '{raw}' must be 2 to 6 characters, start with a letter and hold only letters and digits"
+        )));
+    }
+    Ok(key)
+}
+
+/// Whether `actor` is the user's own hands rather than an agent. The desktop and the
+/// CLI (`cli`, `cli/NAME`) are the user driving Atlas directly, so a project's
+/// `agent_access` allow-lists never apply to them.
+pub fn actor_is_user(actor: &str) -> bool {
+    let a = actor.trim();
+    a == "desktop" || a.starts_with("cli")
+}
+
+/// Whether `actor` is on `allowed`. A `None` list means any actor. A list matches the
+/// full label (`claude-code/reviewer`) or the part before the slash (`claude-code`),
+/// so a project can admit a tool without naming every agent it hosts.
+fn allowed_by(allowed: &Option<Vec<String>>, actor: &str) -> bool {
+    let Some(list) = allowed else { return true };
+    let actor = actor.trim();
+    let tool = actor.split_once('/').map(|(t, _)| t).unwrap_or(actor);
+    list.iter().any(|l| l == actor || l == tool)
+}
+
+/// Refuses an agent that may not write memories here.
+pub fn check_memory_write(actor: &str, p: &Project) -> Result<()> {
+    if actor_is_user(actor) || allowed_by(&p.agent_access.memory_writers, actor) {
+        return Ok(());
+    }
+    Err(AtlasError::Conflict(format!("actor '{actor}' may not write memories in project {}", p.name)))
+}
+
+/// Refuses an agent that may not move tasks here.
+pub fn check_task_move(actor: &str, p: &Project) -> Result<()> {
+    if actor_is_user(actor) || allowed_by(&p.agent_access.task_movers, actor) {
+        return Ok(());
+    }
+    Err(AtlasError::Conflict(format!("actor '{actor}' may not move tasks in project {}", p.name)))
+}
+
+/// The override as a client may see it: the api key becomes `"***"` when one is
+/// stored, the same rule the global `extraction.api_key` follows.
+fn mask_extraction(mut e: ProjectExtraction) -> ProjectExtraction {
+    if e.api_key.as_deref().is_some_and(|k| !k.is_empty()) {
+        e.api_key = Some(crate::settings::MASKED.to_string());
+    }
+    e
+}
 
 /// Wraps a column-conversion failure so a malformed value fails the query instead of
 /// being silently coerced to a default. Mirrors `memories::conv_err`.
@@ -28,6 +89,20 @@ fn row(r: &Row) -> duckdb::Result<Project> {
         .map(|s| serde_json::from_str::<Option<Vec<crate::models::Stage>>>(&s).map_err(|e| conv_err(8, Type::Text, e)))
         .transpose()?
         .flatten();
+    let agent_access: Option<String> = r.get(9)?;
+    let agent_access = agent_access
+        .map(|s| serde_json::from_str::<Option<AgentAccess>>(&s).map_err(|e| conv_err(9, Type::Text, e)))
+        .transpose()?
+        .flatten()
+        .unwrap_or_default();
+    // Masked here rather than in each caller, so no read path can hand out the key.
+    // `ProjectRepo::extraction_raw` is the one deliberate way to the real value.
+    let extraction: Option<String> = r.get(10)?;
+    let extraction = extraction
+        .map(|s| serde_json::from_str::<Option<ProjectExtraction>>(&s).map_err(|e| conv_err(10, Type::Text, e)))
+        .transpose()?
+        .flatten()
+        .map(mask_extraction);
     let profile: Option<String> = r.get(4)?;
     let profile = profile
         .map(|s| serde_json::from_str::<ProjectProfile>(&s).map_err(|e| conv_err(4, Type::Text, e)))
@@ -42,6 +117,8 @@ fn row(r: &Row) -> duckdb::Result<Project> {
         last_seen_at: crate::memories::parse_ts_pub(r.get::<_, String>(6)?)?,
         board_key: r.get(7)?,
         board_stages,
+        agent_access,
+        extraction,
     })
 }
 
@@ -194,6 +271,153 @@ impl<'a> ProjectRepo<'a> {
         self.get(id)
     }
 
+    /// Applies a patch to the project's identity. `name` and `git_remote` are plain
+    /// column writes; `board_key` is the one that moves other rows, so it is validated,
+    /// checked for uniqueness against the other projects and the global board, and then
+    /// applied together with a rename of every task key on this board inside one
+    /// transaction. Callers must already hold the task write gate: renaming
+    /// `tasks.key` is a board write.
+    ///
+    /// `board_counters` is scoped by project id, not by key, so a rename leaves the
+    /// sequence alone and `NEW-8` follows `OLD-7`.
+    pub fn update(&self, id: Uuid, patch: &ProjectPatch, actor: &str) -> Result<Project> {
+        let current = self.get(id)?;
+        let mut renamed: Option<(String, String, i64)> = None;
+
+        if let Some(raw) = &patch.board_key {
+            let key = normalize_board_key(raw)?;
+            let old = current.board_key.clone().unwrap_or_else(|| crate::board::board_key_base(&current.name));
+            if key != old || current.board_key.is_none() {
+                if key == crate::board::GLOBAL_BOARD_KEY {
+                    return Err(AtlasError::Invalid(format!("board key '{key}' is reserved for the global board")));
+                }
+                let tasks = self.db.with_conn(|c| {
+                    let taken: i64 = c.query_row(
+                        "select count(*) from projects where board_key = ? and id::text <> ?",
+                        params![key, id.to_string()],
+                        |r| r.get(0),
+                    )?;
+                    if taken > 0 {
+                        return Err(AtlasError::Invalid(format!("board key '{key}' is already used by another project")));
+                    }
+                    c.execute_batch("begin transaction")?;
+                    let applied = (|| -> Result<i64> {
+                        let n: i64 = c.query_row("select count(*) from tasks where project_id = ?", params![id.to_string()], |r| r.get(0))?;
+                        c.execute("update projects set board_key = ? where id = ?", params![key, id.to_string()])?;
+                        // A task's key is always `<board key>-<seq>`, and `seq` is the stored
+                        // column the key was built from, so rebuilding it is exact.
+                        c.execute("update tasks set key = ? || '-' || seq where project_id = ?", params![key, id.to_string()])?;
+                        Ok(n)
+                    })();
+                    match applied {
+                        Ok(n) => {
+                            c.execute_batch("commit")?;
+                            Ok(n)
+                        }
+                        Err(e) => {
+                            c.execute_batch("rollback")?;
+                            Err(e)
+                        }
+                    }
+                })?;
+                renamed = Some((old, key, tasks));
+            }
+        }
+
+        self.db.with_conn(|c| {
+            if let Some(name) = &patch.name {
+                let name = name.trim();
+                if name.is_empty() {
+                    return Err(AtlasError::Invalid("a project needs a name".into()));
+                }
+                c.execute("update projects set name = ? where id = ?", params![name, id.to_string()])?;
+            }
+            if let Some(remote) = &patch.git_remote {
+                let remote = remote.as_deref().map(str::trim).filter(|r| !r.is_empty());
+                c.execute("update projects set git_remote = ? where id = ?", params![remote, id.to_string()])?;
+            }
+            Ok(())
+        })?;
+
+        let repo = crate::memories::MemoryRepo::new(self.db);
+        if let Some((from, to, tasks)) = renamed {
+            repo.audit(actor, "board_key_rename", "project", Some(id), serde_json::json!({"from": from, "to": to, "tasks": tasks}))?;
+        }
+        if patch.name.is_some() || patch.git_remote.is_some() {
+            repo.audit(actor, "update", "project", Some(id), serde_json::json!({"name": patch.name, "git_remote": patch.git_remote}))?;
+        }
+        self.get(id)
+    }
+
+    /// Replaces the project's agent access rules.
+    pub fn set_agent_access(&self, id: Uuid, access: &AgentAccess, actor: &str) -> Result<Project> {
+        self.get(id)?;
+        let json = serde_json::to_string(access)?;
+        self.db.with_conn(|c| {
+            c.execute("update projects set agent_access = ?::json where id = ?", params![json, id.to_string()])?;
+            Ok(())
+        })?;
+        crate::memories::MemoryRepo::new(self.db).audit(actor, "set_agent_access", "project", Some(id), serde_json::json!(access))?;
+        self.get(id)
+    }
+
+    /// The stored override with its api key unmasked, for the extraction worker.
+    /// Every other read masks it; this is the one deliberate way to the real value.
+    pub fn extraction_raw(&self, id: Uuid) -> Result<Option<ProjectExtraction>> {
+        self.db.with_conn(|c| {
+            let mut st = c.prepare("select extraction::text from projects where id = ?")?;
+            let mut rows = st.query(params![id.to_string()])?;
+            let Some(r) = rows.next()? else { return Err(AtlasError::NotFound(format!("project {id}"))) };
+            let text: Option<String> = r.get(0)?;
+            Ok(text.map(|t| serde_json::from_str::<Option<ProjectExtraction>>(&t)).transpose()?.flatten())
+        })
+    }
+
+    /// Replaces the project's extraction override, or clears it with `None`.
+    ///
+    /// Two rules mirror the global setting, for the same reason: an api key of `"***"`
+    /// is the GUI saying "leave the key alone", so the stored one is kept; and pointing
+    /// `base_url` at a new endpoint without supplying a new key drops the stored key,
+    /// because a key entered against one endpoint is not a key for another.
+    pub fn set_project_extraction(&self, id: Uuid, over: Option<ProjectExtraction>, actor: &str) -> Result<Project> {
+        self.get(id)?;
+        let stored = self.extraction_raw(id)?;
+        let next = over.map(|mut e| {
+            let stored_key = stored.as_ref().and_then(|s| s.api_key.clone()).unwrap_or_default();
+            let masked = e.api_key.as_deref() == Some(crate::settings::MASKED);
+            if masked {
+                e.api_key = (!stored_key.is_empty()).then_some(stored_key.clone());
+            }
+            let brings_key = e.api_key.as_deref().is_some_and(|k| !k.is_empty() && !masked);
+            let moved = match (&e.base_url, stored.as_ref().and_then(|s| s.base_url.as_deref())) {
+                (Some(incoming), Some(old)) => !crate::settings::same_endpoint(incoming, old),
+                (Some(_), None) => true,
+                _ => false,
+            };
+            if moved && !brings_key && !stored_key.is_empty() {
+                tracing::info!("project extraction base_url changed without a new api key; the stored key was cleared");
+                e.api_key = None;
+            }
+            e
+        });
+        let json = next.as_ref().map(serde_json::to_string).transpose()?;
+        self.db.with_conn(|c| {
+            c.execute("update projects set extraction = ?::json where id = ?", params![json, id.to_string()])?;
+            Ok(())
+        })?;
+        // The key value itself never reaches the audit log, only whether one is set.
+        let detail = match &next {
+            None => serde_json::json!({"extraction": null}),
+            Some(e) => serde_json::json!({
+                "enabled": e.enabled, "base_url": e.base_url, "model": e.model,
+                "api_key_set": e.api_key.as_deref().is_some_and(|k| !k.is_empty()),
+                "auto_accept_min_confidence": e.auto_accept_min_confidence,
+            }),
+        };
+        crate::memories::MemoryRepo::new(self.db).audit(actor, "set_extraction", "project", Some(id), detail)?;
+        self.get(id)
+    }
+
     /// Removes the project row, the `sync_targets` that point at it, and its whole
     /// board: the tasks, their blocker links in both directions, and their events.
     ///
@@ -247,6 +471,7 @@ impl<'a> ProjectRepo<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{AgentAccess, ProjectExtraction, ProjectPatch};
     use crate::db::Db;
 
     #[test]
@@ -362,6 +587,153 @@ mod tests {
         assert_eq!(left, 1);
     }
 
+    /// A board key rename moves the project's key and every task key with it, in one
+    /// go, and leaves one audit row naming what changed.
+    #[test]
+    fn update_renames_the_board_key_and_every_task_key() {
+        let db = Db::open_in_memory().unwrap();
+        let repo = ProjectRepo::new(&db);
+        let p = repo.upsert(&Detected { root: "/tmp/rename".into(), remote: None }, None, "t").unwrap();
+
+        // Two tasks on this board, so the rename has to touch more than one row.
+        let db = std::sync::Arc::new(db);
+        let board = crate::board::TaskRepo::new(db.clone(), Default::default());
+        let a = board
+            .create(&crate::models::NewTask { project_id: Some(p.id), title: "first".into(), ..Default::default() }, "t")
+            .unwrap();
+        let b = board
+            .create(&crate::models::NewTask { project_id: Some(p.id), title: "second".into(), ..Default::default() }, "t")
+            .unwrap();
+        assert!(a.key.ends_with("-1") && b.key.ends_with("-2"), "{} {}", a.key, b.key);
+
+        let repo = ProjectRepo::new(&db);
+        // Lower case in, upper case stored.
+        let updated = repo.update(p.id, &ProjectPatch { board_key: Some("zed".into()), ..Default::default() }, "t").unwrap();
+        assert_eq!(updated.board_key.as_deref(), Some("ZED"));
+        assert_eq!(board.get("ZED-1").unwrap().task.title, "first");
+        assert_eq!(board.get("ZED-2").unwrap().task.title, "second");
+
+        // The counter is scoped by project id, so the next task carries on from 3.
+        let c = board
+            .create(&crate::models::NewTask { project_id: Some(p.id), title: "third".into(), ..Default::default() }, "t")
+            .unwrap();
+        assert_eq!(c.key, "ZED-3");
+
+        let detail: String = db
+            .with_conn(|c| {
+                Ok(c.query_row("select detail::text from audit where action = 'board_key_rename'", [], |r| r.get(0))?)
+            })
+            .unwrap();
+        assert!(detail.contains("\"to\":\"ZED\"") && detail.contains("\"tasks\":2"), "{detail}");
+    }
+
+    /// A key another project already holds, one shaped wrong, and the global board's own
+    /// prefix are all refused, and nothing is written.
+    #[test]
+    fn update_refuses_a_duplicate_or_malformed_board_key() {
+        let db = Db::open_in_memory().unwrap();
+        let repo = ProjectRepo::new(&db);
+        let a = repo.upsert(&Detected { root: "/tmp/one".into(), remote: None }, None, "t").unwrap();
+        let b = repo.upsert(&Detected { root: "/tmp/two".into(), remote: None }, None, "t").unwrap();
+        repo.update(b.id, &ProjectPatch { board_key: Some("TAKEN".into()), ..Default::default() }, "t").unwrap();
+
+        for bad in ["TAKEN", "A", "TOOLONGKEY", "1AB", "A-B", crate::board::GLOBAL_BOARD_KEY] {
+            let err = repo.update(a.id, &ProjectPatch { board_key: Some(bad.into()), ..Default::default() }, "t").unwrap_err();
+            assert!(matches!(err, AtlasError::Invalid(_)), "{bad}: {err}");
+        }
+        assert_ne!(repo.get(a.id).unwrap().board_key.as_deref(), Some("TAKEN"));
+    }
+
+    /// The other two fields of the patch: a rename and a remote that an explicit null
+    /// clears.
+    #[test]
+    fn update_sets_the_name_and_clears_the_remote() {
+        let db = Db::open_in_memory().unwrap();
+        let repo = ProjectRepo::new(&db);
+        let p = repo.upsert(&Detected { root: "/tmp/named".into(), remote: Some("git@x/y.git".into()) }, None, "t").unwrap();
+
+        let renamed = repo.update(p.id, &ProjectPatch { name: Some("Atlas".into()), ..Default::default() }, "t").unwrap();
+        assert_eq!(renamed.name, "Atlas");
+        assert_eq!(renamed.git_remote.as_deref(), Some("git@x/y.git"), "an absent remote is left alone");
+
+        let cleared = repo.update(p.id, &ProjectPatch { git_remote: Some(None), ..Default::default() }, "t").unwrap();
+        assert!(cleared.git_remote.is_none());
+        assert!(matches!(repo.update(p.id, &ProjectPatch { name: Some("  ".into()), ..Default::default() }, "t"), Err(AtlasError::Invalid(_))));
+    }
+
+    /// The access rules: a `None` list admits anyone, a list is an allow-list matched on
+    /// the label or its tool half, and the user's own hands are never checked.
+    #[test]
+    fn agent_access_persists_and_gates_the_right_actors() {
+        let db = Db::open_in_memory().unwrap();
+        let repo = ProjectRepo::new(&db);
+        let p = repo.upsert(&Detected { root: "/tmp/access".into(), remote: None }, None, "t").unwrap();
+        assert_eq!(p.agent_access, AgentAccess::default(), "an unset column reads as all-null");
+        assert!(check_task_move("codex", &p).is_ok(), "a null list admits anyone");
+
+        let p = repo
+            .set_agent_access(
+                p.id,
+                &AgentAccess { memory_writers: Some(vec!["claude-code".into()]), task_movers: Some(vec!["claude-code".into()]), require_review: true },
+                "t",
+            )
+            .unwrap();
+        assert!(p.agent_access.require_review);
+        assert!(matches!(check_task_move("codex", &p), Err(AtlasError::Conflict(_))));
+        assert!(check_task_move("claude-code", &p).is_ok());
+        assert!(check_task_move("claude-code/reviewer", &p).is_ok(), "a sub-agent inherits its tool's permission");
+        assert!(check_task_move("desktop", &p).is_ok());
+        assert!(check_task_move("cli", &p).is_ok());
+        assert!(check_task_move("cli/anything", &p).is_ok());
+        assert!(matches!(check_memory_write("codex", &p), Err(AtlasError::Conflict(_))));
+        assert!(check_memory_write("cli", &p).is_ok());
+    }
+
+    /// The override's key is masked on every read, kept when the masked value is sent
+    /// back, and dropped when the endpoint moves without a new key.
+    #[test]
+    fn project_extraction_masks_and_clears_its_key() {
+        let db = Db::open_in_memory().unwrap();
+        let repo = ProjectRepo::new(&db);
+        let p = repo.upsert(&Detected { root: "/tmp/extract".into(), remote: None }, None, "t").unwrap();
+
+        let over = ProjectExtraction {
+            enabled: Some(true),
+            base_url: Some("https://api.deepseek.com".into()),
+            model: Some("deepseek-chat".into()),
+            api_key: Some("sk-project".into()),
+            auto_accept_min_confidence: Some(0.8),
+        };
+        let stored = repo.set_project_extraction(p.id, Some(over.clone()), "t").unwrap();
+        assert_eq!(stored.extraction.as_ref().unwrap().api_key.as_deref(), Some("***"));
+        assert_eq!(repo.get(p.id).unwrap().extraction.unwrap().api_key.as_deref(), Some("***"));
+        assert_eq!(repo.extraction_raw(p.id).unwrap().unwrap().api_key.as_deref(), Some("sk-project"));
+
+        // The masked value read back and sent on is "leave the key alone".
+        let round_trip = ProjectExtraction { api_key: Some("***".into()), model: Some("deepseek-reasoner".into()), ..over.clone() };
+        repo.set_project_extraction(p.id, Some(round_trip), "t").unwrap();
+        assert_eq!(repo.extraction_raw(p.id).unwrap().unwrap().api_key.as_deref(), Some("sk-project"));
+
+        // A new endpoint with no new key does not take the old key with it.
+        let moved = ProjectExtraction { base_url: Some("http://attacker.example/v1".into()), api_key: None, ..over.clone() };
+        repo.set_project_extraction(p.id, Some(moved), "t").unwrap();
+        let raw = repo.extraction_raw(p.id).unwrap().unwrap();
+        assert_eq!(raw.api_key, None);
+        assert_eq!(raw.base_url.as_deref(), Some("http://attacker.example/v1"));
+
+        // The api key value never reaches the audit log.
+        let details: Vec<String> = db
+            .with_conn(|c| {
+                let mut st = c.prepare("select detail::text from audit where action = 'set_extraction'")?;
+                Ok(st.query_map([], |r| r.get(0))?.collect::<duckdb::Result<Vec<String>>>()?)
+            })
+            .unwrap();
+        assert!(!details.iter().any(|d| d.contains("sk-project")), "{details:?}");
+
+        // `null` clears the override entirely.
+        assert!(repo.set_project_extraction(p.id, None, "t").unwrap().extraction.is_none());
+    }
+
     #[test]
     fn malformed_uuid_row_is_rejected() {
         // Hand-build a result row with a malformed id column, mirroring
@@ -371,7 +743,7 @@ mod tests {
             let mut st = c.prepare(
                 "select 'not-a-uuid' as id, 'name' as name, '/root' as root_path, null as git_remote, \
                  null as profile, '2026-01-01 00:00:00' as created_at, '2026-01-01 00:00:00' as last_seen_at, \
-                 null as board_key, null as board_stages",
+                 null as board_key, null as board_stages, null as agent_access, null as extraction",
             )?;
             let mut rows = st.query([])?;
             let r = rows.next()?.ok_or_else(|| AtlasError::NotFound("no row".into()))?;
@@ -387,7 +759,7 @@ mod tests {
             let mut st = c.prepare(
                 "select gen_random_uuid()::text as id, 'name' as name, '/root' as root_path, null as git_remote, \
                  'not json' as profile, '2026-01-01 00:00:00' as created_at, '2026-01-01 00:00:00' as last_seen_at, \
-                 null as board_key, null as board_stages",
+                 null as board_key, null as board_stages, null as agent_access, null as extraction",
             )?;
             let mut rows = st.query([])?;
             let r = rows.next()?.ok_or_else(|| AtlasError::NotFound("no row".into()))?;

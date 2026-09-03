@@ -475,8 +475,12 @@ impl<B: Backend> AtlasMcp<B> {
         // A memory the caller called global stays unattached even in a project session.
         let project_id = match asked { Some(MemoryScope::Global) => None, _ => self.scope_id(a.project_id, a.project_root).await? };
         let scope = asked.unwrap_or(if project_id.is_some() { MemoryScope::Project } else { MemoryScope::Global });
+        // The actor names the tool and, when the caller gave one, the agent, the same
+        // shape a board write records. The project's `agent_access` is checked against
+        // it on the daemon side, and `require_review` may land the memory pending.
+        let actor = self.actor(&a.source_agent);
         let m = NewMemory { scope, project_id, kind, text: a.text, tags: a.tags.unwrap_or_default(), source_agent: a.source_agent, source_tool: Some(self.source_tool.clone()), confidence: 1.0, status: MemoryStatus::Active };
-        json_result(&self.backend.remember(m, "mcp").await.map_err(err)?)
+        json_result(&self.backend.remember(m, &actor).await.map_err(board_err)?)
     }
 
     #[tool(description = "Search shared memory with a natural-language query. Returns ranked memories with scores. Call this before starting work on a task to pick up prior decisions and preferences.")]

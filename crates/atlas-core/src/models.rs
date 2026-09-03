@@ -97,6 +97,76 @@ pub struct Project {
     #[serde(default)] pub board_key: Option<String>,
     /// Per-project stage list. `None` means "use the global list".
     #[serde(default)] pub board_stages: Option<Vec<Stage>>,
+    /// Which agent labels may write here. All-null by default, which lets anyone write.
+    #[serde(default)] pub agent_access: AgentAccess,
+    /// Per-project extraction override. `None` means "use the global settings".
+    /// `api_key` is masked to `"***"` on every read, like the global setting.
+    #[serde(default)] pub extraction: Option<ProjectExtraction>,
+}
+
+/// Who may write to a project, by actor label. `None` means any actor; a list is an
+/// allow-list matched against the full actor string (`claude-code/reviewer`) or the
+/// part before the slash (`claude-code`). The user's own hands are always exempt:
+/// see [`crate::projects::actor_is_user`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct AgentAccess {
+    #[serde(default)] pub memory_writers: Option<Vec<String>>,
+    #[serde(default)] pub task_movers: Option<Vec<String>>,
+    /// Forces a memory written here by an agent to land `pending` instead of `active`.
+    #[serde(default)] pub require_review: bool,
+}
+
+/// A project's extraction override, with the same fields as the global
+/// `extraction.*` settings. An absent field falls back to the global value, so a
+/// project can point one endpoint somewhere else without restating the rest.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct ProjectExtraction {
+    #[serde(default)] pub enabled: Option<bool>,
+    #[serde(default)] pub base_url: Option<String>,
+    #[serde(default)] pub model: Option<String>,
+    #[serde(default)] pub api_key: Option<String>,
+    #[serde(default)] pub auto_accept_min_confidence: Option<f64>,
+}
+
+/// A patch to a project's identity. An absent field is left alone; `git_remote` is a
+/// double option, so an explicit JSON `null` clears it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct ProjectPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub board_key: Option<String>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub git_remote: Option<Option<String>>,
+}
+
+/// What a log entry points at: a task (with its key), a memory, a job, a project or a
+/// sync target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LogRef {
+    #[serde(rename = "type")] pub kind: String,
+    #[serde(default)] pub id: Option<Uuid>,
+    #[serde(default)] pub key: Option<String>,
+}
+
+/// One line of a project's unified log: task events, memory audit rows, project and
+/// sync audit rows, and extraction jobs, merged and sorted newest first.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LogEntry {
+    pub time: DateTime<Utc>,
+    pub source: String,
+    pub kind: String,
+    pub detail: String,
+    #[serde(rename = "ref")] pub reference: Option<LogRef>,
+}
+
+/// Narrows a project log. `after` pages: it keeps entries strictly older than the
+/// given time, which is the last entry of the previous page.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LogFilter {
+    #[serde(default)] pub source: Option<String>,
+    #[serde(default)] pub kind: Option<String>,
+    #[serde(default)] pub q: Option<String>,
+    #[serde(default)] pub after: Option<DateTime<Utc>>,
+    #[serde(default)] pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

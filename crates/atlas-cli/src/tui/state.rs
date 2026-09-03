@@ -647,6 +647,8 @@ mod tests {
             last_seen_at: Utc::now(),
             board_key: None,
             board_stages: None,
+            agent_access: Default::default(),
+            extraction: None,
         }
     }
 

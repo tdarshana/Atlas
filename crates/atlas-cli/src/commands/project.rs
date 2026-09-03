@@ -16,6 +16,40 @@ pub enum ProjectCmd {
         /// The project's UUID, or the root path it was connected at
         target: String,
     },
+    /// Change a project's name, board key prefix or git remote
+    Set {
+        /// The project's UUID, or the root path it was connected at
+        target: String,
+        /// New display name
+        #[arg(long)]
+        name: Option<String>,
+        /// New board key prefix, e.g. ATL. Every task key on the board is renamed with it.
+        #[arg(long)]
+        key: Option<String>,
+        /// New git remote
+        #[arg(long, conflicts_with = "no_remote")]
+        remote: Option<String>,
+        /// Clear the git remote
+        #[arg(long)]
+        no_remote: bool,
+    },
+    /// Show a project's unified log: task events, memory writes, project and sync
+    /// audit rows, and extraction jobs, newest first
+    Log {
+        /// The project's UUID, or the root path it was connected at
+        target: String,
+        /// Keep only entries written by this actor
+        #[arg(long)]
+        source: Option<String>,
+        /// Keep only entries of this kind, e.g. moved, remembered, synced
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        /// Print the entries as JSON instead of a table
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Resolves a `forget` argument to a project id. A UUID is taken as an id; anything
@@ -49,6 +83,44 @@ pub async fn run(cmd: ProjectCmd, backend: &RemoteBackend) -> anyhow::Result<()>
             let id = resolve(&target, backend).await?;
             backend.delete_project(id, "cli").await?;
             println!("forgot project {id}");
+            Ok(())
+        }
+        ProjectCmd::Set { target, name, key, remote, no_remote } => {
+            let id = resolve(&target, backend).await?;
+            // Absent leaves the remote alone; `--no-remote` clears it; `--remote` sets it.
+            let git_remote = match (remote, no_remote) {
+                (Some(r), _) => Some(Some(r)),
+                (None, true) => Some(None),
+                (None, false) => None,
+            };
+            let patch = atlas_core::models::ProjectPatch { name, board_key: key, git_remote };
+            super::print_json(&backend.update_project(id, patch, "cli").await?)
+        }
+        ProjectCmd::Log { target, source, kind, limit, json } => {
+            let id = resolve(&target, backend).await?;
+            let filter = atlas_core::models::LogFilter { source, kind, q: None, after: None, limit: Some(limit) };
+            let entries = backend.project_log(id, filter).await?;
+            if json {
+                return super::print_json(&entries);
+            }
+            let rows: Vec<Vec<String>> = entries
+                .iter()
+                .map(|e| {
+                    let reference = e
+                        .reference
+                        .as_ref()
+                        .map(|r| r.key.clone().unwrap_or_else(|| r.id.map(|i| i.to_string()).unwrap_or_else(|| r.kind.clone())))
+                        .unwrap_or_default();
+                    vec![
+                        e.time.format("%Y-%m-%d %H:%M").to_string(),
+                        e.source.clone(),
+                        e.kind.clone(),
+                        e.detail.lines().next().unwrap_or_default().chars().take(80).collect(),
+                        reference,
+                    ]
+                })
+                .collect();
+            super::print_table(&["TIME", "SOURCE", "EVENT", "DETAIL", "REF"], &rows);
             Ok(())
         }
         ProjectCmd::List => {

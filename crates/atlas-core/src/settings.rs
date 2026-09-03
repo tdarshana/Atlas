@@ -22,11 +22,11 @@ pub const SETTING_KEYS: &[&str] = &[
 const API_KEY: &str = "extraction.api_key";
 const BASE_URL: &str = "extraction.base_url";
 const STAGES: &str = "board.stages";
-const MASKED: &str = "***";
+pub(crate) const MASKED: &str = "***";
 
 /// Whether two base urls name the same endpoint. A trailing slash is not a change
 /// of endpoint, and `LlmClient` strips one anyway before building its request url.
-fn same_endpoint(a: &str, b: &str) -> bool {
+pub(crate) fn same_endpoint(a: &str, b: &str) -> bool {
     a.trim().trim_end_matches('/') == b.trim().trim_end_matches('/')
 }
 

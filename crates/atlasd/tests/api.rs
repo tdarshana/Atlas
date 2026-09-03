@@ -1203,3 +1203,192 @@ async fn global_search_finds_tasks_and_memories_and_validates_kinds() {
     assert!(empty["groups"].as_array().unwrap().is_empty());
     assert_eq!(empty["total"], 0);
 }
+
+// ---- Phase 8: the project hub ----
+
+/// `PATCH /projects/{id}` renames the project, its board key and every task key on
+/// its board, and refuses a malformed key with a 400 and an unknown project with a 404.
+#[tokio::test]
+async fn project_patch_renames_the_board_key_and_validates_it() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    let dir = repo_free_tempdir();
+    fixture_repo(dir.path());
+
+    let project: serde_json::Value = c.post(format!("{base}/projects/connect")).json(&serde_json::json!({"root": dir.path()})).send().await.unwrap().json().await.unwrap();
+    let id = project["id"].as_str().unwrap().to_string();
+    let task: serde_json::Value = c.post(format!("{base}/tasks")).header("X-Atlas-Actor", "desktop")
+        .json(&serde_json::json!({"project_id": id, "title": "renamed with the board"})).send().await.unwrap().json().await.unwrap();
+    assert!(task["key"].as_str().unwrap().ends_with("-1"), "{task}");
+
+    let patched = c.patch(format!("{base}/projects/{id}")).header("X-Atlas-Actor", "desktop")
+        .json(&serde_json::json!({"name": "Renamed", "board_key": "zed", "git_remote": null})).send().await.unwrap();
+    assert_eq!(patched.status(), 200);
+    let patched: serde_json::Value = patched.json().await.unwrap();
+    assert_eq!(patched["name"], "Renamed");
+    assert_eq!(patched["board_key"], "ZED");
+    assert!(patched["git_remote"].is_null(), "an explicit null clears the remote: {patched}");
+
+    let moved: serde_json::Value = c.get(format!("{base}/tasks/ZED-1")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(moved["task"]["title"], "renamed with the board");
+
+    let bad = c.patch(format!("{base}/projects/{id}")).header("X-Atlas-Actor", "desktop")
+        .json(&serde_json::json!({"board_key": "a-b"})).send().await.unwrap();
+    assert_eq!(bad.status(), 400);
+    let body: serde_json::Value = bad.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("board key"), "{body}");
+
+    let missing = c.patch(format!("{base}/projects/{}", uuid::Uuid::new_v4())).header("X-Atlas-Actor", "desktop")
+        .json(&serde_json::json!({"name": "nope"})).send().await.unwrap();
+    assert_eq!(missing.status(), 404);
+}
+
+/// `PUT /projects/{id}/agent-access` stores the rules and the daemon then enforces
+/// them: a tool that is not on `task_movers` gets a 409, the desktop never does.
+#[tokio::test]
+async fn agent_access_is_stored_and_enforced() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    let dir = repo_free_tempdir();
+    fixture_repo(dir.path());
+
+    let project: serde_json::Value = c.post(format!("{base}/projects/connect")).json(&serde_json::json!({"root": dir.path()})).send().await.unwrap().json().await.unwrap();
+    let id = project["id"].as_str().unwrap().to_string();
+    assert!(project["agent_access"]["memory_writers"].is_null(), "a fresh project admits anyone: {project}");
+
+    let saved = c.put(format!("{base}/projects/{id}/agent-access")).header("X-Atlas-Actor", "desktop")
+        .json(&serde_json::json!({"memory_writers": ["claude-code"], "task_movers": ["claude-code"], "require_review": true}))
+        .send().await.unwrap();
+    assert_eq!(saved.status(), 200);
+    let saved: serde_json::Value = saved.json().await.unwrap();
+    assert_eq!(saved["agent_access"]["task_movers"][0], "claude-code");
+    assert_eq!(saved["agent_access"]["require_review"], true);
+
+    let task: serde_json::Value = c.post(format!("{base}/tasks")).header("X-Atlas-Actor", "desktop")
+        .json(&serde_json::json!({"project_id": id, "title": "guarded"})).send().await.unwrap().json().await.unwrap();
+    let key = task["key"].as_str().unwrap().to_string();
+
+    let refused = c.post(format!("{base}/tasks/{key}/move")).header("X-Atlas-Actor", "codex")
+        .json(&serde_json::json!({"stage": "In Progress"})).send().await.unwrap();
+    assert_eq!(refused.status(), 409);
+
+    let allowed = c.post(format!("{base}/tasks/{key}/move")).header("X-Atlas-Actor", "claude-code/reviewer")
+        .json(&serde_json::json!({"stage": "In Progress"})).send().await.unwrap();
+    assert_eq!(allowed.status(), 200);
+
+    // `require_review` holds an agent's memory back; the desktop's goes straight in.
+    let held = c.post(format!("{base}/memories?actor=codex")).json(&serde_json::json!({
+        "scope": "project", "project_id": id, "kind": "fact", "text": "held for review"
+    })).send().await.unwrap();
+    assert_eq!(held.status(), 409, "codex is not on memory_writers either");
+    let reviewed: serde_json::Value = c.post(format!("{base}/memories?actor=claude-code")).json(&serde_json::json!({
+        "scope": "project", "project_id": id, "kind": "fact", "text": "held for review"
+    })).send().await.unwrap().json().await.unwrap();
+    assert_eq!(reviewed["status"], "pending", "{reviewed}");
+
+    let missing = c.put(format!("{base}/projects/{}/agent-access", uuid::Uuid::new_v4())).header("X-Atlas-Actor", "desktop")
+        .json(&serde_json::json!({"require_review": false})).send().await.unwrap();
+    assert_eq!(missing.status(), 404);
+}
+
+/// `PUT /projects/{id}/extraction` masks the key on the way back, and
+/// `POST /extraction/test?project_id=` reaches the project's own endpoint rather
+/// than the global one.
+#[tokio::test]
+async fn project_extraction_override_masks_its_key_and_is_used_by_the_test_route() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    let dir = repo_free_tempdir();
+    fixture_repo(dir.path());
+    let project_llm = stub_llm_with_reply("PROJECT").await;
+
+    let project: serde_json::Value = c.post(format!("{base}/projects/connect")).json(&serde_json::json!({"root": dir.path()})).send().await.unwrap().json().await.unwrap();
+    let id = project["id"].as_str().unwrap().to_string();
+    assert!(project["extraction"].is_null(), "no override by default: {project}");
+
+    // The global settings stay off, so only the project's own switch can turn it on.
+    let saved: serde_json::Value = c.put(format!("{base}/projects/{id}/extraction")).header("X-Atlas-Actor", "desktop")
+        .json(&serde_json::json!({"enabled": true, "base_url": project_llm, "model": "project-model", "api_key": "sk-project"}))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(saved["extraction"]["api_key"], "***", "{saved}");
+    assert_eq!(saved["extraction"]["model"], "project-model");
+
+    let global = c.post(format!("{base}/extraction/test")).send().await.unwrap();
+    assert_eq!(global.status(), 409, "the global settings are still off");
+
+    let scoped = c.post(format!("{base}/extraction/test?project_id={id}")).send().await.unwrap();
+    assert_eq!(scoped.status(), 200);
+    let scoped: serde_json::Value = scoped.json().await.unwrap();
+    assert_eq!(scoped["reply"], "PROJECT", "{scoped}");
+
+    // `null` clears the override and puts the project back on the global settings.
+    let cleared: serde_json::Value = c.put(format!("{base}/projects/{id}/extraction")).header("X-Atlas-Actor", "desktop")
+        .json(&serde_json::Value::Null).send().await.unwrap().json().await.unwrap();
+    assert!(cleared["extraction"].is_null(), "{cleared}");
+    assert_eq!(c.post(format!("{base}/extraction/test?project_id={id}")).send().await.unwrap().status(), 409);
+
+    let missing = c.put(format!("{base}/projects/{}/extraction", uuid::Uuid::new_v4())).header("X-Atlas-Actor", "desktop")
+        .json(&serde_json::Value::Null).send().await.unwrap();
+    assert_eq!(missing.status(), 404);
+}
+
+/// `GET /projects/{id}/log` merges the sources and honours its filters, and
+/// `/log/export` answers the same entries as JSON lines.
+#[tokio::test]
+async fn project_log_merges_sources_and_exports_json_lines() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    let dir = repo_free_tempdir();
+    fixture_repo(dir.path());
+
+    let project: serde_json::Value = c.post(format!("{base}/projects/connect")).json(&serde_json::json!({"root": dir.path()})).send().await.unwrap().json().await.unwrap();
+    let id = project["id"].as_str().unwrap().to_string();
+    let task: serde_json::Value = c.post(format!("{base}/tasks")).header("X-Atlas-Actor", "desktop")
+        .json(&serde_json::json!({"project_id": id, "title": "logged"})).send().await.unwrap().json().await.unwrap();
+    let key = task["key"].as_str().unwrap().to_string();
+    c.post(format!("{base}/tasks/{key}/comment")).header("X-Atlas-Actor", "claude-code")
+        .json(&serde_json::json!({"body": "a note about the deploy"})).send().await.unwrap();
+    c.post(format!("{base}/memories?actor=desktop")).json(&serde_json::json!({
+        "scope": "project", "project_id": id, "kind": "fact", "text": "the deploy target is fly.io"
+    })).send().await.unwrap();
+
+    let log = c.get(format!("{base}/projects/{id}/log")).send().await.unwrap();
+    assert_eq!(log.status(), 200);
+    let log: serde_json::Value = log.json().await.unwrap();
+    let entries = log.as_array().unwrap();
+    let kinds: Vec<&str> = entries.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    for want in ["connected", "created", "commented", "remembered"] {
+        assert!(kinds.contains(&want), "missing {want} in {kinds:?}");
+    }
+    let commented = entries.iter().find(|e| e["kind"] == "commented").unwrap();
+    assert_eq!(commented["source"], "claude-code");
+    assert_eq!(commented["ref"]["type"], "task");
+    assert_eq!(commented["ref"]["key"], key);
+
+    let by_source: serde_json::Value = c.get(format!("{base}/projects/{id}/log?source=claude-code")).send().await.unwrap().json().await.unwrap();
+    assert!(by_source.as_array().unwrap().iter().all(|e| e["source"] == "claude-code"), "{by_source}");
+    let by_kind: serde_json::Value = c.get(format!("{base}/projects/{id}/log?kind=remembered&q=fly.io")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(by_kind.as_array().unwrap().len(), 1, "{by_kind}");
+    let one: serde_json::Value = c.get(format!("{base}/projects/{id}/log?limit=1")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(one.as_array().unwrap().len(), 1);
+
+    let export = c.get(format!("{base}/projects/{id}/log/export")).send().await.unwrap();
+    assert_eq!(export.status(), 200);
+    assert_eq!(export.headers().get("content-type").unwrap(), "application/x-ndjson");
+    let text = export.text().await.unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), entries.len());
+    for line in lines {
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert!(v["time"].is_string(), "{line}");
+    }
+
+    let missing = c.get(format!("{base}/projects/{}/log", uuid::Uuid::new_v4())).send().await.unwrap();
+    assert_eq!(missing.status(), 404);
+    // A bad `after` is a 400 naming the parameter, not a silently dropped filter.
+    assert_eq!(c.get(format!("{base}/projects/{id}/log?after=yesterday")).send().await.unwrap().status(), 400);
+}
