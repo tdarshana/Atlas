@@ -79,7 +79,7 @@ jobs:
       # tauri-action's `tauri build` reruns tauri.conf.json's beforeBuildCommand (which
       # calls prepare-sidecar.sh with no target), once per matrix job; without
       # ATLAS_SIDECAR_STAGED that rerun would build and stage a second, host-triple
-      # sidecar on top of the one just staged above for the actual matrix target — wrong
+      # sidecar on top of the one just staged above for the actual matrix target, which is wrong
       # on a job that cross-compiles (x86_64-apple-darwin on the arm64 macos-latest
       # runner, say). The env var tells the script to no-op instead, since the sidecar
       # for this job's target is already in place.
