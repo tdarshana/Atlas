@@ -41,7 +41,7 @@ async fn run(effect: Effect, backend: Arc<RemoteBackend>, cwd: PathBuf) -> atlas
             backend.connect_project(cwd, ACTOR).await?;
             Ok(Action::ProjectsLoaded(backend.list_projects().await?))
         }
-        Effect::ProjectContext(root) => Ok(Action::ProjectContextLoaded(backend.project_context(root, ACTOR).await?)),
+        Effect::ProjectContext(root) => Ok(Action::ProjectContextLoaded(Box::new(backend.project_context(root, ACTOR).await?))),
         Effect::ListAgents => Ok(Action::AgentsLoaded(backend.list_agents().await?)),
         Effect::Sync(root) => {
             let global = root.is_none();

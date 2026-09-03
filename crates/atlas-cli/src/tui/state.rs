@@ -140,7 +140,9 @@ pub enum Action {
     Tick,
     MemoriesLoaded(Vec<RecallHit>),
     ProjectsLoaded(Vec<Project>),
-    ProjectContextLoaded(ProjectContext),
+    /// Boxed: `ProjectContext` carries a whole `Project` and its memories, and an
+    /// unboxed variant makes every `Action` as large as the biggest one.
+    ProjectContextLoaded(Box<ProjectContext>),
     AgentsLoaded(Vec<Agent>),
     SyncDone(SyncReport),
     DocsLoaded(DocKind, Vec<Doc>),
@@ -204,7 +206,7 @@ pub fn reduce(app: &mut App, action: Action) -> Vec<Effect> {
         }
         Action::ProjectContextLoaded(ctx) => {
             app.in_flight = app.in_flight.saturating_sub(1);
-            app.project_context = Some(ctx);
+            app.project_context = Some(*ctx);
             vec![]
         }
         Action::AgentsLoaded(agents) => {
@@ -439,6 +441,8 @@ mod tests {
             profile: None,
             created_at: Utc::now(),
             last_seen_at: Utc::now(),
+            board_key: None,
+            board_stages: None,
         }
     }
 

@@ -401,6 +401,8 @@ mod tests {
             }),
             created_at: Utc::now(),
             last_seen_at: Utc::now(),
+            board_key: None,
+            board_stages: None,
         }
     }
 

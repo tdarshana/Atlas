@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod board;
 pub mod db;
 pub mod error;
 pub mod export;

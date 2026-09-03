@@ -14,7 +14,7 @@ pub struct ProjectRepo<'a> {
     db: &'a Db,
 }
 
-const SEL: &str = "id::text, name, root_path, git_remote, profile::text, created_at::text, last_seen_at::text";
+const SEL: &str = "id::text, name, root_path, git_remote, profile::text, created_at::text, last_seen_at::text, board_key, board_stages::text";
 
 /// Wraps a column-conversion failure so a malformed value fails the query instead of
 /// being silently coerced to a default. Mirrors `memories::conv_err`.
@@ -23,6 +23,11 @@ fn conv_err(col: usize, ty: Type, msg: impl std::fmt::Display) -> duckdb::Error 
 }
 
 fn row(r: &Row) -> duckdb::Result<Project> {
+    let board_stages: Option<String> = r.get(8)?;
+    let board_stages = board_stages
+        .map(|s| serde_json::from_str::<Option<Vec<crate::models::Stage>>>(&s).map_err(|e| conv_err(8, Type::Text, e)))
+        .transpose()?
+        .flatten();
     let profile: Option<String> = r.get(4)?;
     let profile = profile
         .map(|s| serde_json::from_str::<ProjectProfile>(&s).map_err(|e| conv_err(4, Type::Text, e)))
@@ -35,6 +40,8 @@ fn row(r: &Row) -> duckdb::Result<Project> {
         profile,
         created_at: crate::memories::parse_ts_pub(r.get::<_, String>(5)?)?,
         last_seen_at: crate::memories::parse_ts_pub(r.get::<_, String>(6)?)?,
+        board_key: r.get(7)?,
+        board_stages,
     })
 }
 
@@ -111,9 +118,10 @@ impl<'a> ProjectRepo<'a> {
             None => {
                 let id = Uuid::new_v4();
                 self.db.with_conn(|c| {
+                    let board_key = crate::board::pick_board_key(c, &name, None)?;
                     c.execute(
-                        "insert into projects (id, name, root_path, git_remote, profile) values (?, ?, ?, ?, ?::json)",
-                        params![id.to_string(), name, root, d.remote, profile_json],
+                        "insert into projects (id, name, root_path, git_remote, profile, board_key) values (?, ?, ?, ?, ?::json, ?)",
+                        params![id.to_string(), name, root, d.remote, profile_json, board_key],
                     )?;
                     Ok(())
                 })?;
@@ -319,7 +327,8 @@ mod tests {
         let result: Result<Project> = db.with_conn(|c| {
             let mut st = c.prepare(
                 "select 'not-a-uuid' as id, 'name' as name, '/root' as root_path, null as git_remote, \
-                 null as profile, '2026-01-01 00:00:00' as created_at, '2026-01-01 00:00:00' as last_seen_at",
+                 null as profile, '2026-01-01 00:00:00' as created_at, '2026-01-01 00:00:00' as last_seen_at, \
+                 null as board_key, null as board_stages",
             )?;
             let mut rows = st.query([])?;
             let r = rows.next()?.ok_or_else(|| AtlasError::NotFound("no row".into()))?;
@@ -334,7 +343,8 @@ mod tests {
         let result: Result<Project> = db.with_conn(|c| {
             let mut st = c.prepare(
                 "select gen_random_uuid()::text as id, 'name' as name, '/root' as root_path, null as git_remote, \
-                 'not json' as profile, '2026-01-01 00:00:00' as created_at, '2026-01-01 00:00:00' as last_seen_at",
+                 'not json' as profile, '2026-01-01 00:00:00' as created_at, '2026-01-01 00:00:00' as last_seen_at, \
+                 null as board_key, null as board_stages",
             )?;
             let mut rows = st.query([])?;
             let r = rows.next()?.ok_or_else(|| AtlasError::NotFound("no row".into()))?;

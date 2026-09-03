@@ -18,12 +18,12 @@ pub struct MemoryService {
     /// everything that rebuilds it from the DB. Without it a `remember` whose DB insert
     /// lands after `reload`'s read but whose `upsert` lands before `reload`'s wholesale
     /// replacement is silently dropped from the index and stays unrecallable until restart.
-    write_gate: Mutex<()>,
+    write_gate: Arc<Mutex<()>>,
 }
 
 impl MemoryService {
     pub fn new(db: Arc<Db>, embedder: Arc<dyn Embedder>) -> Result<Self> {
-        let svc = Self { db, embedder: RwLock::new(embedder), index: RwLock::new(Bm25Index::new()), vectors: RwLock::new(HashMap::new()), embed_error: RwLock::new(None), loading: RwLock::new(false), write_gate: Mutex::new(()) };
+        let svc = Self { db, embedder: RwLock::new(embedder), index: RwLock::new(Bm25Index::new()), vectors: RwLock::new(HashMap::new()), embed_error: RwLock::new(None), loading: RwLock::new(false), write_gate: Arc::new(Mutex::new(())) };
         svc.reload()?;
         Ok(svc)
     }
@@ -49,6 +49,12 @@ impl MemoryService {
     /// than two. The guard is a blocking, non-reentrant mutex: never hold it across an
     /// await, and never call another `MemoryService` method while holding it.
     pub fn write_gate(&self) -> MutexGuard<'_, ()> { self.gate() }
+
+    /// The gate itself, for a type that owns its own writes and must take it in the
+    /// same order the memory path does: `board::TaskRepo`. Handing out the `Arc`
+    /// rather than a guard lets that type keep the mutex for its own lifetime
+    /// without borrowing the service.
+    pub fn gate_handle(&self) -> Arc<Mutex<()>> { self.write_gate.clone() }
 
     /// Clone of the current embedder's `Arc`, so callers don't hold the lock while embedding.
     fn emb(&self) -> Arc<dyn Embedder> { self.embedder.read().unwrap_or_else(|e| e.into_inner()).clone() }

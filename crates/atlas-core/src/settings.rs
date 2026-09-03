@@ -13,6 +13,8 @@ pub const SETTING_KEYS: &[&str] = &[
     "extraction.auto_accept_min_confidence",
     "embedding.model",
     "daemon.port",
+    "board.stages",
+    "board.mirror_tasks_md",
 ];
 
 const API_KEY: &str = "extraction.api_key";
@@ -54,6 +56,14 @@ fn check_type(key: &str, value: &Value) -> Result<()> {
             Some(n) if (1..=65535).contains(&n) => {}
             _ => return wrong("a port number between 1 and 65535"),
         },
+        // The board refuses a stage list the repository could not use, before it is
+        // stored, so a bad list can never reach a task move.
+        "board.stages" => crate::board::parse_stages(value.clone()).map(|_| ())?,
+        "board.mirror_tasks_md" => {
+            if !value.is_boolean() {
+                return wrong("a boolean");
+            }
+        }
         _ => {}
     }
     Ok(())

@@ -47,6 +47,32 @@ create table if not exists jobs (
   status text not null default 'queued' check (status in ('queued','running','done','failed')),
   payload json, result json, error text,
   created_at timestamp not null default now(), updated_at timestamp not null default now());
+"#), (3, r#"
+create table if not exists tasks (
+  id uuid primary key,
+  key text not null unique,
+  project_id uuid,
+  seq bigint not null,
+  title text not null,
+  description text not null default '',
+  stage text not null,
+  kind text not null check (kind in ('task','bug','feature','chore')),
+  priority text not null check (priority in ('low','medium','high','urgent')),
+  assignee text,
+  labels json not null default '[]',
+  parent_id uuid,
+  created_by text not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  closed_at timestamptz);
+create table if not exists task_blockers (
+  task_id uuid not null, blocked_by uuid not null, primary key (task_id, blocked_by));
+create table if not exists task_events (
+  id uuid primary key, task_id uuid not null, actor text not null, kind text not null,
+  body text not null default '', detail json,
+  created_at timestamptz not null default now());
+alter table projects add column if not exists board_key text;
+alter table projects add column if not exists board_stages json;
 "#)];
 
 impl Db {
@@ -92,13 +118,18 @@ mod tests {
     #[test]
     fn migrate_creates_tables_and_is_idempotent() {
         let db = Db::open_in_memory().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 2);
+        assert_eq!(db.schema_version().unwrap(), 3);
         let n: i64 = db.with_conn(|c| Ok(c.query_row(
-            "select count(*) from information_schema.tables where table_name in ('memories','memory_embeddings','audit','settings','projects','agents','practices','workflows','sync_targets','jobs')",
+            "select count(*) from information_schema.tables where table_name in ('memories','memory_embeddings','audit','settings','projects','agents','practices','workflows','sync_targets','jobs','tasks','task_blockers','task_events')",
             [], |r| r.get(0))?)).unwrap();
-        assert_eq!(n, 10);
+        assert_eq!(n, 13);
+        // Migration 3 widens `projects` in place.
+        let cols: i64 = db.with_conn(|c| Ok(c.query_row(
+            "select count(*) from information_schema.columns where table_name='projects' and column_name in ('board_key','board_stages')",
+            [], |r| r.get(0))?)).unwrap();
+        assert_eq!(cols, 2);
         db.migrate().unwrap(); // second run is a no-op
-        assert_eq!(db.schema_version().unwrap(), 2);
+        assert_eq!(db.schema_version().unwrap(), 3);
     }
     #[test]
     fn open_on_disk_creates_file() {
