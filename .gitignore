@@ -10,3 +10,6 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 /target
 src-tauri/binaries/
+references/**/uploads/
+references/**/.thumbnail
+references/**/.DS_Store
