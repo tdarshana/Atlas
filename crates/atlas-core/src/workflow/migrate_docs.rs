@@ -19,8 +19,10 @@ const ACTION_NAME: &str = "main";
 const ACTION_AGENT: &str = "desktop";
 
 /// A trigger, one action and an output on a straight line, laid out left to right the
-/// way the editor draws a new workflow.
-fn single_action_graph(instructions: &str) -> Graph {
+/// way the editor draws a new workflow. Public so `atlas import` can build the same
+/// shape for a workflow document found in a pre-Phase-9 export directory, rather than
+/// inventing a second (possibly different) one.
+pub fn single_action_graph(instructions: &str) -> Graph {
     Graph {
         nodes: vec![
             Node {

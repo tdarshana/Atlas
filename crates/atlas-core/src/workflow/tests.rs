@@ -359,6 +359,31 @@ fn a_queued_or_running_run_cancels_and_a_finished_one_conflicts() {
     assert_eq!(repo.get_run(done.id).unwrap().0.status, RunStatus::Success);
 }
 
+/// `set_run_status` is a compare-and-swap against terminal statuses: once a run is
+/// `cancelled` (or `success` or `failed`), a later call asking for a different status
+/// is a silent no-op rather than an overwrite. This is what protects a run cancelled
+/// while its last step's model call was still in flight: `run_workflow` cannot see the
+/// cancellation land in time and always tries to close such a run as `success`, and it
+/// must not win that race.
+#[test]
+fn set_run_status_never_overwrites_a_terminal_status() {
+    let (_db, repo) = repo();
+    let w = repo.create(&new_workflow("release"), "t").unwrap();
+    let run = repo.create_run(w.id, TriggerKind::Manual).unwrap();
+    repo.set_run_status(run.id, RunStatus::Running, None).unwrap();
+    let cancelled = repo.cancel_run(run.id).unwrap();
+    assert_eq!(cancelled.status, RunStatus::Cancelled);
+    let cancelled_finished_at = cancelled.finished_at;
+
+    // A late "success" (or "failed") loses the race: the row stays cancelled, with the
+    // `finished_at` cancellation itself stamped, not overwritten.
+    let after = repo.set_run_status(run.id, RunStatus::Success, Some(json!({"steps": 2}))).unwrap();
+    assert_eq!(after.status, RunStatus::Cancelled, "a terminal status must not move");
+    assert_eq!(after.finished_at, cancelled_finished_at);
+    assert_eq!(after.summary, None, "a swallowed status change must not smuggle in its summary either");
+    assert_eq!(repo.get_run(run.id).unwrap().0.status, RunStatus::Cancelled);
+}
+
 #[test]
 fn a_pending_run_is_one_that_is_queued_or_running() {
     let (_db, repo) = repo();

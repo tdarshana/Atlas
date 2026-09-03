@@ -27,6 +27,9 @@ pub enum WorkflowCmd {
         /// Poll until the run finishes and print its final state
         #[arg(long)]
         wait: bool,
+        /// Give up waiting after this many seconds (only with --wait)
+        #[arg(long, default_value_t = 300)]
+        timeout: u64,
     },
     /// List a workflow's runs, newest first
     Runs {
@@ -63,11 +66,13 @@ pub async fn run(cmd: WorkflowCmd, backend: &RemoteBackend) -> anyhow::Result<()
             Ok(())
         }
         WorkflowCmd::Show { name } => super::print_json(&backend.get_workflow(&name).await?),
-        WorkflowCmd::Run { name, input, wait } => {
+        WorkflowCmd::Run { name, input, wait, timeout } => {
             let run = backend.run_workflow(&name, TriggerKind::Manual, "cli", input).await?;
             println!("started run #{} ({})", run.number, run.id);
             if wait {
-                let finished = poll_until_done(backend, run.id).await?;
+                let finished = poll_until_done(backend, run.id, Duration::from_secs(timeout))
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("timed out waiting for run {}", run.number))?;
                 println!("{}", serde_json::to_string_pretty(&finished)?);
             }
             Ok(())
@@ -91,12 +96,17 @@ pub async fn run(cmd: WorkflowCmd, backend: &RemoteBackend) -> anyhow::Result<()
     }
 }
 
-/// Polls `GET /runs/{id}` every half second until the run reaches a terminal status.
-async fn poll_until_done(backend: &RemoteBackend, run_id: Uuid) -> anyhow::Result<WorkflowRun> {
+/// Polls `GET /runs/{id}` every half second until the run reaches a terminal status,
+/// or `None` once `timeout` has passed without one.
+async fn poll_until_done(backend: &RemoteBackend, run_id: Uuid, timeout: Duration) -> anyhow::Result<Option<WorkflowRun>> {
+    let deadline = std::time::Instant::now() + timeout;
     loop {
         let (run, _) = backend.get_run(run_id).await?;
         if run.status.is_terminal() {
-            return Ok(run);
+            return Ok(Some(run));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(None);
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }

@@ -250,6 +250,31 @@ impl LocalBackend {
         crate::projects::check_task_move(actor, &self.projects().get(pid)?)
     }
 
+    /// Refuses to trigger a run for an actor this project's `agent_access` would
+    /// refuse a direct `remember` or task-board write from — checked once, here, at
+    /// trigger time, against whichever of `memory_writers`/`task_movers` the output
+    /// node could actually exercise. Without this, an actor a project has not admitted
+    /// to write memories or move tasks directly could obtain the same write by routing
+    /// it through a workflow: the run's own writes are stamped `workflow/<name>`, which
+    /// is a different identity from the one this checks, and a `memory_writers`/
+    /// `task_movers` allowlist naming `workflow` (or the specific workflow) would
+    /// otherwise admit it regardless of who asked for the run. The user's own hands
+    /// are exempt, the same as every other gate in this file; a global workflow (no
+    /// project) is never gated, since there is no project's `agent_access` to check.
+    fn workflow_trigger_gate(&self, workflow: &Workflow, actor: &str) -> Result<()> {
+        let Some(pid) = workflow.project_id.filter(|_| !crate::projects::actor_is_user(actor)) else { return Ok(()) };
+        let Some(output) = workflow.graph.nodes.iter().find(|n| n.kind == NodeKind::Output) else { return Ok(()) };
+        let NodeData::Output { propose_memories, file_tasks } = &output.data else { return Ok(()) };
+        let project = self.projects().get(pid)?;
+        if *propose_memories {
+            crate::projects::check_memory_write(actor, &project)?;
+        }
+        if *file_tasks {
+            crate::projects::check_task_move(actor, &project)?;
+        }
+        Ok(())
+    }
+
     fn agents(&self) -> AgentRepo<'_> { AgentRepo::new(&self.db) }
     fn docs(&self, kind: DocKind) -> DocRepo<'_> { DocRepo::new(&self.db, kind) }
     fn settings(&self) -> crate::settings::SettingsRepo<'_> { crate::settings::SettingsRepo::new(&self.db) }
@@ -567,6 +592,7 @@ impl Backend for LocalBackend {
     async fn delete_workflow(&self, id_or_name: &str, actor: &str) -> Result<()> { self.workflows.delete(id_or_name, actor) }
     async fn run_workflow(&self, id_or_name: &str, trigger: TriggerKind, actor: &str, input: Option<String>) -> Result<WorkflowRun> {
         let workflow = self.workflows.get(id_or_name)?;
+        self.workflow_trigger_gate(&workflow, actor)?;
         if self.workflows.has_pending_run(workflow.id)? {
             return Err(AtlasError::Conflict(format!("workflow '{}' already has a run queued or running", workflow.name)));
         }

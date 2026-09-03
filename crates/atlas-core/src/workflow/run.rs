@@ -7,6 +7,19 @@
 //! the job's payload is the only place the run's actor and optional input live, and
 //! that matches how [`crate::extract::run_ingest`] and `run_project_summary` are
 //! already called from the worker.
+//!
+//! # Access control
+//!
+//! The run's *triggering* actor (`job.payload["actor"]`, `run_actor` below) — never
+//! the synthetic `workflow/<name>` identity the run's own writes are stamped with — is
+//! what a project's `agent_access` is checked against. [`crate::backend::LocalBackend::run_workflow`]
+//! checks it once, at trigger time, against whichever of `memory_writers`/`task_movers`
+//! the output node could actually exercise (`propose_memories`/`file_tasks`), so an
+//! actor a project has not admitted cannot obtain a write it could not make directly by
+//! routing it through someone else's workflow. `apply_output` here also passes
+//! `run_actor` (not `workflow_actor`) to `Backend::remember`, so `require_review` reads
+//! the triggering actor's own exemption (the user's own hands are always exempt) rather
+//! than always applying, which `workflow/<name>` — never a user identity — would.
 
 use crate::backend::{Backend, LocalBackend};
 use crate::extract::{self, ExtractionConfig};
@@ -25,34 +38,59 @@ fn status_for(confidence: f64, threshold: f64) -> MemoryStatus {
     if confidence >= threshold { MemoryStatus::Active } else { MemoryStatus::Pending }
 }
 
-/// The last ```json (or bare ```) fenced block in `text`, parsed as a JSON value.
-/// `None` when there is no fence, or its body does not parse.
+/// The trailing fenced block in `text`, whether or not it is tagged ` ```json `. Only
+/// the block that is genuinely last counts: nothing but whitespace may follow its
+/// closing fence, so a `json`-tagged block earlier in the reply, followed later by an
+/// untagged (or differently tagged) one, is correctly *not* selected — the untagged one
+/// is the trailing block, and it is read whether or not it says `json`. `None` when
+/// there is no fence at all, when non-whitespace text follows the last one, or when its
+/// body does not parse as JSON.
 fn trailing_json_block(text: &str) -> Option<Value> {
-    let body_start = text.rfind("```json").map(|i| i + "```json".len()).or_else(|| text.rfind("```").map(|i| i + "```".len()))?;
-    let rest = &text[body_start..];
-    let body_end = rest.find("```")?;
-    serde_json::from_str(rest[..body_end].trim()).ok()
+    let trimmed = text.trim_end();
+    let before_close = trimmed.strip_suffix("```")?;
+    let fence_start = before_close.rfind("```")?;
+    let body = &before_close[fence_start + 3..];
+    let body = body.strip_prefix("json").unwrap_or(body);
+    serde_json::from_str(body.trim()).ok()
 }
 
 /// Records a failure on a step that never got to run: a synthetic step (there is no
 /// action to attach it to) carrying one ERR line, so a graph that fails re-validation
 /// still leaves a readable trail in the run view.
-fn fail_before_steps(backend: &LocalBackend, run_id: Uuid, err: AtlasError) -> Result<Value> {
+fn fail_before_steps(backend: &LocalBackend, run_id: Uuid, run_actor: &str, err: AtlasError) -> Result<Value> {
     let log = vec![LogLine::now(LogLevel::Error, err.to_string())];
     if let Ok(step) = backend.workflows.append_step(run_id, 0, "", "validate", "") {
         let _ = backend.workflows.finish_step(step.id, StepStatus::Failed, None, &log);
     }
     let _ = backend.workflows.set_run_status(run_id, RunStatus::Failed, None);
+    let _ = backend.memories.audit(run_actor, "run", "workflow_run", Some(run_id), json!({"status": "failed", "reason": err.to_string()}));
     Err(err)
 }
 
 /// Records a failure raised while a step was in flight: the step's own log gets the
 /// ERR line, the run is marked failed, and the rest of the actions are skipped.
-fn fail_step(backend: &LocalBackend, run_id: Uuid, step_id: Uuid, mut log: Vec<LogLine>, err: AtlasError) -> Result<Value> {
+fn fail_step(backend: &LocalBackend, run_id: Uuid, step_id: Uuid, run_actor: &str, mut log: Vec<LogLine>, err: AtlasError) -> Result<Value> {
     log.push(LogLine::now(LogLevel::Error, err.to_string()));
     let _ = backend.workflows.finish_step(step_id, StepStatus::Failed, None, &log);
     let _ = backend.workflows.set_run_status(run_id, RunStatus::Failed, None);
+    let _ = backend.memories.audit(run_actor, "run", "workflow_run", Some(run_id), json!({"status": "failed", "reason": err.to_string()}));
     Err(err)
+}
+
+/// Reports a run found (or left) cancelled: an audit row recording why, and the
+/// `cancelled` result the caller returns as-is. Does not itself touch `workflow_runs`:
+/// either `cancel_run` already set the terminal status, or `set_run_status`'s own
+/// compare-and-swap will refuse to overwrite it a moment later, so there is nothing
+/// left to write here but the record of what happened.
+fn cancelled_result(backend: &LocalBackend, run_id: Uuid, run_actor: &str, steps: usize) -> Value {
+    let _ = backend.memories.audit(
+        run_actor,
+        "run",
+        "workflow_run",
+        Some(run_id),
+        json!({"status": "cancelled", "reason": "the run was cancelled", "steps": steps}),
+    );
+    json!({"status": "cancelled", "steps": steps})
 }
 
 /// The memories an action sees, as the bullet list its user message carries: the
@@ -95,20 +133,31 @@ fn system_prompt(backend: &LocalBackend, agent: &str, practices: &[String], log:
     system
 }
 
+/// The parts of `apply_output` that stay the same across every candidate memory and
+/// task it writes, bundled so the function itself does not have to take them one by
+/// one.
+///
+/// `workflow_actor` (`workflow/<name>`) labels the write — a memory's `source_agent`
+/// and a task's `created_by` — so a reviewer can trace it back to the workflow that
+/// made it. `run_actor` (the actor that triggered the run) is what the memory-write
+/// gate and `require_review` are evaluated against: access to this project was already
+/// checked against it at trigger time, and using it here too (rather than
+/// `workflow_actor`, which is never a user identity) is what lets a human's own manual
+/// run skip `require_review` the same way any other action of theirs would.
+#[derive(Clone, Copy)]
+struct OutputContext<'a> {
+    workflow: &'a Workflow,
+    workflow_actor: &'a str,
+    run_actor: &'a str,
+    threshold: f64,
+}
+
 /// Turns the last action's trailing JSON block into pending or active memories and
 /// filed tasks, per the output node's flags. A block that does not parse, or is not
 /// there when one was expected, is a WARN, not a failure: the run has already
-/// succeeded by the time this runs. `actor` is `workflow/<name>`, the same identity
-/// the memory-write and task-create gates check for any other caller.
-async fn apply_output(
-    backend: &LocalBackend,
-    workflow: &Workflow,
-    output: &NodeData,
-    last_output: &str,
-    actor: &str,
-    threshold: f64,
-    log: &mut Vec<LogLine>,
-) -> (usize, usize) {
+/// succeeded by the time this runs.
+async fn apply_output(backend: &LocalBackend, ctx: &OutputContext<'_>, output: &NodeData, last_output: &str, log: &mut Vec<LogLine>) -> (usize, usize) {
+    let OutputContext { workflow, workflow_actor, run_actor, threshold } = *ctx;
     let NodeData::Output { propose_memories, file_tasks } = output else { unreachable!("checked by graph::validate") };
     if !propose_memories && !file_tasks {
         return (0, 0);
@@ -130,12 +179,12 @@ async fn apply_output(
                             kind: c.kind,
                             text: c.text,
                             tags: c.tags,
-                            source_agent: Some(actor.to_string()),
+                            source_agent: Some(workflow_actor.to_string()),
                             source_tool: Some("workflow".to_string()),
                             confidence: c.confidence,
                             status: status_for(c.confidence, threshold),
                         };
-                        match backend.remember(new, actor).await {
+                        match backend.remember(new, run_actor).await {
                             Ok(_) => memories_proposed += 1,
                             Err(e) => log.push(LogLine::now(LogLevel::Warn, format!("a proposed memory was not stored: {e}"))),
                         }
@@ -167,7 +216,7 @@ async fn apply_output(
                     blocked_by: None,
                     stage: None,
                 };
-                match backend.create_task(new, actor).await {
+                match backend.create_task(new, workflow_actor).await {
                     Ok(_) => tasks_filed += 1,
                     Err(e) => log.push(LogLine::now(LogLevel::Warn, format!("a filed task was not created: {e}"))),
                 }
@@ -191,13 +240,13 @@ pub async fn run_workflow(job: &Job, backend: &LocalBackend) -> Result<Value> {
 
     let (run, _) = backend.workflows.get_run(run_id)?;
     if run.status == RunStatus::Cancelled {
-        return Ok(json!({"status": "cancelled", "steps": 0}));
+        return Ok(cancelled_result(backend, run_id, &run_actor, 0));
     }
 
     let workflow = backend.workflows.get(&workflow_id.to_string())?;
     let order = match graph::validate(&workflow.graph) {
         Ok(order) => order,
-        Err(e) => return fail_before_steps(backend, run_id, e),
+        Err(e) => return fail_before_steps(backend, run_id, &run_actor, e),
     };
 
     backend.workflows.set_run_status(run_id, RunStatus::Running, None)?;
@@ -209,7 +258,7 @@ pub async fn run_workflow(job: &Job, backend: &LocalBackend) -> Result<Value> {
     for (i, action_id) in order.iter().enumerate() {
         let (run, _) = backend.workflows.get_run(run_id)?;
         if run.status == RunStatus::Cancelled {
-            return Ok(json!({"status": "cancelled", "steps": i}));
+            return Ok(cancelled_result(backend, run_id, &run_actor, i));
         }
 
         let node = workflow.graph.nodes.iter().find(|n| &n.id == action_id).expect("action id came from graph::validate");
@@ -221,12 +270,12 @@ pub async fn run_workflow(job: &Job, backend: &LocalBackend) -> Result<Value> {
 
         let cfg: ExtractionConfig = match extract::resolve_extraction(&backend.db, workflow.project_id) {
             Ok(cfg) => cfg,
-            Err(e) => return fail_step(backend, run_id, step.id, log, e),
+            Err(e) => return fail_step(backend, run_id, step.id, &run_actor, log, e),
         };
         last_threshold = cfg.auto_accept_min_confidence;
         let client = match extract::build_client(&cfg) {
             Ok(c) => c,
-            Err(e) => return fail_step(backend, run_id, step.id, log, e),
+            Err(e) => return fail_step(backend, run_id, step.id, &run_actor, log, e),
         };
 
         let system = system_prompt(backend, agent, practices, &mut log);
@@ -244,7 +293,7 @@ pub async fn run_workflow(job: &Job, backend: &LocalBackend) -> Result<Value> {
         log.push(LogLine::now(LogLevel::Info, format!("request: system {} chars, user {} chars", system.chars().count(), user.chars().count())));
         let reply = match client.chat(&system, &user).await {
             Ok(r) => r,
-            Err(e) => return fail_step(backend, run_id, step.id, log, e),
+            Err(e) => return fail_step(backend, run_id, step.id, &run_actor, log, e),
         };
         log.push(LogLine::now(LogLevel::Info, format!("reply: {} chars", reply.chars().count())));
 
@@ -252,10 +301,22 @@ pub async fn run_workflow(job: &Job, backend: &LocalBackend) -> Result<Value> {
         last_output = Some(reply);
     }
 
+    // The last action's `client.chat().await` can still be in flight when a cancel
+    // lands: nothing inside the loop observes that until its *next* iteration, and
+    // there is no next iteration after the last action. Re-read the run here, before
+    // any output is proposed or filed and before the run is marked done, so a run
+    // cancelled during (or immediately after) its last step ends `cancelled`, not
+    // `success`.
+    let (run, _) = backend.workflows.get_run(run_id)?;
+    if run.status == RunStatus::Cancelled {
+        return Ok(cancelled_result(backend, run_id, &run_actor, order.len()));
+    }
+
     let output_node = workflow.graph.nodes.iter().find(|n| n.kind == NodeKind::Output).expect("graph::validate requires exactly one output");
     let mut output_log: Vec<LogLine> = vec![];
+    let output_ctx = OutputContext { workflow: &workflow, workflow_actor: &workflow_actor, run_actor: &run_actor, threshold: last_threshold };
     let (memories_proposed, tasks_filed) = match &last_output {
-        Some(out) => apply_output(backend, &workflow, &output_node.data, out, &workflow_actor, last_threshold, &mut output_log).await,
+        Some(out) => apply_output(backend, &output_ctx, &output_node.data, out, &mut output_log).await,
         None => (0, 0),
     };
     // The output step's log is folded into the last action's own step rather than a
@@ -274,7 +335,52 @@ pub async fn run_workflow(job: &Job, backend: &LocalBackend) -> Result<Value> {
         "trigger": run.trigger.as_str(),
         "tokens": Value::Null,
     });
+    // `set_run_status`'s own compare-and-swap refuses to move a run that is already
+    // terminal (a cancellation that landed in the instant between the re-read above and
+    // this call): the audit row still records what this run *tried* to finish as, but
+    // the stored status stays whatever it already was.
     backend.workflows.set_run_status(run_id, RunStatus::Success, Some(summary.clone()))?;
     backend.memories.audit(&run_actor, "run", "workflow_run", Some(run_id), summary.clone())?;
     Ok(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trailing_json_block_reads_a_bare_fence_with_no_json_tag() {
+        let text = "Some notes.\n\n```\n{\"memories\": []}\n```";
+        let block = trailing_json_block(text).expect("an untagged trailing fence should still parse");
+        assert_eq!(block["memories"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn trailing_json_block_reads_a_json_tagged_fence() {
+        let text = "Done.\n\n```json\n{\"tasks\": []}\n```";
+        let block = trailing_json_block(text).expect("a json-tagged trailing fence should parse");
+        assert_eq!(block["tasks"], serde_json::json!([]));
+    }
+
+    /// A `json`-tagged block that is *not* the last thing in the reply must not be
+    /// picked over the block that actually trails it: here that trailing block is a
+    /// plain (non-JSON) fence, so the whole reply carries no usable block at all.
+    #[test]
+    fn a_json_fence_earlier_in_the_reply_is_not_mistaken_for_the_trailing_block() {
+        let text = "```json\n{\"memories\": [{\"text\": \"a\", \"kind\": \"fact\"}]}\n```\n\nAlso, don't do this:\n\n```\nrm -rf /\n```";
+        assert!(trailing_json_block(text).is_none(), "the shell fence trails the json one and is not JSON");
+    }
+
+    /// Prose after the closing fence means the fence is not trailing at all, whatever
+    /// it is tagged.
+    #[test]
+    fn text_after_the_closing_fence_means_there_is_no_trailing_block() {
+        let text = "```json\n{\"memories\": []}\n```\n\nOne more thing to say.";
+        assert!(trailing_json_block(text).is_none());
+    }
+
+    #[test]
+    fn no_fence_at_all_is_none() {
+        assert!(trailing_json_block("just a plain reply").is_none());
+    }
 }

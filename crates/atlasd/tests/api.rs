@@ -1840,6 +1840,50 @@ async fn cancelling_a_queued_run_is_skipped_by_the_worker() {
     assert_eq!(finished["run"]["status"], "success", "{finished}");
 }
 
+/// A cancel that lands while the *last* action's model call is still in flight must
+/// still end the run `cancelled`, not `success`: there is no further loop iteration
+/// after the last action for the runner to notice the cancellation in, so it has to be
+/// observed once more after the loop, before the run is closed out.
+#[tokio::test]
+async fn cancelling_during_the_last_step_still_ends_the_run_cancelled() {
+    let stub = stub_llm_with_delay("slow reply", Duration::from_secs(2)).await;
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    c.put(format!("{base}/settings")).json(&serde_json::json!({
+        "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub", "extraction.api_key": "k",
+    })).send().await.unwrap();
+
+    let workflow = create_workflow(&c, &base, "late-cancel", &["step one", "step two"], false, false).await;
+    let run: serde_json::Value =
+        c.post(format!("{base}/workflows/{}/run", workflow["id"].as_str().unwrap())).json(&serde_json::json!({})).send().await.unwrap().json().await.unwrap();
+    let run_id = run["id"].as_str().unwrap().to_string();
+
+    // Poll until both steps have been appended: the second (last) step is appended
+    // right before its slow `chat()` call starts, so seeing it means we are now inside
+    // that call.
+    let mut in_last_step = false;
+    for _ in 0..100 {
+        let detail: serde_json::Value = c.get(format!("{base}/runs/{run_id}")).send().await.unwrap().json().await.unwrap();
+        if detail["steps"].as_array().unwrap().len() >= 2 {
+            in_last_step = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(in_last_step, "the run never reached its second step within 5s");
+
+    let cancelled: serde_json::Value = c.post(format!("{base}/runs/{run_id}/cancel")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(cancelled["status"], "cancelled", "{cancelled}");
+
+    // Give the in-flight (discarded) second action's slow reply time to come back and
+    // the runner time to fall out of its loop, then confirm the outcome was not
+    // silently overwritten to `success`.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let detail: serde_json::Value = c.get(format!("{base}/runs/{run_id}")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(detail["run"]["status"], "cancelled", "{detail}");
+}
+
 /// `workflow_run` and `workflow_status` are listed, a run started by name is followed
 /// to success, and `workflow_run` on a name nothing was ever saved under is
 /// `invalid_params` (JSON-RPC -32602), not an internal error.

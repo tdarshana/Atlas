@@ -1,6 +1,7 @@
 use crate::remote::RemoteBackend;
 use atlas_core::backend::Backend;
-use atlas_core::models::{DocKind, Memory, NewAgent, NewDoc, NewMemory};
+use atlas_core::models::{DocKind, Memory, NewAgent, NewDoc, NewMemory, NewWorkflow, Trigger};
+use atlas_core::workflow::migrate_docs::single_action_graph;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -12,11 +13,32 @@ pub async fn run(dir: PathBuf, backend: &RemoteBackend) -> anyhow::Result<()> {
     }
 
     let mut docs = 0usize;
-    for kind in [DocKind::Practice, DocKind::Workflow] {
-        for path in md_files(&dir.join(super::export::doc_dir(kind)))? {
-            backend.save_doc(kind, read_doc(&path)?, "import").await?;
-            docs += 1;
-        }
+    for path in md_files(&dir.join(super::export::doc_dir(DocKind::Practice)))? {
+        backend.save_doc(DocKind::Practice, read_doc(&path)?, "import").await?;
+        docs += 1;
+    }
+    // A pre-Phase-9 export directory may still hold Markdown workflow documents:
+    // `DocKind::Workflow` no longer has anywhere to save one (the daemon's own
+    // migration, run once at startup, only ever sees documents already in the store,
+    // not ones an import is about to add). Each becomes a manual single-action
+    // workflow through the same graph shape `workflow::migrate_docs` builds, rather
+    // than failing.
+    for path in md_files(&dir.join(super::export::doc_dir(DocKind::Workflow)))? {
+        let doc = read_doc(&path)?;
+        backend
+            .create_workflow(
+                NewWorkflow {
+                    name: doc.name.clone(),
+                    project_id: doc.project_id,
+                    description: format!("Migrated from the workflow document '{}'.", doc.name),
+                    trigger: Trigger::manual(),
+                    graph: single_action_graph(&doc.body),
+                    enabled: true,
+                },
+                "import",
+            )
+            .await?;
+        docs += 1;
     }
 
     // Memories have no name to upsert on, so the guard against importing the same

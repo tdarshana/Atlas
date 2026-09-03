@@ -519,11 +519,26 @@ impl WorkflowRepo {
         Ok(n > 0)
     }
 
+    /// A terminal run (`success`, `failed` or `cancelled`) is history: once written, no
+    /// later call may move it, whatever status it asks for. `run_workflow` cannot
+    /// itself see a cancellation land during its very last step's model call (there is
+    /// no next loop iteration to notice it in), so it always tries to close the run as
+    /// `success`; the guard here is what makes that attempt a silent no-op instead of
+    /// clobbering a `cancelled` written moments earlier by `cancel_run`. Enforced as a
+    /// compare-and-swap in the `update`'s own `where` clause rather than trusted to the
+    /// read above: the two run under the same gate today, but the guard should hold
+    /// even if that ever changes.
     fn set_run_status_gated(&self, c: &Connection, id: Uuid, status: RunStatus, summary: Option<&serde_json::Value>) -> Result<WorkflowRun> {
         let run = self.load_run(c, id)?;
+        if run.status.is_terminal() {
+            return Ok(run);
+        }
         let finished = if status.is_terminal() { "now()" } else { "null" };
         c.execute(
-            &format!("update workflow_runs set status = ?, summary = coalesce(?::json, summary), finished_at = {finished} where id = ?"),
+            &format!(
+                "update workflow_runs set status = ?, summary = coalesce(?::json, summary), finished_at = {finished} \
+                 where id = ? and status not in ('success', 'failed', 'cancelled')"
+            ),
             params![status.as_str(), summary.map(|s| s.to_string()), id.to_string()],
         )?;
         self.refresh_last_status(c, run.workflow_id)?;

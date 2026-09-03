@@ -9,10 +9,34 @@ use std::sync::Arc;
 
 use atlas_core::backend::{Backend, LocalBackend};
 use atlas_core::models::*;
+use atlas_core::AtlasError;
 use rmcp::model::CallToolRequestParams;
 use rmcp::service::{RunningService, ServiceExt};
 use rmcp::RoleClient;
 use atlas_mcp::AtlasMcp;
+
+/// A one-action workflow whose output node proposes memories and/or files tasks,
+/// depending on `propose_memories`/`file_tasks`: the minimum shape needed to exercise
+/// `Backend::run_workflow`'s trigger-time access check, which reads those two flags off
+/// the output node to decide which of `memory_writers`/`task_movers` applies.
+fn workflow_graph(propose_memories: bool, file_tasks: bool) -> Graph {
+    Graph {
+        nodes: vec![
+            Node { id: "t".into(), kind: NodeKind::Trigger, position: Position { x: 0.0, y: 0.0 }, data: NodeData::Trigger(Trigger::manual()) },
+            Node {
+                id: "a".into(),
+                kind: NodeKind::Action,
+                position: Position { x: 240.0, y: 0.0 },
+                data: NodeData::Action { name: "step".into(), instructions: "do it".into(), agent: "desktop".into(), practices: vec![], memories: None },
+            },
+            Node { id: "o".into(), kind: NodeKind::Output, position: Position { x: 480.0, y: 0.0 }, data: NodeData::Output { propose_memories, file_tasks } },
+        ],
+        edges: vec![
+            Edge { id: "t-a".into(), source: "t".into(), target: "a".into() },
+            Edge { id: "a-o".into(), source: "a".into(), target: "o".into() },
+        ],
+    }
+}
 
 /// A backend on a fresh `ATLAS_HOME`, plus a project rooted at `root`.
 async fn backend(home: &std::path::Path, root: &std::path::Path) -> (Arc<LocalBackend>, Project) {
@@ -204,4 +228,90 @@ async fn ingest_transcript_takes_its_actor_from_the_server_not_the_caller() {
         "{text}"
     );
     client.cancel().await.unwrap();
+}
+
+/// A workflow's own writes are stamped `workflow/<name>`, a different identity from
+/// whoever triggered the run — so the triggering actor is what a project's
+/// `agent_access` has to gate, checked once at trigger time in
+/// `Backend::run_workflow`. Without that check, an actor `memory_writers` never
+/// admitted (and who is refused a direct `remember`) could obtain the same write by
+/// routing it through any workflow whose output node proposes memories, since
+/// `workflow/<name>` would itself pass the allowlist. `Conflict`, the same status and
+/// text a direct `remember` refusal carries.
+#[tokio::test]
+async fn workflow_run_is_refused_for_an_actor_memory_writers_does_not_admit() {
+    let home = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let (backend, project) = backend(home.path(), root.path()).await;
+    backend
+        .set_agent_access(
+            project.id,
+            AgentAccess { memory_writers: Some(vec!["claude-code".into()]), task_movers: None, require_review: false },
+            "cli",
+        )
+        .await
+        .unwrap();
+
+    let workflow = backend
+        .create_workflow(
+            NewWorkflow {
+                name: "propose".into(),
+                project_id: Some(project.id),
+                description: String::new(),
+                trigger: Trigger::manual(),
+                graph: workflow_graph(true, false),
+                enabled: true,
+            },
+            "cli",
+        )
+        .await
+        .unwrap();
+
+    let err = backend.run_workflow(&workflow.id.to_string(), TriggerKind::Prompt, "codex", None).await.unwrap_err();
+    assert!(matches!(err, AtlasError::Conflict(_)), "{err}");
+    assert!(err.to_string().contains(&format!("actor 'codex' may not write memories in project {}", project.name)), "{err}");
+
+    // The named tool is admitted, so the run is allowed to start (it will fail once the
+    // worker gets to it, since extraction is not configured here, which is not what
+    // this test is about).
+    backend.run_workflow(&workflow.id.to_string(), TriggerKind::Prompt, "claude-code", None).await.unwrap();
+}
+
+/// The same trigger-time gate, for the `task_movers` half: a workflow whose output
+/// node files tasks instead of proposing memories is gated against `task_movers`, not
+/// `memory_writers`.
+#[tokio::test]
+async fn workflow_run_is_refused_for_an_actor_task_movers_does_not_admit() {
+    let home = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let (backend, project) = backend(home.path(), root.path()).await;
+    backend
+        .set_agent_access(
+            project.id,
+            AgentAccess { memory_writers: None, task_movers: Some(vec!["claude-code".into()]), require_review: false },
+            "cli",
+        )
+        .await
+        .unwrap();
+
+    let workflow = backend
+        .create_workflow(
+            NewWorkflow {
+                name: "file-tasks".into(),
+                project_id: Some(project.id),
+                description: String::new(),
+                trigger: Trigger::manual(),
+                graph: workflow_graph(false, true),
+                enabled: true,
+            },
+            "cli",
+        )
+        .await
+        .unwrap();
+
+    let err = backend.run_workflow(&workflow.id.to_string(), TriggerKind::Prompt, "codex", None).await.unwrap_err();
+    assert!(matches!(err, AtlasError::Conflict(_)), "{err}");
+    assert!(err.to_string().contains(&format!("actor 'codex' may not move tasks in project {}", project.name)), "{err}");
+
+    backend.run_workflow(&workflow.id.to_string(), TriggerKind::Prompt, "claude-code", None).await.unwrap();
 }

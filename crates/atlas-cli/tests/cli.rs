@@ -317,3 +317,91 @@ fn workflow_list_and_run_via_the_cli() {
 
     assert!(daemon.cmd().args(["daemon", "stop"]).status().unwrap().success());
 }
+
+/// `atlas workflow run --wait` must not block forever: pointed at a model endpoint
+/// that accepts the connection and never answers, `--timeout 1` gives up after about a
+/// second, exits non-zero, and names the run it was waiting on.
+#[test]
+fn workflow_run_wait_times_out_rather_than_hanging_forever() {
+    let daemon = TestDaemon::new();
+    assert!(daemon.cmd().args(["daemon", "start"]).status().unwrap().success());
+
+    // Accepts the connection and then just holds it open, writing nothing back: the
+    // run stays `running` for far longer than the CLI's short --timeout below.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let stub_addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            drop(stream);
+        }
+    });
+
+    let base = format!("http://127.0.0.1:{}/api/v1", daemon.port);
+    let graph = serde_json::json!({
+        "nodes": [
+            {"id": "t", "kind": "trigger", "position": {"x": 0.0, "y": 0.0}, "data": {"kind": "manual"}},
+            {"id": "a", "kind": "action", "position": {"x": 240.0, "y": 0.0}, "data": {"name": "step", "instructions": "do it", "agent": "desktop", "practices": [], "memories": null}},
+            {"id": "o", "kind": "output", "position": {"x": 480.0, "y": 0.0}, "data": {"propose_memories": false, "file_tasks": false}},
+        ],
+        "edges": [
+            {"id": "t-a", "source": "t", "target": "a"},
+            {"id": "a-o", "source": "a", "target": "o"},
+        ],
+    });
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let c = reqwest::Client::new();
+        let put = c
+            .put(format!("{base}/settings"))
+            .json(&serde_json::json!({"extraction.enabled": true, "extraction.base_url": format!("http://{stub_addr}"), "extraction.model": "stub"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(put.status(), 200);
+        let r = c
+            .post(format!("{base}/workflows"))
+            .json(&serde_json::json!({"name": "hangs", "trigger": {"kind": "manual"}, "graph": graph, "enabled": true}))
+            .send()
+            .await
+            .unwrap();
+        let status = r.status();
+        assert_eq!(status, 201, "{}", r.text().await.unwrap());
+    });
+
+    let out = daemon.cmd().args(["workflow", "run", "hangs", "--wait", "--timeout", "1"]).output().unwrap();
+    assert!(!out.status.success(), "a timed-out wait must exit non-zero");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("timed out waiting for run"), "{err}");
+
+    assert!(daemon.cmd().args(["daemon", "stop"]).status().unwrap().success());
+}
+
+/// A pre-Phase-9 export directory's `workflows/*.md` file (the old Markdown-document
+/// shape `atlas export` no longer writes, since `DocKind::Workflow` docs were retired
+/// by the Phase 9 migration) is not silently dropped or refused on import: `atlas
+/// import` turns it into a manual single-action workflow, the same graph shape the
+/// daemon's own startup doc-to-workflow migration builds.
+#[test]
+fn import_converts_a_pre_migration_workflow_document_into_a_real_workflow() {
+    let daemon = TestDaemon::new();
+    assert!(daemon.cmd().args(["daemon", "start"]).status().unwrap().success());
+
+    let dump = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dump.path().join("workflows")).unwrap();
+    std::fs::write(dump.path().join("workflows/release.md"), "---\nname: release\ntags: ops\n---\n\nTag, build, publish.\n").unwrap();
+
+    let out = daemon.cmd().args(["import", dump.path().to_str().unwrap()]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let out = daemon.cmd().args(["workflow", "show", "release"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let shown: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(shown["name"], "release", "{shown}");
+    assert_eq!(shown["trigger"]["kind"], "manual", "{shown}");
+    let nodes = shown["graph"]["nodes"].as_array().unwrap();
+    let action = nodes.iter().find(|n| n["kind"] == "action").expect("a single action node");
+    assert_eq!(action["data"]["instructions"], "Tag, build, publish.", "{shown}");
+    assert_eq!(action["data"]["agent"], "desktop", "{shown}");
+
+    assert!(daemon.cmd().args(["daemon", "stop"]).status().unwrap().success());
+}
