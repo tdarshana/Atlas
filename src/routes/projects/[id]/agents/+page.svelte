@@ -4,6 +4,7 @@
 	// plus the Sync card scoped to this root.
 	import { Badge, Button, Table, type TableColumn } from '$lib/ds';
 	import { daemon } from '$lib/daemon.svelte';
+	import { plural } from '$lib/format';
 	import { setStatusItems } from '$lib/shell';
 	import { agents, loadAgents, saveAgent } from '$lib/stores/agents.svelte';
 	import { project, setHeaderActions } from '$lib/stores/project.svelte';
@@ -23,7 +24,7 @@
 		{ key: 'name', label: 'Name', width: '180px', sortable: true },
 		{ key: 'description', label: 'Description' },
 		{ key: 'version', label: 'Version', width: '90px', align: 'right' },
-		{ key: 'tags', label: 'Tags', width: '160px' }
+		{ key: 'tags', label: 'Tags', width: '120px' }
 	];
 
 	function openNew(): void {
@@ -40,7 +41,7 @@
 	});
 
 	$effect(() => {
-		setStatusItems({ right: [{ text: `${name} · ${mine.length} agent${mine.length === 1 ? '' : 's'}` }] });
+		setStatusItems({ right: [{ text: `${name} · ${plural(mine.length, 'agent')}` }] });
 	});
 </script>
 

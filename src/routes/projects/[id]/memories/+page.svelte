@@ -39,8 +39,8 @@
 	const columns: TableColumn<Memory>[] = [
 		{ key: 'kind', label: 'Kind', width: '110px' },
 		{ key: 'text', label: 'Text', mono: true },
-		{ key: 'tags', label: 'Tags', width: '160px' },
-		{ key: 'source', label: 'Source', width: '140px', mono: true },
+		{ key: 'tags', label: 'Tags', width: '200px' },
+		{ key: 'source', label: 'Source', width: '90px', mono: true },
 		{ key: 'age', label: 'Age', width: '80px', align: 'right', sortable: true }
 	];
 
@@ -59,11 +59,18 @@
 			const q = query.trim();
 			let rows: Memory[];
 			if (q) {
-				const results = await api().search({ query: q, limit: SEARCH_LIMIT, project_id: id });
+				const results = await api().search({
+					query: q,
+					limit: SEARCH_LIMIT,
+					project_id: id,
+					scope: 'project_only'
+				});
 				rows = results.map((r) => r.memory);
 			} else {
 				const lists = await Promise.all(
-					memoryStatusesFor(stateFilter as MemoryStateFilter).map((s) => api().listMemories(s, id))
+					memoryStatusesFor(stateFilter as MemoryStateFilter).map((s) =>
+						api().listMemories(s, id, 'project_only')
+					)
 				);
 				rows = lists.flat();
 			}
@@ -188,10 +195,7 @@
 			</div>
 		{/snippet}
 	</Table>
-	<p class="footnote">
-		Showing memories tagged <span class="mono">{name}</span> or sourced from this root. Global memories
-		are in Memories.
-	</p>
+	<p class="footnote">Showing memories scoped to this project. Global memories are in Memories.</p>
 {/if}
 
 <RememberDialog

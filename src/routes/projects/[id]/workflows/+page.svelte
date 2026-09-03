@@ -6,6 +6,7 @@
 	import { Badge, Button, Table, type TableColumn } from '$lib/ds';
 	import { api } from '$lib/daemon.svelte';
 	import { errorMessage, errorLogPath } from '$lib/errors';
+	import { plural } from '$lib/format';
 	import { setStatusItems } from '$lib/shell';
 	import { project, setHeaderActions } from '$lib/stores/project.svelte';
 	import type { Doc } from '$lib/types';
@@ -55,7 +56,7 @@
 
 	$effect(() => {
 		setStatusItems({
-			right: [{ text: `${name} · ${rows.length} workflow${rows.length === 1 ? '' : 's'} · 0 runs` }]
+			right: [{ text: `${name} · ${plural(rows.length, 'workflow')} · ${plural(0, 'run')}` }]
 		});
 	});
 </script>

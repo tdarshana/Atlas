@@ -5,7 +5,7 @@
 	import { Badge, Button, Table, type TableColumn } from '$lib/ds';
 	import { api } from '$lib/daemon.svelte';
 	import { errorMessage, errorLogPath } from '$lib/errors';
-	import { relativeAge } from '$lib/format';
+	import { plural, relativeAge } from '$lib/format';
 	import { setStatusItems } from '$lib/shell';
 	import { project, setHeaderActions } from '$lib/stores/project.svelte';
 	import type { Doc, NewDoc } from '$lib/types';
@@ -78,7 +78,9 @@
 	$effect(() => {
 		setStatusItems({
 			right: [
-				{ text: `${name} · ${split.project.length} practice${split.project.length === 1 ? '' : 's'} · ${split.inherited.length} inherited` }
+				{
+					text: `${name} · ${plural(split.project.length, 'practice')} · ${split.inherited.length} inherited`
+				}
 			]
 		});
 	});
