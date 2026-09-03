@@ -12,6 +12,7 @@
 	import Button from '$lib/ui/Button.svelte';
 	import ErrorState from '$lib/ui/ErrorState.svelte';
 	import Toast from '$lib/ui/Toast.svelte';
+	import CommandPalette from '$lib/search/CommandPalette.svelte';
 	import ActivityRail from '$lib/shell/ActivityRail.svelte';
 	import SidePanel from '$lib/shell/SidePanel.svelte';
 	import StatusBar from '$lib/shell/StatusBar.svelte';
@@ -53,6 +54,9 @@
 </script>
 
 <TitleBar platform={shell.platform} title={viewLabel(shell.view)} oncommand={openPalette} />
+
+<!-- Drops out of the title bar over the command box; it measures the box itself. -->
+<CommandPalette />
 
 <div class="body">
 	<ActivityRail />

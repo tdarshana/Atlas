@@ -7,6 +7,7 @@ import type {
 	Doc,
 	DocKind,
 	ExtractionTestResult,
+	GlobalSearchQuery,
 	Job,
 	Memory,
 	MemoryStatus,
@@ -18,6 +19,7 @@ import type {
 	ProjectContext,
 	RecallHit,
 	RecallQuery,
+	SearchResult,
 	Settings,
 	Stage,
 	StageCount,
@@ -93,6 +95,25 @@ export class AtlasApi {
 
 	setMemoryStatus(id: Uuid, status: MemoryStatus): Promise<Memory> {
 		return this.req('POST', `/api/v1/memories/${encodeURIComponent(id)}/status`, { status });
+	}
+
+	// ---- global search ----
+
+	/**
+	 * Cross-entity search: tasks, memories, projects, files, commits, events and
+	 * workflows in one call. Named `globalSearch` because `search` above is already
+	 * the memories recall route.
+	 */
+	globalSearch(q: GlobalSearchQuery): Promise<SearchResult> {
+		return this.req(
+			'GET',
+			`/api/v1/search${query({
+				q: q.q,
+				project_id: q.project_id,
+				kinds: q.kinds?.join(','),
+				limit: q.limit == null ? null : String(q.limit)
+			})}`
+		);
 	}
 
 	// ---- projects ----

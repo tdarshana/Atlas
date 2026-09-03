@@ -305,3 +305,40 @@ export interface StageCount {
 	stage: string;
 	count: number;
 }
+
+// ---- global search (GET /api/v1/search, crates/atlas-core/src/search/global.rs) ----
+
+/** The seven kinds a search result can hold, in the order the daemon returns them. */
+export type SearchKind = 'task' | 'memory' | 'project' | 'file' | 'commit' | 'event' | 'workflow';
+
+export interface SearchHit {
+	kind: SearchKind;
+	id: string;
+	title: string;
+	subtitle: string | null;
+	project_id: Uuid | null;
+	/** The hit's human pointer: a task key for tasks, the entity id for events. */
+	reference: string | null;
+	score: number;
+	/** Char offsets `[start, end)` into `title`, empty when the hit scored elsewhere. */
+	highlights: [number, number][];
+}
+
+export interface SearchGroup {
+	kind: SearchKind;
+	items: SearchHit[];
+}
+
+export interface SearchResult {
+	groups: SearchGroup[];
+	total: number;
+	took_ms: number;
+}
+
+/** Query string for `GET /api/v1/search`. `project_id` takes one project, not a list. */
+export interface GlobalSearchQuery {
+	q: string;
+	project_id?: Uuid | null;
+	kinds?: SearchKind[];
+	limit?: number;
+}

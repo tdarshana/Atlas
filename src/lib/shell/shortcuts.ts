@@ -3,7 +3,7 @@
 // the focus is in an editable control; Mod+K opens the palette from anywhere.
 
 import { goto } from '$app/navigation';
-import { shell, toggleRail } from './shell.svelte';
+import { shell, toggleRail, toggleSidePanel } from './shell.svelte';
 import { MAIN_VIEWS, SETTINGS_VIEW } from './views';
 
 /** Task 5 listens for this on `window` and opens the command palette. */
@@ -31,9 +31,9 @@ export function handleKeydown(e: KeyboardEvent): void {
 
 	if (isEditable(e.target)) return;
 
-	// Reserved for Task 5's second palette entry point.
 	if (e.key.toLowerCase() === 'j') {
 		e.preventDefault();
+		toggleSidePanel();
 		return;
 	}
 
