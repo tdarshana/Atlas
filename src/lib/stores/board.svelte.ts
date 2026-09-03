@@ -33,6 +33,104 @@ export interface StageRow {
 	original: string | null;
 }
 
+/** Lane geometry from the design: a 340px lane, draggable between these two. */
+export const LANE_DEFAULT = 340;
+export const LANE_MIN = 220;
+export const LANE_MAX = 520;
+
+/** The docked task detail's geometry, the same idea with its own range. */
+export const DETAIL_DEFAULT = 340;
+export const DETAIL_MIN = 280;
+export const DETAIL_MAX = 560;
+
+/** A collapsed lane shows its header and nothing else, so it needs no more than this. */
+export const LANE_COLLAPSED = 44;
+
+const clamp = (value: number, min: number, max: number) =>
+	Number.isFinite(value) ? Math.min(max, Math.max(min, Math.round(value))) : min;
+
+export const clampLane = (width: number): number => clamp(width, LANE_MIN, LANE_MAX);
+export const clampDetail = (width: number): number => clamp(width, DETAIL_MIN, DETAIL_MAX);
+
+/** Lane widths are the person's own arrangement of one board, so they are keyed by it. */
+export function laneKey(projectId: Uuid | null): string {
+	return `atlas.board.${projectId ?? 'global'}.lanes`;
+}
+
+export const DETAIL_KEY = 'atlas.board.detail';
+
+/**
+ * The widths this board was left at, by stage name. Anything unreadable, of the wrong
+ * shape or out of range is dropped rather than thrown: a bad entry must not cost the
+ * board every other lane's width.
+ */
+export function loadLaneWidths(projectId: Uuid | null): Record<string, number> {
+	try {
+		if (typeof localStorage === 'undefined') return {};
+		const raw = localStorage.getItem(laneKey(projectId));
+		if (!raw) return {};
+		const parsed: unknown = JSON.parse(raw);
+		if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+		const out: Record<string, number> = {};
+		for (const [stage, width] of Object.entries(parsed as Record<string, unknown>)) {
+			if (typeof width === 'number' && Number.isFinite(width)) out[stage] = clampLane(width);
+		}
+		return out;
+	} catch {
+		return {};
+	}
+}
+
+export function saveLaneWidths(projectId: Uuid | null, widths: Record<string, number>): void {
+	try {
+		if (typeof localStorage === 'undefined') return;
+		localStorage.setItem(laneKey(projectId), JSON.stringify(widths));
+	} catch {
+		/* storage is unavailable; the lanes are simply the default width next time */
+	}
+}
+
+export function loadDetailWidth(): number {
+	try {
+		if (typeof localStorage === 'undefined') return DETAIL_DEFAULT;
+		const raw = localStorage.getItem(DETAIL_KEY);
+		if (raw === null) return DETAIL_DEFAULT;
+		const width = Number(raw);
+		return Number.isFinite(width) ? clampDetail(width) : DETAIL_DEFAULT;
+	} catch {
+		return DETAIL_DEFAULT;
+	}
+}
+
+export function saveDetailWidth(width: number): void {
+	try {
+		if (typeof localStorage === 'undefined') return;
+		localStorage.setItem(DETAIL_KEY, String(clampDetail(width)));
+	} catch {
+		/* as above */
+	}
+}
+
+/** A lane and whether the column filter has folded it away. */
+export interface LaneView {
+	column: BoardColumn;
+	collapsed: boolean;
+}
+
+/**
+ * The lanes to draw for a column filter. The filter narrows the board rather than
+ * emptying it: the chosen column keeps its cards and the rest fold to a header, so the
+ * side panel's click has an effect on the screen without hiding what it left behind. A
+ * filter naming no column at all leaves every lane open.
+ */
+export function visibleLanes(columns: BoardColumn[], stage: string | null): LaneView[] {
+	const chosen = stage && columns.some((c) => c.stage.name === stage) ? stage : null;
+	return columns.map((column) => ({
+		column,
+		collapsed: chosen !== null && column.stage.name !== chosen
+	}));
+}
+
 export const board = $state({
 	filters: {
 		/** Null is every project, which is what the daemon means by no project_id. */
@@ -61,8 +159,33 @@ export const board = $state({
 	selected: null as string | null,
 	detail: null as TaskDetail | null,
 	detailLoading: false,
-	detailError: null as string | null
+	detailError: null as string | null,
+	/** Lane width by stage name for the open board, seeded from `localStorage`. */
+	laneWidths: {} as Record<string, number>,
+	/** The docked detail's width, shared by every board. */
+	detailWidth: DETAIL_DEFAULT
 });
+
+/** Reads the arrangement one board was left in. Called when the project changes. */
+export function loadLayout(projectId: Uuid | null): void {
+	board.laneWidths = loadLaneWidths(projectId);
+	board.detailWidth = loadDetailWidth();
+}
+
+/** The width a lane is drawn at, which is the default until someone drags it. */
+export function laneWidth(stage: string): number {
+	return board.laneWidths[stage] ?? LANE_DEFAULT;
+}
+
+export function setLaneWidth(stage: string, width: number): void {
+	board.laneWidths = { ...board.laneWidths, [stage]: clampLane(width) };
+	saveLaneWidths(board.filters.projectId, board.laneWidths);
+}
+
+export function setDetailWidth(width: number): void {
+	board.detailWidth = clampDetail(width);
+	saveDetailWidth(board.detailWidth);
+}
 
 /**
  * Every task under its stage, in stage order. A task whose stage is not in the list

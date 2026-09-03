@@ -1,0 +1,129 @@
+// @vitest-environment jsdom
+// What the strip draws: a lane per stage plus the slot that adds one, a header that
+// counts what its lane holds, and the card's priority dot.
+
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, render } from '@testing-library/svelte';
+import type { Stage, Task } from '$lib/types';
+
+vi.mock('$lib/daemon.svelte', () => ({
+	api: () => ({}),
+	daemon: { port: 7433, ready: true, error: null, logPath: '~/.atlas/atlasd.log' },
+	baseUrl: () => 'http://127.0.0.1:7433',
+	boot: async () => {}
+}));
+
+import { deriveColumns, visibleLanes } from '$lib/stores/board.svelte';
+import LaneStrip from './LaneStrip.svelte';
+import { priorityTone } from './card';
+
+afterEach(cleanup);
+
+const STAGES: Stage[] = [
+	{ name: 'Backlog', done: false },
+	{ name: 'Testing', done: false },
+	{ name: 'Done', done: true }
+];
+
+function task(key: string, stage: string): Task {
+	return {
+		id: `id-${key}`,
+		key,
+		project_id: null,
+		seq: 1,
+		title: `Title of ${key}`,
+		description: '',
+		stage,
+		kind: 'chore',
+		priority: 'medium',
+		assignee: null,
+		labels: [],
+		parent_id: null,
+		created_by: 'desktop',
+		created_at: '2026-09-03T10:00:00Z',
+		updated_at: '2026-09-03T10:00:00Z',
+		closed_at: null,
+		blocked_by: [],
+		open_blockers: 0,
+		ready: true,
+		blocked_reason: null
+	};
+}
+
+function strip(stage: string | null = null) {
+	const tasks = [task('ATL-1', 'Backlog'), task('ATL-2', 'Backlog'), task('ATL-3', 'Testing')];
+	return render(LaneStrip, {
+		props: {
+			lanes: visibleLanes(deriveColumns(STAGES, tasks), stage),
+			widths: { Backlog: 420 },
+			stageOptions: STAGES.map((s) => s.name),
+			selected: null,
+			onopen: () => {},
+			onmove: () => {},
+			onresize: () => {},
+			onexpand: () => {},
+			onaddcolumn: () => {}
+		}
+	});
+}
+
+describe('LaneStrip', () => {
+	it('draws one lane per stage and the slot that adds another', () => {
+		const { container } = strip();
+
+		expect(container.querySelectorAll('[data-testid^="board-column-"]')).toHaveLength(
+			STAGES.length
+		);
+		expect(container.querySelector('[data-testid="board-add-column"]')?.textContent).toContain(
+			'Add column'
+		);
+	});
+
+	it('names each lane and counts what it holds', () => {
+		const { container } = strip();
+
+		const header = container.querySelector('[data-testid="board-column-Backlog"] h2');
+		expect(header?.textContent).toBe('Backlog');
+		expect(
+			container.querySelector('[data-testid="board-count-Backlog"]')?.textContent?.trim()
+		).toBe('2');
+		expect(
+			container.querySelector('[data-testid="board-count-Testing"]')?.textContent?.trim()
+		).toBe('1');
+	});
+
+	it('gives a dragged lane its width and the rest the default', () => {
+		const { container } = strip();
+
+		const backlog = container.querySelector<HTMLElement>('[data-testid="board-column-Backlog"]');
+		const done = container.querySelector<HTMLElement>('[data-testid="board-column-Done"]');
+		expect(backlog?.style.getPropertyValue('--lane-w')).toBe('420px');
+		expect(done?.style.getPropertyValue('--lane-w')).toBe('340px');
+	});
+
+	it('opens a card for every task in a lane', () => {
+		const { container } = strip();
+
+		expect(container.querySelector('[data-testid="task-open-ATL-3"]')?.textContent).toContain(
+			'Title of ATL-3'
+		);
+	});
+
+	it('folds the other lanes to a header when a column is filtered, with a way back', () => {
+		const { container } = strip('Testing');
+
+		expect(container.querySelector('[data-testid="task-open-ATL-1"]')).toBeNull();
+		expect(container.querySelector('[data-testid="task-open-ATL-3"]')).not.toBeNull();
+		expect(container.querySelectorAll('[data-testid="board-show-all"]')).toHaveLength(2);
+	});
+});
+
+describe('priorityTone', () => {
+	it('gives each priority its own dot, and an unknown one the quietest', () => {
+		expect(priorityTone('urgent')).toBe('var(--danger)');
+		expect(priorityTone('high')).toBe('var(--warning)');
+		expect(priorityTone('medium')).toBe('var(--text-tertiary)');
+		expect(priorityTone('low')).toBe('var(--border-default)');
+		expect(priorityTone('whenever')).toBe('var(--border-default)');
+	});
+});
