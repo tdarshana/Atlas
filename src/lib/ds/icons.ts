@@ -42,6 +42,7 @@ import Keyboard from '@lucide/svelte/icons/keyboard';
 import Layers from '@lucide/svelte/icons/layers';
 import ListChecks from '@lucide/svelte/icons/list-checks';
 import Loader from '@lucide/svelte/icons/loader';
+import Lock from '@lucide/svelte/icons/lock';
 import Maximize from '@lucide/svelte/icons/maximize';
 import Minus from '@lucide/svelte/icons/minus';
 import PanelLeft from '@lucide/svelte/icons/panel-left';
@@ -122,7 +123,8 @@ export const icons = {
 	'alert-triangle': AlertTriangle,
 	loader: Loader,
 	keyboard: Keyboard,
-	bell: Bell
+	bell: Bell,
+	lock: Lock
 } satisfies Record<string, LucideIcon>;
 
 export type IconName = keyof typeof icons;

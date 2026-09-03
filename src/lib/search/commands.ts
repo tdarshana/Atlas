@@ -31,6 +31,10 @@ export interface PaletteCommand {
 	icon: IconName;
 	/** A logical combo the shell binds, rendered with `KeyHint`. */
 	combo?: string;
+	/** True for a command that only means anything inside the desktop app (window
+	 * placement, quitting the process): hidden outside Tauri rather than listed as a
+	 * command that logs a fallback warning and does nothing. */
+	desktopOnly?: boolean;
 	run: (ctx: CommandContext) => unknown;
 }
 
@@ -107,6 +111,7 @@ export const COMMANDS: PaletteCommand[] = [
 		label: 'Move window to center',
 		hint: '',
 		icon: 'maximize',
+		desktopOnly: true,
 		run: () => desktop('window_center', undefined, () => undefined)
 	},
 	{
@@ -114,6 +119,7 @@ export const COMMANDS: PaletteCommand[] = [
 		label: 'Move window to top left',
 		hint: '',
 		icon: 'maximize',
+		desktopOnly: true,
 		run: () => desktop('window_move', { position: 'top-left' }, () => undefined)
 	},
 	{
@@ -121,6 +127,7 @@ export const COMMANDS: PaletteCommand[] = [
 		label: 'Move window to top right',
 		hint: '',
 		icon: 'maximize',
+		desktopOnly: true,
 		run: () => desktop('window_move', { position: 'top-right' }, () => undefined)
 	},
 	{
@@ -128,6 +135,7 @@ export const COMMANDS: PaletteCommand[] = [
 		label: 'Move window to bottom left',
 		hint: '',
 		icon: 'maximize',
+		desktopOnly: true,
 		run: () => desktop('window_move', { position: 'bottom-left' }, () => undefined)
 	},
 	{
@@ -135,6 +143,7 @@ export const COMMANDS: PaletteCommand[] = [
 		label: 'Move window to bottom right',
 		hint: '',
 		icon: 'maximize',
+		desktopOnly: true,
 		run: () => desktop('window_move', { position: 'bottom-right' }, () => undefined)
 	},
 	{
@@ -149,13 +158,17 @@ export const COMMANDS: PaletteCommand[] = [
 		label: 'Quit Atlas',
 		hint: '',
 		icon: 'x',
+		desktopOnly: true,
 		run: () => desktop('app_exit', undefined, () => undefined)
 	}
 ];
 
-/** Case-insensitive substring over the label and the hint. Blank keeps them all. */
+/** Case-insensitive substring over the label and the hint. Blank keeps them all.
+ * `desktopOnly` commands are left out entirely outside Tauri, where invoking them would
+ * only log a fallback warning and do nothing. */
 export function filterCommands(text: string): PaletteCommand[] {
+	const available = COMMANDS.filter((c) => !c.desktopOnly || inTauri());
 	const needle = text.trim().toLowerCase();
-	if (!needle) return COMMANDS;
-	return COMMANDS.filter((c) => `${c.label} ${c.hint}`.toLowerCase().includes(needle));
+	if (!needle) return available;
+	return available.filter((c) => `${c.label} ${c.hint}`.toLowerCase().includes(needle));
 }

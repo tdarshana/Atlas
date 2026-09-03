@@ -32,4 +32,13 @@ describe('diagnosticsText', () => {
 	it('falls back to "unknown" for a null locale', () => {
 		expect(diagnosticsText({ ...info, locale: null })).toContain('Locale: unknown');
 	});
+
+	it('appends the UI state as one trailing JSON line when given', () => {
+		expect(diagnosticsText(info, { theme: 'dark' })).toContain('UI state: {"theme":"dark"}');
+	});
+
+	it('omits the UI state line when it is missing or empty', () => {
+		expect(diagnosticsText(info)).not.toContain('UI state:');
+		expect(diagnosticsText(info, {})).not.toContain('UI state:');
+	});
 });

@@ -10,6 +10,18 @@ export async function vaultStatus(): Promise<VaultStatus> {
 }
 
 /**
+ * The line an Extraction card shows under the API key field for a vault that will not
+ * mirror it: `null` once it is unlocked, since there is nothing to warn about. Distinct
+ * sentences for "missing" and "locked" so a fresh install and a locked vault do not read
+ * the same.
+ */
+export function vaultHintText(status: VaultStatus): string | null {
+	if (status === 'missing') return 'No vault yet, key not mirrored.';
+	if (status === 'locked') return 'Vault locked, key not mirrored.';
+	return null;
+}
+
+/**
  * Mirrors `key` under `scope` (`"global"` or `"project/<id>"`). Callers check
  * `vaultStatus() === 'unlocked'` first; the Extraction cards show "Vault locked, key not
  * mirrored" rather than calling this while it is not.

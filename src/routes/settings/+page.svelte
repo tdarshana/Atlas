@@ -12,7 +12,7 @@
 	import { NOTHING, relativeAge } from '$lib/format';
 	import { copyText, inTauri, setStatusItems } from '$lib/shell';
 	import { desktop } from '$lib/shell/platform';
-	import { mirrorKey, vaultStatus } from '$lib/shell/vault';
+	import { mirrorKey, vaultHintText, vaultStatus } from '$lib/shell/vault';
 	import { VIEWS } from '$lib/shell/views';
 	import { openLogFolder } from '$lib/search/commands';
 	import { CLAUDE_SNIPPET, CODEX_SNIPPET, nextDisabledTools, toolIcon } from '$lib/mcp';
@@ -206,6 +206,29 @@
 		}
 	}
 
+	/** `"granted"`, `"denied"`, `"default"` (not yet decided), or null before the first
+	 * load; only `"default"` gets an "Allow notifications" button, since the other two
+	 * are already decided one way or the other. */
+	let notifyPermission = $state<string | null>(null);
+
+	async function loadNotifyPermission(): Promise<void> {
+		notifyPermission = await desktop('notification_permission', undefined, () => null);
+	}
+
+	async function requestNotifyPermission(): Promise<void> {
+		notifyPermission = await desktop('notification_request_permission', undefined, () => notifyPermission);
+	}
+
+	const notifyPermissionHint = $derived(
+		notifyPermission === 'granted'
+			? 'Notifications are allowed.'
+			: notifyPermission === 'denied'
+				? 'Notifications are blocked in system settings.'
+				: notifyPermission === 'default'
+					? 'Notifications need permission before any of the above can show one.'
+					: ''
+	);
+
 	let sendingTestNotification = $state(false);
 
 	async function sendTestNotification(): Promise<void> {
@@ -231,21 +254,36 @@
 	let aboutError = $state<string | null>(null);
 
 	async function loadAbout(): Promise<void> {
+		if (!inTauri()) {
+			about = null;
+			aboutError = null;
+			return;
+		}
 		try {
 			about = await desktop('about_info', undefined, () => null);
-			aboutError = about ? null : 'Only available in the desktop app.';
 		} catch (e) {
 			aboutError = errorMessage(e);
 		}
 	}
 
+	/** The persisted UI state (`ui_state_all`), folded into Copy diagnostics: a bug
+	 * report often hinges on which rail, theme or filters were active. */
+	let uiState = $state<Record<string, unknown>>({});
+
+	async function loadUiState(): Promise<void> {
+		uiState = await desktop('ui_state_all', undefined, () => ({}));
+	}
+
 	const diagnostics = $derived(
 		about
-			? diagnosticsText({
-					...about,
-					daemon_version: status.report?.version ?? 'unknown',
-					db_path: status.report?.db_path ?? 'unknown'
-				})
+			? diagnosticsText(
+					{
+						...about,
+						daemon_version: status.report?.version ?? 'unknown',
+						db_path: status.report?.db_path ?? 'unknown'
+					},
+					uiState
+				)
 			: ''
 	);
 
@@ -520,6 +558,8 @@
 		await loadAutostart();
 		await loadAbout();
 		await loadVault();
+		await loadNotifyPermission();
+		await loadUiState();
 	}
 
 	async function loadStages(): Promise<void> {
@@ -676,9 +716,9 @@
 						Changing the base URL clears the stored key; enter it again.
 					</span>
 				{/if}
-				{#if vault !== 'unlocked'}
+				{#if inTauri() && vaultHintText(vault)}
 					<span class="hint" role="status" data-testid="settings-vault-hint">
-						Vault locked, key not mirrored.
+						{vaultHintText(vault)}
 					</span>
 				{/if}
 
@@ -972,6 +1012,23 @@
 				</Button>
 			</div>
 			<div class="card-body">
+				{#if inTauri() && notifyPermissionHint}
+					<div class="recorder-row">
+						<span class="hint" role="status" data-testid="settings-notify-permission">
+							{notifyPermissionHint}
+						</span>
+						{#if notifyPermission === 'default'}
+							<Button
+								variant="ghost"
+								size="sm"
+								data-testid="settings-notify-request-permission"
+								onclick={requestNotifyPermission}
+							>
+								Allow notifications
+							</Button>
+						{/if}
+					</div>
+				{/if}
 				<Checkbox
 					label="Memories waiting for review"
 					checked={notifyFlag('ui.notify.review_pending')}
@@ -1100,30 +1157,37 @@
 				</Button>
 			</div>
 			<div class="card-body">
-				{#if aboutError}
+				{#if !inTauri()}
+					<p class="hint" data-testid="about-browser-hint">Only available in the desktop app.</p>
+				{:else if aboutError}
 					<p class="bad" role="alert" data-testid="about-error">{aboutError}</p>
-				{:else if about}
-					<dl class="about-list" data-testid="about-info">
+				{:else if !about}
+					<p class="hint">Loading…</p>
+				{/if}
+				<dl class="about-list" data-testid="about-info">
+					{#if about}
 						<dt>App version</dt>
 						<dd class="mono">{about.app_version}</dd>
 						<dt>Tauri version</dt>
 						<dd class="mono">{about.tauri_version}</dd>
-						<dt>Daemon version</dt>
-						<dd class="mono">{status.report?.version ?? '…'}</dd>
+					{/if}
+					<dt>Daemon version</dt>
+					<dd class="mono">{status.report?.version ?? '…'}</dd>
+					{#if about}
 						<dt>OS</dt>
 						<dd class="mono">{about.os_type} {about.os_version} ({about.arch})</dd>
 						<dt>Locale</dt>
 						<dd class="mono">{about.locale ?? NOTHING}</dd>
-						<dt>Database</dt>
-						<dd class="mono">{status.report?.db_path ?? '…'}</dd>
+					{/if}
+					<dt>Database</dt>
+					<dd class="mono">{status.report?.db_path ?? '…'}</dd>
+					{#if about}
 						<dt>Log folder</dt>
 						<dd class="mono">{about.log_dir}</dd>
 						<dt>Data folder</dt>
 						<dd class="mono">{about.data_dir}</dd>
-					</dl>
-				{:else}
-					<p class="hint">Loading…</p>
-				{/if}
+					{/if}
+				</dl>
 
 				<div class="group">
 					<span class="group-heading">Updates</span>

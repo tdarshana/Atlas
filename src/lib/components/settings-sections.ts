@@ -14,6 +14,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
 	{ id: 'mcp', label: 'MCP server' },
 	{ id: 'shortcuts', label: 'Shortcuts' },
 	{ id: 'notifications', label: 'Notifications' },
+	{ id: 'security', label: 'Security' },
 	{ id: 'about', label: 'About' }
 ];
 

@@ -413,7 +413,7 @@
 			bind:form={form.extraction}
 			{testing}
 			result={testResult}
-			vaultLocked={vault !== 'unlocked'}
+			vaultStatus={vault}
 			ontest={onTest}
 		/>
 		<DangerCard disabled={project.removing} onremove={() => (confirmingRemove = true)} />

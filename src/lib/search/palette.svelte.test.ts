@@ -201,8 +201,16 @@ describe('commands', () => {
 		expect(filterCommands('by hand').map((c) => c.id)).toEqual(['remember']);
 	});
 
-	it('keeps every command on a blank filter', () => {
-		expect(filterCommands('  ').map((c) => c.id)).toEqual(COMMANDS.map((c) => c.id));
+	it('keeps every non-desktop-only command on a blank filter', () => {
+		expect(filterCommands('  ').map((c) => c.id)).toEqual(
+			COMMANDS.filter((c) => !c.desktopOnly).map((c) => c.id)
+		);
+	});
+
+	it('hides window and quit commands outside Tauri', () => {
+		const ids = filterCommands('').map((c) => c.id);
+		expect(ids).not.toContain('window-center');
+		expect(ids).not.toContain('quit-atlas');
 	});
 
 	it('finds nothing for a string no command carries', () => {

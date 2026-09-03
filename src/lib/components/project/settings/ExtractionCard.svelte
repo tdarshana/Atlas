@@ -3,6 +3,9 @@
 	// stores nothing of its own; unticked, each field it fills in overrides the global one,
 	// field by field, and each field left blank still inherits.
 	import { Button, Checkbox, Input } from '$lib/ds';
+	import { inTauri } from '$lib/shell/platform';
+	import { vaultHintText } from '$lib/shell/vault';
+	import type { VaultStatus } from '$lib/types';
 	import { type ExtractionForm, keyWillDrop } from './settings';
 
 	interface Props {
@@ -10,12 +13,15 @@
 		testing: boolean;
 		/** The last `Test connection` answer, or null before one has been asked for. */
 		result: { ok: boolean; text: string } | null;
-		/** Whether the desktop vault is closed, so a saved key would not be mirrored. */
-		vaultLocked: boolean;
+		/** The desktop vault's status, so a saved key that would not be mirrored says why. */
+		vaultStatus: VaultStatus;
 		ontest: () => void;
 	}
 
-	let { form = $bindable(), testing, result, vaultLocked, ontest }: Props = $props();
+	let { form = $bindable(), testing, result, vaultStatus, ontest }: Props = $props();
+
+	/** `null` outside Tauri: there is no vault to speak of in the browser build. */
+	const vaultHint = $derived(inTauri() ? vaultHintText(vaultStatus) : null);
 
 	const dropping = $derived(keyWillDrop(form));
 
@@ -93,10 +99,8 @@
 				hint={keyHint}
 				bind:value={form.apiKey}
 			/>
-			{#if vaultLocked}
-				<span class="hint" data-testid="project-extraction-vault-hint">
-					Vault locked, key not mirrored.
-				</span>
+			{#if vaultHint}
+				<span class="hint" data-testid="project-extraction-vault-hint">{vaultHint}</span>
 			{/if}
 		{/if}
 
