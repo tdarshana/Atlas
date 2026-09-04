@@ -20,17 +20,22 @@ vi.mock('$lib/daemon.svelte', () => ({
 }));
 
 /** Every bridge built during a test, in order, with the plugin and view it was built for. */
-const built: { pluginId: string; view: string; disposed: boolean }[] = [];
+const built: { pluginId: string; view: string; disposed: boolean; commands: string[] }[] = [];
 
 vi.mock('./bridge', () => ({
 	createBridge: (options: { plugin: { id: string }; view: string }) => {
-		const record = { pluginId: options.plugin.id, view: options.view, disposed: false };
+		const record = { pluginId: options.plugin.id, view: options.view, disposed: false, commands: [] as string[] };
 		built.push(record);
 		return {
+			get disposed() {
+				return record.disposed;
+			},
 			handle: () => {},
 			sendInit: () => {},
 			sendTheme: () => {},
 			sendContext: () => {},
+			sendCommand: (id: string) => record.commands.push(id),
+			callTool: async () => null,
 			dispose: () => {
 				record.disposed = true;
 			}
@@ -38,7 +43,28 @@ vi.mock('./bridge', () => ({
 	}
 }));
 
+/** Every `registerFrame`/`unregisterFrame` the component made, with the id it named. The
+ * real functions still run underneath, so the registry ends up in the same state the app's
+ * would. */
+const registrations: { call: 'register' | 'unregister'; pluginId: string; view?: string }[] = [];
+
+vi.mock('./host.svelte', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('./host.svelte')>();
+	return {
+		...actual,
+		registerFrame: (pluginId: string, bridge: never, view?: string) => {
+			registrations.push({ call: 'register', pluginId, view });
+			actual.registerFrame(pluginId, bridge, view);
+		},
+		unregisterFrame: (pluginId: string, bridge: never) => {
+			registrations.push({ call: 'unregister', pluginId });
+			actual.unregisterFrame(pluginId, bridge);
+		}
+	};
+});
+
 import PluginFrame from './PluginFrame.svelte';
+import { dispatchCommand } from './host.svelte';
 import type { Manifest, PluginInfo } from './types';
 
 function plugin(id: string): PluginInfo {
@@ -77,6 +103,7 @@ function hello(frame: HTMLIFrameElement): void {
 
 beforeEach(() => {
 	built.length = 0;
+	registrations.length = 0;
 });
 
 afterEach(() => {
@@ -121,6 +148,34 @@ describe('PluginFrame binding', () => {
 		expect(built).toHaveLength(2);
 		expect(built[1]).toMatchObject({ pluginId: 'beta', view: 'main' });
 		expect(built[1].disposed).toBe(false);
+	});
+
+	// The bug this guards: `detachBridge` runs from an `$effect.pre` that fires *because*
+	// the plugin prop changed, and `$props()` reads are live, so reading `plugin.id` there
+	// gave the plugin being navigated *to*. The outgoing bridge was then unregistered under
+	// the incoming id, which matches nothing, and stayed in the outgoing plugin's set
+	// forever. `dispatchCommand` cannot be the assertion here: it now drops a disposed entry
+	// on sight, deliberately, so it answers 0 either way. The id used to unregister is the
+	// thing that actually differs.
+	it('unregisters the outgoing bridge under the plugin it was registered with', async () => {
+		const { rerender } = render(PluginFrame, { props: { plugin: plugin('alpha'), view: 'main' } });
+		const first = await frameFor('alpha');
+		hello(first);
+		expect(registrations).toEqual([{ call: 'register', pluginId: 'alpha', view: 'main' }]);
+
+		await rerender({ plugin: plugin('beta'), view: 'main' });
+		const second = await frameFor('beta');
+		hello(second);
+
+		expect(registrations).toEqual([
+			{ call: 'register', pluginId: 'alpha', view: 'main' },
+			{ call: 'unregister', pluginId: 'alpha' },
+			{ call: 'register', pluginId: 'beta', view: 'main' }
+		]);
+		// Nothing is left listening for the plugin that was navigated away from, so the
+		// palette's "open its section instead" fallback still fires for it.
+		expect(dispatchCommand('alpha', 'say-hello')).toBe(0);
+		expect(dispatchCommand('beta', 'say-hello')).toBe(1);
 	});
 
 	it('does the same for a view change, which never touches the URL', async () => {

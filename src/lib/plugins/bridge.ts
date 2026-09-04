@@ -91,6 +91,10 @@ export interface BridgeOptions {
 }
 
 export interface Bridge {
+	/** False once `dispose` has run. Every method is a no-op after that, so a registry
+	 * holding a disposed bridge is holding something that can never reach a frame; the
+	 * host reads this to tell a live delivery from one that goes nowhere. */
+	readonly disposed: boolean;
 	handle(event: { source?: unknown; data?: unknown }): void;
 	sendInit(theme: ThemeTokens, context?: FrameContext): void;
 	sendTheme(theme: ThemeTokens): void;
@@ -314,6 +318,9 @@ export function createBridge(options: BridgeOptions): Bridge {
 				});
 				post({ type: 'atlas:tool', id, name, args });
 			});
+		},
+		get disposed() {
+			return disposed;
 		},
 		dispose() {
 			disposed = true;

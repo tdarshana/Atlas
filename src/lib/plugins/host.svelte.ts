@@ -84,12 +84,28 @@ export function callPluginTool(pluginId: string, tool: string, args: unknown): P
 	return bridge.callTool(tool, args);
 }
 
-/** Sends `commandId` to every mounted frame of `pluginId`, and answers how many got it. */
+/**
+ * Sends `commandId` to every mounted frame of `pluginId`, and answers how many got it.
+ *
+ * A disposed bridge is skipped and not counted. The palette's plugin commands treat a
+ * count of zero as "nobody is listening, open the plugin's section instead", so counting a
+ * frame whose every method is a no-op would swallow the command and the fallback with it.
+ * A disposed entry should not be in the map at all, and one that is gets cleaned out here.
+ */
 export function dispatchCommand(pluginId: string, commandId: string): number {
 	const set = mountedFrames.get(pluginId);
 	if (!set) return 0;
-	for (const bridge of set) bridge.sendCommand(commandId);
-	return set.size;
+	let delivered = 0;
+	for (const bridge of [...set]) {
+		if (bridge.disposed) {
+			set.delete(bridge);
+			continue;
+		}
+		bridge.sendCommand(commandId);
+		delivered += 1;
+	}
+	if (set.size === 0) mountedFrames.delete(pluginId);
+	return delivered;
 }
 
 export async function loadPlugins(): Promise<void> {

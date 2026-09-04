@@ -4,7 +4,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Bridge } from '$lib/plugins/bridge';
 import { collectContributions } from '$lib/plugins/contributions';
-import { registerFrame, unregisterFrame } from '$lib/plugins/host.svelte';
+import { dispatchCommand, registerFrame, unregisterFrame } from '$lib/plugins/host.svelte';
 import type { Contributes, Manifest, PluginInfo } from '$lib/plugins/types';
 import { clear, toasts } from '$lib/ui/toasts.svelte';
 import { pluginCommands } from './commands';
@@ -51,15 +51,21 @@ const withoutSection = collectContributions([
 /** A bridge that records what was sent to it, which is all a dispatch touches. */
 function fakeBridge(): Bridge & { sent: string[] } {
 	const sent: string[] = [];
+	let disposed = false;
 	return {
 		sent,
+		get disposed() {
+			return disposed;
+		},
 		handle: () => {},
 		sendInit: () => {},
 		sendTheme: () => {},
 		sendContext: () => {},
 		sendCommand: (id: string) => sent.push(id),
 		callTool: async () => null,
-		dispose: () => {}
+		dispose: () => {
+			disposed = true;
+		}
 	};
 }
 
@@ -112,6 +118,42 @@ describe('pluginCommands', () => {
 		unregisterFrame('hello-world', one);
 		unregisterFrame('hello-world', two);
 		unregisterFrame('quiet', other);
+	});
+
+	// A registration that outlived its frame must not count as a listener. The frame
+	// component unregisters under the id it registered with, so this should never happen;
+	// `dispatchCommand` refuses to count it anyway, because the cost of getting it wrong is
+	// a command that silently does nothing instead of opening the plugin.
+	it('falls back to the section when the only registered frame is disposed', () => {
+		const stale = fakeBridge();
+		registerFrame('hello-world', stale);
+		stale.dispose();
+
+		const command = pluginCommands(withSection)[0];
+		const context = ctx();
+		command.run(context);
+
+		expect(stale.sent).toEqual([]);
+		expect(context.goto).toHaveBeenCalledWith('/plugins/hello-world/hello-view');
+		// And the stale entry is gone, so the next run does not have to rediscover it.
+		expect(dispatchCommand('hello-world', 'say-hello')).toBe(0);
+
+		// Belt and braces: a stale entry must never outlive its test, whatever prunes it.
+		unregisterFrame('hello-world', stale);
+	});
+
+	it('still delivers to the live frames when one of several is disposed', () => {
+		const live = fakeBridge();
+		const stale = fakeBridge();
+		registerFrame('hello-world', live);
+		registerFrame('hello-world', stale);
+		stale.dispose();
+
+		expect(dispatchCommand('hello-world', 'say-hello')).toBe(1);
+		expect(live.sent).toEqual(['say-hello']);
+		expect(stale.sent).toEqual([]);
+
+		unregisterFrame('hello-world', live);
 	});
 
 	it('opens the first section of the plugin when no frame is mounted', () => {

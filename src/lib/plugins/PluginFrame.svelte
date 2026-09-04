@@ -55,6 +55,9 @@
 	let frame = $state<HTMLIFrameElement>();
 	let reported = $state(DEFAULT_HEIGHT);
 	let bridge: Bridge | null = null;
+	/** The plugin id and view the live bridge was registered under, so it is unregistered
+	 * under the same pair however the props have moved since. Null whenever `bridge` is. */
+	let registration: { pluginId: string; view: string } | null = null;
 	/** The context as last sent, so a parent that hands over a fresh object holding the
 	 * same values does not make the frame re-render for nothing. */
 	let sentContext = '';
@@ -126,14 +129,22 @@
 			onResize: (h) => (reported = h),
 			onNotify: (kind, text) => push(kind, `${title}: ${text}`)
 		});
-		registerFrame(plugin.id, bridge, view);
+		// Remembered, not re-read at teardown. `detachBridge` runs from an `$effect.pre` that
+		// fires *because* the plugin prop changed, and `$props()` reads are live, so
+		// `plugin.id` there is already the plugin being navigated to. Unregistering under
+		// that id leaves the disposed bridge in the outgoing plugin's `mountedFrames` set,
+		// where `dispatchCommand` would count it as a live listener and swallow the
+		// palette's fallback for a plugin that is no longer mounted at all.
+		registration = { pluginId: plugin.id, view };
+		registerFrame(registration.pluginId, bridge, registration.view);
 		sentContext = JSON.stringify(context ?? {});
 		bridge.sendInit(themeTokens(), context);
 	}
 
 	function detachBridge(): void {
 		if (!bridge) return;
-		unregisterFrame(plugin.id, bridge);
+		if (registration) unregisterFrame(registration.pluginId, bridge);
+		registration = null;
 		bridge.dispose();
 		bridge = null;
 	}
