@@ -115,7 +115,6 @@
 				<div class="empty">
 					<span class="title">No project practices yet</span>
 					<span class="hint">A practice is a standing rule agents should follow, written in Markdown.</span>
-					<Button variant="primary" onclick={openNew}>New practice</Button>
 				</div>
 			{:else}
 				<div class="empty">

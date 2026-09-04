@@ -41,7 +41,6 @@
 	<span class="mono name">{name}</span>
 	{#if root}<span class="mono root">{root}</span>{/if}
 	<span class="spacer"></span>
-	<div class="actions">{@render project.actions?.()}</div>
 </div>
 
 <!-- A project that would not load has no tabs worth offering: every one of them reads the
@@ -58,6 +57,15 @@
 	</ErrorState>
 {:else}
 	<TabStrip items={tabs} {active} />
+
+	<!-- Each tab's own controls sit inside the tab, under the strip, not in the hub
+	     header: the header names the project, the toolbar belongs to what is open. -->
+	{#if project.actions}
+		<div class="tab-toolbar" data-testid="tab-toolbar">
+			<span class="spacer"></span>
+			<div class="actions">{@render project.actions()}</div>
+		</div>
+	{/if}
 
 	{@render children()}
 {/if}
@@ -87,6 +95,13 @@
 
 	.spacer {
 		flex: 1;
+	}
+
+	.tab-toolbar {
+		display: flex;
+		align-items: center;
+		min-height: 28px;
+		flex: 0 0 auto;
 	}
 
 	.actions {
