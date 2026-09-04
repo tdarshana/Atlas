@@ -28,6 +28,9 @@ pub async fn ensure_daemon(paths: &AtlasPaths, port: u16) -> anyhow::Result<u16>
 /// this is worth a short wait first, not the full readiness deadline below.
 const START_RACE_TIMEOUT: Duration = Duration::from_millis(1_500);
 const START_RACE_STEP: Duration = Duration::from_millis(150);
+/// How long to wait on a start that has already written `daemon.json` from a live
+/// atlasd pid before giving up on it and spawning anyway.
+const LIVE_START_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Waits up to `timeout`, polling every `step`, for the daemon to announce itself
 /// either by its port answering or by `daemon.json` appearing. Returns whether either
@@ -47,6 +50,19 @@ pub async fn ensure_daemon_with(paths: &AtlasPaths, port: u16, atlasd: Option<Pa
     if is_up(port).await { return Ok(port); }
     wait_for_daemon(paths, port, START_RACE_TIMEOUT, START_RACE_STEP).await;
     if is_up(port).await { return Ok(port); }
+    // `daemon.json` lands before atlasd serves, so a live pid in it means a start is
+    // in flight: wait for that port instead of spawning a competitor that would only
+    // lose the DuckDB lock race. A stale file from a crash (dead or recycled pid) falls
+    // through to a fresh spawn.
+    if let Some(pid) = daemon_info(paths).and_then(|i| i["pid"].as_u64()) {
+        if is_atlasd(pid) {
+            let deadline = Instant::now() + LIVE_START_TIMEOUT;
+            while Instant::now() < deadline {
+                if is_up(port).await { return Ok(port); }
+                tokio::time::sleep(START_RACE_STEP).await;
+            }
+        }
+    }
     paths.ensure()?;
     let bin = atlasd.unwrap_or_else(atlasd_path);
     let log = std::fs::OpenOptions::new().create(true).append(true).open(paths.log_file())?;

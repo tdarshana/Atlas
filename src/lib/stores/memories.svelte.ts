@@ -100,6 +100,9 @@ export async function loadMemories(): Promise<void> {
 		// Independent of the query text and the kind filter: this is always the whole
 		// active set's facets, not just what the current search matched.
 		const facetsPromise = api().memoryFacets(projectId, facetsListScope());
+		// If the hits fetch throws first, the facets promise must still be observed
+		// or a second failure becomes an unhandled rejection.
+		facetsPromise.catch(() => {});
 		if (query) {
 			// No `kinds` here on purpose: one fetch per load, and the side panel needs the
 			// counts for the kinds the filter is currently hiding.
