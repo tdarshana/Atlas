@@ -121,5 +121,6 @@ fn atlas_entry() -> Resolved {
         },
         env: BTreeMap::new(),
         headers: BTreeMap::new(),
+        cwd: None,
     }
 }

@@ -27,15 +27,25 @@ pub const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 /// Checks one server. The secret values in `resolved` are passed to the child process or
 /// sent as request headers and never appear in the result.
 pub async fn run(resolved: &Resolved) -> McpCheckResult {
+    run_with_timeout(resolved, CHECK_TIMEOUT).await
+}
+
+/// [`run`] with the cap given rather than taken from [`CHECK_TIMEOUT`]. Only a test has
+/// any reason to pass a different one: waiting out the real fifteen seconds to prove the
+/// timeout path is not something a test suite can afford, and asserting a shorter run has
+/// simply not returned proves nothing about the constant.
+pub async fn run_with_timeout(resolved: &Resolved, cap: Duration) -> McpCheckResult {
     let start = Instant::now();
-    let outcome = tokio::time::timeout(CHECK_TIMEOUT, probe(resolved)).await;
+    let outcome = tokio::time::timeout(cap, probe(resolved)).await;
     let elapsed_ms = start.elapsed().as_millis() as u64;
     match outcome {
         Ok(Ok(result)) => McpCheckResult { elapsed_ms, ..result },
         Ok(Err(error)) => McpCheckResult { ok: false, error: Some(error), elapsed_ms, ..Default::default() },
+        // Dropping the timed-out future drops the transport, whose `Drop` kills the child:
+        // a server that will not speak does not outlive the check that started it.
         Err(_) => McpCheckResult {
             ok: false,
-            error: Some(format!("the server did not answer within {}s", CHECK_TIMEOUT.as_secs())),
+            error: Some(format!("the server did not answer within {}s", cap.as_secs_f64())),
             elapsed_ms,
             ..Default::default()
         },
@@ -50,6 +60,11 @@ async fn probe(resolved: &Resolved) -> Result<McpCheckResult, String> {
             cmd.args(args);
             for (key, value) in &resolved.env {
                 cmd.env(key, value);
+            }
+            // Codex's `cwd`, which a relative command depends on. Left alone otherwise,
+            // so the child inherits the daemon's.
+            if let Some(cwd) = &resolved.cwd {
+                cmd.current_dir(cwd);
             }
             // The child's stderr goes nowhere rather than into the daemon's own, which is
             // the default: a checked server's diagnostics are not Atlas's log. It is not

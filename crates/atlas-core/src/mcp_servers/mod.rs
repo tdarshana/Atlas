@@ -21,10 +21,11 @@ pub mod generic_json;
 
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::db::Db;
 use crate::models::{McpCheckResult, McpServerEntry, McpServerList, NewMcpServer, Project};
+use crate::paths::AtlasPaths;
 use crate::{AtlasError, Result};
 
 /// No agent configuration file is read past this. A file larger than it is reported as a
@@ -39,6 +40,10 @@ pub struct Resolved {
     pub entry: McpServerEntry,
     pub env: BTreeMap<String, String>,
     pub headers: BTreeMap<String, String>,
+    /// The working directory the agent would start the server in, for the one agent that
+    /// configures one (Codex's `cwd`). A relative command depends on it, so a check that
+    /// ignored it would fail on a server the agent itself starts.
+    pub cwd: Option<PathBuf>,
 }
 
 /// Everything discovery found, plus what it could not read.
@@ -76,29 +81,29 @@ pub async fn check_mcp_server(home: &Path, project: Option<&Project>, id: &str) 
 /// Flips the agent's own enable switch for one server. `Invalid` where the agent has
 /// none: see [`edit::set_enabled`].
 pub fn set_mcp_server_enabled(
+    paths: &AtlasPaths,
     db: &Db,
-    home: &Path,
     project: Option<&Project>,
     id: &str,
     enabled: bool,
     actor: &str,
 ) -> Result<McpServerEntry> {
-    let resolved = find(home, project, id)?;
-    edit::set_enabled(db, home, project, &resolved.entry, enabled, actor)?;
-    find(home, project, id).map(|r| r.entry)
+    let resolved = find(paths.agent_home(), project, id)?;
+    edit::set_enabled(paths, db, project, &resolved.entry, enabled, actor)?;
+    find(paths.agent_home(), project, id).map(|r| r.entry)
 }
 
 /// Writes a new server into one agent's configuration. Refuses a name the target file
 /// already holds rather than replacing it.
-pub fn add_mcp_server(db: &Db, home: &Path, project: Option<&Project>, input: &NewMcpServer, actor: &str) -> Result<McpServerEntry> {
-    let id = edit::add_server(db, home, project, input, actor)?;
-    find(home, project, &id).map(|r| r.entry)
+pub fn add_mcp_server(paths: &AtlasPaths, db: &Db, project: Option<&Project>, input: &NewMcpServer, actor: &str) -> Result<McpServerEntry> {
+    let id = edit::add_server(paths, db, project, input, actor)?;
+    find(paths.agent_home(), project, &id).map(|r| r.entry)
 }
 
 /// Deletes a server from the file it came from.
-pub fn remove_mcp_server(db: &Db, home: &Path, project: Option<&Project>, id: &str, actor: &str) -> Result<()> {
-    let resolved = find(home, project, id)?;
-    edit::remove_server(db, project, &resolved.entry, actor)
+pub fn remove_mcp_server(paths: &AtlasPaths, db: &Db, project: Option<&Project>, id: &str, actor: &str) -> Result<()> {
+    let resolved = find(paths.agent_home(), project, id)?;
+    edit::remove_server(paths, db, project, &resolved.entry, actor)
 }
 
 /// The one entry whose id matches, resolved against a listing taken right now.
@@ -163,7 +168,6 @@ mod tests {
     use crate::models::{McpServerScope, McpServerSource, McpTransport, McpTransportInput};
     use crate::projects::ProjectRepo;
     use std::collections::BTreeMap;
-    use std::path::PathBuf;
 
     /// The value planted in every `env` and `headers` block in the fixtures. No listing,
     /// no entry and no error may ever carry it.
@@ -175,10 +179,11 @@ mod tests {
     /// Copied rather than read in place, because every edit test writes, and the real
     /// `~/.claude.json` and `~/.codex/config.toml` must never be within reach: nothing
     /// here ever reads a path the fixture did not put there.
-    fn fixture(db: &Db) -> (tempfile::TempDir, PathBuf, Project) {
+    fn fixture(db: &Db) -> (tempfile::TempDir, AtlasPaths, Project) {
         let temp = tempfile::tempdir().unwrap();
         let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp_servers");
         let home = temp.path().join("home");
+        let temp_atlas = temp.path().join("atlas-home");
         let root = temp.path().join("project");
         copy_tree(&fixtures.join("home"), &home);
         copy_tree(&fixtures.join("project"), &root);
@@ -198,7 +203,10 @@ mod tests {
 
         let detected = crate::projects::Detected { root: root.clone(), remote: None };
         let project = ProjectRepo::new(db).upsert(&detected, None, "t").unwrap();
-        (temp, home, project)
+        // Atlas's own home and the agent home are two different directories here, which is
+        // what a real daemon under `ATLAS_SYNC_HOME` looks like and what keeps the backups
+        // out of the tree being edited.
+        (temp, AtlasPaths::at(temp_atlas).with_skills_home(&home), project)
     }
 
     fn copy_tree(from: &Path, to: &Path) {
@@ -230,8 +238,8 @@ mod tests {
     #[test]
     fn the_global_listing_covers_every_agent() {
         let db = Db::open_in_memory().unwrap();
-        let (_temp, home, _project) = fixture(&db);
-        let list = list_mcp_servers(&home, None);
+        let (_temp, paths, _project) = fixture(&db);
+        let list = list_mcp_servers(paths.agent_home(), None);
 
         assert_eq!(
             ids(&list),
@@ -240,6 +248,7 @@ mod tests {
                 "codex:user:computer-use",
                 "cursor:user:cursor-off",
                 "cursor:user:cursor-one",
+                "gemini:user:gemini-http",
                 "gemini:user:gemini-one",
                 "codex:user:node_repl",
                 "plugin:acme/tools:packaged",
@@ -277,6 +286,12 @@ mod tests {
 
         // Gemini CLI and Windsurf have no switch of their own, so Remove is the only way.
         assert!(!entry(&list, "gemini:user:gemini-one").can_toggle);
+        // Gemini spells the HTTP key `httpUrl`; reading it as a URL is what keeps a valid
+        // server off the warnings list.
+        assert_eq!(
+            entry(&list, "gemini:user:gemini-http").transport,
+            McpTransport::Http { url: "https://gemini.example/mcp".into(), header_keys: vec!["Authorization".into()] }
+        );
         assert!(entry(&list, "windsurf:user:windsurf-one").can_remove);
 
         // The newest plugin version wins, its placeholders come through verbatim, and
@@ -306,8 +321,8 @@ mod tests {
     #[test]
     fn a_project_listing_is_that_project_plus_the_plugins_and_atlas() {
         let db = Db::open_in_memory().unwrap();
-        let (_temp, home, project) = fixture(&db);
-        let list = list_mcp_servers(&home, Some(&project));
+        let (_temp, paths, project) = fixture(&db);
+        let list = list_mcp_servers(paths.agent_home(), Some(&project));
 
         assert_eq!(
             ids(&list),
@@ -347,14 +362,14 @@ mod tests {
     #[test]
     fn no_secret_value_ever_leaves_the_daemon() {
         let db = Db::open_in_memory().unwrap();
-        let (_temp, home, project) = fixture(&db);
-        for list in [list_mcp_servers(&home, None), list_mcp_servers(&home, Some(&project))] {
+        let (_temp, paths, project) = fixture(&db);
+        for list in [list_mcp_servers(paths.agent_home(), None), list_mcp_servers(paths.agent_home(), Some(&project))] {
             let json = serde_json::to_string(&list).unwrap();
             assert!(!json.contains(SECRET), "a secret reached the wire: {json}");
             // The key names do come through, which is what a client needs to show.
             assert!(json.contains("env_keys") || json.contains("header_keys"), "{json}");
         }
-        let global = serde_json::to_string(&list_mcp_servers(&home, None)).unwrap();
+        let global = serde_json::to_string(&list_mcp_servers(paths.agent_home(), None)).unwrap();
         assert!(global.contains("NODE_TOKEN"), "the key name is what a listing shows: {global}");
     }
 
@@ -363,8 +378,8 @@ mod tests {
     #[test]
     fn a_scratch_plugin_directory_is_skipped() {
         let db = Db::open_in_memory().unwrap();
-        let (_temp, home, _project) = fixture(&db);
-        let list = list_mcp_servers(&home, None);
+        let (_temp, paths, _project) = fixture(&db);
+        let list = list_mcp_servers(paths.agent_home(), None);
         assert!(list.servers.iter().all(|s| s.name != "half-installed"), "{:?}", ids(&list));
     }
 
@@ -372,9 +387,9 @@ mod tests {
     #[test]
     fn a_broken_config_is_a_warning() {
         let db = Db::open_in_memory().unwrap();
-        let (_temp, home, _project) = fixture(&db);
-        std::fs::write(home.join(".cursor/mcp.json"), "{ this is not json").unwrap();
-        let list = list_mcp_servers(&home, None);
+        let (_temp, paths, _project) = fixture(&db);
+        std::fs::write(paths.agent_home().join(".cursor/mcp.json"), "{ this is not json").unwrap();
+        let list = list_mcp_servers(paths.agent_home(), None);
         assert!(list.servers.iter().all(|s| s.source != McpServerSource::Cursor), "{:?}", ids(&list));
         assert_eq!(list.warnings.len(), 1, "{:?}", list.warnings);
         assert!(list.warnings[0].contains(".cursor/mcp.json"), "{:?}", list.warnings);
@@ -387,21 +402,21 @@ mod tests {
     #[test]
     fn claude_code_enable_and_disable_round_trip() {
         let db = Db::open_in_memory().unwrap();
-        let (_temp, home, project) = fixture(&db);
+        let (_temp, paths, project) = fixture(&db);
         let project = Some(&project);
 
-        set_mcp_server_enabled(&db, &home, project, "claude:local:playwright", false, "t").unwrap();
-        assert!(!entry(&list_mcp_servers(&home, project), "claude:local:playwright").enabled);
-        set_mcp_server_enabled(&db, &home, project, "claude:local:playwright", true, "t").unwrap();
-        assert!(entry(&list_mcp_servers(&home, project), "claude:local:playwright").enabled);
+        set_mcp_server_enabled(&paths, &db, project, "claude:local:playwright", false, "t").unwrap();
+        assert!(!entry(&list_mcp_servers(paths.agent_home(), project), "claude:local:playwright").enabled);
+        set_mcp_server_enabled(&paths, &db, project, "claude:local:playwright", true, "t").unwrap();
+        assert!(entry(&list_mcp_servers(paths.agent_home(), project), "claude:local:playwright").enabled);
 
-        set_mcp_server_enabled(&db, &home, project, "claude:project:unapproved", true, "t").unwrap();
-        let list = list_mcp_servers(&home, project);
+        set_mcp_server_enabled(&paths, &db, project, "claude:project:unapproved", true, "t").unwrap();
+        let list = list_mcp_servers(paths.agent_home(), project);
         assert!(entry(&list, "claude:project:unapproved").enabled, "approving it is what turns it on");
         assert!(entry(&list, "claude:project:approved").enabled, "the other one is untouched");
 
         // The rest of `~/.claude.json` survived four rewrites.
-        let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.join(".claude.json")).unwrap()).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(paths.agent_home().join(".claude.json")).unwrap()).unwrap();
         assert_eq!(config["numStartups"], 7);
         assert_eq!(config["mcpServers"]["svelte"]["headers"]["Authorization"], format!("Bearer {SECRET}"));
     }
@@ -411,13 +426,13 @@ mod tests {
     #[test]
     fn cursor_enable_and_disable_round_trip() {
         let db = Db::open_in_memory().unwrap();
-        let (_temp, home, _project) = fixture(&db);
-        set_mcp_server_enabled(&db, &home, None, "cursor:user:cursor-one", false, "t").unwrap();
-        let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.join(".cursor/mcp.json")).unwrap()).unwrap();
+        let (_temp, paths, _project) = fixture(&db);
+        set_mcp_server_enabled(&paths, &db, None, "cursor:user:cursor-one", false, "t").unwrap();
+        let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(paths.agent_home().join(".cursor/mcp.json")).unwrap()).unwrap();
         assert_eq!(config["mcpServers"]["cursor-one"]["disabled"], true);
 
-        set_mcp_server_enabled(&db, &home, None, "cursor:user:cursor-one", true, "t").unwrap();
-        let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.join(".cursor/mcp.json")).unwrap()).unwrap();
+        set_mcp_server_enabled(&paths, &db, None, "cursor:user:cursor-one", true, "t").unwrap();
+        let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(paths.agent_home().join(".cursor/mcp.json")).unwrap()).unwrap();
         assert!(config["mcpServers"]["cursor-one"].get("disabled").is_none(), "{config}");
         assert_eq!(config["mcpServers"]["cursor-one"]["env"]["CURSOR_TOKEN"], SECRET, "the value stayed in its own file");
     }
@@ -427,9 +442,9 @@ mod tests {
     #[test]
     fn an_agent_with_no_switch_refuses_the_toggle() {
         let db = Db::open_in_memory().unwrap();
-        let (_temp, home, _project) = fixture(&db);
+        let (_temp, paths, _project) = fixture(&db);
         for id in ["gemini:user:gemini-one", "windsurf:user:windsurf-one", "plugin:acme/tools:packaged", "atlas", "claude:user:svelte"] {
-            let err = set_mcp_server_enabled(&db, &home, None, id, false, "t").unwrap_err();
+            let err = set_mcp_server_enabled(&paths, &db, None, id, false, "t").unwrap_err();
             assert!(matches!(err, AtlasError::Invalid(ref m) if m == edit::NO_SWITCH), "{id}: {err}");
         }
         let audited: i64 = db
@@ -442,8 +457,8 @@ mod tests {
     #[test]
     fn adding_a_codex_server_preserves_the_document() {
         let db = Db::open_in_memory().unwrap();
-        let (_temp, home, _project) = fixture(&db);
-        let before = std::fs::read_to_string(home.join(".codex/config.toml")).unwrap();
+        let (_temp, paths, _project) = fixture(&db);
+        let before = std::fs::read_to_string(paths.agent_home().join(".codex/config.toml")).unwrap();
 
         let input = NewMcpServer {
             source: McpServerSource::Codex,
@@ -456,18 +471,18 @@ mod tests {
                 env: BTreeMap::from([("ADDED_TOKEN".to_string(), SECRET.to_string())]),
             },
         };
-        let added = add_mcp_server(&db, &home, None, &input, "t").unwrap();
+        let added = add_mcp_server(&paths, &db, None, &input, "t").unwrap();
         assert_eq!(added.id, "codex:user:added");
         assert_eq!(added.transport, McpTransport::Stdio { command: "added-server".into(), args: vec!["--go".into()], env_keys: vec!["ADDED_TOKEN".into()] });
 
-        let after = std::fs::read_to_string(home.join(".codex/config.toml")).unwrap();
+        let after = std::fs::read_to_string(paths.agent_home().join(".codex/config.toml")).unwrap();
         assert!(after.starts_with(&before), "everything before the addition is unchanged:\n{after}");
         assert!(after.contains("# Codex's own file, comments and all."), "{after}");
         assert!(after.contains("[mcp_servers.added]"), "{after}");
         assert!(after.contains("ADDED_TOKEN"), "the value is written into the file it belongs in");
 
         // A second add of the same name is a conflict, not a replacement.
-        let err = add_mcp_server(&db, &home, None, &input, "t").unwrap_err();
+        let err = add_mcp_server(&paths, &db, None, &input, "t").unwrap_err();
         assert!(matches!(err, AtlasError::Conflict(_)), "{err}");
     }
 
@@ -475,7 +490,7 @@ mod tests {
     #[test]
     fn adding_a_json_server_keeps_the_existing_keys() {
         let db = Db::open_in_memory().unwrap();
-        let (_temp, home, _project) = fixture(&db);
+        let (_temp, paths, _project) = fixture(&db);
         let input = NewMcpServer {
             source: McpServerSource::Claude,
             scope: McpServerScope::User,
@@ -486,11 +501,11 @@ mod tests {
                 headers: BTreeMap::from([("Authorization".to_string(), SECRET.to_string())]),
             },
         };
-        let added = add_mcp_server(&db, &home, None, &input, "t").unwrap();
+        let added = add_mcp_server(&paths, &db, None, &input, "t").unwrap();
         assert_eq!(added.id, "claude:user:added");
         assert_eq!(added.transport, McpTransport::Http { url: "https://added.example/mcp".into(), header_keys: vec!["Authorization".into()] });
 
-        let text = std::fs::read_to_string(home.join(".claude.json")).unwrap();
+        let text = std::fs::read_to_string(paths.agent_home().join(".claude.json")).unwrap();
         let config: serde_json::Value = serde_json::from_str(&text).unwrap();
         let keys: Vec<&str> = config.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(keys, vec!["numStartups", "mcpServers", "projects"], "the file's own key order survived");
@@ -506,13 +521,13 @@ mod tests {
     #[test]
     fn only_a_project_scope_may_create_a_file() {
         let db = Db::open_in_memory().unwrap();
-        let (_temp, home, project) = fixture(&db);
+        let (_temp, paths, project) = fixture(&db);
         std::fs::remove_file(Path::new(&project.root_path).join(".cursor/mcp.json")).unwrap();
-        std::fs::remove_dir_all(home.join(".gemini")).unwrap();
+        std::fs::remove_dir_all(paths.agent_home().join(".gemini")).unwrap();
 
         let created = add_mcp_server(
+            &paths,
             &db,
-            &home,
             Some(&project),
             &NewMcpServer {
                 source: McpServerSource::Cursor,
@@ -527,8 +542,8 @@ mod tests {
         assert_eq!(created.id, "cursor:project:fresh");
 
         let err = add_mcp_server(
+            &paths,
             &db,
-            &home,
             None,
             &NewMcpServer {
                 source: McpServerSource::Gemini,
@@ -541,7 +556,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, AtlasError::Invalid(ref m) if m.contains("does not create a configuration file")), "{err}");
-        assert!(!home.join(".gemini").exists(), "nothing was created");
+        assert!(!paths.agent_home().join(".gemini").exists(), "nothing was created");
     }
 
     /// A plugin's and Atlas's rows are never removable, and a removal takes the entry out
@@ -549,34 +564,38 @@ mod tests {
     #[test]
     fn removing_a_server_edits_only_its_own_file() {
         let db = Db::open_in_memory().unwrap();
-        let (_temp, home, _project) = fixture(&db);
+        let (_temp, paths, _project) = fixture(&db);
         for id in ["plugin:acme/tools:packaged", "atlas"] {
-            let err = remove_mcp_server(&db, &home, None, id, "t").unwrap_err();
+            let err = remove_mcp_server(&paths, &db, None, id, "t").unwrap_err();
             assert!(matches!(err, AtlasError::Invalid(ref m) if m.contains("not a server Atlas can remove")), "{id}: {err}");
         }
 
-        remove_mcp_server(&db, &home, None, "codex:user:playwright", "t").unwrap();
-        let toml = std::fs::read_to_string(home.join(".codex/config.toml")).unwrap();
+        remove_mcp_server(&paths, &db, None, "codex:user:playwright", "t").unwrap();
+        let toml = std::fs::read_to_string(paths.agent_home().join(".codex/config.toml")).unwrap();
         assert!(!toml.contains("[mcp_servers.playwright]"), "{toml}");
         assert!(toml.contains("[mcp_servers.node_repl]") && toml.contains("model = \"gpt-5\""), "{toml}");
 
-        remove_mcp_server(&db, &home, None, "claude:user:user-stdio", "t").unwrap();
-        let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.join(".claude.json")).unwrap()).unwrap();
+        remove_mcp_server(&paths, &db, None, "claude:user:user-stdio", "t").unwrap();
+        let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(paths.agent_home().join(".claude.json")).unwrap()).unwrap();
         assert!(config["mcpServers"].get("user-stdio").is_none(), "{config}");
         assert!(config["mcpServers"].get("svelte").is_some(), "{config}");
 
-        let missing = remove_mcp_server(&db, &home, None, "codex:user:playwright", "t").unwrap_err();
+        let missing = remove_mcp_server(&paths, &db, None, "codex:user:playwright", "t").unwrap_err();
         assert!(matches!(missing, AtlasError::NotFound(_)), "{missing}");
     }
 
-    /// Every write leaves an audit row carrying the file's previous text, so an edit made
-    /// from Atlas can be undone by hand.
+    /// Every write copies the file it is about to replace into Atlas's own home and names
+    /// that backup in the audit row, so an edit made from Atlas can be undone by hand.
+    /// The row itself carries the path, the backup and a byte count and nothing else: an
+    /// agent's config is full of tokens, and global search renders a matching row's whole
+    /// detail as the hit's title.
     #[test]
-    fn every_write_records_the_previous_text() {
+    fn every_write_backs_the_file_up_and_names_it_in_the_audit_row() {
         let db = Db::open_in_memory().unwrap();
-        let (_temp, home, _project) = fixture(&db);
-        let before = std::fs::read_to_string(home.join(".cursor/mcp.json")).unwrap();
-        set_mcp_server_enabled(&db, &home, None, "cursor:user:cursor-one", false, "desktop").unwrap();
+        let (_temp, paths, _project) = fixture(&db);
+        let before = std::fs::read_to_string(paths.agent_home().join(".cursor/mcp.json")).unwrap();
+        assert!(before.contains(SECRET), "the fixture is what makes this test mean something");
+        set_mcp_server_enabled(&paths, &db, None, "cursor:user:cursor-one", false, "desktop").unwrap();
 
         let (actor, entity, detail): (String, String, String) = db
             .with_conn(|c| {
@@ -587,12 +606,87 @@ mod tests {
             .unwrap();
         assert_eq!(actor, "desktop");
         assert_eq!(entity, "mcp_server");
+        assert!(!detail.contains(SECRET), "the audit row quoted the file: {detail}");
         let detail: serde_json::Value = serde_json::from_str(&detail).unwrap();
-        assert_eq!(detail["action"], "set_enabled");
-        assert_eq!(detail["id"], "cursor:user:cursor-one");
+        assert_eq!(detail.as_object().unwrap().len(), 3, "only path, backup and bytes: {detail}");
         assert!(detail["path"].as_str().unwrap().ends_with(".cursor/mcp.json"), "{detail}");
-        assert_eq!(detail["previous"].as_str().unwrap(), before, "the whole previous file is kept");
-        assert_eq!(detail["previous_truncated"], false);
+        assert_eq!(detail["bytes"].as_u64().unwrap(), before.len() as u64);
+
+        // The backup is the undo: it is the file, byte for byte, under Atlas's own home.
+        let backup = std::path::PathBuf::from(detail["backup"].as_str().unwrap());
+        assert!(backup.starts_with(&paths.home), "{backup:?} is not under {:?}", paths.home);
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), before);
+        assert!(backup.file_name().unwrap().to_string_lossy().ends_with("-cursor-mcp.json"), "{backup:?}");
+    }
+
+    /// Neither the backup nor the directory holding it may be readable by another local
+    /// account: they are verbatim copies of the user's agent configs.
+    #[cfg(unix)]
+    #[test]
+    fn a_backup_and_its_directory_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let db = Db::open_in_memory().unwrap();
+        let (_temp, paths, _project) = fixture(&db);
+        set_mcp_server_enabled(&paths, &db, None, "cursor:user:cursor-one", false, "t").unwrap();
+
+        let directory = paths.home.join(edit::BACKUP_DIR);
+        assert_eq!(std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777, 0o700);
+        let backup = std::fs::read_dir(&directory).unwrap().flatten().next().unwrap().path();
+        assert_eq!(std::fs::metadata(&backup).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    /// A replaced config keeps its own mode, and never widens even for an instant: the
+    /// temp file is created with that mode rather than created and then narrowed.
+    #[cfg(unix)]
+    #[test]
+    fn a_rewritten_config_keeps_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let db = Db::open_in_memory().unwrap();
+        let (_temp, paths, project) = fixture(&db);
+        let cursor = paths.agent_home().join(".cursor/mcp.json");
+        std::fs::set_permissions(&cursor, std::fs::Permissions::from_mode(0o600)).unwrap();
+        set_mcp_server_enabled(&paths, &db, None, "cursor:user:cursor-one", false, "t").unwrap();
+        assert_eq!(std::fs::metadata(&cursor).unwrap().permissions().mode() & 0o777, 0o600);
+
+        // A file Atlas creates for a project starts private too, since it will hold that
+        // agent's secrets from the first write.
+        std::fs::remove_file(Path::new(&project.root_path).join(".cursor/mcp.json")).unwrap();
+        add_mcp_server(
+            &paths,
+            &db,
+            Some(&project),
+            &NewMcpServer {
+                source: McpServerSource::Cursor,
+                scope: McpServerScope::Project,
+                project_id: Some(project.id),
+                name: "fresh".into(),
+                transport: McpTransportInput::Stdio { command: "x".into(), args: vec![], env: BTreeMap::new() },
+            },
+            "t",
+        )
+        .unwrap();
+        let created = Path::new(&project.root_path).join(".cursor/mcp.json");
+        assert_eq!(std::fs::metadata(&created).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    /// A config the user symlinked into a dotfiles repository is written through, not
+    /// replaced: the link survives and the file it points at is the one that changes.
+    #[cfg(unix)]
+    #[test]
+    fn an_edit_writes_through_a_symlinked_config() {
+        let db = Db::open_in_memory().unwrap();
+        let (_temp, paths, _project) = fixture(&db);
+        let cursor = paths.agent_home().join(".cursor/mcp.json");
+        let dotfiles = paths.agent_home().join("dotfiles");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        let real = dotfiles.join("cursor-mcp.json");
+        std::fs::rename(&cursor, &real).unwrap();
+        std::os::unix::fs::symlink(&real, &cursor).unwrap();
+
+        set_mcp_server_enabled(&paths, &db, None, "cursor:user:cursor-one", false, "t").unwrap();
+        assert!(std::fs::symlink_metadata(&cursor).unwrap().file_type().is_symlink(), "the link was replaced");
+        let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&real).unwrap()).unwrap();
+        assert_eq!(config["mcpServers"]["cursor-one"]["disabled"], true, "the real file is what changed");
     }
 
     /// A name that could split an id, or an unmanageable one, is refused before anything
@@ -600,11 +694,11 @@ mod tests {
     #[test]
     fn a_name_that_would_break_an_id_is_refused() {
         let db = Db::open_in_memory().unwrap();
-        let (_temp, home, _project) = fixture(&db);
+        let (_temp, paths, _project) = fixture(&db);
         for name in ["", "with:colon", "with/slash", "with\nnewline"] {
             let err = add_mcp_server(
+                &paths,
                 &db,
-                &home,
                 None,
                 &NewMcpServer {
                     source: McpServerSource::Cursor,
@@ -624,53 +718,23 @@ mod tests {
     #[test]
     fn an_unknown_id_is_not_found() {
         let db = Db::open_in_memory().unwrap();
-        let (_temp, home, _project) = fixture(&db);
+        let (_temp, paths, _project) = fixture(&db);
         for id in ["nope", "claude:user:../../etc/passwd", "cursor:user:cursor-one/../x"] {
-            assert!(matches!(find(&home, None, id), Err(AtlasError::NotFound(_))), "{id}");
+            assert!(matches!(find(paths.agent_home(), None, id), Err(AtlasError::NotFound(_))), "{id}");
         }
     }
 
-    /// A check runs the user's own command. This one starts a shell that says nothing and
-    /// never exits, so the check has to end on its own timeout rather than hanging, and
-    /// the failure has to be an answer rather than an error.
-    #[tokio::test]
-    async fn a_server_that_never_answers_times_out() {
-        let resolved = Resolved {
-            entry: McpServerEntry {
-                id: "test".into(),
-                name: "test".into(),
-                source: McpServerSource::Cursor,
-                scope: McpServerScope::User,
-                transport: McpTransport::Stdio { command: "sleep".into(), args: vec!["60".into()], env_keys: vec![] },
-                file: None,
-                plugin: None,
-                enabled: true,
-                can_toggle: false,
-                can_remove: false,
-                is_atlas: false,
-                project_id: None,
-            },
-            env: BTreeMap::new(),
-            headers: BTreeMap::new(),
-        };
-        // The real cap is 15 s and this test would sit through it; the same path is
-        // exercised at a length a test suite can afford.
-        let result = tokio::time::timeout(std::time::Duration::from_millis(400), check::run(&resolved)).await;
-        assert!(result.is_err(), "a silent server must not answer early: {result:?}");
-    }
-
-    /// A command that is not there is a failed check with a reason, not an error.
-    #[tokio::test]
-    async fn a_command_that_does_not_exist_is_a_failed_check() {
-        let resolved = Resolved {
+    /// A `Resolved` for a command a check test wants to run, with nothing else filled in.
+    fn stdio_probe(command: &str, args: &[&str]) -> Resolved {
+        Resolved {
             entry: McpServerEntry {
                 id: "test".into(),
                 name: "test".into(),
                 source: McpServerSource::Cursor,
                 scope: McpServerScope::User,
                 transport: McpTransport::Stdio {
-                    command: "atlas-no-such-command-exists".into(),
-                    args: vec![],
+                    command: command.into(),
+                    args: args.iter().map(|a| a.to_string()).collect(),
                     env_keys: vec![],
                 },
                 file: None,
@@ -683,7 +747,70 @@ mod tests {
             },
             env: BTreeMap::new(),
             headers: BTreeMap::new(),
-        };
+            cwd: None,
+        }
+    }
+
+    /// The cap the real check runs under. Only the value differs from a live check, so a
+    /// test can prove the timeout path without sitting through fifteen seconds.
+    #[test]
+    fn the_check_cap_is_fifteen_seconds() {
+        assert_eq!(check::CHECK_TIMEOUT, std::time::Duration::from_secs(15));
+    }
+
+    /// A server that starts and then says nothing ends on the cap with an answer, not an
+    /// error, and does not outlive the check: the process is gone afterwards.
+    ///
+    /// Multi-threaded on purpose. The kill is spawned as a task by the transport's `Drop`,
+    /// and on a current-thread runtime a test that then waits for the process would be
+    /// holding the only thread the kill could run on.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_server_that_never_answers_times_out_and_its_process_is_killed() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("pid");
+        // `exec` so the recorded pid is the child Atlas spawned, not a shell that forked
+        // it: the kill under test is of that process.
+        let script = format!("echo $$ > {}; exec sleep 60", pid_file.display());
+        let resolved = stdio_probe("sh", &["-c", &script]);
+
+        let result = check::run_with_timeout(&resolved, std::time::Duration::from_millis(600)).await;
+        assert!(!result.ok, "{result:?}");
+        assert!(result.error.as_deref().unwrap().contains("did not answer within"), "{result:?}");
+        assert!(result.elapsed_ms >= 500, "it ended on the cap, not early: {result:?}");
+
+        let pid: i32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+        // The kill is spawned on its own task by the transport's `Drop`, so it is polled
+        // for rather than asserted the instant the check returns.
+        let mut gone = false;
+        for _ in 0..50 {
+            if !process_is_alive(pid) {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(gone, "the child outlived its check: pid {pid}");
+    }
+
+    /// Whether `pid` is still a running process. A killed child lingers as a zombie until
+    /// it is reaped, which is not "alive" for this purpose.
+    #[cfg(unix)]
+    fn process_is_alive(pid: i32) -> bool {
+        let out = std::process::Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output();
+        match out {
+            Ok(out) => {
+                let stat = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                !stat.is_empty() && !stat.starts_with('Z')
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// A command that is not there is a failed check with a reason, not an error.
+    #[tokio::test]
+    async fn a_command_that_does_not_exist_is_a_failed_check() {
+        let resolved = stdio_probe("atlas-no-such-command-exists", &[]);
         let result = check::run(&resolved).await;
         assert!(!result.ok, "{result:?}");
         assert!(result.error.unwrap().contains("atlas-no-such-command-exists"));

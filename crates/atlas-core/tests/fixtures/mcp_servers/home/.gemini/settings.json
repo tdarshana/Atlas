@@ -4,6 +4,12 @@
     "gemini-one": {
       "command": "gemini-server",
       "args": ["--serve"]
+    },
+    "gemini-http": {
+      "httpUrl": "https://gemini.example/mcp",
+      "headers": {
+        "Authorization": "Bearer SECRET-DO-NOT-LEAK"
+      }
     }
   }
 }

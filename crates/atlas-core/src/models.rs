@@ -1034,7 +1034,7 @@ pub enum McpTransportInput {
 }
 
 /// A server to write into one agent's configuration. `project_id` is required for a
-/// `project` or `local` scope and refused for `user`.
+/// `project` or `local` scope; a `user` scope ignores it.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NewMcpServer {
     pub source: McpServerSource,

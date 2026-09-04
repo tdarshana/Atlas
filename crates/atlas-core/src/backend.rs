@@ -1140,31 +1140,31 @@ impl Backend for LocalBackend {
     }
     async fn set_mcp_server_enabled(&self, project_id: Option<Uuid>, id: &str, enabled: bool, actor: &str) -> Result<McpServerEntry> {
         let db = self.db.clone();
-        let home = self.paths.agent_home().to_path_buf();
+        let paths = self.paths.clone();
         let (id, actor) = (id.to_string(), actor.to_string());
         self.blocking(move || {
             let project = project_id.map(|p| projects_repo(&db).get(p)).transpose()?;
-            crate::mcp_servers::set_mcp_server_enabled(&db, &home, project.as_ref(), &id, enabled, &actor)
+            crate::mcp_servers::set_mcp_server_enabled(&paths, &db, project.as_ref(), &id, enabled, &actor)
         })
         .await
     }
     async fn add_mcp_server(&self, input: NewMcpServer, actor: &str) -> Result<McpServerEntry> {
         let db = self.db.clone();
-        let home = self.paths.agent_home().to_path_buf();
+        let paths = self.paths.clone();
         let actor = actor.to_string();
         self.blocking(move || {
             let project = input.project_id.map(|p| projects_repo(&db).get(p)).transpose()?;
-            crate::mcp_servers::add_mcp_server(&db, &home, project.as_ref(), &input, &actor)
+            crate::mcp_servers::add_mcp_server(&paths, &db, project.as_ref(), &input, &actor)
         })
         .await
     }
     async fn remove_mcp_server(&self, project_id: Option<Uuid>, id: &str, actor: &str) -> Result<()> {
         let db = self.db.clone();
-        let home = self.paths.agent_home().to_path_buf();
+        let paths = self.paths.clone();
         let (id, actor) = (id.to_string(), actor.to_string());
         self.blocking(move || {
             let project = project_id.map(|p| projects_repo(&db).get(p)).transpose()?;
-            crate::mcp_servers::remove_mcp_server(&db, &home, project.as_ref(), &id, &actor)
+            crate::mcp_servers::remove_mcp_server(&paths, &db, project.as_ref(), &id, &actor)
         })
         .await
     }

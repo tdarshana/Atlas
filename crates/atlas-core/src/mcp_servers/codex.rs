@@ -10,7 +10,7 @@
 //! the user's comments and layout and there is no reason for two TOML parsers.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use toml_edit::{DocumentMut, Item, Value as TomlValue};
 use uuid::Uuid;
@@ -73,6 +73,8 @@ pub fn servers(path: &Path, scope: McpServerScope, project_id: Option<Uuid>, fou
             },
             env,
             headers: BTreeMap::new(),
+            // Codex starts a server here, so a relative `command` only resolves with it.
+            cwd: entry.get("cwd").and_then(string).map(PathBuf::from),
         });
     }
 }

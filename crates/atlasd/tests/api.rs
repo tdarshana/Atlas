@@ -3056,6 +3056,18 @@ async fn mcp_servers_list_check_toggle_add_and_remove() {
         .unwrap();
     assert_eq!(refused.status(), 400, "Atlas has no switch");
 
+    // The edit above replaced a config full of tokens. Its previous text goes to a backup
+    // file under the daemon's own home, and the audit row names that file rather than
+    // quoting it, because global search renders a matching audit row's whole detail as the
+    // hit's title. Searching for terms that config is full of must not hand back a secret.
+    for term in ["cursor", "atlas-no-such-command-exists", "mcp_config_edit", "CURSOR_TOKEN"] {
+        let found = c.get(format!("{base}/search?q={term}")).send().await.unwrap();
+        assert_eq!(found.status(), 200, "the search itself has to work for this to mean anything");
+        let hits = found.text().await.unwrap();
+        assert!(!hits.contains("SECRET-DO-NOT-LEAK"), "'{term}' returned a secret from the audit trail: {hits}");
+        assert!(!hits.contains("mcp_config_edit"), "'{term}' returned a config edit at all: {hits}");
+    }
+
     // Add: a new server in the repository's own `.mcp.json`, which Atlas may create.
     let repo = repo_free_tempdir();
     fixture_repo(repo.path());

@@ -2,9 +2,11 @@
 //! share, and which Claude Code plugins ship in their own `.mcp.json`.
 //!
 //! One entry is either `{ "command": ..., "args": [...], "env": {...} }` or
-//! `{ "type": "http" | "sse", "url": ..., "headers": {...} }`. Cursor adds
-//! `"disabled": true`. Anything else is skipped with a warning naming the server, since
-//! an entry Atlas cannot describe is better said out loud than silently missing.
+//! `{ "type": "http" | "sse", "url": ..., "headers": {...} }`; Gemini CLI spells the
+//! second one's key `httpUrl`, which is read as the same thing so a valid Gemini server
+//! is listed rather than warned about. Cursor adds `"disabled": true`. Anything else is
+//! skipped with a warning naming the server, since an entry Atlas cannot describe is
+//! better said out loud than silently missing.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -81,6 +83,8 @@ pub fn collect(
             },
             env: parsed.env,
             headers: parsed.headers,
+            // Only Codex configures a working directory, and it has its own reader.
+            cwd: None,
         });
     }
 }
@@ -91,8 +95,9 @@ pub fn parse_entry(value: &Value) -> Option<ParsedEntry> {
     let object = value.as_object()?;
     let disabled = object.get("disabled").and_then(Value::as_bool).unwrap_or(false);
     // The URL is checked first: an entry carrying both is an HTTP server whose author
-    // left a stale command behind, and the URL is what the agent will use.
-    if let Some(url) = object.get("url").and_then(Value::as_str) {
+    // left a stale command behind, and the URL is what the agent will use. `httpUrl` is
+    // Gemini CLI's spelling of the same key.
+    if let Some(url) = object.get("url").or_else(|| object.get("httpUrl")).and_then(Value::as_str) {
         let headers = string_map(object.get("headers"));
         return Some(ParsedEntry {
             transport: McpTransport::Http { url: url.to_string(), header_keys: headers.keys().cloned().collect() },

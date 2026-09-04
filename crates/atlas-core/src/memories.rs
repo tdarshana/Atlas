@@ -244,11 +244,20 @@ impl<'a> MemoryRepo<'a> {
     /// first, capped at 500. A SQL-level prefilter for global search, so a table that
     /// only ever grows (nothing is hard-deleted from `audit`) still answers in bounded
     /// time. `"at"` is quoted because it's a reserved word.
+    ///
+    /// `mcp_config_edit` rows are left out on purpose. Global search renders a matching
+    /// row's whole `detail` as the hit's title, and that action describes an edit to one
+    /// of the user's own agent configuration files. Those rows carry only a path, a
+    /// backup file name and a byte count today, but the file they describe is full of
+    /// tokens, and one careless field added to that detail later would put every one of
+    /// them into a search response. The exclusion is the belt to
+    /// `mcp_servers::edit`'s braces.
     pub fn list_audit_for_search(&self, pattern: &str) -> Result<Vec<AuditEntry>> {
         self.db.with_conn(|c| {
             let mut st = c.prepare(
                 "select id::text, actor, action, entity, entity_id::text, detail::text, \"at\"::text from audit \
-                 where (lower(action) like ? escape '\\' or lower(detail::text) like ? escape '\\') \
+                 where action <> 'mcp_config_edit' \
+                 and (lower(action) like ? escape '\\' or lower(detail::text) like ? escape '\\') \
                  order by \"at\" desc limit 500",
             )?;
             let rows = st.query_map(params![pattern, pattern], row_to_audit)?;
