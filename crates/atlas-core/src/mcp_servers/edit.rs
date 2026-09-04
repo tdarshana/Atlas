@@ -34,6 +34,11 @@ use super::{claude, codex};
 /// Where under Atlas's own home a replaced agent config is copied before it is replaced.
 pub const BACKUP_DIR: &str = "config-backups";
 
+/// How many backups of the same file are kept. `~/.claude.json` runs to hundreds of
+/// kilobytes and every edit copies it whole, so without a cap the directory grows with
+/// each toggle; twenty is far more history than an undo by hand ever needs.
+pub const BACKUP_KEEP: usize = 20;
+
 /// The message a source with no native switch answers with, so every caller says the
 /// same thing.
 pub const NO_SWITCH: &str = "this agent has no enable switch; remove the server instead";
@@ -56,22 +61,23 @@ pub fn set_enabled(
     if !entry.can_toggle {
         return Err(AtlasError::Invalid(NO_SWITCH.into()));
     }
+    let action = if enabled { "enable" } else { "disable" };
     match (entry.source, entry.scope) {
         (McpServerSource::Claude, McpServerScope::Local) => {
             let root = require_project(project)?.root_path.clone();
-            claude_list_edit(paths, db, &root, entry, actor, |block, name| {
+            claude_list_edit(paths, db, &root, entry, action, actor, |block, name| {
                 set_membership(block, "disabledMcpServers", name, !enabled);
             })
         }
         (McpServerSource::Claude, McpServerScope::Project) => {
             let root = require_project(project)?.root_path.clone();
-            claude_list_edit(paths, db, &root, entry, actor, |block, name| {
+            claude_list_edit(paths, db, &root, entry, action, actor, |block, name| {
                 set_membership(block, "enabledMcpjsonServers", name, enabled);
                 set_membership(block, "disabledMcpjsonServers", name, !enabled);
             })
         }
         (McpServerSource::Codex, _) => {
-            let path = entry_file(entry)?;
+            let path = editable_file(project, entry)?;
             let mut doc = read_toml(&path)?;
             let table = table_for(&mut doc)?
                 .get_mut(&entry.name)
@@ -84,10 +90,10 @@ pub fn set_enabled(
             } else {
                 table.insert("enabled", toml_edit::value(false));
             }
-            write(paths, db, &path, doc.to_string(), entry.source.as_str(), actor)
+            write(paths, db, &path, doc.to_string(), Edited { agent: entry.source.as_str(), action, id: &entry.id, actor })
         }
         (McpServerSource::Cursor, _) => {
-            let path = entry_file(entry)?;
+            let path = editable_file(project, entry)?;
             let mut config = read_json(&path)?;
             let server = config
                 .get_mut("mcpServers")
@@ -102,7 +108,7 @@ pub fn set_enabled(
             } else {
                 server.insert("disabled".into(), Value::Bool(true));
             }
-            write(paths, db, &path, pretty(&config), entry.source.as_str(), actor)
+            write(paths, db, &path, pretty(&config), Edited { agent: entry.source.as_str(), action, id: &entry.id, actor })
         }
         _ => Err(AtlasError::Invalid(NO_SWITCH.into())),
     }
@@ -114,6 +120,11 @@ pub fn set_enabled(
 pub fn add_server(paths: &AtlasPaths, db: &Db, project: Option<&Project>, input: &NewMcpServer, actor: &str) -> Result<String> {
     validate_name(&input.name)?;
     let target = target_file(paths.agent_home(), project, input.source, input.scope)?;
+    if input.scope == McpServerScope::Project {
+        confine_to_project(project, &target)?;
+    }
+    let id = server_id(input.source, input.scope.as_str(), &input.name);
+    let edited = Edited { agent: input.source.as_str(), action: "add", id: &id, actor };
     match input.source {
         McpServerSource::Codex => {
             let mut doc = match read_toml_if_present(&target)? {
@@ -128,7 +139,7 @@ pub fn add_server(paths: &AtlasPaths, db: &Db, project: Option<&Project>, input:
                 return Err(AtlasError::Conflict(format!("{} already has a server called '{}'", target.display(), input.name)));
             }
             table.insert(&input.name, Item::Table(toml_entry(&input.transport)));
-            write(paths, db, &target, doc.to_string(), input.source.as_str(), actor)?;
+            write(paths, db, &target, doc.to_string(), edited)?;
         }
         _ => {
             let mut config = match read_json_if_present(&target)? {
@@ -143,10 +154,10 @@ pub fn add_server(paths: &AtlasPaths, db: &Db, project: Option<&Project>, input:
                 return Err(AtlasError::Conflict(format!("{} already has a server called '{}'", target.display(), input.name)));
             }
             servers.insert(input.name.clone(), json_entry(&input.transport));
-            write(paths, db, &target, pretty(&config), input.source.as_str(), actor)?;
+            write(paths, db, &target, pretty(&config), edited)?;
         }
     }
-    Ok(server_id(input.source, input.scope.as_str(), &input.name))
+    Ok(id)
 }
 
 /// Deletes a server from the file it came from. The agent's own switches are left alone:
@@ -156,18 +167,19 @@ pub fn remove_server(paths: &AtlasPaths, db: &Db, project: Option<&Project>, ent
     if !entry.can_remove {
         return Err(AtlasError::Invalid(format!("'{}' is not a server Atlas can remove", entry.id)));
     }
-    let path = entry_file(entry)?;
+    let path = editable_file(project, entry)?;
+    let edited = Edited { agent: entry.source.as_str(), action: "remove", id: &entry.id, actor };
     if entry.source == McpServerSource::Codex {
         let mut doc = read_toml(&path)?;
         table_for(&mut doc)?
             .remove(&entry.name)
             .ok_or_else(|| AtlasError::NotFound(format!("mcp server {}", entry.id)))?;
-        return write(paths, db, &path, doc.to_string(), entry.source.as_str(), actor);
+        return write(paths, db, &path, doc.to_string(), edited);
     }
     let mut config = read_json(&path)?;
     let servers = json_servers_mut(&mut config, project, entry.source, entry.scope)?;
     servers.remove(&entry.name).ok_or_else(|| AtlasError::NotFound(format!("mcp server {}", entry.id)))?;
-    write(paths, db, &path, pretty(&config), entry.source.as_str(), actor)
+    write(paths, db, &path, pretty(&config), edited)
 }
 
 // ---------------------------------------------------------------------------
@@ -234,6 +246,32 @@ fn entry_file(entry: &McpServerEntry) -> Result<PathBuf> {
         .ok_or_else(|| AtlasError::Invalid(format!("'{}' comes from no file Atlas can edit", entry.id)))
 }
 
+/// The file an existing entry is edited through, with a project-scope one confined to its
+/// project first.
+fn editable_file(project: Option<&Project>, entry: &McpServerEntry) -> Result<PathBuf> {
+    let path = entry_file(entry)?;
+    if entry.scope == McpServerScope::Project {
+        confine_to_project(project, &path)?;
+    }
+    Ok(path)
+}
+
+/// Refuses a project-scope config that resolves outside its own project.
+///
+/// A repository is not trusted to say where Atlas writes. Cloning one that ships
+/// `.mcp.json`, `.codex` or `.cursor` as a symlink would otherwise redirect a project
+/// scope edit into the user's home, since [`write`] canonicalises its target and
+/// [`ensure_creatable`] would happily `create_dir_all` through the link. User scope files
+/// keep the canonical write: a `~/.claude.json` symlinked into a dotfiles repository is
+/// the ordinary case there, and the path came from Atlas rather than from a checkout.
+fn confine_to_project(project: Option<&Project>, path: &Path) -> Result<()> {
+    let root = Path::new(&require_project(project)?.root_path).canonicalize()?;
+    if !resolve(path)?.starts_with(&root) {
+        return Err(AtlasError::Invalid(format!("config {} resolves outside the project", path.display())));
+    }
+    Ok(())
+}
+
 fn require_project(project: Option<&Project>) -> Result<&Project> {
     project.ok_or_else(|| AtlasError::Invalid("this scope needs a project".into()))
 }
@@ -251,6 +289,7 @@ fn claude_list_edit(
     db: &Db,
     root: &str,
     entry: &McpServerEntry,
+    action: &str,
     actor: &str,
     edit: impl FnOnce(&mut Map<String, Value>, &str),
 ) -> Result<()> {
@@ -267,7 +306,7 @@ fn claude_list_edit(
         .as_object_mut()
         .ok_or_else(|| AtlasError::Invalid("the project's block is not an object".into()))?;
     edit(block, &entry.name);
-    write(paths, db, &path, pretty(&config), entry.source.as_str(), actor)
+    write(paths, db, &path, pretty(&config), Edited { agent: entry.source.as_str(), action, id: &entry.id, actor })
 }
 
 /// Puts `name` in `key`'s array, or takes it out, leaving the rest of the list in the
@@ -364,7 +403,7 @@ fn read_json_if_present(path: &Path) -> Result<Option<Value>> {
     if text.trim().is_empty() {
         return Ok(Some(Value::Object(Map::new())));
     }
-    serde_json::from_str(&text).map(Some).map_err(|e| AtlasError::Invalid(format!("{}: {e}", path.display())))
+    serde_json::from_str(&text).map(Some).map_err(|e| AtlasError::Invalid(super::json_error(path, &e)))
 }
 
 fn read_toml(path: &Path) -> Result<DocumentMut> {
@@ -373,7 +412,7 @@ fn read_toml(path: &Path) -> Result<DocumentMut> {
 
 fn read_toml_if_present(path: &Path) -> Result<Option<DocumentMut>> {
     let Some(text) = super::read_config_for_edit(path)? else { return Ok(None) };
-    text.parse::<DocumentMut>().map(Some).map_err(|e| AtlasError::Invalid(format!("{}: {e}", path.display())))
+    text.parse::<DocumentMut>().map(Some).map_err(|e| AtlasError::Invalid(super::toml_error(path, &text, &e)))
 }
 
 /// `[mcp_servers]` in a Codex document, created implicit so it renders as
@@ -415,6 +454,19 @@ fn ensure_creatable(scope: McpServerScope, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// What one write records beside the path, the backup and the byte count. All four are
+/// names Atlas itself chose, so none of them can carry a value out of the file.
+#[derive(Clone, Copy)]
+struct Edited<'a> {
+    /// The agent whose file is being written, which also names the backup.
+    agent: &'a str,
+    /// `add`, `remove`, `enable` or `disable`.
+    action: &'a str,
+    /// The server the edit was about.
+    id: &'a str,
+    actor: &'a str,
+}
+
 /// Replaces `path` atomically, after copying what it held into a backup file under
 /// Atlas's own home.
 ///
@@ -426,12 +478,13 @@ fn ensure_creatable(scope: McpServerScope, path: &Path) -> Result<()> {
 ///
 /// `path` is canonicalised first, so an edit to a `~/.claude.json` that is a symlink into
 /// a dotfiles repository rewrites the file it points at rather than replacing the link
-/// with a regular file and leaving the real one stale.
-fn write(paths: &AtlasPaths, db: &Db, path: &Path, text: String, agent: &str, actor: &str) -> Result<()> {
+/// with a regular file and leaving the real one stale. A project scope path has already
+/// been through [`confine_to_project`] by the time it gets here.
+fn write(paths: &AtlasPaths, db: &Db, path: &Path, text: String, edited: Edited<'_>) -> Result<()> {
     let path = &resolve(path)?;
     let previous = std::fs::read(path).unwrap_or_default();
     let directory = path.parent().ok_or_else(|| AtlasError::Invalid(format!("{} has no directory", path.display())))?;
-    let backup = if previous.is_empty() { None } else { Some(write_backup(paths, path, agent, &previous)?) };
+    let backup = if previous.is_empty() { None } else { Some(write_backup(paths, path, edited.agent, &previous)?) };
 
     let temp = directory.join(format!(".atlas-{}.tmp", Uuid::new_v4()));
     let written = (|| -> std::io::Result<()> {
@@ -446,12 +499,19 @@ fn write(paths: &AtlasPaths, db: &Db, path: &Path, text: String, agent: &str, ac
         let _ = std::fs::remove_file(&temp);
         return Err(e.into());
     }
+    // Only once the replacement is in place: until then the newest backup is the one that
+    // would be needed, and pruning is worth nothing if it costs the undo.
+    if let Some(backup) = backup.as_deref().and_then(Path::parent) {
+        prune_backups(backup, &backup_suffix(edited.agent, path));
+    }
     MemoryRepo::new(db).audit(
-        actor,
+        edited.actor,
         "mcp_config_edit",
         "mcp_server",
         None,
         serde_json::json!({
+            "action": edited.action,
+            "id": edited.id,
             "path": path.display().to_string(),
             "backup": backup.map(|b| b.display().to_string()),
             "bytes": previous.len(),
@@ -459,15 +519,24 @@ fn write(paths: &AtlasPaths, db: &Db, path: &Path, text: String, agent: &str, ac
     )
 }
 
-/// `path` with every symlink resolved. A file that is not there yet resolves through its
-/// parent, which the caller has already created.
+/// `path` with every symlink resolved, without requiring it to exist: the deepest
+/// ancestor that does exist is canonicalised and the rest is appended, so a target whose
+/// parent directory has not been created yet still resolves to where it would land.
 fn resolve(path: &Path) -> Result<PathBuf> {
     if let Ok(real) = path.canonicalize() {
         return Ok(real);
     }
-    let parent = path.parent().ok_or_else(|| AtlasError::Invalid(format!("{} has no directory", path.display())))?;
-    let name = path.file_name().ok_or_else(|| AtlasError::Invalid(format!("{} names no file", path.display())))?;
-    Ok(parent.canonicalize()?.join(name))
+    let mut trailing = Vec::new();
+    let mut cursor = path;
+    loop {
+        let parent = cursor.parent().ok_or_else(|| AtlasError::Invalid(format!("{} has no directory", path.display())))?;
+        let name = cursor.file_name().ok_or_else(|| AtlasError::Invalid(format!("{} names no file", path.display())))?;
+        trailing.push(name);
+        if let Ok(real) = parent.canonicalize() {
+            return Ok(trailing.iter().rev().fold(real, |acc, part| acc.join(part)));
+        }
+        cursor = parent;
+    }
 }
 
 /// Copies a file's current bytes into `<atlas home>/config-backups/` and answers with the
@@ -476,19 +545,26 @@ fn resolve(path: &Path) -> Result<PathBuf> {
 /// configs, tokens included.
 fn write_backup(paths: &AtlasPaths, path: &Path, agent: &str, previous: &[u8]) -> Result<PathBuf> {
     let directory = paths.home.join(BACKUP_DIR);
-    std::fs::create_dir_all(&directory)?;
+    // Created at `0700` in one step rather than created and then narrowed: between the two
+    // a directory about to hold verbatim copies of the user's tokens would stand open at
+    // whatever the umask allows.
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
     }
+    builder.create(&directory)?;
     let millis = chrono::Utc::now().timestamp_millis();
-    let name = sanitise(&path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "config".into()));
+    let suffix = backup_suffix(agent, path);
     // Two edits inside the same millisecond would otherwise collide; `create_new` is what
-    // notices, so a backup can never overwrite an older one.
+    // notices, so a backup can never overwrite an older one. The counter goes before the
+    // agent and the file name, so every backup of one file ends with the same suffix and
+    // the pruning below can find them all.
     for attempt in 0..16 {
-        let suffix = if attempt == 0 { String::new() } else { format!("-{attempt}") };
-        let target = directory.join(format!("{millis}-{agent}-{name}{suffix}"));
+        let counter = if attempt == 0 { String::new() } else { format!("-{attempt}") };
+        let target = directory.join(format!("{millis}{counter}{suffix}"));
         match write_with_mode(&target, previous, Some(0o600)) {
             Ok(()) => return Ok(target),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -496,6 +572,31 @@ fn write_backup(paths: &AtlasPaths, path: &Path, agent: &str, previous: &[u8]) -
         }
     }
     Err(AtlasError::Other(format!("could not name a backup for {} in {}", path.display(), directory.display())))
+}
+
+/// What every backup of one agent's one file ends with: `-<agent>-<file name>`.
+fn backup_suffix(agent: &str, path: &Path) -> String {
+    let name = sanitise(&path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "config".into()));
+    format!("-{agent}-{name}")
+}
+
+/// Deletes all but the newest [`BACKUP_KEEP`] backups of the same file, leaving every
+/// other file in the directory alone. Names begin with a fixed width millisecond stamp,
+/// so sorting them as strings sorts them by age.
+///
+/// Best effort on purpose: an edit that succeeded must not be reported as failed because
+/// an old copy of it could not be deleted.
+fn prune_backups(directory: &Path, suffix: &str) {
+    let Ok(entries) = std::fs::read_dir(directory) else { return };
+    let mut names: Vec<String> =
+        entries.flatten().filter_map(|e| e.file_name().to_str().map(str::to_string)).filter(|n| n.ends_with(suffix)).collect();
+    if names.len() <= BACKUP_KEEP {
+        return;
+    }
+    names.sort();
+    for name in &names[..names.len() - BACKUP_KEEP] {
+        let _ = std::fs::remove_file(directory.join(name));
+    }
 }
 
 /// A file name reduced to what is safe in one: everything but letters, digits, `.`, `-`

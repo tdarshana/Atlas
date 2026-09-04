@@ -3130,4 +3130,34 @@ async fn mcp_servers_list_check_toggle_add_and_remove() {
         .await
         .unwrap();
     assert_eq!(gone.status(), 404);
+
+    // A config that does not parse is reported by position. Both parsers would otherwise
+    // print the offending source line, which is where a token on a half-edited line would
+    // leave the daemon: once in the listing's warnings, once in an error body.
+    std::fs::create_dir_all(sync_home.path().join(".codex")).unwrap();
+    std::fs::write(
+        sync_home.path().join(".codex/config.toml"),
+        "[mcp_servers.one]\ncommand = \"x\"\ntoken = \"SECRET-DO-NOT-LEAK\" and then some\n",
+    )
+    .unwrap();
+    let broken: serde_json::Value = c.get(format!("{base}/mcp/servers")).send().await.unwrap().json().await.unwrap();
+    let warnings = broken["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{broken}");
+    let warning = warnings[0].as_str().unwrap();
+    assert!(!warning.contains("SECRET-DO-NOT-LEAK"), "the warning quoted the broken line: {warning}");
+    assert!(warning.contains("line 3") && warning.contains("column"), "{warning}");
+
+    let refused = c
+        .post(format!("{base}/mcp/servers"))
+        .json(&serde_json::json!({
+            "source": "codex", "scope": "user", "project_id": null, "name": "nope",
+            "transport": {"kind": "stdio", "command": "x", "args": []}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 400);
+    let body = refused.text().await.unwrap();
+    assert!(!body.contains("SECRET-DO-NOT-LEAK"), "the error body quoted the broken line: {body}");
+    assert!(body.contains("line 3"), "{body}");
 }

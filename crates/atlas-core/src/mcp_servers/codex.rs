@@ -86,7 +86,7 @@ pub fn read_document(path: &Path, found: &mut Found) -> Option<DocumentMut> {
     match text.parse::<DocumentMut>() {
         Ok(doc) => Some(doc),
         Err(e) => {
-            found.warnings.push(format!("{}: {e}", path.display()));
+            found.warnings.push(super::toml_error(path, &text, &e));
             None
         }
     }

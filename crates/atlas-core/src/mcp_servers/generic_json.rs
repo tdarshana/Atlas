@@ -137,7 +137,7 @@ pub fn read_file(path: &Path, found: &mut Found) -> Option<Value> {
     match serde_json::from_str::<Value>(&text) {
         Ok(v) => Some(v),
         Err(e) => {
-            found.warnings.push(format!("{}: {e}", path.display()));
+            found.warnings.push(super::json_error(path, &e));
             None
         }
     }

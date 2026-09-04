@@ -162,6 +162,40 @@ pub(crate) fn display(path: &Path) -> String {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf()).display().to_string()
 }
 
+/// A TOML parse failure named by position alone.
+///
+/// `toml_edit`'s own `Display` prints the offending source line under the message, and
+/// these files are full of tokens: a secret sitting on a line that fails to parse would
+/// travel into a listing's `warnings`, into an HTTP error body and onto the desktop. Only
+/// the path and the line and column ever come back.
+pub(crate) fn toml_error(path: &Path, text: &str, error: &toml_edit::TomlError) -> String {
+    let (line, column) = error.span().map(|s| position(text, s.start)).unwrap_or((1, 1));
+    format!("{}: not valid TOML at line {line}, column {column}", path.display())
+}
+
+/// The same for JSON. `serde_json`'s own `Display` is already position only; this is here
+/// so both agents' messages read the same and neither can start quoting a line.
+pub(crate) fn json_error(path: &Path, error: &serde_json::Error) -> String {
+    format!("{}: not valid JSON at line {}, column {}", path.display(), error.line(), error.column())
+}
+
+/// The 1-based line and column of a byte offset into `text`.
+fn position(text: &str, offset: usize) -> (usize, usize) {
+    let (mut line, mut column) = (1, 1);
+    for (index, ch) in text.char_indices() {
+        if index >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    (line, column)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -586,9 +620,9 @@ mod tests {
 
     /// Every write copies the file it is about to replace into Atlas's own home and names
     /// that backup in the audit row, so an edit made from Atlas can be undone by hand.
-    /// The row itself carries the path, the backup and a byte count and nothing else: an
-    /// agent's config is full of tokens, and global search renders a matching row's whole
-    /// detail as the hit's title.
+    /// The row itself carries what Atlas did, to which server, the path, the backup and a
+    /// byte count and nothing else: an agent's config is full of tokens, and global search
+    /// renders a matching row's whole detail as the hit's title.
     #[test]
     fn every_write_backs_the_file_up_and_names_it_in_the_audit_row() {
         let db = Db::open_in_memory().unwrap();
@@ -608,7 +642,9 @@ mod tests {
         assert_eq!(entity, "mcp_server");
         assert!(!detail.contains(SECRET), "the audit row quoted the file: {detail}");
         let detail: serde_json::Value = serde_json::from_str(&detail).unwrap();
-        assert_eq!(detail.as_object().unwrap().len(), 3, "only path, backup and bytes: {detail}");
+        assert_eq!(detail.as_object().unwrap().len(), 5, "only action, id, path, backup and bytes: {detail}");
+        assert_eq!(detail["action"], "disable", "{detail}");
+        assert_eq!(detail["id"], "cursor:user:cursor-one", "{detail}");
         assert!(detail["path"].as_str().unwrap().ends_with(".cursor/mcp.json"), "{detail}");
         assert_eq!(detail["bytes"].as_u64().unwrap(), before.len() as u64);
 
@@ -617,6 +653,197 @@ mod tests {
         assert!(backup.starts_with(&paths.home), "{backup:?} is not under {:?}", paths.home);
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), before);
         assert!(backup.file_name().unwrap().to_string_lossy().ends_with("-cursor-mcp.json"), "{backup:?}");
+
+        // The other two verbs name themselves too, so the trail says what Atlas did to
+        // which server without anyone having to diff two backups to find out.
+        add_mcp_server(
+            &paths,
+            &db,
+            None,
+            &NewMcpServer {
+                source: McpServerSource::Cursor,
+                scope: McpServerScope::User,
+                project_id: None,
+                name: "added".into(),
+                transport: McpTransportInput::Stdio { command: "x".into(), args: vec![], env: BTreeMap::new() },
+            },
+            "desktop",
+        )
+        .unwrap();
+        remove_mcp_server(&paths, &db, None, "cursor:user:added", "desktop").unwrap();
+        let verbs: Vec<(String, String)> = db
+            .with_conn(|c| {
+                let mut stmt = c.prepare(
+                    "select detail->>'action', detail->>'id' from audit where action = 'mcp_config_edit' order by \"at\", rowid",
+                )?;
+                let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .unwrap();
+        assert_eq!(
+            verbs,
+            vec![
+                ("disable".to_string(), "cursor:user:cursor-one".to_string()),
+                ("add".to_string(), "cursor:user:added".to_string()),
+                ("remove".to_string(), "cursor:user:added".to_string()),
+            ]
+        );
+    }
+
+    /// The backup directory is capped per file. `~/.claude.json` runs to hundreds of
+    /// kilobytes and every toggle copies it whole, so an uncapped directory would grow
+    /// with each click.
+    #[test]
+    fn only_the_newest_backups_of_one_file_are_kept() {
+        let db = Db::open_in_memory().unwrap();
+        let (_temp, paths, _project) = fixture(&db);
+        for round in 0..22 {
+            set_mcp_server_enabled(&paths, &db, None, "cursor:user:cursor-one", round % 2 == 1, "t").unwrap();
+            // A backup is named by the millisecond it was taken in, and this loop is far
+            // faster than that; the pause is what keeps the names apart.
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        let directory = paths.home.join(edit::BACKUP_DIR);
+        let mut names: Vec<String> =
+            std::fs::read_dir(&directory).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names.len(), edit::BACKUP_KEEP, "22 edits, the newest {} kept: {names:?}", edit::BACKUP_KEEP);
+        assert!(names.iter().all(|n| n.ends_with("-cursor-mcp.json")), "{names:?}");
+        // What was kept is the tail: the newest backup is the last write's.
+        let newest = names.last().unwrap();
+        assert!(std::fs::read_to_string(directory.join(newest)).unwrap().contains(SECRET), "the backups are still the file");
+    }
+
+    /// A configuration file that fails to parse is named by position and nothing else.
+    /// `toml_edit`'s own message prints the source line under it, so a token on a broken
+    /// line would otherwise reach a listing's warnings and an edit's error.
+    #[test]
+    fn a_parse_error_never_quotes_the_line_it_failed_on() {
+        let db = Db::open_in_memory().unwrap();
+        let (_temp, paths, _project) = fixture(&db);
+        let codex = paths.agent_home().join(".codex/config.toml");
+        std::fs::write(&codex, format!("[mcp_servers.one]\ncommand = \"x\"\ntoken = \"{SECRET}\" and then some\n")).unwrap();
+        std::fs::write(
+            paths.agent_home().join(".cursor/mcp.json"),
+            format!("{{\"mcpServers\": {{\"one\": {{\"command\": \"x\", \"env\": {{\"TOKEN\": \"{SECRET}\"}}}}}}}} trailing\n"),
+        )
+        .unwrap();
+
+        let list = list_mcp_servers(paths.agent_home(), None);
+        assert_eq!(list.warnings.len(), 2, "{:?}", list.warnings);
+        for warning in &list.warnings {
+            assert!(!warning.contains(SECRET), "a warning quoted the broken line: {warning}");
+            assert!(warning.contains("line") && warning.contains("column"), "{warning}");
+        }
+        assert!(list.warnings.iter().any(|w| w.contains("config.toml") && w.contains("not valid TOML")), "{:?}", list.warnings);
+        assert!(list.warnings.iter().any(|w| w.contains("mcp.json") && w.contains("not valid JSON")), "{:?}", list.warnings);
+
+        // The same file read for an edit is an error rather than a warning, and it is the
+        // same sentence.
+        for source in [McpServerSource::Codex, McpServerSource::Cursor] {
+            let err = add_mcp_server(
+                &paths,
+                &db,
+                None,
+                &NewMcpServer {
+                    source,
+                    scope: McpServerScope::User,
+                    project_id: None,
+                    name: "nope".into(),
+                    transport: McpTransportInput::Stdio { command: "x".into(), args: vec![], env: BTreeMap::new() },
+                },
+                "t",
+            )
+            .unwrap_err();
+            let message = err.to_string();
+            assert!(!message.contains(SECRET), "{source:?}: an error quoted the broken line: {message}");
+            assert!(message.contains("line") && message.contains("column"), "{source:?}: {message}");
+        }
+    }
+
+    /// A repository does not get to say where a project scope write lands. A `.mcp.json`
+    /// symlinked out of the tree is refused, both for the listing that would edit it and
+    /// for an add that would create one.
+    #[cfg(unix)]
+    #[test]
+    fn a_project_config_that_resolves_outside_the_project_is_refused() {
+        let db = Db::open_in_memory().unwrap();
+        let (temp, paths, project) = fixture(&db);
+        let outside = temp.path().join("outside-mcp.json");
+        let planted = format!("{{\"mcpServers\": {{\"outside\": {{\"command\": \"x\", \"env\": {{\"T\": \"{SECRET}\"}}}}}}}}\n");
+        std::fs::write(&outside, &planted).unwrap();
+        let inside = Path::new(&project.root_path).join(".mcp.json");
+        std::fs::remove_file(&inside).unwrap();
+        std::os::unix::fs::symlink(&outside, &inside).unwrap();
+
+        let added = add_mcp_server(
+            &paths,
+            &db,
+            Some(&project),
+            &NewMcpServer {
+                source: McpServerSource::Claude,
+                scope: McpServerScope::Project,
+                project_id: Some(project.id),
+                name: "fresh".into(),
+                transport: McpTransportInput::Stdio { command: "x".into(), args: vec![], env: BTreeMap::new() },
+            },
+            "t",
+        )
+        .unwrap_err();
+        assert!(matches!(added, AtlasError::Invalid(ref m) if m.contains("resolves outside the project")), "{added}");
+
+        // The link is followed by discovery, so the row is there to be asked for; the
+        // write is where it is stopped.
+        let removed = remove_mcp_server(&paths, &db, Some(&project), "claude:project:outside", "t").unwrap_err();
+        assert!(matches!(removed, AtlasError::Invalid(ref m) if m.contains("resolves outside the project")), "{removed}");
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), planted, "nothing outside the project was written");
+
+        // A user scope file symlinked into a dotfiles repository still writes through: it
+        // is Atlas that names that path, not a checkout.
+        set_mcp_server_enabled(&paths, &db, None, "cursor:user:cursor-one", false, "t").unwrap();
+    }
+
+    /// Adding to a repository that has none of an agent's project files creates the one it
+    /// needs, private from its first byte, and the answer names it so a client can say
+    /// where the server went.
+    #[test]
+    fn an_add_creates_a_missing_project_file_and_names_it() {
+        let db = Db::open_in_memory().unwrap();
+        let (_temp, paths, project) = fixture(&db);
+        let root = Path::new(&project.root_path);
+        std::fs::remove_file(root.join(".mcp.json")).unwrap();
+        std::fs::remove_dir_all(root.join(".codex")).unwrap();
+        std::fs::remove_dir_all(root.join(".cursor")).unwrap();
+
+        for (source, relative) in [
+            (McpServerSource::Claude, ".mcp.json"),
+            (McpServerSource::Codex, ".codex/config.toml"),
+            (McpServerSource::Cursor, ".cursor/mcp.json"),
+        ] {
+            let created = add_mcp_server(
+                &paths,
+                &db,
+                Some(&project),
+                &NewMcpServer {
+                    source,
+                    scope: McpServerScope::Project,
+                    project_id: Some(project.id),
+                    name: "fresh".into(),
+                    transport: McpTransportInput::Stdio { command: "x".into(), args: vec![], env: BTreeMap::new() },
+                },
+                "t",
+            )
+            .unwrap();
+            let path = root.join(relative);
+            assert!(path.is_file(), "{relative} was not created");
+            assert_eq!(created.file.as_deref(), Some(display(&path).as_str()), "{relative} is not named in the answer");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600, "{relative}");
+            }
+        }
     }
 
     /// Neither the backup nor the directory holding it may be readable by another local

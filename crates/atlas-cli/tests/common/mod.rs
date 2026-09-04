@@ -49,14 +49,19 @@ fn run(dir: &Path, args: &[&str]) {
 /// this an atlasd would outlive the run and hold its DuckDB file open.
 pub struct TestDaemon {
     pub home: tempfile::TempDir,
+    /// An empty stand-in for the user's own home. The daemon reads the agents'
+    /// skills and MCP server configs from `ATLAS_SYNC_HOME`, so without this a
+    /// test that lists either would read the developer's real `~/.claude.json`.
+    pub sync_home: tempfile::TempDir,
     pub port: u16,
 }
 
 impl TestDaemon {
     pub fn new() -> Self {
         let home = tempfile::tempdir().unwrap();
+        let sync_home = tempfile::tempdir().unwrap();
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        Self { home, port }
+        Self { home, sync_home, port }
     }
 
     /// An `atlas` command already pointed at this home and port. `PATH` carries
@@ -65,6 +70,7 @@ impl TestDaemon {
         let exe = Path::new(env!("CARGO_BIN_EXE_atlas"));
         let mut c = Command::new(exe);
         c.env("ATLAS_HOME", self.home.path())
+            .env("ATLAS_SYNC_HOME", self.sync_home.path())
             .env("ATLAS_PORT", self.port.to_string())
             .env("ATLAS_NO_EMBED", "1")
             .env(
