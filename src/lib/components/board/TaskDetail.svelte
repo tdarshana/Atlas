@@ -573,7 +573,6 @@
 		background: var(--bg-raised);
 		border: 1px solid var(--border-default);
 		border-radius: 5px;
-		box-shadow: var(--shadow-md);
 		overflow: hidden;
 	}
 
