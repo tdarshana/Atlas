@@ -106,7 +106,11 @@
 <Toast />
 
 <style>
+	/* Pinned to the viewport: `overflow: hidden` alone still lets anchor navigation
+	   (`/settings#about`) scroll the root and push the whole shell out of view. */
 	:global(body) {
+		position: fixed;
+		inset: 0;
 		display: flex;
 		flex-direction: column;
 		height: 100vh;
