@@ -281,7 +281,7 @@ mod tests {
     #[test]
     fn rejects_a_contribution_without_its_permission() {
         let json = HELLO_WORLD.replace(
-            "\"permissions\": [\"ui.sections\", \"ui.components\", \"tasks.read\"]",
+            "\"permissions\": [\"ui.sections\", \"ui.components\", \"tasks.read\", \"mcp.tools\"]",
             "\"permissions\": []",
         );
         assert_ne!(json, HELLO_WORLD, "the fixture's permissions line moved; update this replacement");

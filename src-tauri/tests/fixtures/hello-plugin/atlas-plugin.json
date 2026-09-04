@@ -2,11 +2,11 @@
   "id": "hello-world",
   "name": "Hello World",
   "version": "1.0.0",
-  "description": "A minimal plugin that adds a sidebar section, a dashboard card, a task panel, a command and a theme.",
+  "description": "A minimal plugin that adds a sidebar section, a dashboard card, a task panel, a command, a theme and an MCP tool.",
   "author": "Atlas",
   "api": ">=1.0 <2",
   "main": "main.js",
-  "permissions": ["ui.sections", "ui.components", "tasks.read"],
+  "permissions": ["ui.sections", "ui.components", "tasks.read", "mcp.tools"],
   "contributes": {
     "sections": [
       { "id": "hello", "title": "Hello", "icon": "sparkles", "view": "hello-view" }
@@ -16,6 +16,14 @@
       { "slot": "task.detail.panel", "id": "looking", "view": "task-panel" }
     ],
     "commands": [{ "id": "say-hello", "title": "Say hello" }],
-    "themes": [{ "id": "hello-dusk", "name": "Hello dusk", "file": "theme.json" }]
+    "themes": [{ "id": "hello-dusk", "name": "Hello dusk", "file": "theme.json" }],
+    "tools": [
+      {
+        "name": "ready_count",
+        "description": "Count the ready tasks on the board",
+        "args": { "type": "object", "properties": {}, "additionalProperties": false },
+        "scope": "read"
+      }
+    ]
   }
 }

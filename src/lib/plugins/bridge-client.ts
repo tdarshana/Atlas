@@ -6,7 +6,7 @@
 
 export const BRIDGE_CLIENT_JS = `// The script every plugin frame loads before its own entry point. It defines the global
 // window.atlas a plugin talks to the host through: a ready promise, request for the typed
-// API, theme, command and context callbacks, resize and notify.
+// API, theme, command and context callbacks, MCP tool handlers, resize and notify.
 //
 // Written as plain ES5-shaped JavaScript with no imports and no template literals, for
 // two reasons: it is served straight out of the binary by protocol.rs with no build step,
@@ -19,6 +19,7 @@ export const BRIDGE_CLIENT_JS = `// The script every plugin frame loads before i
   var themeHandlers = [];
   var commandHandlers = [];
   var contextHandlers = [];
+  var toolHandlers = {};
   var context = {};
   var initialized = false;
   var outbox = [];
@@ -51,6 +52,37 @@ export const BRIDGE_CLIENT_JS = `// The script every plugin frame loads before i
   function post(message) {
     if (initialized) send(message);
     else outbox.push(message);
+  }
+
+  // An MCP tool call, forwarded by the daemon and handed on by the host. The answer
+  // carries the same id, so an unregistered name has to say so rather than go quiet: the
+  // daemon is waiting on this frame and would otherwise sit there for its whole timeout.
+  function answerTool(id, name, args) {
+    var handler = Object.prototype.hasOwnProperty.call(toolHandlers, name) ? toolHandlers[name] : null;
+    if (typeof handler !== 'function') {
+      post({ type: 'atlas:tool-result', id: id, ok: false, error: 'tool ' + name + ' is not handled' });
+      return;
+    }
+    var value;
+    try {
+      value = handler(args || {});
+    } catch (thrown) {
+      post({ type: 'atlas:tool-result', id: id, ok: false, error: reason(thrown) });
+      return;
+    }
+    // A handler may answer with a value or a promise; both are settled the same way here.
+    Promise.resolve(value).then(
+      function (result) {
+        post({ type: 'atlas:tool-result', id: id, ok: true, result: result === undefined ? null : result });
+      },
+      function (error) {
+        post({ type: 'atlas:tool-result', id: id, ok: false, error: reason(error) });
+      }
+    );
+  }
+
+  function reason(error) {
+    return error && error.message ? error.message : String(error);
   }
 
   function request(method, params) {
@@ -93,6 +125,10 @@ export const BRIDGE_CLIENT_JS = `// The script every plugin frame loads before i
       for (var j = 0; j < commandHandlers.length; j++) commandHandlers[j](data.id);
       return;
     }
+    if (data.type === 'atlas:tool') {
+      answerTool(data.id, data.name, data.args);
+      return;
+    }
     if (data.type === 'atlas:response') {
       var waiting = pending[data.id];
       if (!waiting) return;
@@ -121,6 +157,12 @@ export const BRIDGE_CLIENT_JS = `// The script every plugin frame loads before i
     // ready payload, so a plugin renders from that and updates from here.
     onContext: function (cb) {
       contextHandlers.push(cb);
+    },
+    // One handler per contributed MCP tool, by the name the manifest declares. The
+    // handler is given the call's arguments and answers with a value or a promise; the
+    // last registration for a name wins.
+    onTool: function (name, handler) {
+      toolHandlers[name] = handler;
     },
     resize: function (height) {
       post({ type: 'atlas:resize', height: height });

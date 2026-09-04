@@ -14,6 +14,14 @@ export type Permission =
 
 export type Slot = 'dashboard.card' | 'board.card.badge' | 'task.detail.panel' | 'table.column';
 
+/**
+ * Where a frame is running. The four `Slot` values come from a manifest's
+ * `contributes.components`; `background` is the host's own hidden frame, which fills no
+ * slot on screen and exists so a plugin with MCP tools has a running context even when
+ * none of its views is open.
+ */
+export type FrameSlot = Slot | 'background';
+
 export interface Section {
 	id: string;
 	title: string;

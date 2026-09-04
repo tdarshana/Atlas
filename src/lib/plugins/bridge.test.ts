@@ -6,7 +6,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Task } from '$lib/types';
 import { BRIDGE_CLIENT_JS } from './bridge-client';
-import { createBridge, MAX_FRAME_HEIGHT, MIN_FRAME_HEIGHT, type PostTarget } from './bridge';
+import {
+	createBridge,
+	MAX_FRAME_HEIGHT,
+	MIN_FRAME_HEIGHT,
+	TOOL_CALL_TIMEOUT_MS,
+	type PostTarget
+} from './bridge';
 import type { PluginBackend } from './plugin-api';
 import type { Manifest, Permission, PluginInfo } from './types';
 
@@ -265,6 +271,7 @@ function runClient() {
 			request(method: string, params?: unknown): Promise<unknown>;
 			resize(height: number): void;
 			onContext(cb: (context: Record<string, unknown>) => void): void;
+			onTool(name: string, handler: (args: unknown) => unknown): void;
 		},
 		deliver: (data: unknown) => listeners.forEach((cb) => cb({ data }))
 	};
@@ -370,5 +377,135 @@ describe('the bridge client handshake', () => {
 		// A frame with no subject is told so, rather than left to guess.
 		h.bridge.sendInit({});
 		expect(h.sent[2]).toMatchObject({ type: 'atlas:init', context: {} });
+	});
+});
+
+// The MCP tool path: the daemon forwards a call to the host, the host asks the frame, the
+// frame answers with the same id. Both halves are exercised here, the host's against a
+// fake frame and the client's against the real script.
+describe('a forwarded MCP tool call', () => {
+	it('goes out as atlas:tool and resolves on the matching result', async () => {
+		const h = harness(['mcp.tools']);
+
+		const answer = h.bridge.callTool('ready_count', { of: 'tasks' });
+
+		expect(h.sent).toEqual([
+			{ type: 'atlas:tool', id: 1, name: 'ready_count', args: { of: 'tasks' } }
+		]);
+		h.bridge.handle({
+			source: h.target,
+			data: { type: 'atlas:tool-result', id: 1, ok: true, result: { count: 3 } }
+		});
+		await expect(answer).resolves.toEqual({ count: 3 });
+	});
+
+	it('rejects with the message the frame gave when the plugin fails', async () => {
+		const h = harness(['mcp.tools']);
+
+		const answer = h.bridge.callTool('ready_count', {});
+		h.bridge.handle({
+			source: h.target,
+			data: { type: 'atlas:tool-result', id: 1, ok: false, error: 'the board is empty' }
+		});
+
+		await expect(answer).rejects.toThrow('the board is empty');
+	});
+
+	it('ignores a result whose id nothing is waiting on', async () => {
+		const h = harness(['mcp.tools']);
+
+		const answer = h.bridge.callTool('ready_count', {});
+		h.bridge.handle({ source: h.target, data: { type: 'atlas:tool-result', id: 99, ok: true, result: 1 } });
+		h.bridge.handle({ source: h.target, data: { type: 'atlas:tool-result', id: 1, ok: true, result: 2 } });
+
+		await expect(answer).resolves.toBe(2);
+	});
+
+	it('gives up before the daemon does, naming the plugin that went quiet', async () => {
+		vi.useFakeTimers();
+		try {
+			const h = harness(['mcp.tools']);
+			const answer = h.bridge.callTool('ready_count', {});
+			const settled = expect(answer).rejects.toThrow('plugin hello-world did not answer');
+
+			// The daemon's own limit is 30 seconds, so this has to fire first.
+			await vi.advanceTimersByTimeAsync(TOOL_CALL_TIMEOUT_MS);
+			await settled;
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('fails a call in flight when the frame goes away', async () => {
+		const h = harness(['mcp.tools']);
+
+		const answer = h.bridge.callTool('ready_count', {});
+		h.bridge.dispose();
+
+		await expect(answer).rejects.toThrow('plugin hello-world is not running');
+	});
+
+	it('is answered by the frame from its onTool handler', async () => {
+		const client = runClient();
+		client.atlas.onTool('ready_count', (args) => ({ count: 3, args }));
+		client.deliver({
+			type: 'atlas:init',
+			plugin: { id: 'hello-world', view: 'background', slot: 'background' },
+			api: '1.0.0',
+			theme: {}
+		});
+
+		client.deliver({ type: 'atlas:tool', id: 7, name: 'ready_count', args: { of: 'tasks' } });
+		await flush();
+
+		expect(client.posted.at(-1)).toEqual({
+			type: 'atlas:tool-result',
+			id: 7,
+			ok: true,
+			result: { count: 3, args: { of: 'tasks' } }
+		});
+	});
+
+	it('says so rather than going quiet when nothing handles the name', async () => {
+		const client = runClient();
+		client.deliver({
+			type: 'atlas:init',
+			plugin: { id: 'hello-world', view: 'background', slot: 'background' },
+			api: '1.0.0',
+			theme: {}
+		});
+
+		client.deliver({ type: 'atlas:tool', id: 4, name: 'nope', args: {} });
+		await flush();
+
+		expect(client.posted.at(-1)).toEqual({
+			type: 'atlas:tool-result',
+			id: 4,
+			ok: false,
+			error: 'tool nope is not handled'
+		});
+	});
+
+	it('reports a handler that throws or rejects as a failed call', async () => {
+		const client = runClient();
+		client.atlas.onTool('throws', () => {
+			throw new Error('no board');
+		});
+		client.atlas.onTool('rejects', () => Promise.reject(new Error('no daemon')));
+		client.deliver({
+			type: 'atlas:init',
+			plugin: { id: 'hello-world', view: 'background', slot: 'background' },
+			api: '1.0.0',
+			theme: {}
+		});
+
+		client.deliver({ type: 'atlas:tool', id: 1, name: 'throws', args: {} });
+		client.deliver({ type: 'atlas:tool', id: 2, name: 'rejects', args: {} });
+		await flush();
+
+		expect(client.posted.slice(-2)).toEqual([
+			{ type: 'atlas:tool-result', id: 1, ok: false, error: 'no board' },
+			{ type: 'atlas:tool-result', id: 2, ok: false, error: 'no daemon' }
+		]);
 	});
 });

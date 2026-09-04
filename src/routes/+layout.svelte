@@ -13,6 +13,7 @@
 	import ErrorState from '$lib/ui/ErrorState.svelte';
 	import Toast from '$lib/ui/Toast.svelte';
 	import CommandPalette from '$lib/search/CommandPalette.svelte';
+	import ToolHost from '$lib/plugins/ToolHost.svelte';
 	import ActivityRail from '$lib/shell/ActivityRail.svelte';
 	import SidePanel from '$lib/shell/SidePanel.svelte';
 	import StatusBar from '$lib/shell/StatusBar.svelte';
@@ -102,6 +103,13 @@
 </div>
 
 <StatusBar />
+
+<!-- Hidden frames for the plugins that contribute MCP tools, plus the daemon's channel
+     for the calls it forwards. Renders nothing on screen and nothing at all outside
+     Tauri; it waits for the daemon because the channel is the daemon's socket. -->
+{#if daemon.ready}
+	<ToolHost />
+{/if}
 
 <Toast />
 

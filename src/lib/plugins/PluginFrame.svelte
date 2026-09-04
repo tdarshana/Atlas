@@ -17,14 +17,15 @@
 	import { frameUrl } from './frame-url';
 	import { registerFrame, unregisterFrame } from './host.svelte';
 	import { pluginBackend } from './plugin-api';
-	import type { PluginInfo, Slot } from './types';
+	import type { FrameSlot, PluginInfo } from './types';
 
 	interface Props {
 		plugin: PluginInfo;
 		/** Which of the plugin's views to render. */
 		view: string;
-		/** The slot, when this frame is a contributed component rather than a section. */
-		slot?: Slot | null;
+		/** The slot, when this frame is a contributed component rather than a section, or
+		 * `background` for the hidden frame that answers MCP tool calls. */
+		slot?: FrameSlot | null;
 		/** A fixed height. Without one the frame follows the plugin's own `atlas.resize`. */
 		height?: number;
 		/** A ceiling on what the frame may ask for, for a slot with a budget to keep. */
@@ -98,7 +99,7 @@
 			onResize: (h) => (reported = h),
 			onNotify: (kind, text) => push(kind, `${title}: ${text}`)
 		});
-		registerFrame(plugin.id, bridge);
+		registerFrame(plugin.id, bridge, view);
 		sentContext = JSON.stringify(context ?? {});
 		bridge.sendInit(themeTokens(), context);
 	}

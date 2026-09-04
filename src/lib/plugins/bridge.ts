@@ -7,7 +7,7 @@
 // way round instead, by comparing `event.source` against the frame's own window.
 
 import type { PluginBackend } from './plugin-api';
-import type { Permission, PluginInfo, Slot } from './types';
+import type { FrameSlot, Permission, PluginInfo } from './types';
 
 /** The API version the host implements, matching `ATLAS_API_VERSION` in Rust. */
 export const ATLAS_API_VERSION = '1.0.0';
@@ -15,6 +15,13 @@ export const ATLAS_API_VERSION = '1.0.0';
 /** How short and how tall a frame may ask to be, in pixels. */
 export const MIN_FRAME_HEIGHT = 40;
 export const MAX_FRAME_HEIGHT = 2000;
+
+/**
+ * How long the host waits for a frame to answer a forwarded MCP tool call. The daemon
+ * gives up at 30 seconds; failing here first means the agent is told which plugin went
+ * quiet rather than being handed the daemon's generic channel timeout.
+ */
+export const TOOL_CALL_TIMEOUT_MS = 25_000;
 
 export type ErrorCode = 'permission_denied' | 'unknown_method' | 'bad_params' | 'upstream';
 
@@ -58,8 +65,9 @@ export interface BridgeOptions {
 	plugin: PluginInfo;
 	/** Which of the plugin's views the frame is showing. */
 	view: string;
-	/** The slot a contributed component renders in, when the frame is a component. */
-	slot?: Slot | null;
+	/** The slot a contributed component renders in, when the frame is a component, or
+	 * `background` for the hidden frame that answers MCP tool calls. */
+	slot?: FrameSlot | null;
 	/** The frame's window. */
 	target: PostTarget;
 	/**
@@ -80,6 +88,8 @@ export interface Bridge {
 	sendTheme(theme: ThemeTokens): void;
 	sendContext(context: FrameContext): void;
 	sendCommand(id: string): void;
+	/** Asks the frame to run one of the plugin's contributed MCP tools. */
+	callTool(name: string, args: unknown): Promise<unknown>;
 	dispose(): void;
 }
 
@@ -129,6 +139,15 @@ export function createBridge(options: BridgeOptions): Bridge {
 	const source = options.source ?? target;
 	const granted = new Set<Permission>(plugin.manifest?.permissions ?? []);
 	let disposed = false;
+
+	/** Tool calls waiting on the frame, by the id this side minted. */
+	const pendingTools = new Map<number, { settle: (ok: boolean, value: unknown) => void }>();
+	let nextToolId = 0;
+
+	function failPending(message: string): void {
+		for (const [, waiting] of pendingTools) waiting.settle(false, message);
+		pendingTools.clear();
+	}
 
 	function post(message: unknown): void {
 		if (disposed) return;
@@ -230,6 +249,15 @@ export function createBridge(options: BridgeOptions): Bridge {
 				if (height !== null) onResize?.(height);
 				return;
 			}
+			if (message.type === 'atlas:tool-result') {
+				if (typeof message.id !== 'number') return;
+				const waiting = pendingTools.get(message.id);
+				if (!waiting) return;
+				pendingTools.delete(message.id);
+				if (message.ok === true) waiting.settle(true, message.result ?? null);
+				else waiting.settle(false, typeof message.error === 'string' ? message.error : 'The plugin reported an error.');
+				return;
+			}
 			if (message.type !== 'atlas:request') return;
 			if (typeof message.id !== 'number') return;
 			void answer(message.id, message.method, message.params);
@@ -253,8 +281,32 @@ export function createBridge(options: BridgeOptions): Bridge {
 		sendCommand(id) {
 			post({ type: 'atlas:command', id });
 		},
+		callTool(name, args) {
+			return new Promise((resolve, reject) => {
+				if (disposed) {
+					reject(new Error(`plugin ${plugin.id} is not running`));
+					return;
+				}
+				nextToolId += 1;
+				const id = nextToolId;
+				const timer = setTimeout(() => {
+					pendingTools.delete(id);
+					reject(new Error(`plugin ${plugin.id} did not answer`));
+				}, TOOL_CALL_TIMEOUT_MS);
+				pendingTools.set(id, {
+					settle(ok, value) {
+						clearTimeout(timer);
+						if (ok) resolve(value);
+						else reject(new Error(String(value)));
+					}
+				});
+				post({ type: 'atlas:tool', id, name, args });
+			});
+		},
 		dispose() {
 			disposed = true;
+			// The frame this bridge spoke to is gone, so nothing will ever answer these.
+			failPending(`plugin ${plugin.id} is not running`);
 		}
 	};
 }

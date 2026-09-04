@@ -20,7 +20,10 @@ describe('BRIDGE_CLIENT_JS', () => {
 			'atlas:response',
 			'atlas:resize',
 			'atlas:context',
-			'onContext'
+			'onContext',
+			'atlas:tool',
+			'atlas:tool-result',
+			'onTool'
 		]) {
 			expect(BRIDGE_CLIENT_JS).toContain(name);
 		}

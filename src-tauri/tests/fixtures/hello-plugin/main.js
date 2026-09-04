@@ -7,6 +7,9 @@
 atlas.ready.then(function (context) {
   var root = document.getElementById('root');
 
+  // The host's hidden frame. It paints nothing; it is here so the tool handler below is
+  // running and can answer an agent even when no view of this plugin is open.
+  if (context.plugin.view === 'background') return;
   if (context.plugin.view === 'ready-card') return readyCard(root);
   if (context.plugin.view === 'task-panel') return taskPanel(root, context.context);
   return helloView(root, context);
@@ -76,6 +79,19 @@ function countReady(done) {
       done(error.message);
     });
 }
+
+// The manifest's one MCP tool. An agent calls it as `plugin__hello_world__ready_count`
+// through the daemon, which forwards it to whichever frame of this plugin is running in
+// the background; the value returned here is what the agent gets back.
+atlas.onTool('ready_count', function () {
+  return atlas.request('tasks.list', {}).then(function (tasks) {
+    return {
+      count: tasks.filter(function (task) {
+        return task.ready;
+      }).length
+    };
+  });
+});
 
 // Every command the manifest contributes arrives here, by its own id.
 atlas.onCommand(function (id) {

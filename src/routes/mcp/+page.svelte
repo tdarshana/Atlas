@@ -9,7 +9,7 @@
 	import { daemon } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
 	import { relativeAge } from '$lib/format';
-	import { CLAUDE_SNIPPET, CODEX_SNIPPET, toolIcon } from '$lib/mcp';
+	import { CLAUDE_SNIPPET, CODEX_SNIPPET, toolIcon, toolPluginId } from '$lib/mcp';
 	import { copyText, inTauri, setStatusItems } from '$lib/shell';
 	import { loadMcp, mcp, toggleTool } from '$lib/stores/mcp.svelte';
 	import type { McpClient, McpToolRow } from '$lib/types';
@@ -202,6 +202,11 @@
 						<span class="tool-name">
 							<Icon name={toolIcon(toolRow.name)} size={12} color="var(--text-tertiary)" />
 							<span class="mono">{toolRow.name}</span>
+							{#if toolPluginId(toolRow.source)}
+								<Badge variant="outline" data-testid="mcp-tool-source-{toolRow.name}">
+									Plugin {toolPluginId(toolRow.source)}
+								</Badge>
+							{/if}
 						</span>
 					{:else if column.key === 'description'}
 						{toolRow.description}
@@ -227,6 +232,8 @@
 		<span class="hint">
 			Disabled tools are absent from <span class="mono">tools/list</span> and a call to one
 			answers "method not found". Write tools still respect a project's agent access rules.
+			A tool a plugin contributes carries a <strong>Plugin</strong> badge and is answered by the
+			desktop app, so it is listed only while Atlas is running.
 		</span>
 	</div>
 

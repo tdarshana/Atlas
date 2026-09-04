@@ -8,7 +8,7 @@
 	import { agentAccessSummary } from '$lib/components/project/mcp';
 	import { errorLogPath, errorMessage } from '$lib/errors';
 	import { relativeAge } from '$lib/format';
-	import { nextDisabledTools, projectConnectSnippet, projectToolState } from '$lib/mcp';
+	import { nextDisabledTools, projectConnectSnippet, projectToolState, toolPluginId } from '$lib/mcp';
 	import { copyText } from '$lib/shell';
 	import { loadProject } from '$lib/stores/projects.svelte';
 	import { project, setHeaderActions } from '$lib/stores/project.svelte';
@@ -208,6 +208,11 @@
 							{/if}
 						{:else}
 							{row.name}
+							{#if toolPluginId(row.source)}
+								<Badge variant="outline" data-testid="project-mcp-tool-source-{row.name}">
+									Plugin {toolPluginId(row.source)}
+								</Badge>
+							{/if}
 						{/if}
 					{/snippet}
 					{#snippet empty()}

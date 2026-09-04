@@ -48,6 +48,7 @@ function fakeBridge(): Bridge & { sent: string[] } {
 		sendTheme: () => {},
 		sendContext: () => {},
 		sendCommand: (id: string) => sent.push(id),
+		callTool: async () => null,
 		dispose: () => {}
 	};
 }

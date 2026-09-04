@@ -730,6 +730,9 @@ export interface McpToolRow {
 	args: string;
 	scope: McpToolScope;
 	enabled: boolean;
+	/** `builtin` for a tool the daemon carries itself, `plugin:<id>` for one a plugin
+	 * registered. Optional so a report from an older daemon still type-checks. */
+	source?: string;
 }
 
 export interface McpResource {
@@ -798,6 +801,9 @@ export interface ProjectMcpToolRow {
 	enabled_globally: boolean;
 	/** Actually callable here: enabled globally and not in this project's own override. */
 	enabled_here: boolean;
+	/** Read the same way as `McpToolRow.source`. Optional, and today always absent: this
+	 * route reports the built-in table only. */
+	source?: string;
 }
 
 export interface ProjectMcpReport {

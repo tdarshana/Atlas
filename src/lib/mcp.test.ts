@@ -6,7 +6,8 @@ import {
 	nextDisabledTools,
 	projectConnectSnippet,
 	projectToolState,
-	toolIcon
+	toolIcon,
+	toolPluginId
 } from './mcp';
 import type { McpStatusReport } from './types';
 
@@ -141,5 +142,17 @@ describe('mcpSidepanelCounts', () => {
 			prompts: 0,
 			clients: 0
 		});
+	});
+});
+
+describe('toolPluginId', () => {
+	it('reads the plugin out of a plugin row source', () => {
+		expect(toolPluginId('plugin:hello-world')).toBe('hello-world');
+	});
+
+	it('answers null for a built-in, an empty id and a report with no source at all', () => {
+		expect(toolPluginId('builtin')).toBeNull();
+		expect(toolPluginId('plugin:')).toBeNull();
+		expect(toolPluginId(undefined)).toBeNull();
 	});
 });

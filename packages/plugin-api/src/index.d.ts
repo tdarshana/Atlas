@@ -267,6 +267,13 @@ export interface AtlasClient {
 	onCommand(cb: (commandId: string) => void): void;
 	/** Called on every context change after init; the context at init is in `ready`. */
 	onContext(cb: (context: FrameContext) => void): void;
+	/**
+	 * Registers the handler for one of the manifest's `contributes.tools`, by its declared
+	 * name. The handler is given the call's arguments and answers with a value or a promise
+	 * for one; throwing or rejecting reports the message as the tool's error. Answer inside
+	 * 25 seconds, after which the host gives up on the plugin's behalf.
+	 */
+	onTool(name: string, handler: (args: Record<string, unknown>) => unknown): void;
 	/** Asks the host for a height in pixels, clamped to 40..2000 and to whatever ceiling
 	 * the slot sets. Ignored for a section, which fills the content panel. */
 	resize(height: number): void;

@@ -24,6 +24,7 @@ export function nextDisabledTools(current: string[], name: string, enabled: bool
 /** Icon prefixes tried in order; the first match wins. `workflow_status` must be
  * checked before the bare `workflow_` prefix. */
 const TOOL_ICON_PREFIXES: [string, string][] = [
+	['plugin__', 'plug'],
 	['memory_', 'database'],
 	['project_', 'folder'],
 	['task_', 'columns-3'],
@@ -42,6 +43,19 @@ export function toolIcon(name: string): string {
 		if (name.startsWith(prefix)) return icon;
 	}
 	return 'terminal';
+}
+
+/** The prefix the daemon puts on a plugin tool row's `source`. */
+const PLUGIN_SOURCE_PREFIX = 'plugin:';
+
+/**
+ * The plugin a tool row came from, or null for a built-in. The daemon sends
+ * `plugin:<id>`; an older daemon sends no `source` at all, which reads as built-in.
+ */
+export function toolPluginId(source: string | undefined): string | null {
+	if (!source || !source.startsWith(PLUGIN_SOURCE_PREFIX)) return null;
+	const id = source.slice(PLUGIN_SOURCE_PREFIX.length);
+	return id === '' ? null : id;
 }
 
 /**

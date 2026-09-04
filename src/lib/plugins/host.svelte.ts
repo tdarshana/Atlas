@@ -49,17 +49,38 @@ export function pluginById(id: string): PluginInfo | undefined {
 
 const mountedFrames = new Map<string, Set<Bridge>>();
 
-export function registerFrame(pluginId: string, bridge: Bridge): void {
+/** The view name the host's own hidden frame is opened with. A plugin reads it from
+ * `atlas.ready` and renders nothing for it. */
+export const BACKGROUND_VIEW = 'background';
+
+/** The one hidden frame per plugin, kept apart from the rest because a forwarded MCP tool
+ * call has to reach that frame in particular: a section frame is only there while its
+ * page is open, and would answer "not handled" for a tool it never registered. */
+const backgroundFrames = new Map<string, Bridge>();
+
+export function registerFrame(pluginId: string, bridge: Bridge, view?: string): void {
 	const set = mountedFrames.get(pluginId) ?? new Set<Bridge>();
 	set.add(bridge);
 	mountedFrames.set(pluginId, set);
+	if (view === BACKGROUND_VIEW) backgroundFrames.set(pluginId, bridge);
 }
 
 export function unregisterFrame(pluginId: string, bridge: Bridge): void {
+	if (backgroundFrames.get(pluginId) === bridge) backgroundFrames.delete(pluginId);
 	const set = mountedFrames.get(pluginId);
 	if (!set) return;
 	set.delete(bridge);
 	if (set.size === 0) mountedFrames.delete(pluginId);
+}
+
+/**
+ * Runs one of a plugin's contributed MCP tools in its background frame. The daemon has
+ * already resolved which plugin and tool the agent named; this is the last hop.
+ */
+export function callPluginTool(pluginId: string, tool: string, args: unknown): Promise<unknown> {
+	const bridge = backgroundFrames.get(pluginId);
+	if (!bridge) return Promise.reject(new Error(`plugin ${pluginId} is not running`));
+	return bridge.callTool(tool, args);
 }
 
 /** Sends `commandId` to every mounted frame of `pluginId`, and answers how many got it. */
