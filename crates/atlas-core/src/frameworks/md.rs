@@ -111,6 +111,27 @@ pub(crate) fn checkboxes(text: &str) -> Vec<Checkbox> {
     out
 }
 
+/// Cleans a checkbox item's raw text into a subtask title: strips one layer of
+/// surrounding `**`/`__` (Markdown bold/strong emphasis), then one layer of
+/// surrounding backticks, then a trailing `:`, then collapses any run of
+/// whitespace to a single space. Used by the Superpowers adapter so
+/// `**Step 1: Write the workspace manifest**` imports as `Step 1: Write the
+/// workspace manifest` rather than with its markdown intact.
+pub(crate) fn clean_step_title(s: &str) -> String {
+    let mut t = s.trim();
+    for wrap in ["**", "__"] {
+        if let Some(inner) = t.strip_prefix(wrap).and_then(|r| r.strip_suffix(wrap)) {
+            t = inner.trim();
+            break;
+        }
+    }
+    if let Some(inner) = t.strip_prefix('`').and_then(|r| r.strip_suffix('`')) {
+        t = inner.trim();
+    }
+    let t = t.strip_suffix(':').unwrap_or(t).trim();
+    t.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// The bullet lines (`- ` or `* `) under a heading whose text matches `name`
 /// (case-insensitive), stopping at the next heading of any level. Matches
 /// `## Decisions`, `# Decisions`, and so on regardless of level, and, when a
@@ -227,6 +248,19 @@ fn fence_delimiter(trimmed: &str) -> Option<(char, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clean_step_title_strips_bold_backticks_colon_and_extra_whitespace() {
+        assert_eq!(
+            clean_step_title("**Step 1: Write the workspace manifest**"),
+            "Step 1: Write the workspace manifest"
+        );
+        assert_eq!(clean_step_title("__Step 2__"), "Step 2");
+        assert_eq!(clean_step_title("`inline code`"), "inline code");
+        assert_eq!(clean_step_title("Trailing colon:"), "Trailing colon");
+        assert_eq!(clean_step_title("  extra   spaces   here "), "extra spaces here");
+        assert_eq!(clean_step_title("Plain text"), "Plain text", "text with nothing to clean is left as is");
+    }
 
     #[test]
     fn title_from_first_h1() {

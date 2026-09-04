@@ -377,6 +377,11 @@ pub struct Task {
     pub ready: bool,
     /// Why `ready` is false, when the task is open but held up.
     pub blocked_reason: Option<String>,
+    /// How many direct subtasks this task has. Computed on read, the same way
+    /// `open_blockers` and `ready` are.
+    pub subtasks_total: u32,
+    /// How many of `subtasks_total` sit in a done stage.
+    pub subtasks_done: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, Default)]
@@ -457,6 +462,9 @@ pub struct TaskFilter {
     /// Keep only tasks with no project at all: the literal global board, distinct from
     /// a bare `project_id: None`, which leaves every project's tasks in.
     #[serde(default)] pub global_only: bool,
+    /// `Some(true)` keeps only tasks with no parent (`parent_id is null`); `Some(false)`
+    /// keeps only subtasks; `None` applies no filter either way.
+    #[serde(default)] pub top_level: Option<bool>,
 }
 
 // ---- workflows ----
@@ -732,6 +740,9 @@ pub struct ImportedTask {
     /// left to `import::import_tasks` to map onto a board stage.
     #[serde(default)] pub status_hint: Option<String>,
     pub source_ref: SourceRef,
+    /// The parent task's own `source_ref.anchor`, when this item is a subtask of
+    /// another `ImportedTask` from the same adapter run. `None` for a top-level item.
+    #[serde(default)] pub parent_anchor: Option<String>,
 }
 
 /// A decision line found by `FrameworkAdapter::decisions`, ready to become a
@@ -754,6 +765,10 @@ pub struct ImportReport {
     pub created: usize,
     pub updated: usize,
     pub skipped: usize,
+    /// How many existing tasks were given a different parent (or had one removed) by
+    /// this import. Counted independently of `updated`: a task whose parent changed
+    /// but whose title and description did not is still `reparented`, not `updated`.
+    pub reparented: usize,
 }
 
 /// One framework's inventory plus the documents it holds, the shape

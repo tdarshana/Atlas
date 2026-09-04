@@ -317,6 +317,7 @@ impl Backend for RemoteBackend {
         if let Some(text) = f.query { parts.push(format!("q={text}")); }
         if f.include_done { parts.push("include_done=true".into()); }
         if f.global_only { parts.push("scope=global".into()); }
+        if let Some(tl) = f.top_level { parts.push(format!("top_level={tl}")); }
         let q = if parts.is_empty() { String::new() } else { format!("?{}", parts.join("&")) };
         Self::handle(self.client.get(format!("{}/tasks{q}", self.base)).header("X-Atlas-Actor", &self.actor).send().await.map_err(Self::net)?).await
     }
@@ -379,10 +380,11 @@ impl Backend for RemoteBackend {
         )
         .await
     }
-    async fn task_counts(&self, project_id: Option<Uuid>, global_only: bool) -> Result<Vec<(String, i64)>> {
+    async fn task_counts(&self, project_id: Option<Uuid>, global_only: bool, top_level: Option<bool>) -> Result<Vec<(String, i64)>> {
         let mut params = Vec::new();
         if let Some(p) = project_id { params.push(format!("project_id={p}")); }
         if global_only { params.push("scope=global".to_string()); }
+        if let Some(tl) = top_level { params.push(format!("top_level={tl}")); }
         let query = if params.is_empty() { String::new() } else { format!("?{}", params.join("&")) };
         let rows: Vec<StageCount> =
             Self::handle(self.client.get(format!("{}/tasks/counts{query}", self.base)).header("X-Atlas-Actor", &self.actor).send().await.map_err(Self::net)?).await?;

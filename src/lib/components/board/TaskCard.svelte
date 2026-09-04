@@ -51,6 +51,9 @@
 
 	<div class="tags">
 		<Badge mono>{task.kind}</Badge>
+		{#if task.subtasks_total > 0}
+			<Badge mono icon="list-checks">{task.subtasks_done}/{task.subtasks_total}</Badge>
+		{/if}
 		{#if task.assignee}
 			<Badge tone="accent" mono>{task.assignee}</Badge>
 		{/if}

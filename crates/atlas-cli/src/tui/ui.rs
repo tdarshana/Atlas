@@ -661,6 +661,8 @@ mod tests {
             open_blockers: 1,
             ready: false,
             blocked_reason: Some("waiting on ATL-9".into()),
+            subtasks_total: 0,
+            subtasks_done: 0,
         }
     }
 

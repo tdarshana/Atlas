@@ -91,6 +91,8 @@ fn row_to_task(r: &Row) -> duckdb::Result<Task> {
         open_blockers: 0,
         ready: false,
         blocked_reason: None,
+        subtasks_total: 0,
+        subtasks_done: 0,
     })
 }
 
@@ -411,10 +413,13 @@ impl TaskRepo {
                 .map(|(key, _, _)| key.clone())
                 .collect();
             open_children.sort();
+            let own_children = children.get(&t.id).map(|v| v.len()).unwrap_or(0);
 
             t.blocked_by = keys;
             t.open_blockers = open_blockers.len();
             t.ready = !done && open_blockers.is_empty() && open_children.is_empty();
+            t.subtasks_total = own_children as u32;
+            t.subtasks_done = (own_children - open_children.len()) as u32;
             t.blocked_reason = if done {
                 None
             } else if !open_blockers.is_empty() {
@@ -462,6 +467,9 @@ impl TaskRepo {
             }
             if f.global_only {
                 sql.push_str(" and project_id is null");
+            }
+            if let Some(top_level) = f.top_level {
+                sql.push_str(if top_level { " and parent_id is null" } else { " and parent_id is not null" });
             }
             if let Some(s) = &f.stage {
                 sql.push_str(" and lower(stage) = lower(?)");
@@ -525,30 +533,23 @@ impl TaskRepo {
     /// every project's tasks, `project_id` alone counts just that project's, and
     /// `global_only` counts just the project-less ones (the caller refuses passing
     /// both at once).
-    pub fn counts_by_stage(&self, project_id: Option<Uuid>, global_only: bool) -> Result<Vec<(String, i64)>> {
+    pub fn counts_by_stage(&self, project_id: Option<Uuid>, global_only: bool, top_level: Option<bool>) -> Result<Vec<(String, i64)>> {
         self.db.with_conn(|c| {
             let stages = self.stages_for(c, project_id)?.stages;
             let mut out = Vec::with_capacity(stages.len());
             for s in stages {
-                let n: i64 = if global_only {
-                    c.query_row(
-                        "select count(*) from tasks where project_id is null and lower(stage) = lower(?)",
-                        params![s.name],
-                        |r| r.get(0),
-                    )?
+                let mut sql = String::from("select count(*) from tasks where lower(stage) = lower(?)");
+                let mut args: Vec<String> = vec![s.name.clone()];
+                if global_only {
+                    sql.push_str(" and project_id is null");
                 } else if let Some(p) = project_id {
-                    c.query_row(
-                        "select count(*) from tasks where project_id = ? and lower(stage) = lower(?)",
-                        params![p.to_string(), s.name],
-                        |r| r.get(0),
-                    )?
-                } else {
-                    c.query_row(
-                        "select count(*) from tasks where lower(stage) = lower(?)",
-                        params![s.name],
-                        |r| r.get(0),
-                    )?
-                };
+                    sql.push_str(" and project_id = ?");
+                    args.push(p.to_string());
+                }
+                if let Some(top_level) = top_level {
+                    sql.push_str(if top_level { " and parent_id is null" } else { " and parent_id is not null" });
+                }
+                let n: i64 = c.query_row(&sql, params_from_iter(args.iter()), |r| r.get(0))?;
                 out.push((s.name, n));
             }
             Ok(out)

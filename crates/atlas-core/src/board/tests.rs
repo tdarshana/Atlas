@@ -125,7 +125,7 @@ fn counts_by_stage_covers_every_column_in_board_order() {
     repo.create(&new_task(Some(p.id), "a"), "t").unwrap();
     let b = repo.create(&new_task(Some(p.id), "b"), "t").unwrap();
     repo.move_stage(&b.key, "Testing", None, "t").unwrap();
-    let counts = repo.counts_by_stage(Some(p.id), false).unwrap();
+    let counts = repo.counts_by_stage(Some(p.id), false, None).unwrap();
     assert_eq!(
         counts,
         vec![("Backlog".to_string(), 1), ("In Progress".to_string(), 0), ("Testing".to_string(), 1), ("Done".to_string(), 0)]
@@ -142,13 +142,34 @@ fn counts_by_stage_with_neither_scope_counts_every_project() {
     repo.create(&new_task(Some(p.id), "in a project"), "t").unwrap();
     repo.create(&new_task(None, "no project"), "t").unwrap();
 
-    let every = repo.counts_by_stage(None, false).unwrap();
+    let every = repo.counts_by_stage(None, false, None).unwrap();
     let backlog = every.iter().find(|(s, _)| s == "Backlog").unwrap().1;
     assert_eq!(backlog, 2, "{every:?}");
 
-    let global = repo.counts_by_stage(None, true).unwrap();
+    let global = repo.counts_by_stage(None, true, None).unwrap();
     let backlog = global.iter().find(|(s, _)| s == "Backlog").unwrap().1;
     assert_eq!(backlog, 1, "{global:?}");
+}
+
+/// `top_level` narrows the count to parent-less tasks (`Some(true)`) or subtasks
+/// (`Some(false)`), the same `parent_id` rule `list`'s `top_level` filter applies.
+#[test]
+fn counts_by_stage_top_level_narrows_by_parent_id() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    let parent = repo.create(&new_task(Some(p.id), "parent"), "t").unwrap();
+    repo.create(&new_task(Some(p.id), "standalone"), "t").unwrap();
+    repo.update(&parent.key, &TaskUpdate::default(), "t").unwrap(); // no-op, keeps parent stable
+    let child = repo.create(&new_task(Some(p.id), "child"), "t").unwrap();
+    repo.update(&child.key, &TaskUpdate { parent: Some(Some(parent.key.clone())), ..Default::default() }, "t").unwrap();
+
+    let top = repo.counts_by_stage(Some(p.id), false, Some(true)).unwrap();
+    let backlog = top.iter().find(|(s, _)| s == "Backlog").unwrap().1;
+    assert_eq!(backlog, 2, "the parent and the standalone task, not the child: {top:?}");
+
+    let subtasks = repo.counts_by_stage(Some(p.id), false, Some(false)).unwrap();
+    let backlog = subtasks.iter().find(|(s, _)| s == "Backlog").unwrap().1;
+    assert_eq!(backlog, 1, "just the child: {subtasks:?}");
 }
 
 // -- blockers, subtasks, ready ---------------------------------------------
@@ -290,10 +311,63 @@ fn a_parent_with_an_open_child_is_not_ready_and_says_why() {
     assert_eq!(detail.children.len(), 1);
     // The child is ready on its own terms.
     assert!(detail.children[0].ready);
+    assert_eq!(detail.task.subtasks_total, 1);
+    assert_eq!(detail.task.subtasks_done, 0);
 
     repo.move_stage(&child.key, "Done", None, "t").unwrap();
     let after = repo.get(&parent.key).unwrap().task;
     assert!(after.ready, "{:?}", after.blocked_reason);
+    assert_eq!(after.subtasks_total, 1);
+    assert_eq!(after.subtasks_done, 1, "the child moved to a done stage");
+}
+
+/// `subtasks_total`/`subtasks_done` count only direct children, are 0 for a task
+/// with none, and count a done child even while another sibling is still open.
+#[test]
+fn subtasks_total_and_done_count_direct_children_in_a_done_stage() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    let parent = repo.create(&new_task(Some(p.id), "parent"), "t").unwrap();
+    assert_eq!(parent.subtasks_total, 0);
+    assert_eq!(parent.subtasks_done, 0);
+
+    let a = repo.create(&NewTask { project_id: Some(p.id), title: "a".into(), parent: Some(parent.key.clone()), ..Default::default() }, "t").unwrap();
+    let b = repo.create(&NewTask { project_id: Some(p.id), title: "b".into(), parent: Some(parent.key.clone()), ..Default::default() }, "t").unwrap();
+    repo.move_stage(&a.key, "Done", None, "t").unwrap();
+
+    let parent = repo.get(&parent.key).unwrap().task;
+    assert_eq!(parent.subtasks_total, 2);
+    assert_eq!(parent.subtasks_done, 1);
+
+    // The child itself has no subtasks of its own.
+    let a = repo.get(&a.key).unwrap().task;
+    assert_eq!(a.subtasks_total, 0);
+    assert_eq!(a.subtasks_done, 0);
+    let _ = b;
+}
+
+/// `list`'s `top_level` filter keeps only parent-less tasks (`Some(true)`) or only
+/// subtasks (`Some(false)`); `None` (the default) applies no filter either way.
+#[test]
+fn list_top_level_filter_keeps_parents_or_subtasks() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    let parent = repo.create(&new_task(Some(p.id), "parent"), "t").unwrap();
+    let child = repo.create(&NewTask { project_id: Some(p.id), title: "child".into(), parent: Some(parent.key.clone()), ..Default::default() }, "t").unwrap();
+
+    let keys = |f: TaskFilter| -> Vec<String> { repo.list(&f).unwrap().into_iter().map(|t| t.key).collect() };
+
+    let top = keys(TaskFilter { project_id: Some(p.id), top_level: Some(true), ..Default::default() });
+    assert_eq!(top, vec![parent.key.clone()], "{top:?}");
+
+    let subtasks = keys(TaskFilter { project_id: Some(p.id), top_level: Some(false), ..Default::default() });
+    assert_eq!(subtasks, vec![child.key.clone()], "{subtasks:?}");
+
+    let mut both = keys(TaskFilter { project_id: Some(p.id), ..Default::default() });
+    both.sort();
+    let mut expected = vec![parent.key, child.key];
+    expected.sort();
+    assert_eq!(both, expected, "top_level left unset filters neither out");
 }
 
 // -- claim ------------------------------------------------------------------

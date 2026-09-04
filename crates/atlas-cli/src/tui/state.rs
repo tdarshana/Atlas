@@ -680,6 +680,8 @@ mod tests {
             open_blockers: 0,
             ready: true,
             blocked_reason: None,
+            subtasks_total: 0,
+            subtasks_done: 0,
         }
     }
 

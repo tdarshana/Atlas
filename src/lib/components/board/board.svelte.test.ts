@@ -15,6 +15,7 @@ vi.mock('$lib/daemon.svelte', () => ({
 
 import { deriveColumns, visibleLanes } from '$lib/stores/board.svelte';
 import LaneStrip from './LaneStrip.svelte';
+import TaskCard from './TaskCard.svelte';
 import { priorityTone } from './card';
 
 afterEach(cleanup);
@@ -46,7 +47,9 @@ function task(key: string, stage: string): Task {
 		blocked_by: [],
 		open_blockers: 0,
 		ready: true,
-		blocked_reason: null
+		blocked_reason: null,
+		subtasks_total: 0,
+		subtasks_done: 0
 	};
 }
 
@@ -125,6 +128,30 @@ describe('LaneStrip', () => {
 		const backlog = container.querySelector<HTMLElement>('[data-testid="board-column-Backlog"]');
 		expect(backlog?.style.getPropertyValue('--lane-w')).toBe('44px');
 		expect(backlog?.querySelector('h2')?.textContent).toBe('Backlog');
+	});
+});
+
+describe('TaskCard', () => {
+	function card(overrides: Partial<Task>) {
+		return render(TaskCard, {
+			props: {
+				task: { ...task('ATL-1', 'Backlog'), ...overrides },
+				stageOptions: STAGES.map((s) => ({ value: s.name, label: s.name })),
+				selected: false,
+				onopen: () => {},
+				onmove: () => {}
+			}
+		});
+	}
+
+	it('shows a done/total chip once the task has subtasks', () => {
+		const { container } = card({ subtasks_total: 3, subtasks_done: 1 });
+		expect(container.querySelector('[data-testid="task-open-ATL-1"]')?.textContent).toContain('1/3');
+	});
+
+	it('shows no chip for a task with no subtasks', () => {
+		const { container } = card({});
+		expect(container.querySelector('[data-testid="task-open-ATL-1"]')?.textContent).not.toContain('/');
 	});
 });
 

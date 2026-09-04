@@ -244,6 +244,13 @@ fn query_flag<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<boo
     Ok(matches!(raw.as_deref(), Some("true") | Some("1")))
 }
 
+/// Like `query_flag`, but tri-state: an absent query value is `None` (no filter),
+/// and any present value is `Some` of whether it reads as true (`true`/`1`) or not.
+fn query_flag_opt<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<bool>, D::Error> {
+    let raw = Option::<String>::deserialize(d)?;
+    Ok(raw.map(|v| matches!(v.as_str(), "true" | "1")))
+}
+
 #[derive(Deserialize)] pub struct TaskListQ {
     #[serde(default)] pub project_id: Option<Uuid>,
     #[serde(default)] pub stage: Option<String>,
@@ -254,6 +261,9 @@ fn query_flag<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<boo
     /// `global`, for the literal global board (tasks with no project); anything else,
     /// including absent or empty, is the existing widen-or-narrow-by-`project_id` read.
     #[serde(default)] pub scope: Option<String>,
+    /// `Some(true)` keeps only parent-less tasks, `Some(false)` only subtasks, `None`
+    /// (an absent query value) applies no filter.
+    #[serde(default, deserialize_with = "query_flag_opt")] pub top_level: Option<bool>,
 }
 #[derive(Deserialize)] pub struct MoveBody { pub stage: String, #[serde(default)] pub expected_updated_at: Option<DateTime<Utc>> }
 #[derive(Deserialize)] pub struct CommentBody { pub body: String }
@@ -265,6 +275,9 @@ fn query_flag<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<boo
     /// Read exactly like `TaskListQ::scope`, so `/tasks/counts` never disagrees with
     /// `/tasks` about what a bare request or `scope=global` means.
     #[serde(default)] pub scope: Option<String>,
+    /// Read exactly like `TaskListQ::top_level`, so the side panel's counts can match
+    /// a board list narrowed to parent tasks.
+    #[serde(default, deserialize_with = "query_flag_opt")] pub top_level: Option<bool>,
 }
 #[derive(Deserialize)] pub struct SetStagesBody { pub stages: Vec<Stage>, #[serde(default)] pub renames: HashMap<String, String> }
 #[derive(Deserialize)] pub struct SetProjectStagesBody { #[serde(default)] pub stages: Option<Vec<Stage>>, #[serde(default)] pub renames: HashMap<String, String> }
@@ -549,7 +562,7 @@ fn task_global_only(scope: Option<&str>, project_id: Option<Uuid>) -> Result<boo
 }
 async fn list_tasks(State(s): State<AppState>, ApiQuery(q): ApiQuery<TaskListQ>) -> Result<Json<Vec<Task>>, ApiError> {
     let global_only = task_global_only(q.scope.as_deref(), q.project_id)?;
-    let f = TaskFilter { project_id: q.project_id, stage: q.stage, assignee: q.assignee, ready: q.ready, query: q.q, include_done: q.include_done, global_only };
+    let f = TaskFilter { project_id: q.project_id, stage: q.stage, assignee: q.assignee, ready: q.ready, query: q.q, include_done: q.include_done, global_only, top_level: q.top_level };
     Ok(Json(s.backend.list_tasks(f).await?))
 }
 async fn create_task(State(s): State<AppState>, Actor(actor): Actor, ApiJson(t): ApiJson<NewTask>) -> Result<(StatusCode, Json<Task>), ApiError> {
@@ -588,7 +601,7 @@ async fn put_project_stages(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid
 }
 async fn task_counts(State(s): State<AppState>, ApiQuery(q): ApiQuery<TaskCountsQ>) -> Result<Json<Vec<StageCount>>, ApiError> {
     let global_only = task_global_only(q.scope.as_deref(), q.project_id)?;
-    let counts = s.backend.task_counts(q.project_id, global_only).await?;
+    let counts = s.backend.task_counts(q.project_id, global_only, q.top_level).await?;
     Ok(Json(counts.into_iter().map(|(stage, count)| StageCount { stage, count }).collect()))
 }
 

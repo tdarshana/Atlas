@@ -48,7 +48,9 @@ function task(key: string, stage: string): Task {
 		blocked_by: [],
 		open_blockers: 0,
 		ready: true,
-		blocked_reason: null
+		blocked_reason: null,
+		subtasks_total: 0,
+		subtasks_done: 0
 	};
 }
 
@@ -166,6 +168,20 @@ describe('refresh', () => {
 		await first;
 
 		expect(board.tasks.map((t) => t.key)).toEqual(['ATL-2']);
+	});
+
+	it('asks for top-level tasks only while the search box is empty', async () => {
+		mocks.boardStages.mockResolvedValue({ stages: STAGES, overridden: false });
+		mocks.listTasks.mockResolvedValue([]);
+
+		await refresh();
+		expect(mocks.listTasks).toHaveBeenLastCalledWith(expect.objectContaining({ top_level: true }));
+
+		board.filters.query = '  widget  ';
+		await refresh();
+		const call = mocks.listTasks.mock.calls.at(-1)![0];
+		expect(call.top_level).toBeUndefined();
+		expect(call.query).toBe('widget');
 	});
 });
 

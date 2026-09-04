@@ -448,6 +448,10 @@ export interface Task {
 	/** Computed on read: open, every blocker done, and no open subtask. */
 	ready: boolean;
 	blocked_reason: string | null;
+	/** How many direct subtasks this task has. Computed on read, like `open_blockers`. */
+	subtasks_total: number;
+	/** How many of `subtasks_total` sit in a done stage. */
+	subtasks_done: number;
 }
 
 export interface NewTask {
@@ -508,6 +512,9 @@ export interface TaskFilter {
 	/** Case-insensitive substring match over key, title and description. */
 	query?: string | null;
 	include_done?: boolean;
+	/** Keep only parent-less tasks (`true`) or only subtasks (`false`); omitted
+	 * applies no filter either way. */
+	top_level?: boolean;
 }
 
 /** One row of `GET /tasks/counts`; every stage appears, including empty ones. */

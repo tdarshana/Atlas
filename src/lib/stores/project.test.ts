@@ -53,6 +53,8 @@ function task(over: Partial<Task>): Task {
 		open_blockers: 0,
 		ready: true,
 		blocked_reason: null,
+		subtasks_total: 0,
+		subtasks_done: 0,
 		...over
 	};
 }

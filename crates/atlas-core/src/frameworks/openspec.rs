@@ -89,6 +89,7 @@ impl FrameworkAdapter for OpenspecAdapter {
                     description: item.heading.clone().unwrap_or_default(),
                     status_hint: Some(if item.checked { "done".to_string() } else { "todo".to_string() }),
                     source_ref: SourceRef { framework: self.kind(), path: path_rel.clone(), anchor },
+                    parent_anchor: None,
                 });
             }
         }

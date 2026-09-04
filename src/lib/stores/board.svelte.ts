@@ -405,6 +405,7 @@ let generation = 0;
 export async function refresh(): Promise<void> {
 	const g = ++generation;
 	const { projectId, assignee, query, hideDone } = board.filters;
+	const trimmedQuery = query.trim();
 	board.loading = true;
 	try {
 		const client = api();
@@ -413,8 +414,11 @@ export async function refresh(): Promise<void> {
 			client.listTasks({
 				project_id: projectId,
 				assignee: assignee.trim() || null,
-				query: query.trim() || null,
-				include_done: !hideDone
+				query: trimmedQuery || null,
+				include_done: !hideDone,
+				// A search must still find subtasks, so the top-level-only narrowing
+				// applies only while the board isn't being searched.
+				top_level: trimmedQuery ? undefined : true
 			})
 		]);
 		if (g !== generation) return;

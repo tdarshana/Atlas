@@ -1341,6 +1341,42 @@ async fn board_task_counts_cover_every_stage() {
     assert_eq!(done["count"], 0, "a stage with no tasks is still reported: {counts}");
 }
 
+/// `top_level=true` on `GET /tasks` keeps only parent-less tasks, and the same flag
+/// on `GET /tasks/counts` narrows its per-stage counts to match, so the board's lanes
+/// and its side panel counts agree once the desktop app asks for both.
+#[tokio::test]
+async fn top_level_narrows_the_task_list_and_its_counts_to_parents() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+
+    let parent: serde_json::Value = c.post(format!("{base}/tasks")).header("X-Atlas-Actor", "alice").json(&serde_json::json!({"title": "parent"})).send().await.unwrap().json().await.unwrap();
+    let parent_key = parent["key"].as_str().unwrap().to_string();
+    let child: serde_json::Value = c.post(format!("{base}/tasks")).header("X-Atlas-Actor", "alice")
+        .json(&serde_json::json!({"title": "child", "parent": parent_key}))
+        .send().await.unwrap().json().await.unwrap();
+    let child_key = child["key"].as_str().unwrap().to_string();
+
+    let all: serde_json::Value = c.get(format!("{base}/tasks")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(all.as_array().unwrap().len(), 2, "top_level left unset shows both: {all}");
+
+    let top: serde_json::Value = c.get(format!("{base}/tasks?top_level=true")).send().await.unwrap().json().await.unwrap();
+    let top_keys: Vec<&str> = top.as_array().unwrap().iter().map(|t| t["key"].as_str().unwrap()).collect();
+    assert_eq!(top_keys, vec![parent_key.as_str()], "{top:?}");
+
+    let subtasks: serde_json::Value = c.get(format!("{base}/tasks?top_level=false")).send().await.unwrap().json().await.unwrap();
+    let subtask_keys: Vec<&str> = subtasks.as_array().unwrap().iter().map(|t| t["key"].as_str().unwrap()).collect();
+    assert_eq!(subtask_keys, vec![child_key.as_str()], "{subtasks:?}");
+
+    let counts_top: serde_json::Value = c.get(format!("{base}/tasks/counts?top_level=true")).send().await.unwrap().json().await.unwrap();
+    let backlog_top = counts_top.as_array().unwrap().iter().find(|r| r["stage"] == "Backlog").unwrap()["count"].as_i64().unwrap();
+    assert_eq!(backlog_top, 1, "just the parent: {counts_top}");
+
+    let counts_bare: serde_json::Value = c.get(format!("{base}/tasks/counts")).send().await.unwrap().json().await.unwrap();
+    let backlog_bare = counts_bare.as_array().unwrap().iter().find(|r| r["stage"] == "Backlog").unwrap()["count"].as_i64().unwrap();
+    assert_eq!(backlog_bare, 2, "top_level left unset counts both: {counts_bare}");
+}
+
 /// `TASKS.md` is only planned once `board.mirror_tasks_md` is switched on, the same
 /// unauthenticated-daemon-decides pattern the transcript hooks follow: `POST /sync` must
 /// not take the mirror flag from the request itself.
@@ -1657,13 +1693,13 @@ async fn frameworks_routes_round_trip_400_and_gate_import() {
         .json(&serde_json::json!({"what": "tasks"})).send().await.unwrap();
     assert_eq!(imported.status(), 200, "{}", imported.text().await.unwrap());
     let imported: serde_json::Value = imported.json().await.unwrap();
-    assert_eq!(imported["created"], 1, "{imported}");
+    assert_eq!(imported["created"], 2, "the parent task and its one subtask: {imported}");
 
     // Importing again is idempotent: nothing new is created.
     let reimported: serde_json::Value = c.post(format!("{base}/projects/{id}/frameworks/superpowers/import"))
         .json(&serde_json::json!({"what": "tasks"})).send().await.unwrap().json().await.unwrap();
     assert_eq!(reimported["created"], 0, "{reimported}");
-    assert_eq!(reimported["skipped"], 1, "{reimported}");
+    assert_eq!(reimported["skipped"], 2, "{reimported}");
 }
 
 /// `PUT /projects/{id}/extraction` masks the key on the way back, and

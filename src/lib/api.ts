@@ -415,7 +415,8 @@ export class AtlasApi {
 				assignee: filter.assignee,
 				ready: filter.ready ? 'true' : null,
 				q: filter.query,
-				include_done: filter.include_done ? 'true' : null
+				include_done: filter.include_done ? 'true' : null,
+				top_level: filter.top_level === undefined ? null : filter.top_level ? 'true' : 'false'
 			})}`
 		);
 	}
@@ -487,8 +488,14 @@ export class AtlasApi {
 		});
 	}
 
-	taskCounts(projectId?: Uuid | null): Promise<StageCount[]> {
-		return this.boardReq('GET', `/api/v1/tasks/counts${query({ project_id: projectId })}`);
+	taskCounts(projectId?: Uuid | null, topLevel?: boolean): Promise<StageCount[]> {
+		return this.boardReq(
+			'GET',
+			`/api/v1/tasks/counts${query({
+				project_id: projectId,
+				top_level: topLevel === undefined ? null : topLevel ? 'true' : 'false'
+			})}`
+		);
 	}
 
 	/**

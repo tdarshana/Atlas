@@ -68,7 +68,9 @@ function task(key: string, stage: string): Task {
 		blocked_by: [],
 		open_blockers: 0,
 		ready: true,
-		blocked_reason: null
+		blocked_reason: null,
+		subtasks_total: 0,
+		subtasks_done: 0
 	};
 }
 

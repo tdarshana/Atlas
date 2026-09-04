@@ -7,7 +7,7 @@
 //! deduplicated by an exact text match against this project's memories already
 //! tagged for the framework.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::board::TaskRepo;
@@ -15,6 +15,7 @@ use crate::frameworks;
 use crate::memories::MemoryRepo;
 use crate::models::*;
 use crate::{AtlasError, Result};
+use uuid::Uuid;
 
 /// Free-text status hints (as a framework spells "done" in its own checkboxes or
 /// status lines) that map an imported task onto the board's first *done* stage
@@ -42,7 +43,10 @@ fn adapter_for(kind: FrameworkKind) -> Result<Box<dyn frameworks::FrameworkAdapt
 /// Creates or updates board tasks from `kind`'s adapter under `project`, keyed by
 /// `source_ref` so a re-import never duplicates a task. An existing task's title
 /// and description are refreshed when the source changed and left alone when they
-/// match; its stage is never touched either way.
+/// match; its stage is never touched either way. An item whose `parent_anchor` names
+/// another item from the same adapter run becomes (or is moved to be) that item's
+/// subtask; the adapter emits a parent immediately before its children, so this
+/// resolves without a second pass over `items`.
 ///
 /// Every task write is attributed to `import/<kind>` (both `created_by` and the
 /// event actor), so the board history shows the item came from the framework
@@ -56,16 +60,50 @@ pub fn import_tasks(tasks: &TaskRepo, memories: &MemoryRepo, project: &Project, 
     let import_actor = format!("import/{}", kind.as_str());
 
     let mut report = ImportReport::default();
+    // `source_ref.anchor` to task id, filled in as each item's task is created or
+    // matched below. A child's `parent_anchor` looks itself up here first.
+    let mut anchor_ids: HashMap<String, Uuid> = HashMap::new();
+
     for item in items {
-        match tasks.find_by_source_ref(Some(project.id), &item.source_ref)? {
+        let parent_id: Option<Uuid> = match &item.parent_anchor {
+            None => None,
+            Some(anchor) => match anchor_ids.get(anchor) {
+                Some(id) => Some(*id),
+                // The parent wasn't created earlier in *this* run (an import of just
+                // the children, say, or a run order the adapter doesn't guarantee) —
+                // fall back to the parent's own SourceRef, the same lookup a child
+                // uses for itself.
+                None => {
+                    let parent_ref = SourceRef { framework: kind, path: item.source_ref.path.clone(), anchor: anchor.clone() };
+                    tasks.find_by_source_ref(Some(project.id), &parent_ref)?.map(|t| t.id)
+                }
+            },
+        };
+
+        let task_id = match tasks.find_by_source_ref(Some(project.id), &item.source_ref)? {
             Some(existing) => {
-                if existing.title != item.title || existing.description != item.description {
-                    let upd = TaskUpdate { title: Some(item.title.clone()), description: Some(item.description.clone()), ..Default::default() };
+                let mut upd = TaskUpdate::default();
+                let content_changed = existing.title != item.title || existing.description != item.description;
+                if content_changed {
+                    upd.title = Some(item.title.clone());
+                    upd.description = Some(item.description.clone());
+                }
+                let reparent = parent_id != existing.parent_id;
+                if reparent {
+                    upd.parent = Some(parent_id.map(|id| id.to_string()));
+                }
+                if content_changed || reparent {
                     tasks.update(&existing.key, &upd, &import_actor)?;
-                    report.updated += 1;
+                    if content_changed {
+                        report.updated += 1;
+                    }
+                    if reparent {
+                        report.reparented += 1;
+                    }
                 } else {
                     report.skipped += 1;
                 }
+                existing.id
             }
             None => {
                 let stage = stage_for_hint(&stages, item.status_hint.as_deref())?;
@@ -75,19 +113,28 @@ pub fn import_tasks(tasks: &TaskRepo, memories: &MemoryRepo, project: &Project, 
                     description: Some(item.description.clone()),
                     stage: Some(stage),
                     source_ref: Some(item.source_ref.clone()),
+                    parent: parent_id.map(|id| id.to_string()),
                     ..Default::default()
                 };
-                tasks.create(&new, &import_actor)?;
+                let created = tasks.create(&new, &import_actor)?;
                 report.created += 1;
+                created.id
             }
-        }
+        };
+        anchor_ids.insert(item.source_ref.anchor.clone(), task_id);
     }
     memories.audit(
         actor,
         "import_tasks",
         "project",
         Some(project.id),
-        serde_json::json!({"framework": kind.as_str(), "created": report.created, "updated": report.updated, "skipped": report.skipped}),
+        serde_json::json!({
+            "framework": kind.as_str(),
+            "created": report.created,
+            "updated": report.updated,
+            "skipped": report.skipped,
+            "reparented": report.reparented,
+        }),
     )?;
     Ok(report)
 }
@@ -216,6 +263,69 @@ mod tests {
         assert_eq!(again.len(), first.created, "no duplicates after a second import");
         let still_moved = again.iter().find(|t| t.key == moved.key).unwrap();
         assert_eq!(still_moved.stage, target, "re-import must not move a task's stage back");
+    }
+
+    #[test]
+    fn imports_superpowers_plan_tasks_as_parents_with_linked_children() {
+        let (db, tasks) = setup();
+        let memories = MemoryRepo::new(&db);
+        let (project, _dir) = project_for_fixture(&db, "superpowers");
+
+        let report = import_tasks(&tasks, &memories, &project, FrameworkKind::Superpowers, "test").unwrap();
+        assert_eq!(report.created, 5, "two parents, two children under Task 1, one under Task 2: {report:?}");
+        assert_eq!(report.reparented, 0);
+
+        let all = tasks.list(&TaskFilter { project_id: Some(project.id), include_done: true, ..Default::default() }).unwrap();
+        let parent = all.iter().find(|t| t.title == "Task 1: Set up the widget").expect("parent task created");
+        assert!(parent.parent_id.is_none(), "a parent task has no parent of its own");
+
+        let children: Vec<_> = all.iter().filter(|t| t.parent_id == Some(parent.id)).collect();
+        assert_eq!(children.len(), 2, "{all:?}");
+        assert!(children.iter().any(|t| t.title == "Step 1: Write the widget module"), "the child's title is cleaned: {children:?}");
+
+        // Task 2's single checkbox is checked, so its parent lands in a done stage.
+        let task_2 = all.iter().find(|t| t.title == "Task 2: Wire the widget in").unwrap();
+        let stages = tasks.effective_stages(Some(project.id)).unwrap().stages;
+        assert!(stages.iter().find(|s| s.name == task_2.stage).unwrap().done, "{task_2:?}");
+    }
+
+    /// A task an earlier, parent-less importer created for a checkbox, titled with
+    /// the raw checkbox markdown, must be picked up by a re-import: reparented under
+    /// the new parent task and renamed to the cleaned title, both counted.
+    #[test]
+    fn reimporting_over_tasks_created_flat_reparents_and_renames_them() {
+        let (db, tasks) = setup();
+        let memories = MemoryRepo::new(&db);
+        let (project, _dir) = project_for_fixture(&db, "superpowers");
+
+        let flat = NewTask {
+            project_id: Some(project.id),
+            title: "**Step 1: Write the widget module**".to_string(),
+            description: Some("Task 1: Set up the widget".to_string()),
+            source_ref: Some(SourceRef {
+                framework: FrameworkKind::Superpowers,
+                path: "docs/superpowers/plans/2026-01-01-example.md".to_string(),
+                anchor: "Task 1: Set up the widget#1".to_string(),
+            }),
+            ..Default::default()
+        };
+        let created = tasks.create(&flat, "test").unwrap();
+        assert!(created.parent_id.is_none());
+
+        let report = import_tasks(&tasks, &memories, &project, FrameworkKind::Superpowers, "test").unwrap();
+        assert_eq!(report.reparented, 1, "{report:?}");
+        assert_eq!(report.updated, 1, "the title changed too: {report:?}");
+        assert_eq!(report.created, 4, "everything but the pre-existing child: {report:?}");
+
+        let again = tasks.get(&created.key).unwrap().task;
+        assert_eq!(again.title, "Step 1: Write the widget module");
+        let parent = tasks
+            .list(&TaskFilter { project_id: Some(project.id), include_done: true, ..Default::default() })
+            .unwrap()
+            .into_iter()
+            .find(|t| t.title == "Task 1: Set up the widget")
+            .expect("parent created");
+        assert_eq!(again.parent_id, Some(parent.id));
     }
 
     #[test]

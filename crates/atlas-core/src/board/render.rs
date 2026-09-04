@@ -59,6 +59,8 @@ mod tests {
             open_blockers: 0,
             ready: false,
             blocked_reason: None,
+            subtasks_total: 0,
+            subtasks_done: 0,
         }
     }
 

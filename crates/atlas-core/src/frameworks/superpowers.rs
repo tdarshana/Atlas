@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 
 use super::adapter::{mtime, read_doc_file, read_doc_prefix, read_within_root, rel, root_instruction_files, FrameworkAdapter};
-use super::md::{checkboxes, first_heading, ruling_lines};
+use super::md::{checkboxes, clean_step_title, first_heading, ruling_lines, Checkbox};
 use crate::models::{FrameworkDoc, FrameworkDocType, FrameworkInventory, FrameworkKind, ImportedDecision, ImportedTask, SourceRef};
 use crate::Result;
 
@@ -61,21 +61,43 @@ impl FrameworkAdapter for SuperpowersAdapter {
         for path in md_files(&root.join(PLANS_DIR)) {
             let Some(text) = read_doc_file(&path) else { continue };
             let path_rel = rel(root, &path);
+            // Group the plan's checkboxes by their "### Task N" heading, keeping the
+            // order each heading is first seen in the file: a stray checklist with no
+            // such heading (there is none in practice, but the rule is explicit) is
+            // not imported at all. Each group becomes a parent task, its checkboxes
+            // becoming that parent's subtasks.
+            let mut groups: Vec<(String, Vec<Checkbox>)> = Vec::new();
             for item in checkboxes(&text) {
-                // Only checkbox lines under a "### Task N" heading are plan tasks;
-                // a stray checklist elsewhere in the doc (there is none in practice,
-                // but the rule is explicit) is not imported.
-                let Some(heading) = item.heading.filter(|h| h.starts_with("Task ")) else { continue };
-                // "<heading>#<ordinal>": unique among the checkboxes under this
-                // heading, since two tasks in the same section (a real case: see
-                // the fixture) would otherwise share the same anchor.
-                let anchor = format!("{heading}#{}", item.ordinal);
+                let Some(heading) = item.heading.clone().filter(|h| h.starts_with("Task ")) else { continue };
+                match groups.iter_mut().find(|(h, _)| *h == heading) {
+                    Some((_, items)) => items.push(item),
+                    None => groups.push((heading, vec![item])),
+                }
+            }
+            for (heading, items) in groups {
+                // The parent's own anchor is the heading text, with no ordinal: it is
+                // unique within the file since two "### Task N" headings never share a
+                // title (each names a distinct task number).
                 out.push(ImportedTask {
-                    title: item.text,
-                    description: heading,
-                    status_hint: Some(if item.checked { "done".to_string() } else { "todo".to_string() }),
-                    source_ref: SourceRef { framework: self.kind(), path: path_rel.clone(), anchor },
+                    title: heading.clone(),
+                    description: path_rel.clone(),
+                    status_hint: Some(if items.iter().all(|i| i.checked) { "done".to_string() } else { "todo".to_string() }),
+                    source_ref: SourceRef { framework: self.kind(), path: path_rel.clone(), anchor: heading.clone() },
+                    parent_anchor: None,
                 });
+                for item in items {
+                    // "<heading>#<ordinal>": unique among the checkboxes under this
+                    // heading, since two tasks in the same section (a real case: see
+                    // the fixture) would otherwise share the same anchor.
+                    let anchor = format!("{heading}#{}", item.ordinal);
+                    out.push(ImportedTask {
+                        title: clean_step_title(&item.text),
+                        description: heading.clone(),
+                        status_hint: Some(if item.checked { "done".to_string() } else { "todo".to_string() }),
+                        source_ref: SourceRef { framework: self.kind(), path: path_rel.clone(), anchor },
+                        parent_anchor: Some(heading.clone()),
+                    });
+                }
             }
         }
         out
@@ -195,19 +217,52 @@ mod tests {
     fn tasks_come_from_checkboxes_under_task_headings_with_unique_anchors() {
         let a = SuperpowersAdapter;
         let tasks = a.tasks(&fixture());
-        assert_eq!(tasks.len(), 3);
-        let done: Vec<_> = tasks.iter().filter(|t| t.status_hint.as_deref() == Some("done")).collect();
-        assert_eq!(done.len(), 1);
-        assert!(tasks.iter().any(|t| t.title == "write the widget module"));
+        // Two "### Task N" headings, each a parent, plus three checkboxes total
+        // (two under Task 1, one under Task 2) as their children.
+        assert_eq!(tasks.len(), 5);
         assert!(tasks.iter().all(|t| t.source_ref.framework == FrameworkKind::Superpowers));
 
-        // The fixture's "Task 1" heading covers two checkboxes: their anchors must
-        // differ, or a re-import could not tell the two tasks apart.
-        let under_task_1: Vec<_> = tasks.iter().filter(|t| t.description == "Task 1: Set up the widget").collect();
+        // Task 1's checkboxes are cleaned of the fixture's bold markup and keep
+        // distinct, stable anchors so a re-import can tell them apart.
+        let under_task_1: Vec<_> =
+            tasks.iter().filter(|t| t.parent_anchor.as_deref() == Some("Task 1: Set up the widget")).collect();
         assert_eq!(under_task_1.len(), 2);
         assert_ne!(under_task_1[0].source_ref.anchor, under_task_1[1].source_ref.anchor);
         assert_eq!(under_task_1[0].source_ref.anchor, "Task 1: Set up the widget#1");
         assert_eq!(under_task_1[1].source_ref.anchor, "Task 1: Set up the widget#2");
+        assert!(under_task_1.iter().any(|t| t.title == "Step 1: Write the widget module"));
+        assert!(under_task_1.iter().all(|t| t.description == "Task 1: Set up the widget"));
+    }
+
+    #[test]
+    fn a_parent_precedes_its_children_with_its_own_anchor_and_no_parent() {
+        let a = SuperpowersAdapter;
+        let tasks = a.tasks(&fixture());
+
+        let task_1_pos = tasks.iter().position(|t| t.title == "Task 1: Set up the widget").expect("Task 1 parent present");
+        let parent = &tasks[task_1_pos];
+        assert_eq!(parent.parent_anchor, None);
+        assert_eq!(parent.source_ref.anchor, "Task 1: Set up the widget");
+        assert_eq!(parent.description, "docs/superpowers/plans/2026-01-01-example.md");
+
+        // Both of Task 1's children come right after their parent in the list.
+        assert_eq!(tasks[task_1_pos + 1].parent_anchor.as_deref(), Some("Task 1: Set up the widget"));
+        assert_eq!(tasks[task_1_pos + 2].parent_anchor.as_deref(), Some("Task 1: Set up the widget"));
+    }
+
+    #[test]
+    fn a_heading_whose_checkboxes_are_all_checked_hints_the_parent_done() {
+        let a = SuperpowersAdapter;
+        let tasks = a.tasks(&fixture());
+
+        // Task 2's one checkbox is checked, so its parent hints done.
+        let task_2 = tasks.iter().find(|t| t.title == "Task 2: Wire the widget in").expect("Task 2 parent present");
+        assert_eq!(task_2.status_hint.as_deref(), Some("done"));
+
+        // Task 1 has one unchecked checkbox, so its parent stays todo even though
+        // the other checkbox is checked.
+        let task_1 = tasks.iter().find(|t| t.title == "Task 1: Set up the widget").expect("Task 1 parent present");
+        assert_eq!(task_1.status_hint.as_deref(), Some("todo"));
     }
 
     #[test]
