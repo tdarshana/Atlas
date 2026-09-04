@@ -6,7 +6,7 @@
 	import { Badge, Button, Select, Table, type TableColumn } from '$lib/ds';
 	import { api } from '$lib/daemon.svelte';
 	import { errorLogPath, errorMessage } from '$lib/errors';
-	import { dateTime, relativeAge } from '$lib/format';
+	import { relativeAge } from '$lib/format';
 	import { board, refresh as refreshBoard } from '$lib/stores/board.svelte';
 	import { project, setHeaderActions } from '$lib/stores/project.svelte';
 	import {
@@ -31,7 +31,10 @@
 	// Held as a plain string because `Select` binds one; only ever a `FrameworkKind`,
 	// cast at the point of use, the same way the task detail panel handles its Selects.
 	let importKind = $state('');
-	let importing = $state(false);
+	// Which import is in flight, or null: separate from a single `importing` flag
+	// so the busy label lands only on the button that was clicked, not the other
+	// one the shared flag also disabled.
+	let importingWhat = $state<ImportWhat | null>(null);
 
 	let selected = $state<FrameworkDoc | null>(null);
 	let docContent = $state<string | null>(null);
@@ -88,7 +91,7 @@
 	async function doImport(what: ImportWhat): Promise<void> {
 		const kind = (importKind || listings[0]?.inventory.kind) as FrameworkKind | undefined;
 		if (!id || !kind) return;
-		importing = true;
+		importingWhat = what;
 		try {
 			const report = await api().importFramework(id, kind, what);
 			push('success', reportText(report));
@@ -101,7 +104,7 @@
 		} catch (e) {
 			push('error', errorMessage(e));
 		} finally {
-			importing = false;
+			importingWhat = null;
 		}
 	}
 
@@ -133,17 +136,17 @@
 	{/if}
 	<Button
 		data-testid="frameworks-import-tasks"
-		disabled={importing}
+		disabled={importingWhat !== null}
 		onclick={() => doImport('tasks')}
 	>
-		{importing ? 'Importing…' : 'Import tasks'}
+		{importingWhat === 'tasks' ? 'Importing…' : 'Import tasks'}
 	</Button>
 	<Button
 		data-testid="frameworks-import-decisions"
-		disabled={importing}
+		disabled={importingWhat !== null}
 		onclick={() => doImport('decisions')}
 	>
-		Import decisions
+		{importingWhat === 'decisions' ? 'Importing…' : 'Import decisions'}
 	</Button>
 {/snippet}
 
@@ -185,7 +188,7 @@
 					</div>
 					<div class="reading">
 						<span class="label">Detected</span>
-						<span class="mono value">{dateTime(listing.inventory.detected_at)}</span>
+						<span class="mono value">{relativeAge(listing.inventory.detected_at)}</span>
 					</div>
 				</div>
 			{/each}

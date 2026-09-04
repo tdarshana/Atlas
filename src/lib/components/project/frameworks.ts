@@ -2,7 +2,14 @@
 // badge tones, and the import report's toast text. Kept separate from the page so the
 // shaping rules are unit-testable without mounting Svelte.
 
-import type { FrameworkDoc, FrameworkDocType, FrameworkKind, FrameworkListing, ImportReport } from '$lib/types';
+import type {
+	FrameworkDoc,
+	FrameworkDocType,
+	FrameworkInventory,
+	FrameworkKind,
+	FrameworkListing,
+	ImportReport
+} from '$lib/types';
 
 /** The subset of `Badge`'s `tone` prop the Type column uses. */
 export type DocTypeTone = 'neutral' | 'accent' | 'success' | 'warning' | 'info';
@@ -51,6 +58,16 @@ export function documentRows(listings: FrameworkListing[]): FrameworkDoc[] {
  * alone repeats across frameworks that share a layout. */
 export function docRowKey(doc: FrameworkDoc): string {
 	return `${doc.kind}:${doc.path}`;
+}
+
+/**
+ * The Projects side panel's Frameworks group reads the frameworks route for the open
+ * project rather than `ProjectProfile.planning_frameworks`: the stored profile predates
+ * this phase for a project connected before it, and would show no group at all until the
+ * next refresh. This is just the listing-to-inventory projection the panel renders.
+ */
+export function sidePanelFrameworks(listings: FrameworkListing[]): FrameworkInventory[] {
+	return listings.map((listing) => listing.inventory);
 }
 
 /** The import report toast's text, e.g. `3 created, 1 updated, 12 skipped`. */

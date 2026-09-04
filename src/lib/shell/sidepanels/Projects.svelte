@@ -4,10 +4,10 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { daemon } from '$lib/daemon.svelte';
-	import { FRAMEWORK_LABEL } from '$lib/components/project/frameworks';
+	import { api, daemon } from '$lib/daemon.svelte';
+	import { FRAMEWORK_LABEL, sidePanelFrameworks } from '$lib/components/project/frameworks';
 	import { connectProject, loadProjects, pickProjectRoot, projects } from '$lib/stores/projects.svelte';
-	import { project } from '$lib/stores/project.svelte';
+	import type { FrameworkListing } from '$lib/types';
 	import TreeGroup from '../TreeGroup.svelte';
 	import TreeRow from '../TreeRow.svelte';
 
@@ -15,9 +15,31 @@
 	const GLOBAL_ID = 'global';
 
 	const openId = $derived(page.params.id ?? '');
-	// The frameworks Atlas detected in the open project, from the last connect or refresh;
-	// empty away from a project, or before that scan has ever run.
-	const frameworks = $derived(project.current?.profile?.planning_frameworks ?? []);
+	// Read from the frameworks route rather than `ProjectProfile.planning_frameworks`:
+	// a project connected before this phase has a stored profile with no such field,
+	// and would otherwise show no group here until its next refresh.
+	let frameworkListings = $state<FrameworkListing[]>([]);
+	const frameworks = $derived(sidePanelFrameworks(frameworkListings));
+
+	$effect(() => {
+		const id = openId && openId !== GLOBAL_ID ? openId : null;
+		if (!id) {
+			frameworkListings = [];
+			return;
+		}
+		let cancelled = false;
+		void api()
+			.listFrameworks(id)
+			.then((listings) => {
+				if (!cancelled) frameworkListings = listings;
+			})
+			.catch(() => {
+				if (!cancelled) frameworkListings = [];
+			});
+		return () => {
+			cancelled = true;
+		};
+	});
 
 	onMount(() => {
 		// The projects page loads the same list; only fetch when nothing has yet.
