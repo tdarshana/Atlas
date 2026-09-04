@@ -109,10 +109,18 @@ pub const MAX_PLUGIN_TOOLS: usize = 32;
 /// useful sentence or two, short enough that 32 of them stay a reasonable tool list.
 pub const MAX_PLUGIN_TOOL_DESCRIPTION: usize = 400;
 
-/// Whether `s` matches `^[a-z0-9][a-z0-9-]{1,63}$` and holds no `--`: the shape of a
-/// plugin id. The doubled dash is excluded because `atlas-mcp`'s `plugin_tool_name`
-/// rewrites `-` as `_`, so an id holding `--` would produce the `__` that separates the
-/// id from the tool name in an MCP tool name. See [`validate_plugin_id`].
+/// Whether `s` matches `^[a-z0-9][a-z0-9-]{1,63}$` and holds neither a `--` nor a
+/// trailing `-`: the shape of a plugin id.
+///
+/// Both dash rules exist because `atlas-mcp`'s `plugin_tool_name` rewrites `-` as `_`
+/// and then joins the id to the tool name with `__`, and its inverse splits on the first
+/// `__` after the prefix. An id holding `--` would produce a `__` of its own inside the
+/// id half. An id *ending* in `-` is subtler: it rewrites to a trailing `_` that runs
+/// straight into the separator, so `ab-` with tool `count` encodes to
+/// `plugin__ab___count` and the split lands one character early, recovering
+/// `("ab", "_count")` rather than `("ab_", "count")`. Such a tool would be listed to
+/// every MCP client and fail every call with `unknown plugin tool`, so the id is refused
+/// at registration instead. See [`validate_plugin_id`].
 fn is_plugin_id(s: &str) -> bool {
     let mut chars = s.chars();
     let Some(first) = chars.next() else { return false };
@@ -121,6 +129,7 @@ fn is_plugin_id(s: &str) -> bool {
     (1..=63).contains(&rest.len())
         && rest.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-')
         && !s.contains("--")
+        && !s.ends_with('-')
 }
 
 /// Whether `s` matches `^[a-z][a-z0-9_]{0,47}$` and holds no `__`: the shape of a plugin
@@ -143,6 +152,9 @@ fn is_plugin_tool_name(s: &str) -> bool {
 pub fn validate_plugin_id(id: &str) -> Result<()> {
     if id.contains("--") {
         return Err(AtlasError::Invalid(format!("plugin id {id} cannot contain \"--\" because it would be ambiguous as an MCP tool name")));
+    }
+    if id.ends_with('-') {
+        return Err(AtlasError::Invalid(format!("plugin id {id} cannot end with \"-\" because it would be ambiguous as an MCP tool name")));
     }
     if !is_plugin_id(id) {
         return Err(AtlasError::Invalid(format!("'{id}' is not a plugin id: 2 to 64 characters of a-z, 0-9 and '-', starting with a letter or digit")));
@@ -999,7 +1011,7 @@ mod tests {
 
     #[test]
     fn validate_plugin_tool_decls_rejects_a_malformed_plugin_id() {
-        for bad in ["", "a", "-lead", "Upper", "has space", "under_score", &"a".repeat(65)] {
+        for bad in ["", "a", "-lead", "ab-", "hello-world-", "Upper", "has space", "under_score", &"a".repeat(65)] {
             assert!(validate_plugin_tool_decls(&[decl(bad, "count")]).is_err(), "accepted plugin id '{bad}'");
         }
     }
@@ -1011,40 +1023,62 @@ mod tests {
         }
     }
 
-    /// A plugin id holding `--` and a tool name holding `__` are refused, because
-    /// `plugin_tool_name` rewrites `-` as `_` and would otherwise map two different
-    /// (plugin, tool) pairs onto one MCP name: `a--b` + `count` and `a` + `b__count`
-    /// both read as `plugin__a__b__count`.
+    /// The three id and name shapes that would break the MCP name mapping are refused.
+    /// A `--` in an id and a `__` in a name would each map two different (plugin, tool)
+    /// pairs onto one MCP name: `a--b` + `count` and `a` + `b__count` both read as
+    /// `plugin__a__b__count`. A trailing `-` collides with nothing, but its rewritten
+    /// `_` runs into the separator, so `ab-` + `count` encodes to `plugin__ab___count`
+    /// and parses back as `("ab", "_count")`, a pair no registry holds.
     #[test]
     fn validate_plugin_tool_decls_rejects_the_names_that_would_collide() {
         let bad_id = validate_plugin_tool_decls(&[decl("a--b", "count")]).unwrap_err();
         assert!(bad_id.to_string().contains("plugin id a--b cannot contain \"--\""), "{bad_id}");
         let bad_name = validate_plugin_tool_decls(&[decl("hello-world", "b__count")]).unwrap_err();
         assert!(bad_name.to_string().contains("plugin tool name b__count cannot contain \"__\""), "{bad_name}");
+        let trailing = validate_plugin_tool_decls(&[decl("ab-", "count")]).unwrap_err();
+        assert!(trailing.to_string().contains("plugin id ab- cannot end with \"-\""), "{trailing}");
 
         // A single dash and a single underscore stay legal, and so do the shortest and
         // longest legal forms.
         assert!(validate_plugin_tool_decls(&[decl("a-b-c", "greet_twice")]).is_ok());
         assert!(validate_plugin_id("hello-world").is_ok());
         assert!(validate_plugin_id("a--b").is_err(), "the id-only check refuses it too");
+        assert!(validate_plugin_id("ab-").is_err(), "and refuses a trailing dash");
     }
 
-    /// The whole point of the two rules above: no two distinct (plugin id, tool name)
-    /// pairs share an MCP name, and every pair survives the round trip. The mapping is
-    /// spelled out here rather than imported, since `atlas-core` cannot depend on
-    /// `atlas-mcp`; `atlas-mcp`'s own `plugin_tool_names_round_trip` checks the same
-    /// property against the real functions.
+    /// The whole point of the three rules above: no two distinct (plugin id, tool name)
+    /// pairs share an MCP name, and every pair registration accepts survives the round
+    /// trip. The mapping is spelled out here rather than imported, since `atlas-core`
+    /// cannot depend on `atlas-mcp`; `atlas-mcp`'s own
+    /// `distinct_plugin_tools_never_share_an_mcp_name` checks the same property against
+    /// the real functions.
+    ///
+    /// The lists carry the boundary shapes on purpose: an id ending in `-`, an id with
+    /// `--`, a name with `__`, and names whose own underscores sit next to the
+    /// separator. Each is asserted invalid with its reason, so loosening a rule turns one
+    /// of them valid and fails the round trip below rather than passing quietly.
     #[test]
     fn every_valid_plugin_id_and_tool_name_maps_to_a_distinct_mcp_name() {
-        let ids = ["hello-world", "hello", "a1", "x-y-z", "helloworld", "hello-w"];
-        let names = ["count", "greet_twice", "c", "count_2", "b_count"];
+        let ids = ["hello-world", "hello", "a1", "x-y-z", "helloworld", "hello-w", "ab-", "hello--world", "a-b-"];
+        let names = ["count", "greet_twice", "c", "count_2", "b_count", "world_count", "count_", "b__count"];
+        let illegal_ids = ["ab-", "hello--world", "a-b-"];
+        let illegal_names = ["b__count"];
         let mut seen: HashMap<String, (&str, &str)> = HashMap::new();
         for id in ids {
             for name in names {
-                assert!(validate_plugin_tool_decls(&[decl(id, name)]).is_ok(), "{id} / {name} should be valid");
+                let valid = validate_plugin_tool_decls(&[decl(id, name)]).is_ok();
+                if !valid {
+                    assert!(
+                        illegal_ids.contains(&id) || illegal_names.contains(&name),
+                        "{id} / {name} was refused but is not one of the shapes the rules exclude",
+                    );
+                    continue;
+                }
+                assert!(!illegal_ids.contains(&id), "{id} should have been refused as an id");
+                assert!(!illegal_names.contains(&name), "{name} should have been refused as a tool name");
                 let mcp_name = format!("plugin__{}__{name}", id.replace('-', "_"));
                 // Splitting on the first `__` after the prefix recovers the pair,
-                // because neither half can hold one.
+                // because neither half can hold one and the id cannot end in one either.
                 let rest = mcp_name.strip_prefix("plugin__").unwrap();
                 let (got_id, got_name) = rest.split_once("__").unwrap();
                 assert_eq!(got_id, id.replace('-', "_"), "{mcp_name}");
@@ -1054,6 +1088,7 @@ mod tests {
                 }
             }
         }
+        assert!(!seen.is_empty(), "the loop never reached a valid pair");
     }
 
     /// `mcp.disabled_tools` may only hold a plugin name registration could actually

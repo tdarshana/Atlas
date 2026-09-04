@@ -2385,15 +2385,23 @@ mod tests {
         }
     }
 
-    /// The mapping is injective over everything registration accepts, so no plugin can
+    /// The mapping is injective over everything registration accepts, and every accepted
+    /// pair survives `plugin_tool_name` then `parse_plugin_tool_name`, so no plugin can
     /// take another plugin's calls and no plugin's tool is listed under a name that
-    /// resolves to someone else. `validate_plugin_tool_decls` is what makes this hold
-    /// (no `--` in an id, no `__` in a tool name), so every pair here is asserted valid
-    /// first: a rule loosened there would fail this test rather than ship quietly.
+    /// resolves to nothing. `validate_plugin_tool_decls` is what makes this hold: no
+    /// `--` in an id, no trailing `-` on an id, no `__` in a tool name.
+    ///
+    /// The lists carry the boundary shapes the three rules exclude, each named in
+    /// `illegal_ids`/`illegal_names`, so loosening a rule turns one of them valid and
+    /// fails the round trip rather than shipping quietly. `ab-` is the case that
+    /// mattered: it encodes to `plugin__ab___count`, whose first `__` lands one character
+    /// early and parses back as `("ab", "_count")`.
     #[test]
     fn distinct_plugin_tools_never_share_an_mcp_name() {
-        let ids = ["hello-world", "hello", "hello_world_is_not_an_id", "a1", "x-y-z", "helloworld", "hello-w"];
-        let names = ["count", "greet_twice", "c", "count_2", "b_count", "world_count"];
+        let ids = ["hello-world", "hello", "hello_world_is_not_an_id", "a1", "x-y-z", "helloworld", "hello-w", "ab-", "hello--world", "a-b-"];
+        let names = ["count", "greet_twice", "c", "count_2", "b_count", "world_count", "count_", "b__count"];
+        let illegal_ids = ["hello_world_is_not_an_id", "ab-", "hello--world", "a-b-"];
+        let illegal_names = ["b__count"];
         let mut seen: HashMap<String, (&str, &str)> = HashMap::new();
         for id in ids {
             for name in names {
@@ -2405,17 +2413,21 @@ mod tests {
                 let valid = atlas_core::settings::validate_plugin_tool_decls(&[decl]).is_ok();
                 let mcp_name = plugin_tool_name(id, name);
                 if !valid {
-                    // Only the deliberately illegal id in the list, kept here so the
-                    // test says out loud which shapes registration turns away.
-                    assert_eq!(id, "hello_world_is_not_an_id", "unexpectedly invalid: {id} / {name}");
+                    assert!(
+                        illegal_ids.contains(&id) || illegal_names.contains(&name),
+                        "unexpectedly invalid: {id} / {name}",
+                    );
                     continue;
                 }
+                assert!(!illegal_ids.contains(&id), "{id} should have been refused as an id");
+                assert!(!illegal_names.contains(&name), "{name} should have been refused as a tool name");
                 assert_eq!(parse_plugin_tool_name(&mcp_name), Some((id.replace('-', "_"), name.to_string())), "{mcp_name}");
                 if let Some(other) = seen.insert(mcp_name.clone(), (id, name)) {
                     panic!("{mcp_name} is produced by both {other:?} and ({id}, {name})");
                 }
             }
         }
+        assert!(!seen.is_empty(), "the loop never reached a valid pair");
     }
 
     /// A plugin tool can never shadow a built-in, because no built-in name starts with
