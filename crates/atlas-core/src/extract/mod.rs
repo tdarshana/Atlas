@@ -338,73 +338,95 @@ pub fn build_client(cfg: &ExtractionConfig) -> Result<LlmClient> {
 /// write gate is never held across an await. Each insert then goes through
 /// `MemoryService::remember`, which takes the gate itself.
 pub async fn run_ingest(job: &Job, backend: &LocalBackend) -> Result<Value> {
-    let text = job.payload["text"].as_str().ok_or_else(|| AtlasError::Invalid("ingest job has no text".into()))?;
+    let text = job.payload["text"].as_str().ok_or_else(|| AtlasError::Invalid("ingest job has no text".into()))?.to_string();
     let source_tool = job.payload["source_tool"].as_str().unwrap_or("ingest").to_string();
     let root = job.payload["project_root"].as_str().map(PathBuf::from);
-
     // The project was resolved when the job was queued, and the gate that admitted the
     // caller used that same answer; re-resolving here could disagree with it. An older
-    // job, queued before the payload carried the id, still falls back to the root.
-    let project_id = match job.payload["project_id"].as_str() {
+    // job, queued before the payload carried the id, still falls back to the root
+    // (inside the blocking closure below, since `project_for` reads the Db).
+    let project_id_from_payload = match job.payload["project_id"].as_str() {
         Some(id) => Some(Uuid::parse_str(id).map_err(|e| AtlasError::Invalid(format!("ingest job has a malformed project_id: {e}")))?),
-        None => project_for(&backend.db, root)?,
+        None => None,
     };
-    // `require_review` is the project's, not the model's: an agent writing here has
-    // every memory land `pending` whatever the confidence, the same rule
-    // `Backend::remember` applies. The actor the gate admitted is the payload's
-    // `source_tool`; the user's own hands (`desktop`, `cli`, `cli/*`, `api`) are exempt
-    // here exactly as they are at the gate.
-    let require_review = match project_id.filter(|_| !crate::projects::actor_is_user(&source_tool)) {
-        Some(pid) => ProjectRepo::new(&backend.db).get(pid)?.agent_access.require_review,
-        None => false,
+
+    // `require_review` is the project's, not the model's, and `resolve_extraction`
+    // both read the Db, so they run together on the blocking pool before the model
+    // call below.
+    let (project_id, require_review, cfg) = {
+        let db = backend.db.clone();
+        let source_tool = source_tool.clone();
+        backend.blocking(move || {
+            let project_id = match project_id_from_payload {
+                Some(pid) => Some(pid),
+                None => project_for(&db, root)?,
+            };
+            // The actor the gate admitted is the payload's `source_tool`; the user's own
+            // hands (`desktop`, `cli`, `cli/*`, `api`) are exempt here exactly as they are
+            // at the gate.
+            let require_review = match project_id.filter(|_| !crate::projects::actor_is_user(&source_tool)) {
+                Some(pid) => ProjectRepo::new(&db).get(pid)?.agent_access.require_review,
+                None => false,
+            };
+            let cfg = resolve_extraction(&db, project_id)?;
+            Ok((project_id, require_review, cfg))
+        }).await?
     };
-    let cfg = resolve_extraction(&backend.db, project_id)?;
     let client = build_client(&cfg)?;
-    let candidates = extract_candidates(text, &client).await?;
+    let candidates = extract_candidates(&text, &client).await?;
     let found = candidates.len();
+    let threshold = cfg.auto_accept_min_confidence;
+    let model = cfg.model.clone();
+    let job_id = job.id;
 
-    let keep = dedupe(candidates, &backend.memories, project_id)?;
-    let skipped_duplicates = found - keep.len();
-
-    // An insert that fails partway leaves the earlier memories stored, so the count
-    // is tracked as we go and the audit row is written either way: the trail has to
+    // `dedupe` (which can call the embedder) and every insert are synchronous Db/ONNX
+    // work with no await between them, so they share one blocking round trip. An
+    // insert that fails partway leaves the earlier memories stored, so the count is
+    // tracked as it goes and the audit row is written either way: the trail has to
     // name what actually landed, not what was attempted.
-    let mut inserted = 0usize;
-    let mut failure = None;
-    for c in keep {
-        let stored = backend.memories.remember(
-            NewMemory {
-                scope: if project_id.is_some() { MemoryScope::Project } else { MemoryScope::Global },
-                project_id,
-                kind: c.kind,
-                text: c.text,
-                tags: c.tags,
-                source_agent: Some(EXTRACTOR.to_string()),
-                source_tool: Some(source_tool.clone()),
-                confidence: c.confidence,
-                status: if require_review { MemoryStatus::Pending } else { status_for(c.confidence, cfg.auto_accept_min_confidence) },
-            },
-            EXTRACTOR,
-        );
-        match stored {
-            Ok(_) => inserted += 1,
-            Err(e) => { failure = Some(e); break; }
-        }
-    }
-
-    backend.memories.audit(
-        EXTRACTOR,
-        "extract",
-        "job",
-        Some(job.id),
-        serde_json::json!({
-            "job_id": job.id,
-            "candidates": found,
-            "inserted": inserted,
-            "skipped_duplicates": skipped_duplicates,
-            "model": cfg.model,
-        }),
-    )?;
+    let (inserted, skipped_duplicates, failure) = {
+        let memories = backend.memories.clone();
+        backend.blocking(move || -> Result<(usize, usize, Option<AtlasError>)> {
+            let keep = dedupe(candidates, &memories, project_id)?;
+            let skipped_duplicates = found - keep.len();
+            let mut inserted = 0usize;
+            let mut failure = None;
+            for c in keep {
+                let stored = memories.remember(
+                    NewMemory {
+                        scope: if project_id.is_some() { MemoryScope::Project } else { MemoryScope::Global },
+                        project_id,
+                        kind: c.kind,
+                        text: c.text,
+                        tags: c.tags,
+                        source_agent: Some(EXTRACTOR.to_string()),
+                        source_tool: Some(source_tool.clone()),
+                        confidence: c.confidence,
+                        status: if require_review { MemoryStatus::Pending } else { status_for(c.confidence, threshold) },
+                    },
+                    EXTRACTOR,
+                );
+                match stored {
+                    Ok(_) => inserted += 1,
+                    Err(e) => { failure = Some(e); break; }
+                }
+            }
+            memories.audit(
+                EXTRACTOR,
+                "extract",
+                "job",
+                Some(job_id),
+                serde_json::json!({
+                    "job_id": job_id,
+                    "candidates": found,
+                    "inserted": inserted,
+                    "skipped_duplicates": skipped_duplicates,
+                    "model": model,
+                }),
+            )?;
+            Ok((inserted, skipped_duplicates, failure))
+        }).await?
+    };
     match failure {
         Some(e) => Err(e),
         None => Ok(serde_json::json!({"inserted": inserted, "skipped_duplicates": skipped_duplicates})),
@@ -422,14 +444,18 @@ pub async fn run_project_summary(job: &Job, backend: &LocalBackend) -> Result<Va
         .ok_or_else(|| AtlasError::Invalid("project_summary job has no project_id".into()))?;
 
     // The project's own override applies to its summary, the same as to an ingest.
-    let cfg = resolve_extraction(&backend.db, Some(project_id))?;
+    let (cfg, profile) = {
+        let db = backend.db.clone();
+        backend.blocking(move || {
+            let cfg = resolve_extraction(&db, Some(project_id))?;
+            let profile = ProjectRepo::new(&db)
+                .get(project_id)?
+                .profile
+                .ok_or_else(|| AtlasError::Invalid(format!("project {project_id} has no profile to summarize")))?;
+            Ok((cfg, profile))
+        }).await?
+    };
     let client = build_client(&cfg)?;
-
-    let repo = ProjectRepo::new(&backend.db);
-    let profile = repo
-        .get(project_id)?
-        .profile
-        .ok_or_else(|| AtlasError::Invalid(format!("project {project_id} has no profile to summarize")))?;
 
     // The model call happens here, before the gate is taken: `write_gate` is a
     // blocking mutex and must never be held across an await.
@@ -439,15 +465,22 @@ pub async fn run_project_summary(job: &Job, backend: &LocalBackend) -> Result<Va
     // The profile read above is now potentially stale: a `refresh_project` running
     // alongside this job may have rescanned the repository and written new languages,
     // file counts and README excerpt. Re-read it under the gate and change only
-    // `summary`, so writing the summary cannot revert that scan.
+    // `summary`, so writing the summary cannot revert that scan. The gate is taken
+    // inside this closure, never across an await.
     {
-        let _gate = backend.memories.write_gate();
-        let mut profile = repo
-            .get(project_id)?
-            .profile
-            .ok_or_else(|| AtlasError::Invalid(format!("project {project_id} has no profile to summarize")))?;
-        profile.summary = Some(summary);
-        repo.set_profile(project_id, &profile, EXTRACTOR)?;
+        let db = backend.db.clone();
+        let memories = backend.memories.clone();
+        backend.blocking(move || {
+            let _gate = memories.write_gate();
+            let repo = ProjectRepo::new(&db);
+            let mut profile = repo
+                .get(project_id)?
+                .profile
+                .ok_or_else(|| AtlasError::Invalid(format!("project {project_id} has no profile to summarize")))?;
+            profile.summary = Some(summary);
+            repo.set_profile(project_id, &profile, EXTRACTOR)?;
+            Ok(())
+        }).await?;
     }
     Ok(serde_json::json!({"chars": chars}))
 }
