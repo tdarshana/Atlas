@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 
-use super::adapter::{mtime, read_doc_file, read_within_root, rel, root_instruction_files, FrameworkAdapter};
+use super::adapter::{mtime, read_doc_file, read_doc_prefix, read_within_root, rel, root_instruction_files, FrameworkAdapter};
 use super::md::{checkboxes, first_heading, section_bullets};
 use crate::models::{FrameworkDoc, FrameworkDocType, FrameworkInventory, FrameworkKind, ImportedDecision, ImportedTask, SourceRef};
 use crate::Result;
@@ -119,7 +119,7 @@ impl FrameworkAdapter for SpeckitAdapter {
 
 impl SpeckitAdapter {
     fn doc_at(&self, root: &Path, path: &Path, doc_type: FrameworkDocType) -> FrameworkDoc {
-        let text = read_doc_file(path).unwrap_or_default();
+        let text = read_doc_prefix(path).unwrap_or_default();
         let title = first_heading(&text).unwrap_or_else(|| file_stem(path));
         FrameworkDoc { kind: self.kind(), path: rel(root, path), title, doc_type, updated_at: mtime(path) }
     }

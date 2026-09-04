@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 
-use super::adapter::{mtime, read_doc_file, read_within_root, rel, FrameworkAdapter};
+use super::adapter::{mtime, read_doc_file, read_doc_prefix, read_within_root, rel, FrameworkAdapter};
 use super::md::{checkboxes, first_heading, section_bullets};
 use crate::models::{FrameworkDoc, FrameworkDocType, FrameworkInventory, FrameworkKind, ImportedDecision, ImportedTask, SourceRef};
 use crate::Result;
@@ -119,7 +119,7 @@ impl FrameworkAdapter for GsdAdapter {
 
 impl GsdAdapter {
     fn doc_at(&self, root: &Path, path: &Path, doc_type: FrameworkDocType) -> FrameworkDoc {
-        let text = read_doc_file(path).unwrap_or_default();
+        let text = read_doc_prefix(path).unwrap_or_default();
         let title = first_heading(&text).unwrap_or_else(|| file_stem(path));
         FrameworkDoc { kind: self.kind(), path: rel(root, path), title, doc_type, updated_at: mtime(path) }
     }
@@ -188,8 +188,22 @@ mod tests {
     fn tasks_come_from_plan_checkboxes() {
         let a = GsdAdapter;
         let tasks = a.tasks(&fixture());
-        assert_eq!(tasks.len(), 2);
-        assert_eq!(tasks.iter().filter(|t| t.status_hint.as_deref() == Some("done")).count(), 1);
+        assert_eq!(tasks.len(), 4);
+        assert_eq!(tasks.iter().filter(|t| t.status_hint.as_deref() == Some("done")).count(), 2);
+    }
+
+    /// The fixture's `PLAN.md` has two "## Tasks" headings (a real GSD shape: a
+    /// phase can note something between two task lists). Their checkboxes must
+    /// not collide on the same `SourceRef.anchor`, or a re-import would map the
+    /// second heading's items onto the first heading's tasks.
+    #[test]
+    fn tasks_under_two_headings_sharing_a_title_get_unique_anchors() {
+        let a = GsdAdapter;
+        let tasks = a.tasks(&fixture());
+        let anchors: Vec<&str> = tasks.iter().map(|t| t.source_ref.anchor.as_str()).collect();
+        let unique: std::collections::HashSet<&str> = anchors.iter().copied().collect();
+        assert_eq!(unique.len(), anchors.len(), "anchors must all be distinct: {anchors:?}");
+        assert_eq!(anchors, vec!["Tasks#1", "Tasks#2", "Tasks#3", "Tasks#4"]);
     }
 
     #[test]

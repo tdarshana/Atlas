@@ -7,6 +7,8 @@
 //! matches inside one, so an example checkbox or heading shown in a spec's own
 //! code sample is never read as real content.
 
+use std::collections::HashMap;
+
 use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
 
 /// The text of the document's first level-1 heading, or `None` if it has none.
@@ -38,15 +40,20 @@ pub(crate) fn first_heading(text: &str) -> Option<String> {
 
 /// One `- [ ]`/`- [x]` line: whether it is checked, its text, the nearest
 /// preceding heading line (any level, `#`s stripped), if any, and this item's
-/// 1-based position among the checkboxes sharing that heading (or, when there is
-/// no heading, among those with none). Adapters use `heading`+`ordinal` to build
-/// a `SourceRef.anchor` that is unique within the document: two checkboxes under
-/// the same heading get `"<heading>#1"`, `"<heading>#2"`, not the same anchor.
+/// 1-based position among *every* checkbox seen so far under a heading with that
+/// exact title (or, when there is no heading, among those with none). Adapters
+/// use `heading`+`ordinal` to build a `SourceRef.anchor` that is unique within
+/// the document: two checkboxes under the same heading get `"<heading>#1"`,
+/// `"<heading>#2"`, not the same anchor. Counting by title rather than by
+/// occurrence also keeps two *different* headings that happen to share a title
+/// (a repeated `### Verification` under each task, say) from colliding on the
+/// same anchor: their checkboxes are numbered 1, 2, 3… across every occurrence
+/// of that title, never reset back to 1 at the second one.
 /// The ordinal is stable against edits elsewhere in the document (a change above
 /// the heading, or under a different heading, never renumbers it) but shifts if
-/// an item is added or removed earlier under the *same* heading — a line number
-/// would avoid even that, at the cost of changing on any edit above it in the
-/// whole file, so the ordinal is the more stable choice of the two the brief
+/// an item is added or removed earlier under the *same* heading title — a line
+/// number would avoid even that, at the cost of changing on any edit above it in
+/// the whole file, so the ordinal is the more stable choice of the two the brief
 /// allows.
 pub(crate) struct Checkbox {
     pub checked: bool,
@@ -59,10 +66,14 @@ pub(crate) struct Checkbox {
 
 /// Scans `text` line by line for GFM checkbox items (`- [ ] foo` / `- [x] foo`),
 /// tagging each with the most recent heading line above it and its ordinal under
-/// that heading. Lines inside a fenced code block are never matched.
+/// that heading title. Lines inside a fenced code block are never matched.
 pub(crate) fn checkboxes(text: &str) -> Vec<Checkbox> {
     let mut heading: Option<String> = None;
-    let mut ordinal_in_heading: usize = 0;
+    let mut no_heading_ordinal: usize = 0;
+    // One counter per heading *title*, not per occurrence: two headings sharing a
+    // title (e.g. a repeated "### Verification") keep counting from where the
+    // first one left off, so their checkboxes never land on the same ordinal.
+    let mut ordinals: HashMap<String, usize> = HashMap::new();
     let mut out = vec![];
     let mut fence = Fence::default();
     for (i, raw) in text.lines().enumerate() {
@@ -74,7 +85,6 @@ pub(crate) fn checkboxes(text: &str) -> Vec<Checkbox> {
             let title = trimmed[level..].trim();
             if !title.is_empty() {
                 heading = Some(title.to_string());
-                ordinal_in_heading = 0;
             }
             continue;
         }
@@ -85,19 +95,33 @@ pub(crate) fn checkboxes(text: &str) -> Vec<Checkbox> {
         } else {
             continue;
         };
-        ordinal_in_heading += 1;
-        out.push(Checkbox { checked, text: rest.trim().to_string(), heading: heading.clone(), line: i + 1, ordinal: ordinal_in_heading });
+        let ordinal = match &heading {
+            Some(h) => {
+                let counter = ordinals.entry(h.clone()).or_insert(0);
+                *counter += 1;
+                *counter
+            }
+            None => {
+                no_heading_ordinal += 1;
+                no_heading_ordinal
+            }
+        };
+        out.push(Checkbox { checked, text: rest.trim().to_string(), heading: heading.clone(), line: i + 1, ordinal });
     }
     out
 }
 
 /// The bullet lines (`- ` or `* `) under a heading whose text matches `name`
 /// (case-insensitive), stopping at the next heading of any level. Matches
-/// `## Decisions`, `# Decisions`, and so on regardless of level. Each result is
-/// `(text, line, ordinal)`, `ordinal` being the bullet's 1-based position within
-/// the section (for a unique `"<name>#<ordinal>"` anchor, the same scheme
-/// `checkboxes` uses). Lines inside a fenced code block are never matched, so a
-/// `## Decisions` shown as an example inside one doesn't open a real section.
+/// `## Decisions`, `# Decisions`, and so on regardless of level, and, when a
+/// document has more than one such section, every one of them: the ordinal
+/// counts across all of them rather than resetting at each, so a second
+/// `## Decisions` section's bullets continue numbering instead of repeating the
+/// first section's anchors. Each result is `(text, line, ordinal)`, `ordinal`
+/// being the bullet's 1-based position across every matching section (for a
+/// unique `"<name>#<ordinal>"` anchor, the same scheme `checkboxes` uses). Lines
+/// inside a fenced code block are never matched, so a `## Decisions` shown as an
+/// example inside one doesn't open a real section.
 pub(crate) fn section_bullets(text: &str, name: &str) -> Vec<(String, usize, usize)> {
     let mut out = vec![];
     let mut in_section = false;
@@ -111,7 +135,6 @@ pub(crate) fn section_bullets(text: &str, name: &str) -> Vec<(String, usize, usi
         if let Some(level) = heading_level(trimmed) {
             let title = trimmed[level..].trim();
             in_section = title.eq_ignore_ascii_case(name);
-            ordinal = 0;
             continue;
         }
         if in_section {
@@ -274,5 +297,36 @@ mod tests {
         let rulings = ruling_lines(text);
         assert_eq!(rulings.len(), 1);
         assert_eq!(rulings[0].0, "real ruling.");
+    }
+
+    #[test]
+    fn checkboxes_under_two_headings_sharing_a_title_get_distinct_anchors() {
+        // Two "### Verification" headings, one per task, is a real GSD/OpenSpec
+        // shape (a repeated section title across tasks or changes). Both used to
+        // reset the ordinal to 0, so the second heading's first item collided
+        // with the first heading's first item on the same "Verification#1".
+        let text = "### Task 1\n\n### Verification\n\n- [ ] check the first thing\n\n### Task 2\n\n### Verification\n\n- [ ] check the second thing\n- [x] check the third thing\n";
+        let items = checkboxes(text);
+        assert_eq!(items.len(), 3);
+        assert!(items.iter().all(|i| i.heading.as_deref() == Some("Verification")));
+        // Ordinals climb across both occurrences instead of resetting, so no two
+        // anchors ("Verification#<ordinal>") collide.
+        assert_eq!(items[0].ordinal, 1);
+        assert_eq!(items[1].ordinal, 2);
+        assert_eq!(items[2].ordinal, 3);
+    }
+
+    #[test]
+    fn section_bullets_across_two_matching_sections_keep_climbing() {
+        // A second "## Decisions" section (a real OpenSpec/GSD shape: one per
+        // change or phase) used to reset the ordinal, colliding with the first
+        // section's anchors.
+        let text = "## Decisions\n\n- first section's decision\n\n## Notes\n\nnothing here\n\n## Decisions\n\n- second section's decision\n";
+        let bullets = section_bullets(text, "Decisions");
+        assert_eq!(bullets.len(), 2);
+        assert_eq!(bullets[0].0, "first section's decision");
+        assert_eq!(bullets[0].2, 1);
+        assert_eq!(bullets[1].0, "second section's decision");
+        assert_eq!(bullets[1].2, 2, "must not repeat ordinal 1 from the first section");
     }
 }

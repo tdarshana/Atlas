@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 
-use super::adapter::{mtime, read_doc_file, read_within_root, rel, root_instruction_files, FrameworkAdapter};
+use super::adapter::{mtime, read_doc_file, read_doc_prefix, read_within_root, rel, root_instruction_files, FrameworkAdapter};
 use super::md::{checkboxes, first_heading, ruling_lines};
 use crate::models::{FrameworkDoc, FrameworkDocType, FrameworkInventory, FrameworkKind, ImportedDecision, ImportedTask, SourceRef};
 use crate::Result;
@@ -39,6 +39,10 @@ impl FrameworkAdapter for SuperpowersAdapter {
         let mut out = vec![];
         for (dir, doc_type) in [(SPECS_DIR, FrameworkDocType::Spec), (PLANS_DIR, FrameworkDocType::Plan)] {
             for path in md_files(&root.join(dir)) {
+                // A plan file named `*.ledger.md` is a ledger despite living under
+                // `PLANS_DIR`: the convention some Superpowers projects use for a
+                // standalone decision ledger that isn't a `.superpowers/sdd/*/progress.md`.
+                let doc_type = if dir == PLANS_DIR && is_ledger_filename(&path) { FrameworkDocType::Ledger } else { doc_type };
                 out.push(self.doc_at(root, &path, doc_type));
             }
         }
@@ -99,10 +103,17 @@ impl FrameworkAdapter for SuperpowersAdapter {
 
 impl SuperpowersAdapter {
     fn doc_at(&self, root: &Path, path: &Path, doc_type: FrameworkDocType) -> FrameworkDoc {
-        let text = read_doc_file(path).unwrap_or_default();
+        let text = read_doc_prefix(path).unwrap_or_default();
         let title = first_heading(&text).unwrap_or_else(|| file_stem(path));
         FrameworkDoc { kind: self.kind(), path: rel(root, path), title, doc_type, updated_at: mtime(path) }
     }
+}
+
+/// Whether `path`'s file name ends `.ledger.md`, the convention a standalone
+/// decision ledger under `PLANS_DIR` uses to mark itself as one rather than a
+/// plan.
+fn is_ledger_filename(path: &Path) -> bool {
+    path.file_name().and_then(|f| f.to_str()).is_some_and(|f| f.ends_with(".ledger.md"))
 }
 
 /// `*.md` files directly under `dir` (no recursion). Empty if `dir` doesn't exist.
@@ -151,21 +162,33 @@ mod tests {
         let inv = a.detect(&fixture()).expect("superpowers fixture should be detected");
         assert_eq!(inv.kind, FrameworkKind::Superpowers);
         assert_eq!(inv.roots.len(), 3);
-        assert_eq!(inv.docs, 3, "one spec, one plan, one ledger");
-        assert_eq!(inv.tasks, 1, "detect counts task-bearing files (one plan), not checkbox items");
+        assert_eq!(inv.docs, 4, "one spec, two plan-directory files (one a ledger), one sdd ledger");
+        assert_eq!(inv.tasks, 2, "detect counts every plan-directory file, not checkbox items");
     }
 
     #[test]
     fn documents_carry_doc_types_and_titles() {
         let a = SuperpowersAdapter;
         let docs = a.documents(&fixture());
-        assert_eq!(docs.len(), 3);
+        assert_eq!(docs.len(), 4);
         let spec = docs.iter().find(|d| d.doc_type == FrameworkDocType::Spec).unwrap();
         assert_eq!(spec.title, "Example fixture spec");
         let plan = docs.iter().find(|d| d.doc_type == FrameworkDocType::Plan).unwrap();
         assert_eq!(plan.title, "Example fixture plan");
-        let ledger = docs.iter().find(|d| d.doc_type == FrameworkDocType::Ledger).unwrap();
-        assert!(ledger.path.ends_with("progress.md"), "{}", ledger.path);
+        assert_eq!(docs.iter().filter(|d| d.doc_type == FrameworkDocType::Ledger).count(), 2);
+        let sdd_ledger = docs.iter().find(|d| d.doc_type == FrameworkDocType::Ledger && d.path.ends_with("progress.md")).unwrap();
+        assert!(sdd_ledger.path.contains(".superpowers/sdd"), "{}", sdd_ledger.path);
+    }
+
+    /// A file matching `*.ledger.md` under `PLANS_DIR` is a ledger, not a plan,
+    /// even though it lives beside the plan files.
+    #[test]
+    fn a_ledger_named_plan_directory_file_is_typed_ledger_not_plan() {
+        let a = SuperpowersAdapter;
+        let docs = a.documents(&fixture());
+        let doc = docs.iter().find(|d| d.path.ends_with(".ledger.md")).expect("fixture has a *.ledger.md file");
+        assert_eq!(doc.doc_type, FrameworkDocType::Ledger);
+        assert_eq!(doc.title, "Example fixture ledger");
     }
 
     #[test]
