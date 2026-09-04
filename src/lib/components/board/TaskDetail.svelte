@@ -373,8 +373,16 @@
 				onclick={copyKey}
 			/>
 		{/if}
-		{#if task && !task.ready}
+		<!-- `ready` is false for three different reasons, and calling all of them `blocked`
+		     said the wrong thing about a parent whose only holdup is its own children, and
+		     about a task that is simply closed. Blockers first, then open subtasks, then
+		     nothing at all. -->
+		{#if task && !task.ready && task.open_blockers > 0}
 			<Badge tone="danger" title={task.blocked_reason ?? 'Not ready'}>blocked</Badge>
+		{:else if task && !task.ready && task.subtasks_total > task.subtasks_done}
+			<Badge tone="warning" title={task.blocked_reason ?? 'Not ready'}>
+				waiting on subtasks
+			</Badge>
 		{/if}
 		<span class="spacer"></span>
 		<IconButton

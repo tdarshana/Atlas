@@ -160,7 +160,21 @@ describe('toolDecls and toolPlugins', () => {
 
 		expect(toolPlugins(items).map((p) => p.id)).toEqual(['with-tools']);
 		expect(warn).toHaveBeenCalledWith(
-			"plugin no-permission declares MCP tools without the 'mcp.tools' permission"
+			"plugin no-permission declares MCP tools without a held 'mcp.tools' permission"
+		);
+		warn.mockRestore();
+	});
+
+	it('drops a plugin whose mcp.tools grant was revoked, manifest or not', () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		// The manifest still asks for `mcp.tools`; the user took it back on the Permissions
+		// view. Revoking it has to unregister the plugin's tools, which is the whole point
+		// of a revocable grant.
+		const revoked = plugin('revoked', [READY_COUNT], ['mcp.tools'], { granted: [] });
+
+		expect(toolPlugins([revoked])).toEqual([]);
+		expect(warn).toHaveBeenCalledWith(
+			"plugin revoked declares MCP tools without a held 'mcp.tools' permission"
 		);
 		warn.mockRestore();
 	});

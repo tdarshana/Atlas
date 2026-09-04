@@ -274,6 +274,14 @@
 		gap: 8px;
 	}
 
+	/* A plugin card is appended after the five stat cards, so at the template's own
+	   widths it would land alone on a second row at `1fr` and read as a stranded sliver.
+	   Full-width rows of its own instead: the frame inside sets its own height, so the
+	   row costs no more space than the card needs. */
+	.stat-card.plugin-card {
+		grid-column: 1 / -1;
+	}
+
 	.stat-card.rows {
 		gap: 6px;
 	}

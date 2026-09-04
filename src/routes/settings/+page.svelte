@@ -58,6 +58,7 @@
 	import { loadProjects, projects } from '$lib/stores/projects.svelte';
 	import { permissionsStatus } from '$lib/permissions/commands';
 	import { summaryText, toRows, type PermissionStatus } from '$lib/permissions/system';
+	import { asksForPermissions } from '$lib/plugins/grants';
 	import { contributions, loadPlugins, plugins } from '$lib/plugins/host.svelte';
 	import { loadPluginThemes } from '$lib/plugins/themes';
 	import ToolChannelWarning from '$lib/plugins/ToolChannelWarning.svelte';
@@ -465,7 +466,7 @@
 	const permissionsSummaryText = $derived(
 		summaryText(
 			toRows(permissionStatuses),
-			plugins.items.filter((p) => (p.manifest?.permissions.length ?? 0) > 0).length
+			plugins.items.filter(asksForPermissions).length
 		)
 	);
 

@@ -55,6 +55,8 @@
 	let frame = $state<HTMLIFrameElement>();
 	let reported = $state(DEFAULT_HEIGHT);
 	let bridge: Bridge | null = null;
+	/** Bumped by `reload()` to recreate the iframe element, and with it the frame's window. */
+	let generation = $state(0);
 	/** The context as last sent, so a parent that hands over a fresh object holding the
 	 * same values does not make the frame re-render for nothing. */
 	let sentContext = '';
@@ -84,10 +86,20 @@
 	 * the moment it runs, and buffers its own calls until init comes back.
 	 */
 	function onHello(source: MessageEventSource): void {
-		// Only the window this iframe is showing right now. Any other window saying hello,
-		// including one from a page the frame navigated itself to, is not this plugin.
+		// Only the window this iframe is showing right now. A frame the app is not showing
+		// is not this plugin.
 		if (!frame || source !== frame.contentWindow) return;
-		detachBridge();
+		// A same-frame navigation keeps the same `Window` object, so the check above does
+		// not exclude a page the frame navigated itself to. Once a bridge is live, a second
+		// hello is refused: rebinding would hand the plugin's grants (`memories.remember`,
+		// `tasks.move`, `settings.get`, all as `plugin/<id>`) to whatever page the frame
+		// walked off to. Only the host resets a binding, through `reload()` below.
+		if (bridge) {
+			console.warn(
+				`plugin ${plugin.id}: refused a second atlas:hello from an already-bound frame`
+			);
+			return;
+		}
 		bridge = createBridge({
 			plugin,
 			view,
@@ -112,6 +124,17 @@
 		unregisterFrame(plugin.id, bridge);
 		bridge.dispose();
 		bridge = null;
+	}
+
+	/**
+	 * Reloads the plugin's document from a fresh iframe element, disposing the bridge
+	 * first. The guard in `onHello` refuses a rebind, so this is the host's way, and the
+	 * only way, to bind a new one: the frame is recreated rather than re-navigated, so the
+	 * new document gets a new `Window` and the old one cannot speak again.
+	 */
+	export function reload(): void {
+		detachBridge();
+		generation += 1;
 	}
 
 	onMount(() => {
@@ -153,14 +176,16 @@
 </script>
 
 {#if src}
-	<iframe
-		bind:this={frame}
-		{title}
-		{src}
-		sandbox="allow-scripts"
-		style={frameStyle}
-		data-testid="plugin-frame-{plugin.id}"
-	></iframe>
+	{#key generation}
+		<iframe
+			bind:this={frame}
+			{title}
+			{src}
+			sandbox="allow-scripts"
+			style={frameStyle}
+			data-testid="plugin-frame-{plugin.id}"
+		></iframe>
+	{/key}
 {/if}
 
 <style>

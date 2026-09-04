@@ -11,6 +11,7 @@
 
 import { baseUrl } from '$lib/daemon.svelte';
 import { activePlugins } from './contributions';
+import { holds } from './grants';
 import type { PluginInfo, ToolContribution } from './types';
 
 /** One tool as the daemon's `PUT` body carries it. `plugin_id` is not sent: the path
@@ -104,15 +105,16 @@ export function toolDecls(tools: ToolContribution[]): ToolDecl[] {
 
 /**
  * The plugins that contribute MCP tools right now: enabled, compatible, holding
- * `mcp.tools` and declaring at least one. The permission check is defensive, since the
- * manifest validation already refuses `contributes.tools` without it.
+ * `mcp.tools` and declaring at least one. The check is on the grant, not the manifest's
+ * request: revoking `mcp.tools` on the Permissions view has to unregister the plugin's
+ * tools, which is the whole point of a revocable grant.
  */
 export function toolPlugins(items: PluginInfo[]): PluginInfo[] {
 	return activePlugins(items).filter((p) => {
 		const tools = p.manifest?.contributes.tools ?? [];
 		if (tools.length === 0) return false;
-		if (!p.manifest?.permissions.includes('mcp.tools')) {
-			console.warn(`plugin ${p.id} declares MCP tools without the 'mcp.tools' permission`);
+		if (!holds(p, 'mcp.tools')) {
+			console.warn(`plugin ${p.id} declares MCP tools without a held 'mcp.tools' permission`);
 			return false;
 		}
 		return true;

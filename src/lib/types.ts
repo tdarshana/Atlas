@@ -813,8 +813,8 @@ export interface ProjectMcpToolRow {
 	enabled_globally: boolean;
 	/** Actually callable here: enabled globally and not in this project's own override. */
 	enabled_here: boolean;
-	/** Read the same way as `McpToolRow.source`. Optional, and today always absent: this
-	 * route reports the built-in table only. */
+	/** Read the same way as `McpToolRow.source`: `builtin`, or `plugin:<id>` for a tool a
+	 * plugin contributed. Optional only for a report written by an older daemon. */
 	source?: string;
 }
 

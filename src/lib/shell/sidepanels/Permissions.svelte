@@ -5,6 +5,7 @@
 	import { onMount } from 'svelte';
 	import { checkPermissions, systemPermissions } from '$lib/permissions/store.svelte';
 	import { toRows } from '$lib/permissions/system';
+	import { asksForPermissions } from '$lib/plugins/grants';
 	import { plugins, loadPlugins } from '$lib/plugins/host.svelte';
 	import { loadProjects, projects } from '$lib/stores/projects.svelte';
 	import TreeGroup from '../TreeGroup.svelte';
@@ -12,7 +13,7 @@
 
 	const rows = $derived(toRows(systemPermissions.statuses));
 	const grantCount = $derived(
-		plugins.items.filter((p) => (p.manifest?.permissions.length ?? 0) > 0).length
+		plugins.items.filter(asksForPermissions).length
 	);
 
 	const DOTS = {

@@ -10,6 +10,7 @@
 	import { openSettingsPane, permissionRequest } from '$lib/permissions/commands';
 	import { checkPermissions, putStatus, systemPermissions } from '$lib/permissions/store.svelte';
 	import { grantedCount, toRows, type PermissionId, type PermissionRow } from '$lib/permissions/system';
+	import { asksForPermissions, nextGrants, permissionChips } from '$lib/plugins/grants';
 	import { loadPlugins, plugins, setPermissions } from '$lib/plugins/host.svelte';
 	import type { Permission, PluginInfo } from '$lib/plugins/types';
 	import { alwaysAllowed, knownActors } from '$lib/components/project/settings/settings';
@@ -59,17 +60,14 @@
 
 	/** The plugins that ask for anything at all. One that asks for nothing has no row to
 	 * draw and nothing to revoke. */
-	const pluginRows = $derived(
-		plugins.items.filter((p) => (p.manifest?.permissions.length ?? 0) > 0)
-	);
+	const pluginRows = $derived(plugins.items.filter(asksForPermissions));
 
 	async function togglePermission(
 		plugin: PluginInfo,
 		permission: Permission,
 		on: boolean
 	): Promise<void> {
-		const asked = plugin.manifest?.permissions ?? [];
-		const next = asked.filter((p) => (p === permission ? on : plugin.granted.includes(p)));
+		const next = nextGrants(plugin, permission, on);
 		togglingPlugin = plugin.id;
 		try {
 			await setPermissions(plugin.id, next);
@@ -296,10 +294,11 @@
 						{/if}
 					</div>
 					<div class="grants">
-						{#each plugin.manifest?.permissions ?? [] as permission (permission)}
+						{#each permissionChips(plugin) as chip (chip.permission)}
+							{@const permission = chip.permission}
 							<Checkbox
 								label={permission}
-								checked={plugin.granted.includes(permission)}
+								checked={chip.granted}
 								disabled={togglingPlugin === plugin.id}
 								data-testid="grant-{plugin.id}-{permission}"
 								onchange={(e) => togglePermission(plugin, permission, e.currentTarget.checked)}

@@ -13,6 +13,7 @@
 		setEnabled,
 		uninstall
 	} from '$lib/plugins/host.svelte';
+	import { permissionChips } from '$lib/plugins/grants';
 	import ToolChannelWarning from '$lib/plugins/ToolChannelWarning.svelte';
 	import type { PluginInfo } from '$lib/plugins/types';
 	import { inTauri, setStatusItems } from '$lib/shell';
@@ -47,6 +48,13 @@
 		{ key: 'actions', label: '', width: '110px' }
 	];
 
+	/** What an install says. Installing is not consenting: the plugin lands disabled and
+	 * nothing of it runs, so the toast points at the permission chips and the toggle
+	 * rather than announcing a plugin that is already live. */
+	function installedMessage(info: PluginInfo): string {
+		return `Installed ${info.manifest?.name ?? info.id}. Review its permissions, then enable it.`;
+	}
+
 	async function pickFolder(): Promise<void> {
 		if (!inTauri()) return;
 		installing = true;
@@ -55,7 +63,7 @@
 			const picked = await open({ directory: true });
 			if (typeof picked !== 'string') return;
 			const info = await installFolder(picked);
-			push('success', `Installed ${info.manifest?.name ?? info.id}`);
+			push('success', installedMessage(info));
 		} catch (e) {
 			push('error', errorMessage(e));
 		} finally {
@@ -68,7 +76,7 @@
 		installing = true;
 		try {
 			const info = await installGithub(githubUrl.trim());
-			push('success', `Installed ${info.manifest?.name ?? info.id}`);
+			push('success', installedMessage(info));
 			githubOpen = false;
 			githubUrl = '';
 		} catch (e) {
@@ -168,11 +176,19 @@
 					{:else if column.key === 'author'}
 						{plugin.manifest?.author ?? '-'}
 					{:else if column.key === 'permissions'}
+						<!-- The grant, not the request: a permission the user revoked on the
+						     Permissions view stays on the row, greyed and struck through, so
+						     this column says both what the plugin asked for and what it holds. -->
 						<span class="chips">
-							{#each plugin.manifest?.permissions ?? [] as permission (permission)}
-								<Badge tone="info">{permission}</Badge>
+							{#each permissionChips(plugin) as chip (chip.permission)}
+								<Badge
+									tone={chip.granted ? 'info' : 'neutral'}
+									title={chip.granted ? '' : 'Asked for, revoked on the Permissions view'}
+								>
+									<span class:revoked={!chip.granted}>{chip.permission}</span>
+								</Badge>
 							{/each}
-							{#if (plugin.manifest?.permissions ?? []).length === 0}
+							{#if permissionChips(plugin).length === 0}
 								<span class="hint">none</span>
 							{/if}
 						</span>
@@ -311,6 +327,12 @@
 		display: flex;
 		flex-wrap: wrap;
 		gap: 4px;
+	}
+
+	/* A permission the manifest asks for and the user has taken back. */
+	.revoked {
+		text-decoration: line-through;
+		opacity: 0.7;
 	}
 
 	.form {

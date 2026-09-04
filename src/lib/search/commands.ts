@@ -95,6 +95,14 @@ export const COMMANDS: PaletteCommand[] = [
 		run: (ctx) => ctx.goto('/permissions')
 	},
 	{
+		id: 'open-skills',
+		label: 'Open skills',
+		hint: 'the SKILL.md folders agents read here',
+		icon: 'graduation-cap',
+		combo: 'Mod+0',
+		run: (ctx) => ctx.goto('/skills')
+	},
+	{
 		id: 'open-plugins',
 		label: 'Plugins',
 		hint: 'install and enable plugins',
