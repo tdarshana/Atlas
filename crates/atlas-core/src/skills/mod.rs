@@ -291,6 +291,40 @@ mod tests {
         assert!(discover::read_body(&dir, &canonical_root).is_err(), "nor can it be read");
     }
 
+    /// A `SKILL.md` that is itself a symlink, even one staying inside its root, is
+    /// readable but not editable: writing would either overwrite the file it points at,
+    /// which another skill may share, or replace the link. The listing says so, so a
+    /// client never offers an edit that can only fail.
+    #[cfg(unix)]
+    #[test]
+    fn an_in_root_symlinked_skill_file_is_read_only() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join(".claude/skills");
+        let shared = skill_at(&root, "shared", "---\nname: shared\ndescription: The real one.\n---\n\nShared body.\n");
+        let alias = root.join("alias");
+        std::fs::create_dir_all(&alias).unwrap();
+        std::os::unix::fs::symlink(shared.join("SKILL.md"), alias.join("SKILL.md")).unwrap();
+
+        let db = Db::open_in_memory().unwrap();
+        let list = list_skills(&db, None, home.path()).unwrap();
+        let aliased = list.skills.iter().find(|s| s.id == "claude-user:alias").expect("an in-root link still lists");
+        assert!(!aliased.editable, "a symlinked SKILL.md is not editable: {aliased:?}");
+        // It is still readable, since nothing left the root.
+        assert!(get_skill(&db, None, "claude-user:alias", home.path()).unwrap().body.contains("Shared body."));
+
+        let err = write_skill_body(&db, None, "claude-user:alias", "rewritten".into(), "t", home.path()).unwrap_err();
+        assert!(matches!(err, AtlasError::Invalid(ref m) if m.contains("not editable")), "{err}");
+        // The file it points at is untouched, and so is the link.
+        assert!(std::fs::read_to_string(shared.join("SKILL.md")).unwrap().contains("Shared body."));
+        assert!(std::fs::symlink_metadata(alias.join("SKILL.md")).unwrap().file_type().is_symlink());
+
+        // `write_body` refuses on its own too, not only through the `editable` gate.
+        let canonical_root = root.canonicalize().unwrap();
+        let refused = discover::write_body(&alias, &canonical_root, "rewritten").unwrap_err();
+        assert!(matches!(refused, AtlasError::Invalid(ref m) if m.contains("is a symlink")), "{refused}");
+        assert!(std::fs::read_to_string(shared.join("SKILL.md")).unwrap().contains("Shared body."));
+    }
+
     /// An in-place write keeps the file's own mode rather than replacing a `0600`
     /// skill with a world-readable one.
     #[cfg(unix)]

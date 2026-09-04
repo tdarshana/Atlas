@@ -169,18 +169,36 @@ fn scan_root(
             Some(label) => format!("{label}/{folder}"),
             None => folder.clone(),
         };
-        let fm = frontmatter::parse(&text);
+        // The parser is total (`frontmatter::parse_never_panics_on_odd_input`), but this
+        // text is a third party's, and a listing that fails wholesale because one plugin
+        // shipped one strange file would take every other skill down with it. So one
+        // file's parse is one file's problem: a panic here becomes a warning and the
+        // walk goes on.
+        let parsed = std::panic::catch_unwind(|| {
+            let fm = frontmatter::parse(&text);
+            (fm.name, fm.description.unwrap_or_else(|| frontmatter::first_paragraph(&text)))
+        });
+        let (name, description) = match parsed {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                found.warnings.push(format!("{}: could not be read as a skill", file.display()));
+                continue;
+            }
+        };
         found.skills.push(Discovered {
             summary: SkillSummary {
                 id: format!("{}:{relative}", source.as_str()),
                 source,
-                name: fm.name.unwrap_or(folder),
-                description: fm.description.unwrap_or_else(|| frontmatter::first_paragraph(&text)),
+                name: name.unwrap_or(folder),
+                description,
                 scope,
                 project_id,
                 path: Some(dir.display().to_string()),
                 plugin: plugin.clone(),
-                editable: is_writable(&file),
+                // A symlinked `SKILL.md` is readable but not editable: `write_body`
+                // refuses one, so saying so here keeps a client from offering an edit
+                // that can only fail.
+                editable: is_writable(&file) && !is_symlink(&dir.join(SKILL_FILE)),
                 updated_at: modified(&file),
                 enabled_here: None,
             },
@@ -252,6 +270,17 @@ pub fn read_body(dir: &Path, root: &Path) -> Result<String> {
 /// root it was listed under is refused rather than replaced.
 pub fn write_body(dir: &Path, root: &Path, body: &str) -> Result<()> {
     let target = checked_skill_file(dir, root)?;
+    // Checked after the root, so a link that leaves the root still reports that rather
+    // than this. A `SKILL.md` that is itself a link, even one staying inside the root,
+    // is refused: writing would either follow it and overwrite a file another skill may
+    // share, or replace the link and quietly break whatever set it up. Neither is a
+    // choice Atlas should make on the user's behalf from an edit box.
+    if is_symlink(&dir.join(SKILL_FILE)) {
+        return Err(AtlasError::Invalid(format!(
+            "{} is a symlink; Atlas does not edit a skill through one, edit the file it points at",
+            dir.join(SKILL_FILE).display()
+        )));
+    }
     let mode = std::fs::metadata(&target).map(|m| m.permissions()).ok();
     let temp = dir.join(format!(".atlas-{}.tmp", Uuid::new_v4()));
     let write = (|| -> std::io::Result<()> {
@@ -326,6 +355,11 @@ fn is_scratch_dir(path: &Path) -> bool {
 
 fn name_of(path: &Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// Whether `path` is itself a symlink, without following it.
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).map(|m| m.file_type().is_symlink()).unwrap_or(false)
 }
 
 fn modified(path: &Path) -> Option<DateTime<Utc>> {

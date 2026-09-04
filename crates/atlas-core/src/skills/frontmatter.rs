@@ -119,14 +119,13 @@ fn read_block_scalar<'a>(lines: &mut std::iter::Peekable<std::str::Lines<'a>>, s
     while collected.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
         collected.pop();
     }
-    let indent = collected
-        .iter()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.len() - l.trim_start().len())
-        .min()
-        .unwrap_or(0);
-    // Indentation is ASCII whitespace, so this byte offset is always a char boundary.
-    let body: Vec<&str> = collected.iter().map(|l| if l.len() >= indent { &l[indent..] } else { l.trim_start() }).collect();
+    // Counted in characters, never in bytes. `trim_start` strips every Unicode
+    // whitespace character, and several of those (a non-breaking space, an ideographic
+    // space) are more than one byte, so the shared byte offset one line's ASCII indent
+    // produces can land inside another line's multi-byte one. That is a panic on a file
+    // the daemon does not own, so the whole block is measured and cut by character.
+    let indent = collected.iter().filter(|l| !l.trim().is_empty()).map(|l| indent_chars(l)).min().unwrap_or(0);
+    let body: Vec<&str> = collected.iter().map(|l| strip_indent(l, indent)).collect();
     let mut out = String::new();
     for line in &body {
         if line.trim().is_empty() {
@@ -147,6 +146,24 @@ fn read_block_scalar<'a>(lines: &mut std::iter::Peekable<std::str::Lines<'a>>, s
         out.push('\n');
     }
     out
+}
+
+/// How many whitespace characters a line opens with, counted in characters so a
+/// multi-byte one counts once rather than two or three times.
+fn indent_chars(line: &str) -> usize {
+    line.chars().take_while(|c| c.is_whitespace()).count()
+}
+
+/// `line` with its first `indent` characters removed. The offset comes from
+/// `char_indices`, so it is a character boundary by construction and can never split a
+/// multi-byte character; a line holding `indent` characters or fewer has nothing left
+/// after the cut and reads as a blank line, which is what a short line inside a block
+/// scalar means.
+fn strip_indent(line: &str, indent: usize) -> &str {
+    match line.char_indices().nth(indent) {
+        Some((byte, _)) => &line[byte..],
+        None => "",
+    }
 }
 
 /// Cuts a value to [`MAX_VALUE_CHARS`] characters, counting characters rather than
@@ -340,6 +357,67 @@ mod tests {
         let fm = parse("---\nname: last\ndescription: >\n  The final key.\n---\n\n# Body\n\nNot part of the description.\n");
         assert_eq!(fm.name.as_deref(), Some("last"));
         assert_eq!(fm.description.as_deref(), Some("The final key.\n"));
+    }
+
+    /// A block whose lines are indented with multi-byte whitespace is measured and cut
+    /// by character. Slicing by byte here panics: the ASCII line's indent of two bytes
+    /// lands inside the ideographic space that opens the next line.
+    #[test]
+    fn block_scalar_indent_may_be_multi_byte_whitespace() {
+        // The block's common indent is one character, the ideographic space, so the
+        // two-space line keeps one of its own. Cutting the same *byte* offset out of the
+        // second line instead would land inside `\u{3000}` and panic.
+        let fm = parse("---\ndescription: >-\n  Two ASCII spaces.\n\u{3000}One ideographic space.\n---\n");
+        assert_eq!(fm.description.as_deref(), Some(" Two ASCII spaces. One ideographic space."));
+
+        // A non-breaking space (two bytes) indenting the whole block: the common indent
+        // is one character, and every line loses exactly that.
+        let fm = parse("---\ndescription: |-\n\u{a0}First line.\n\u{a0}Second line.\n---\n");
+        assert_eq!(fm.description.as_deref(), Some("First line.\nSecond line."));
+
+        // Mixed the other way round: the shortest indent is the multi-byte one.
+        let fm = parse("---\ndescription: >-\n\u{a0}One NBSP.\n    Four spaces.\n---\n");
+        assert_eq!(fm.description.as_deref(), Some("One NBSP.    Four spaces."));
+    }
+
+    /// A line shorter than the block's common indent is a blank line, not a slice out of
+    /// bounds.
+    #[test]
+    fn a_line_shorter_than_the_indent_reads_as_blank() {
+        let fm = parse("---\ndescription: |-\n    Indented four.\n  \n    After a short line.\n---\n");
+        assert_eq!(fm.description.as_deref(), Some("Indented four.\nAfter a short line."));
+    }
+
+    /// `parse` runs on every discovered `SKILL.md`, including third-party plugin files,
+    /// so it has to be total: no input may panic it. A few dozen odd shapes, built from
+    /// whitespace and delimiters that have tripped hand-written parsers before.
+    #[test]
+    fn parse_never_panics_on_odd_input() {
+        let pieces = [
+            "---", "name:", "description:", ">", ">-", "|", "|-", "\u{a0}", "\u{3000}", "\u{2028}", "\u{feff}",
+            " ", "\t", "\r", "\n", "\"", "'", ":", "  \u{85}x", "é", "🙂", "\u{200b}", "\u{1e}",
+        ];
+        let mut cases: Vec<String> = Vec::new();
+        for a in &pieces {
+            for b in &pieces {
+                cases.push(format!("---\ndescription: >\n{a}{b}\n---\n"));
+                cases.push(format!("---\nname: |-\n{a}\n{b}\n---\n"));
+                cases.push(format!("{a}---\ndescription:{b}\n---\n{a}{b}"));
+            }
+        }
+        // A block whose lines disagree about which whitespace they are indented with is
+        // the shape that panicked, so it is built deliberately as well.
+        for a in &pieces {
+            cases.push(format!("---\ndescription: >-\n  ascii\n{a}other\n\t{a}\n---\n"));
+        }
+        for case in &cases {
+            let fm = parse(case);
+            // Whatever came back is still bounded and still valid UTF-8 by construction.
+            for value in [fm.name, fm.description].into_iter().flatten() {
+                assert!(value.chars().count() <= MAX_VALUE_CHARS, "{case:?} produced {value:?}");
+            }
+            let _ = first_paragraph(case);
+        }
     }
 
     /// An indicator this parser does not know is read as the literal text it is, which
