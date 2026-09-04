@@ -50,7 +50,14 @@ describe('collectContributions', () => {
 		const out = collectContributions([everything, disabled]);
 
 		expect(out.sections).toEqual([
-			{ id: 'hello', title: 'Hello', icon: 'sparkles', view: 'hello-view', pluginId: 'everything' }
+			{
+				id: 'hello',
+				title: 'Hello',
+				icon: 'sparkles',
+				view: 'hello-view',
+				pluginId: 'everything',
+				pluginName: 'everything'
+			}
 		]);
 		expect(out.themes.map((t) => t.id)).toEqual(['midnight']);
 		expect(out.commands.map((c) => c.id)).toEqual(['say']);
@@ -86,6 +93,18 @@ describe('collectContributions', () => {
 		expect(out.components['board.card.badge']?.map((c) => c.id)).toEqual(['badge']);
 		expect(out.components['task.detail.panel']).toBeUndefined();
 		expect(out.components['dashboard.card']?.every((c) => c.pluginId === 'everything')).toBe(true);
+	});
+
+	it('labels every ref with the plugin manifest name', () => {
+		const named: PluginInfo = {
+			...everything,
+			manifest: { ...everything.manifest!, name: 'Everything Plugin' }
+		};
+		const out = collectContributions([named]);
+
+		expect(out.commands[0].pluginName).toBe('Everything Plugin');
+		expect(out.themes[0].pluginName).toBe('Everything Plugin');
+		expect(out.components['dashboard.card']?.[0].pluginName).toBe('Everything Plugin');
 	});
 
 	it('routes a section to its own plugin view', () => {

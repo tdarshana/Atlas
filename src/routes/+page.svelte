@@ -9,6 +9,8 @@
 	import { Badge, Button, Table, type TableColumn } from '$lib/ds';
 	import { errorLogPath, errorMessage } from '$lib/errors';
 	import { plural, relativeAge } from '$lib/format';
+	import PluginFrame from '$lib/plugins/PluginFrame.svelte';
+	import { contributions, loadPlugins, pluginById, plugins } from '$lib/plugins/host.svelte';
 	import { setStatusItems } from '$lib/shell';
 	import { status } from '$lib/stores/status.svelte';
 	import type { Memory, MemoryKind, StageCount } from '$lib/types';
@@ -115,7 +117,15 @@
 		void loadTasks();
 	}
 
-	onMount(refresh);
+	/** The `dashboard.card` slot: one card per contributed component, after the app's own.
+	    Each frame keeps to whatever `atlas.resize` asks for, up to a card's worth. */
+	const PLUGIN_CARD_MAX_HEIGHT = 480;
+	const pluginCards = $derived(contributions().components['dashboard.card'] ?? []);
+
+	onMount(() => {
+		refresh();
+		if (!plugins.loaded && plugins.available) void loadPlugins();
+	});
 
 	$effect(() => {
 		const n = report?.memories_active ?? 0;
@@ -178,6 +188,21 @@
 			<span>Database</span><span class="db-path mono">{report?.db_path || '-'}</span>
 		</div>
 	</div>
+
+	{#each pluginCards as card (`${card.pluginId}:${card.id}`)}
+		{@const plugin = pluginById(card.pluginId)}
+		{#if plugin}
+			<div class="card stat-card plugin-card" data-testid="plugin-card-{card.pluginId}-{card.id}">
+				<span class="group-heading">{plugin.manifest?.name ?? plugin.id}</span>
+				<PluginFrame
+					{plugin}
+					view={card.view}
+					slot="dashboard.card"
+					maxHeight={PLUGIN_CARD_MAX_HEIGHT}
+				/>
+			</div>
+		{/if}
+	{/each}
 </div>
 
 <div class="card recent">

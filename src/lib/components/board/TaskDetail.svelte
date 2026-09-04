@@ -23,6 +23,8 @@
 		setDetailTab
 	} from '$lib/stores/board.svelte';
 	import { FRAMEWORK_LABEL, reportText } from '$lib/components/project/frameworks';
+	import PluginFrame from '$lib/plugins/PluginFrame.svelte';
+	import { contributions, loadPlugins, pluginById, plugins } from '$lib/plugins/host.svelte';
 	import type { Stage, TaskDetail, TaskEvent, TaskKind, TaskPriority } from '$lib/types';
 	import Dialog from '$lib/ui/Dialog.svelte';
 	import ResizeBar from '$lib/ui/ResizeBar.svelte';
@@ -81,6 +83,16 @@
 		{ id: 'activity', label: 'Activity', icon: 'activity', count: activityEvents.length },
 		{ id: 'comments', label: 'Comments', icon: 'message-square', count: commentEvents.length }
 	] satisfies Tab[]);
+
+	// The `task.detail.panel` slot, below the tabs. Each frame is told which task is open
+	// through the bridge's `atlas:context`, so it follows the selection without remounting.
+	const PLUGIN_PANEL_MAX_HEIGHT = 480;
+	const pluginPanels = $derived(contributions().components['task.detail.panel'] ?? []);
+	const pluginContext = $derived(task ? { taskKey: task.key } : {});
+
+	onMount(() => {
+		if (!plugins.loaded && plugins.available) void loadPlugins();
+	});
 
 	let title = $state('');
 	let description = $state('');
@@ -564,6 +576,22 @@
 					</div>
 				{/if}
 			</section>
+
+			{#each pluginPanels as panel (`${panel.pluginId}:${panel.id}`)}
+				{@const plugin = pluginById(panel.pluginId)}
+				{#if plugin}
+					<section class="plugin-panel" data-testid="plugin-panel-{panel.pluginId}-{panel.id}">
+						<h3>{plugin.manifest?.name ?? plugin.id}</h3>
+						<PluginFrame
+							{plugin}
+							view={panel.view}
+							slot="task.detail.panel"
+							maxHeight={PLUGIN_PANEL_MAX_HEIGHT}
+							context={pluginContext}
+						/>
+					</section>
+				{/if}
+			{/each}
 		{/if}
 	</div>
 </aside>

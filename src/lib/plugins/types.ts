@@ -25,7 +25,8 @@ export interface Section {
 export interface ThemeContribution {
 	id: string;
 	name: string;
-	/** A CSS file inside the plugin's folder, read through `plugin_read_file`. */
+	/** A theme pack JSON file inside the plugin's folder, read through `plugin_read_file`
+	 * and validated by `validateThemePack` exactly as an imported pack is. */
 	file: string;
 }
 

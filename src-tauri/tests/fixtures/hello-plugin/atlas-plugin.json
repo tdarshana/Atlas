@@ -2,14 +2,20 @@
   "id": "hello-world",
   "name": "Hello World",
   "version": "1.0.0",
-  "description": "A minimal plugin that adds a sidebar section.",
+  "description": "A minimal plugin that adds a sidebar section, a dashboard card, a task panel, a command and a theme.",
   "author": "Atlas",
   "api": ">=1.0 <2",
   "main": "main.js",
-  "permissions": ["ui.sections", "tasks.read"],
+  "permissions": ["ui.sections", "ui.components", "tasks.read"],
   "contributes": {
     "sections": [
       { "id": "hello", "title": "Hello", "icon": "sparkles", "view": "hello-view" }
-    ]
+    ],
+    "components": [
+      { "slot": "dashboard.card", "id": "ready", "view": "ready-card" },
+      { "slot": "task.detail.panel", "id": "looking", "view": "task-panel" }
+    ],
+    "commands": [{ "id": "say-hello", "title": "Say hello" }],
+    "themes": [{ "id": "hello-dusk", "name": "Hello dusk", "file": "theme.json" }]
   }
 }

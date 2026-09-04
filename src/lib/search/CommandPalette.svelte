@@ -8,12 +8,13 @@
 	import { page } from '$app/state';
 	import { Icon, KeyHint, type IconName } from '$lib/ds';
 	import { plural } from '$lib/format';
+	import { contributions, loadPlugins, plugins } from '$lib/plugins/host.svelte';
 	import { shell } from '$lib/shell/shell.svelte';
 	import { PALETTE_EVENT } from '$lib/shell/shortcuts';
 	import { VIEWS, type ViewDef } from '$lib/shell/views';
 	import { loadProjects, projects } from '$lib/stores/projects.svelte';
 	import type { Project, SearchHit, SearchKind } from '$lib/types';
-	import { filterCommands, type PaletteCommand } from './commands';
+	import { filterCommands, pluginCommands, type PaletteCommand } from './commands';
 	import { highlightSegments, TYPE_PREFIXES } from './parse';
 	import {
 		chooseScope,
@@ -100,6 +101,9 @@
 	};
 
 	const query = $derived(parsed());
+	/** The contributed commands, listed beside the app's own. Nothing renders until the
+	 * store has been read once, and outside Tauri there is nothing to read. */
+	const extraCommands = $derived(plugins.loaded ? pluginCommands(contributions()) : []);
 	const chips = $derived(scopeChips());
 	const scopeNames = $derived(chips.map((c) => c.name).join(' '));
 
@@ -143,7 +147,7 @@
 				{
 					label: 'Commands',
 					meta: '',
-					rows: filterCommands(query.text).map((command): Row => ({ kind: 'command', command }))
+					rows: filterCommands(query.text, extraCommands).map((command): Row => ({ kind: 'command', command }))
 				}
 			];
 		}
@@ -165,7 +169,7 @@
 			out.push({
 				label: 'Commands',
 				meta: '',
-				rows: filterCommands('').map((command): Row => ({ kind: 'command', command }))
+				rows: filterCommands('', extraCommands).map((command): Row => ({ kind: 'command', command }))
 			});
 			return out;
 		}
@@ -225,6 +229,7 @@
 		measure();
 		openPalette();
 		void loadProjects();
+		if (!plugins.loaded && plugins.available) void loadPlugins();
 		await tick();
 		box?.focus();
 	}

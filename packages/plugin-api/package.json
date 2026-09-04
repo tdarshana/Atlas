@@ -1,0 +1,9 @@
+{
+  "name": "@atlas/plugin-api",
+  "version": "1.0.0",
+  "description": "Type declarations for Atlas plugins: the manifest, the window.atlas client and the request methods.",
+  "types": "src/index.d.ts",
+  "files": ["src/index.d.ts"],
+  "private": false,
+  "license": "MIT"
+}

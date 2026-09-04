@@ -53,7 +53,8 @@
 		settings
 	} from '$lib/stores/settings.svelte';
 	import { loadMcp, mcp } from '$lib/stores/mcp.svelte';
-	import { loadPlugins, plugins } from '$lib/plugins/host.svelte';
+	import { contributions, loadPlugins, plugins } from '$lib/plugins/host.svelte';
+	import { loadPluginThemes } from '$lib/plugins/themes';
 	import { status } from '$lib/stores/status.svelte';
 	import { UI_FONT_MONO_KEY, UI_FONT_SIZE_KEY, UI_FONT_UI_KEY, UI_SCALE_KEY, UI_THEME_PACK_KEY } from '$lib/types';
 	import { THEME_PRESETS, themePreset } from '$lib/shell/theme-presets';
@@ -564,13 +565,23 @@
 	let importError = $state<string | null>(null);
 	let fileInput = $state<HTMLInputElement | null>(null);
 
-	/** The base theme plus, when one is imported, its own entry: only one pack can be
-	 * stored at a time, so there is never more than one extra option here. */
+	/** The themes enabled plugins contribute, each already named `<name> (<plugin name>)`
+	 * and validated the same way an imported pack is. */
+	let pluginThemes = $state<ThemePack[]>([]);
+
+	function pluginTheme(name: string): ThemePack | undefined {
+		return pluginThemes.find((p) => p.name === name);
+	}
+
+	/** The base themes, the bundled presets, the contributed themes, and, when one is
+	 * imported, its own entry: only one pack can be stored at a time, so there is never
+	 * more than one extra option here. */
 	const themeOptions = $derived([
 		{ value: 'dark', label: 'Dark' },
 		{ value: 'light', label: 'Light' },
 		...THEME_PRESETS.map((p) => ({ value: p.name, label: p.name })),
-		...(draftPack && !themePreset(draftPack.name)
+		...pluginThemes.map((p) => ({ value: p.name, label: p.name })),
+		...(draftPack && !themePreset(draftPack.name) && !pluginTheme(draftPack.name)
 			? [{ value: draftPack.name, label: draftPack.name }]
 			: [])
 	]);
@@ -582,18 +593,19 @@
 		draftPack ? Object.entries(draftPack.tokens).map(([k, v]) => `${k}:${v}`).join(';') : ''
 	);
 
-	/** Picking Dark or Light drops the pack; picking a bundled preset makes it the draft
-	 * pack; picking an imported pack's own name (the only other option) is a no-op. */
+	/** Picking Dark or Light drops the pack; picking a bundled preset or a plugin's theme
+	 * makes it the draft pack; picking an imported pack's own name (the only other
+	 * option) is a no-op. */
 	function onThemeChange(value: string): void {
 		if (value === 'dark' || value === 'light') {
 			draftTheme = value;
 			draftPack = null;
 			return;
 		}
-		const preset = themePreset(value);
-		if (preset) {
-			draftTheme = preset.base;
-			draftPack = { ...preset, tokens: { ...preset.tokens } };
+		const pack = themePreset(value) ?? pluginTheme(value);
+		if (pack) {
+			draftTheme = pack.base;
+			draftPack = { ...pack, tokens: { ...pack.tokens } };
 		}
 	}
 
@@ -712,6 +724,13 @@
 	onMount(() => {
 		void reload();
 		if (!plugins.loaded) void loadPlugins();
+	});
+
+	// The contributed themes follow the plugin list: enabling a plugin from the Plugins
+	// page and coming back here shows its themes without a reload.
+	$effect(() => {
+		const contribs = contributions();
+		void loadPluginThemes(contribs).then((packs) => (pluginThemes = packs));
 	});
 
 	// `/settings#<section>` (the side panel's Sections rows) scrolls to that card once its

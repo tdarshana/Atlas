@@ -13,8 +13,9 @@
 	import { resolvePlatform } from '$lib/shell/platform';
 	import { themeTokenAllowlist } from '$lib/shell/theme-pack';
 	import { push } from '$lib/ui/toasts.svelte';
-	import { createBridge, type Bridge, type ThemeTokens } from './bridge';
+	import { createBridge, type Bridge, type FrameContext, type ThemeTokens } from './bridge';
 	import { frameUrl } from './frame-url';
+	import { registerFrame, unregisterFrame } from './host.svelte';
 	import { pluginBackend } from './plugin-api';
 	import type { PluginInfo, Slot } from './types';
 
@@ -26,11 +27,16 @@
 		slot?: Slot | null;
 		/** A fixed height. Without one the frame follows the plugin's own `atlas.resize`. */
 		height?: number;
+		/** A ceiling on what the frame may ask for, for a slot with a budget to keep. */
+		maxHeight?: number;
 		/** Fills its container instead, for a section that owns the whole content panel. */
 		fill?: boolean;
+		/** What the surface around this frame is showing, e.g. `{ taskKey }`. Sent with the
+		 * handshake and again whenever it changes. */
+		context?: FrameContext;
 	}
 
-	let { plugin, view, slot = null, height, fill = false }: Props = $props();
+	let { plugin, view, slot = null, height, maxHeight, fill = false, context }: Props = $props();
 
 	/** What a frame is given before it has asked for a height of its own. */
 	const DEFAULT_HEIGHT = 120;
@@ -48,10 +54,14 @@
 	let frame = $state<HTMLIFrameElement>();
 	let reported = $state(DEFAULT_HEIGHT);
 	let bridge: Bridge | null = null;
+	/** The context as last sent, so a parent that hands over a fresh object holding the
+	 * same values does not make the frame re-render for nothing. */
+	let sentContext = '';
 
 	const src = $derived(platform ? frameUrl(plugin.id, platform) : undefined);
 	const title = $derived(plugin.manifest?.name ?? plugin.id);
-	const frameStyle = $derived(fill ? 'height:100%' : `height:${height ?? reported}px`);
+	const shownHeight = $derived(Math.min(height ?? reported, maxHeight ?? Number.POSITIVE_INFINITY));
+	const frameStyle = $derived(fill ? 'height:100%' : `height:${shownHeight}px`);
 
 	/** Every token the app is drawing itself with right now, resolved to a literal value
 	 * so the frame can use `var(--accent)` without the app's stylesheet. */
@@ -76,7 +86,7 @@
 		// Only the window this iframe is showing right now. Any other window saying hello,
 		// including one from a page the frame navigated itself to, is not this plugin.
 		if (!frame || source !== frame.contentWindow) return;
-		bridge?.dispose();
+		detachBridge();
 		bridge = createBridge({
 			plugin,
 			view,
@@ -88,7 +98,16 @@
 			onResize: (h) => (reported = h),
 			onNotify: (kind, text) => push(kind, `${title}: ${text}`)
 		});
-		bridge.sendInit(themeTokens());
+		registerFrame(plugin.id, bridge);
+		sentContext = JSON.stringify(context ?? {});
+		bridge.sendInit(themeTokens(), context);
+	}
+
+	function detachBridge(): void {
+		if (!bridge) return;
+		unregisterFrame(plugin.id, bridge);
+		bridge.dispose();
+		bridge = null;
 	}
 
 	onMount(() => {
@@ -115,9 +134,17 @@
 		return () => {
 			observer.disconnect();
 			window.removeEventListener('message', onMessage);
-			bridge?.dispose();
-			bridge = null;
+			detachBridge();
 		};
+	});
+
+	// The surface moved on to another subject: tell the frame, so a task detail panel
+	// follows the selection instead of showing whichever task was open when it mounted.
+	$effect(() => {
+		const next = JSON.stringify(context ?? {});
+		if (!bridge || next === sentContext) return;
+		sentContext = next;
+		bridge.sendContext(context ?? {});
 	});
 </script>
 

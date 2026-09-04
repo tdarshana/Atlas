@@ -13,8 +13,10 @@ import type {
 	ToolContribution
 } from './types';
 
-/** Every ref carries the plugin it came from, so the shell can route back to it. */
-export type Ref<T> = T & { pluginId: string };
+/** Every ref carries the plugin it came from, so the shell can route back to it. The
+ * name rides along because a contribution is labelled with it wherever it surfaces (a
+ * palette command, a theme option), and those labels are built from the refs alone. */
+export type Ref<T> = T & { pluginId: string; pluginName: string };
 
 export type SectionRef = Ref<Section>;
 export type ComponentRef = Ref<Component>;
@@ -43,14 +45,16 @@ export function collectContributions(items: PluginInfo[]): Contributions {
 		const pluginId = plugin.id;
 		const contributes = plugin.manifest?.contributes;
 		if (!contributes) continue;
+		const pluginName = plugin.manifest?.name ?? pluginId;
+		const from = { pluginId, pluginName };
 
-		for (const section of contributes.sections ?? []) out.sections.push({ ...section, pluginId });
-		for (const command of contributes.commands ?? []) out.commands.push({ ...command, pluginId });
-		for (const theme of contributes.themes ?? []) out.themes.push({ ...theme, pluginId });
-		for (const tool of contributes.tools ?? []) out.tools.push({ ...tool, pluginId });
+		for (const section of contributes.sections ?? []) out.sections.push({ ...section, ...from });
+		for (const command of contributes.commands ?? []) out.commands.push({ ...command, ...from });
+		for (const theme of contributes.themes ?? []) out.themes.push({ ...theme, ...from });
+		for (const tool of contributes.tools ?? []) out.tools.push({ ...tool, ...from });
 		for (const component of contributes.components ?? []) {
 			const bucket = (out.components[component.slot] ??= []);
-			bucket.push({ ...component, pluginId });
+			bucket.push({ ...component, ...from });
 		}
 	}
 

@@ -3,7 +3,8 @@
 //
 // A plugin document cannot be a `srcdoc` or a `blob:`: both inherit the app's CSP
 // (`default-src 'self'`), which blocks the plugin's own script. Serving the document from
-// its own scheme gives it its own origin and no CSP of its own.
+// its own scheme gives it its own origin and lets it carry a policy of its own instead:
+// see `FRAME_CSP`, which pins the frame to files from that same scheme.
 //
 // URL shape: `atlas-plugin://localhost/<id>/<path>` on macOS and Linux, which Tauri maps
 // to `http://atlas-plugin.localhost/<id>/<path>` on Windows. Both are parsed as a `Url`,
@@ -33,6 +34,17 @@ fn escape_attribute(value: &str) -> String {
     value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
+/// The frame document's own content security policy. The frame may load scripts, styles,
+/// images and fonts from the `atlas-plugin` scheme (its own files, under both the macOS
+/// and Linux `atlas-plugin:` form and the Windows `http://atlas-plugin.localhost` one) and
+/// nothing else: `connect-src 'none'` stops a plugin calling out to the network,
+/// `frame-src 'none'` and `base-uri 'none'` stop it embedding or rebasing onto a remote
+/// page, and `form-action 'none'` stops it navigating itself away by submitting a form.
+///
+/// This does not restrict `postMessage`, which CSP does not govern, so everything a
+/// plugin is meant to do still works: the bridge is the only way out either way.
+const FRAME_CSP: &str = "default-src 'none'; script-src atlas-plugin: http://atlas-plugin.localhost; style-src 'unsafe-inline' atlas-plugin: http://atlas-plugin.localhost; img-src atlas-plugin: http://atlas-plugin.localhost data:; font-src atlas-plugin: http://atlas-plugin.localhost data:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'";
+
 /// The generated frame document, `<id>/__frame`. `main` is the manifest's entry point,
 /// resolved relative to the frame's own URL, so both scripts land back on this scheme.
 ///
@@ -43,7 +55,8 @@ fn escape_attribute(value: &str) -> String {
 /// that lands.
 fn frame_html(main: &str) -> String {
     format!(
-        "<!doctype html><meta charset=\"utf-8\"><style>html{{margin:0;background:var(--bg-base, transparent);color:var(--text-primary, inherit);color-scheme:var(--color-scheme, normal);font-family:var(--font-ui, inherit)}}body{{margin:0}}</style><div id=\"root\"></div><script type=\"module\" src=\"./__bridge.js\"></script><script type=\"module\" src=\"./{}\"></script>",
+        "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{}\"><style>html{{margin:0;background:var(--bg-base, transparent);color:var(--text-primary, inherit);color-scheme:var(--color-scheme, normal);font-family:var(--font-ui, inherit)}}body{{margin:0}}</style><div id=\"root\"></div><script type=\"module\" src=\"./__bridge.js\"></script><script type=\"module\" src=\"./{}\"></script>",
+        FRAME_CSP,
         escape_attribute(main)
     )
 }
@@ -310,6 +323,25 @@ mod tests {
         assert!(html.contains("color:var(--text-primary, inherit)"), "{html}");
         assert!(html.contains("color-scheme:var(--color-scheme, normal)"), "{html}");
         assert!(html.contains("body{margin:0}"), "{html}");
+    }
+
+    #[test]
+    fn the_frame_document_carries_its_own_csp() {
+        let html = frame_html("main.js");
+        assert!(
+            html.contains(&format!(
+                r#"<meta http-equiv="Content-Security-Policy" content="{FRAME_CSP}">"#
+            )),
+            "{html}"
+        );
+        // The two the policy exists for: no network calls out, no navigating to a remote
+        // page. Both platform spellings of the plugin's own origin stay loadable.
+        assert!(FRAME_CSP.contains("connect-src 'none'"), "{FRAME_CSP}");
+        assert!(FRAME_CSP.contains("base-uri 'none'"), "{FRAME_CSP}");
+        assert!(FRAME_CSP.contains("script-src atlas-plugin: http://atlas-plugin.localhost"), "{FRAME_CSP}");
+        // The meta tag comes before either script, or it would not govern them.
+        let csp_at = html.find("Content-Security-Policy").unwrap();
+        assert!(csp_at < html.find("<script").unwrap(), "{html}");
     }
 
     #[test]

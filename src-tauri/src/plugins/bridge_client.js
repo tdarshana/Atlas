@@ -1,6 +1,6 @@
 // The script every plugin frame loads before its own entry point. It defines the global
 // window.atlas a plugin talks to the host through: a ready promise, request for the typed
-// API, theme and command callbacks, resize and notify.
+// API, theme, command and context callbacks, resize and notify.
 //
 // Written as plain ES5-shaped JavaScript with no imports and no template literals, for
 // two reasons: it is served straight out of the binary by protocol.rs with no build step,
@@ -12,6 +12,8 @@
   var nextId = 0;
   var themeHandlers = [];
   var commandHandlers = [];
+  var contextHandlers = [];
+  var context = {};
   var initialized = false;
   var outbox = [];
   var resolveReady;
@@ -59,13 +61,21 @@
     if (!data || typeof data !== 'object') return;
     if (data.type === 'atlas:init') {
       applyTheme(data.theme);
+      context = data.context || {};
       // A second init means the host rebuilt its side; the queue is already drained.
       if (!initialized) {
         initialized = true;
         for (var k = 0; k < outbox.length; k++) send(outbox[k]);
         outbox = [];
       }
-      resolveReady({ plugin: data.plugin, api: data.api, theme: data.theme });
+      resolveReady({ plugin: data.plugin, api: data.api, theme: data.theme, context: context });
+      return;
+    }
+    // What the surface around this frame is showing, e.g. { taskKey: 'ATL-12' } for a
+    // task.detail.panel. It arrives with the init above and again on every change.
+    if (data.type === 'atlas:context') {
+      context = data.context || {};
+      for (var c = 0; c < contextHandlers.length; c++) contextHandlers[c](context);
       return;
     }
     if (data.type === 'atlas:theme') {
@@ -100,6 +110,11 @@
     },
     onCommand: function (cb) {
       commandHandlers.push(cb);
+    },
+    // Called on every change after init, like onTheme; the context at init is in the
+    // ready payload, so a plugin renders from that and updates from here.
+    onContext: function (cb) {
+      contextHandlers.push(cb);
     },
     resize: function (height) {
       post({ type: 'atlas:resize', height: height });

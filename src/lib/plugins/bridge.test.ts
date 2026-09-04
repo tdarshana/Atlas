@@ -257,9 +257,14 @@ function runClient() {
 		posted,
 		applied,
 		atlas: win.atlas as {
-			ready: Promise<{ plugin: { id: string }; theme: Record<string, string> }>;
+			ready: Promise<{
+				plugin: { id: string };
+				theme: Record<string, string>;
+				context: Record<string, unknown>;
+			}>;
 			request(method: string, params?: unknown): Promise<unknown>;
 			resize(height: number): void;
+			onContext(cb: (context: Record<string, unknown>) => void): void;
 		},
 		deliver: (data: unknown) => listeners.forEach((cb) => cb({ data }))
 	};
@@ -330,5 +335,40 @@ describe('the bridge client handshake', () => {
 		const buffered = client.posted.at(-1);
 		hostBridge.handle({ source: 'frame-window', data: buffered });
 		await expect(answer).resolves.toEqual([{ key: 'ATL-1' }]);
+	});
+
+	it('carries the context in the ready payload and again on every change', async () => {
+		const client = runClient();
+		const seen: Record<string, unknown>[] = [];
+		client.atlas.onContext((context) => void seen.push(context));
+
+		client.deliver({
+			type: 'atlas:init',
+			plugin: { id: 'hello-world', view: 'task-panel', slot: 'task.detail.panel' },
+			api: '1.0.0',
+			theme: {},
+			context: { taskKey: 'ATL-1' }
+		});
+
+		// The context at init arrives through `ready`, not through the callback.
+		await expect(client.atlas.ready).resolves.toMatchObject({ context: { taskKey: 'ATL-1' } });
+		expect(seen).toEqual([]);
+
+		client.deliver({ type: 'atlas:context', context: { taskKey: 'ATL-2' } });
+		client.deliver({ type: 'atlas:context', context: {} });
+
+		expect(seen).toEqual([{ taskKey: 'ATL-2' }, {}]);
+	});
+
+	it('is sent the context by a host bridge, on init and on change', () => {
+		const h = harness([]);
+		h.bridge.sendInit({ '--accent': '#0f0' }, { taskKey: 'ATL-7' });
+		h.bridge.sendContext({ taskKey: 'ATL-8' });
+
+		expect(h.sent[0]).toMatchObject({ type: 'atlas:init', context: { taskKey: 'ATL-7' } });
+		expect(h.sent[1]).toEqual({ type: 'atlas:context', context: { taskKey: 'ATL-8' } });
+		// A frame with no subject is told so, rather than left to guess.
+		h.bridge.sendInit({});
+		expect(h.sent[2]).toMatchObject({ type: 'atlas:init', context: {} });
 	});
 });

@@ -3,10 +3,13 @@
 // combos the shell actually binds are printed, so a hint never promises a key that
 // does nothing.
 
-import type { IconName } from '$lib/ds';
+import { comboKeys, type IconName } from '$lib/ds';
+import { type Contributions, sectionHref } from '$lib/plugins/contributions';
+import { dispatchCommand } from '$lib/plugins/host.svelte';
 import { desktop, inTauri } from '$lib/shell/platform';
 import { setTheme, shell, toggleRail, toggleSidePanel } from '$lib/shell/shell.svelte';
 import type { Uuid } from '$lib/types';
+import { push } from '$lib/ui/toasts.svelte';
 
 /** Opens the log directory in the OS file manager. No-op outside Tauri: there is no
  * folder to reveal in a browser tab, so `desktop` is skipped entirely rather than
@@ -178,11 +181,48 @@ export const COMMANDS: PaletteCommand[] = [
 	}
 ];
 
+/** A logical combo as the glyphs this platform spells it with, the same way `KeyHint`
+ * draws it: joined tight on mac, with a plus everywhere else. */
+function comboText(combo: string): string {
+	const platform = shell.platform;
+	return comboKeys(combo, platform).join(platform === 'mac' ? '' : '+');
+}
+
+/**
+ * One palette command per contributed command. Running it sends the command id to every
+ * mounted frame of that plugin; when none is mounted there is nobody to hear it, so the
+ * run opens the plugin's first section instead, and says so when it has no section
+ * either.
+ *
+ * A manifest's `combo` is printed as a hint, not bound: the shell's shortcut table is
+ * fixed at build time and a plugin must not be able to take a key off the app.
+ */
+export function pluginCommands(contribs: Contributions): PaletteCommand[] {
+	return contribs.commands.map((command) => {
+		const section = contribs.sections.find((s) => s.pluginId === command.pluginId);
+		// Printed as plain text rather than set as `combo`, which the palette renders as a
+		// `KeyHint` and so would promise a key nothing listens for.
+		const keys = command.combo ? comboText(command.combo) : '';
+		return {
+			id: `plugin:${command.pluginId}:${command.id}`,
+			label: `${command.pluginName}: ${command.title}`,
+			hint: keys ? `plugin command, ${keys} inside the plugin` : 'plugin command',
+			icon: 'plug' as IconName,
+			run: (ctx: CommandContext) => {
+				if (dispatchCommand(command.pluginId, command.id) > 0) return;
+				if (section) return ctx.goto(sectionHref(section));
+				push('info', `Open ${command.pluginName} first`);
+			}
+		};
+	});
+}
+
 /** Case-insensitive substring over the label and the hint. Blank keeps them all.
  * `desktopOnly` commands are left out entirely outside Tauri, where invoking them would
- * only log a fallback warning and do nothing. */
-export function filterCommands(text: string): PaletteCommand[] {
-	const available = COMMANDS.filter((c) => !c.desktopOnly || inTauri());
+ * only log a fallback warning and do nothing. `extra` is the contributed commands, which
+ * the palette passes in so this module stays free of the plugin store. */
+export function filterCommands(text: string, extra: PaletteCommand[] = []): PaletteCommand[] {
+	const available = [...COMMANDS, ...extra].filter((c) => !c.desktopOnly || inTauri());
 	const needle = text.trim().toLowerCase();
 	if (!needle) return available;
 	return available.filter((c) => `${c.label} ${c.hint}`.toLowerCase().includes(needle));

@@ -1,0 +1,11 @@
+{
+  "name": "Hello dusk",
+  "base": "dark",
+  "tokens": {
+    "--bg-base": "#12131A",
+    "--bg-surface": "#191B25",
+    "--border-default": "#2C3040",
+    "--text-primary": "#E8E6F0",
+    "--accent": "#8B7BF6"
+  }
+}

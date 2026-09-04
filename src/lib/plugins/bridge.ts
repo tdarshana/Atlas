@@ -47,6 +47,13 @@ export interface PostTarget {
 /** The tokens handed to the frame, `--name` to value. */
 export type ThemeTokens = Record<string, string>;
 
+/**
+ * What the surface around a frame is showing right now: `{ taskKey }` for a
+ * `task.detail.panel`, and nothing at all for a frame whose surface has no subject. The
+ * host sends it with `atlas:init` and again whenever it changes.
+ */
+export type FrameContext = Record<string, unknown>;
+
 export interface BridgeOptions {
 	plugin: PluginInfo;
 	/** Which of the plugin's views the frame is showing. */
@@ -69,8 +76,9 @@ export interface BridgeOptions {
 
 export interface Bridge {
 	handle(event: { source?: unknown; data?: unknown }): void;
-	sendInit(theme: ThemeTokens): void;
+	sendInit(theme: ThemeTokens, context?: FrameContext): void;
 	sendTheme(theme: ThemeTokens): void;
+	sendContext(context: FrameContext): void;
 	sendCommand(id: string): void;
 	dispose(): void;
 }
@@ -226,17 +234,21 @@ export function createBridge(options: BridgeOptions): Bridge {
 			if (typeof message.id !== 'number') return;
 			void answer(message.id, message.method, message.params);
 		},
-		sendInit(theme) {
+		sendInit(theme, context) {
 			post({
 				type: 'atlas:init',
 				plugin: { id: plugin.id, view, slot },
 				api: ATLAS_API_VERSION,
 				actor,
-				theme
+				theme,
+				context: context ?? {}
 			});
 		},
 		sendTheme(theme) {
 			post({ type: 'atlas:theme', theme });
+		},
+		sendContext(context) {
+			post({ type: 'atlas:context', context });
 		},
 		sendCommand(id) {
 			post({ type: 'atlas:command', id });
