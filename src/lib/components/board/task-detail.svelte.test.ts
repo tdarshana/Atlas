@@ -3,17 +3,20 @@
 // children list, the non-comment events and the comment events plus the composer.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import type { Stage, Task, TaskDetail as TaskDetailType, TaskEvent } from '$lib/types';
 
+const mocks = vi.hoisted(() => ({ updateTask: vi.fn() }));
+
 vi.mock('$lib/daemon.svelte', () => ({
-	api: () => ({}),
+	api: () => mocks,
 	daemon: { port: 7433, ready: true, error: null, logPath: '~/.atlas/atlasd.log' },
 	baseUrl: () => 'http://127.0.0.1:7433',
 	boot: async () => {}
 }));
 
 import { DETAIL_TAB_KEY, setDetailTab } from '$lib/stores/board.svelte';
+import { clear as clearToasts, toasts } from '$lib/ui/toasts.svelte';
 import TaskDetail from './TaskDetail.svelte';
 
 afterEach(cleanup);
@@ -21,6 +24,9 @@ afterEach(cleanup);
 beforeEach(() => {
 	localStorage.clear();
 	setDetailTab('subtasks');
+	mocks.updateTask.mockReset();
+	mocks.updateTask.mockResolvedValue({});
+	clearToasts();
 });
 
 const STAGES: Stage[] = [
@@ -75,7 +81,7 @@ function detail(): TaskDetailType {
 	};
 }
 
-function open(d: TaskDetailType | null = detail()) {
+function open(d: TaskDetailType | null = detail(), overrides: { onchanged?: () => Promise<void> } = {}) {
 	return render(TaskDetail, {
 		props: {
 			detail: d,
@@ -89,7 +95,8 @@ function open(d: TaskDetailType | null = detail()) {
 			onchanged: async () => {},
 			onmove: () => {},
 			ondeleted: async () => {},
-			onresize: () => {}
+			onresize: () => {},
+			...overrides
 		}
 	});
 }
@@ -149,5 +156,138 @@ describe('TaskDetail tabs', () => {
 		await fireEvent.click(container.querySelector('[data-testid="task-tab-comments"]')!);
 
 		expect(localStorage.getItem(DETAIL_TAB_KEY)).toBe('comments');
+	});
+});
+
+describe('TaskDetail title and description edit in place', () => {
+	it('shows the title and description as text with edit pencils, no editor mounted', () => {
+		const { container } = open();
+
+		expect(container.querySelector('[data-testid="task-title-text"]')?.textContent).toBe(
+			'Title of ATL-1'
+		);
+		expect(container.querySelector('[data-testid="task-title-edit"]')).not.toBeNull();
+		expect(container.querySelector('[data-testid="task-title"]')).toBeNull();
+
+		expect(container.querySelector('[data-testid="task-description-edit"]')).not.toBeNull();
+		expect(container.querySelector('[data-testid="task-description"]')).toBeNull();
+		expect(
+			container.querySelector('[data-testid="task-description-text"]')?.textContent
+		).toContain('No description');
+	});
+
+	it('clicking the title text enters edit mode and Enter saves through the API with only { title }', async () => {
+		const onchanged = vi.fn(async () => {});
+		const { container } = open(detail(), { onchanged });
+
+		await fireEvent.click(container.querySelector('[data-testid="task-title-text"]')!);
+
+		const editor = container.querySelector<HTMLTextAreaElement>('[data-testid="task-title"]');
+		expect(editor).not.toBeNull();
+		expect(editor!.value).toBe('Title of ATL-1');
+
+		await fireEvent.input(editor!, { target: { value: 'Renamed title' } });
+		await fireEvent.keyDown(editor!, { key: 'Enter' });
+
+		await waitFor(() => expect(onchanged).toHaveBeenCalled());
+		expect(mocks.updateTask).toHaveBeenCalledTimes(1);
+		expect(mocks.updateTask).toHaveBeenCalledWith('ATL-1', { title: 'Renamed title' });
+		expect(container.querySelector('[data-testid="task-title"]')).toBeNull();
+		expect(container.querySelector('[data-testid="task-title-text"]')?.textContent).toBe(
+			'Renamed title'
+		);
+		expect(toasts.some((t) => t.kind === 'success')).toBe(true);
+	});
+
+	it('Escape restores the old title and does not call the API', async () => {
+		const { container } = open();
+
+		await fireEvent.click(container.querySelector('[data-testid="task-title-edit"]')!);
+		const editor = container.querySelector<HTMLTextAreaElement>('[data-testid="task-title"]')!;
+
+		await fireEvent.input(editor, { target: { value: 'Thrown away' } });
+		await fireEvent.keyDown(editor, { key: 'Escape' });
+
+		expect(container.querySelector('[data-testid="task-title"]')).toBeNull();
+		expect(container.querySelector('[data-testid="task-title-text"]')?.textContent).toBe(
+			'Title of ATL-1'
+		);
+		expect(mocks.updateTask).not.toHaveBeenCalled();
+	});
+
+	it('refuses an empty title inline and keeps the editor open', async () => {
+		const { container } = open();
+
+		await fireEvent.click(container.querySelector('[data-testid="task-title-edit"]')!);
+		const editor = container.querySelector<HTMLTextAreaElement>('[data-testid="task-title"]')!;
+
+		await fireEvent.input(editor, { target: { value: '   ' } });
+		await fireEvent.keyDown(editor, { key: 'Enter' });
+
+		expect(mocks.updateTask).not.toHaveBeenCalled();
+		expect(container.querySelector('[data-testid="task-title"]')).not.toBeNull();
+		expect(container.textContent).toContain('Title cannot be empty');
+	});
+
+	it('clicking the description enters edit mode and Mod+Enter saves { description }', async () => {
+		const onchanged = vi.fn(async () => {});
+		const { container } = open(detail(), { onchanged });
+
+		await fireEvent.click(container.querySelector('[data-testid="task-description-edit"]')!);
+		const editor = container.querySelector<HTMLTextAreaElement>(
+			'[data-testid="task-description"]'
+		)!;
+		expect(editor).not.toBeNull();
+
+		await fireEvent.input(editor, { target: { value: 'Some **details**.' } });
+		await fireEvent.keyDown(editor, { key: 'Enter', ctrlKey: true });
+
+		await waitFor(() => expect(onchanged).toHaveBeenCalled());
+		expect(mocks.updateTask).toHaveBeenCalledTimes(1);
+		expect(mocks.updateTask).toHaveBeenCalledWith('ATL-1', {
+			description: 'Some **details**.'
+		});
+		expect(container.querySelector('[data-testid="task-description"]')).toBeNull();
+	});
+
+	it('the description editor has no max-height and hides its overflow instead of scrolling', async () => {
+		const { container } = open();
+
+		await fireEvent.click(container.querySelector('[data-testid="task-description-edit"]')!);
+		const editor = container.querySelector<HTMLTextAreaElement>(
+			'[data-testid="task-description"]'
+		)!;
+
+		const style = getComputedStyle(editor);
+		expect(style.overflow).toBe('hidden');
+		expect(style.maxHeight === '' || style.maxHeight === 'none').toBe(true);
+	});
+
+	it('switching tasks closes an open editor and shows the new task', async () => {
+		const { container, rerender } = open(detail());
+
+		await fireEvent.click(container.querySelector('[data-testid="task-title-edit"]')!);
+		expect(container.querySelector('[data-testid="task-title"]')).not.toBeNull();
+
+		const other: TaskDetailType = { task: task('ATL-9'), children: [], events: [] };
+		await rerender({
+			detail: other,
+			stages: STAGES,
+			loading: false,
+			error: null,
+			width: 340,
+			mode: 'docked',
+			ontogglemode: () => {},
+			onclose: () => {},
+			onchanged: async () => {},
+			onmove: () => {},
+			ondeleted: async () => {},
+			onresize: () => {}
+		});
+
+		expect(container.querySelector('[data-testid="task-title"]')).toBeNull();
+		expect(container.querySelector('[data-testid="task-title-text"]')?.textContent).toBe(
+			'Title of ATL-9'
+		);
 	});
 });

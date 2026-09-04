@@ -26,7 +26,9 @@
 	import PluginFrame from '$lib/plugins/PluginFrame.svelte';
 	import { contributions, loadPlugins, pluginById, plugins } from '$lib/plugins/host.svelte';
 	import type { Stage, TaskDetail, TaskEvent, TaskKind, TaskPriority } from '$lib/types';
+	import { autogrow } from '$lib/ui/autogrow';
 	import Dialog from '$lib/ui/Dialog.svelte';
+	import MarkdownView from '$lib/ui/MarkdownView.svelte';
 	import ResizeBar from '$lib/ui/ResizeBar.svelte';
 	import { push } from '$lib/ui/toasts.svelte';
 
@@ -165,6 +167,11 @@
 			if (other || same(labels, base.labels)) labels = next.labels;
 			if (other) titleError = null;
 			base = next;
+			// Opening another task or a reload after a write (Claim, a blocker, a comment)
+			// always lands on the server's own values, so an inline editor left open would
+			// be showing a draft against a task that has already moved on.
+			titleEditing = false;
+			descriptionEditing = false;
 		});
 	});
 
@@ -173,6 +180,124 @@
 		// back at the top of the page.
 		panel?.focus();
 	});
+
+	// --- Title, inline ---------------------------------------------------------------
+
+	let titleEditing = $state(false);
+	let titleDraft = $state('');
+
+	function beginTitleEdit() {
+		if (!task) return;
+		titleDraft = title;
+		titleError = null;
+		titleEditing = true;
+	}
+
+	function cancelTitleEdit() {
+		titleEditing = false;
+		titleError = null;
+	}
+
+	async function saveTitle() {
+		if (!task) return;
+		const name = titleDraft.replace(/\r?\n/g, ' ').trim();
+		if (!name) {
+			titleError = 'Title cannot be empty';
+			return;
+		}
+		titleError = null;
+		if (name === title.trim()) {
+			titleEditing = false;
+			return;
+		}
+		try {
+			await api().updateTask(task.key, { title: name });
+			title = name;
+			titleEditing = false;
+			await onchanged();
+			push('success', 'Title saved');
+		} catch (e) {
+			push('error', errorMessage(e));
+		}
+	}
+
+	/** Enter saves; Shift+Enter is not a line break either, since a title has none. */
+	function onTitleKeydown(event: KeyboardEvent) {
+		if (event.key === 'Enter') {
+			event.preventDefault();
+			if (!event.shiftKey) void saveTitle();
+		} else if (event.key === 'Escape') {
+			event.preventDefault();
+			cancelTitleEdit();
+		}
+	}
+
+	function onTitleBlur() {
+		if (!titleEditing) return;
+		if (titleDraft.replace(/\r?\n/g, ' ').trim() === title.trim()) {
+			titleEditing = false;
+			titleError = null;
+			return;
+		}
+		void saveTitle();
+	}
+
+	// --- Description, inline ----------------------------------------------------------
+
+	let descriptionEditing = $state(false);
+	let descriptionDraft = $state('');
+
+	function beginDescriptionEdit() {
+		if (!task) return;
+		descriptionDraft = description;
+		descriptionEditing = true;
+	}
+
+	function cancelDescriptionEdit() {
+		descriptionEditing = false;
+	}
+
+	async function saveDescription() {
+		if (!task) return;
+		const next = descriptionDraft;
+		if (next === description) {
+			descriptionEditing = false;
+			return;
+		}
+		try {
+			await api().updateTask(task.key, { description: next });
+			description = next;
+			descriptionEditing = false;
+			await onchanged();
+			push('success', 'Description saved');
+		} catch (e) {
+			push('error', errorMessage(e));
+		}
+	}
+
+	function onDescriptionKeydown(event: KeyboardEvent) {
+		if (event.key === 'Escape') {
+			event.preventDefault();
+			cancelDescriptionEdit();
+		} else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+			event.preventDefault();
+			void saveDescription();
+		}
+	}
+
+	/** Keeps a Save/Cancel button click from first blurring the field it belongs to. */
+	function keepFocus(event: MouseEvent) {
+		event.preventDefault();
+	}
+
+	function onEditableKeydown(begin: () => void) {
+		return (event: KeyboardEvent) => {
+			if (event.key === 'Enter' || event.key === ' ') {
+				event.preventDefault();
+				begin();
+			}
+		};
+	}
 
 	function onWindowKey(event: KeyboardEvent) {
 		// The native <dialog> in modal mode handles its own Escape (close -> onModalClose
@@ -401,23 +526,114 @@
 		{:else if !task}
 			<p class="muted">{loading ? 'Loading…' : 'No task open.'}</p>
 		{:else}
-			<Input
-				label="Title"
-				bind:value={title}
-				error={titleError ?? undefined}
-				data-testid="task-title"
-			/>
+			<div class="field">
+				{#if titleEditing}
+					<textarea
+						bind:value={titleDraft}
+						use:autogrow
+						rows="1"
+						class="title-input"
+						aria-label="Title"
+						data-testid="task-title"
+						onkeydown={onTitleKeydown}
+						onblur={onTitleBlur}
+					></textarea>
+					{#if titleError}
+						<p class="bad" role="alert">{titleError}</p>
+					{/if}
+					<div class="row">
+						<IconButton
+							size="sm"
+							icon="check"
+							label="Save title"
+							data-testid="task-title-save"
+							onmousedown={keepFocus}
+							onclick={saveTitle}
+						/>
+						<IconButton
+							size="sm"
+							icon="x"
+							label="Cancel"
+							data-testid="task-title-cancel"
+							onmousedown={keepFocus}
+							onclick={cancelTitleEdit}
+						/>
+					</div>
+				{:else}
+					<div class="title-display">
+						<button
+							type="button"
+							class="title-hit"
+							data-testid="task-title-text"
+							onclick={beginTitleEdit}
+						>
+							<h2 class="title-text">{title}</h2>
+						</button>
+						<IconButton
+							size="sm"
+							icon="pencil"
+							label="Edit title"
+							data-testid="task-title-edit"
+							onclick={beginTitleEdit}
+						/>
+					</div>
+				{/if}
+			</div>
 
-			<label class="field">
-				<span>Description</span>
-				<textarea
-					bind:value={description}
-					class="area mono-hint"
-					rows="3"
-					placeholder="No description"
-					data-testid="task-description"
-				></textarea>
-			</label>
+			<div class="field">
+				<div class="field-head">
+					<span>Description</span>
+					{#if !descriptionEditing}
+						<IconButton
+							size="sm"
+							icon="pencil"
+							label="Edit description"
+							data-testid="task-description-edit"
+							onclick={beginDescriptionEdit}
+						/>
+					{/if}
+				</div>
+				{#if descriptionEditing}
+					<textarea
+						bind:value={descriptionDraft}
+						use:autogrow
+						class="area mono-hint"
+						rows="3"
+						placeholder="No description"
+						data-testid="task-description"
+						onkeydown={onDescriptionKeydown}
+					></textarea>
+					<div class="row">
+						<Button
+							size="sm"
+							data-testid="task-description-save"
+							onmousedown={keepFocus}
+							onclick={saveDescription}
+						>
+							Save
+						</Button>
+						<Button
+							size="sm"
+							data-testid="task-description-cancel"
+							onmousedown={keepFocus}
+							onclick={cancelDescriptionEdit}
+						>
+							Cancel
+						</Button>
+					</div>
+				{:else}
+					<div
+						class="description-display"
+						role="button"
+						tabindex="0"
+						data-testid="task-description-text"
+						onclick={beginDescriptionEdit}
+						onkeydown={onEditableKeydown(beginDescriptionEdit)}
+					>
+						<MarkdownView source={description} showHeader={false} emptyText="No description" />
+					</div>
+				{/if}
+			</div>
 
 			<div class="pair">
 				<Select label="Kind" bind:value={kind} options={kindOptions} data-testid="task-kind" />
@@ -701,13 +917,20 @@
 		gap: 4px;
 	}
 
-	.field > span {
+	.field-head {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+
+	.field-head > span {
 		font-size: 12px;
 		color: var(--text-secondary);
 	}
 
 	.area {
 		resize: none;
+		overflow: hidden;
 		background: var(--bg-base);
 		border: 1px solid var(--border-default);
 		border-radius: 3px;
@@ -726,6 +949,78 @@
 	.mono-hint::placeholder {
 		font-family: var(--font-mono);
 		color: var(--text-tertiary);
+	}
+
+	/* Title: wrapped text in place, Jira style, switching to an auto-growing single
+	   field on click. Both states share the heading's size so the swap does not jump. */
+	.title-display {
+		display: flex;
+		align-items: flex-start;
+		gap: 6px;
+	}
+
+	.title-hit {
+		flex: 1;
+		min-width: 0;
+		padding: 0;
+		background: none;
+		border: 0;
+		font: inherit;
+		text-align: left;
+		color: inherit;
+		cursor: pointer;
+		border-radius: 3px;
+	}
+
+	.title-hit:focus-visible {
+		outline: var(--focus-ring-width) solid var(--focus-ring);
+		outline-offset: 2px;
+	}
+
+	.title-text {
+		margin: 0;
+		font-size: 15px;
+		font-weight: 600;
+		line-height: 1.3;
+		overflow-wrap: anywhere;
+	}
+
+	.title-input {
+		width: 100%;
+		resize: none;
+		overflow: hidden;
+		background: var(--bg-base);
+		border: 1px solid var(--accent);
+		border-radius: 3px;
+		color: var(--text-primary);
+		font-family: var(--font-ui);
+		font-size: 15px;
+		font-weight: 600;
+		line-height: 1.3;
+		padding: 5px 7px;
+		outline: var(--focus-ring-width) solid var(--focus-ring);
+		outline-offset: 0;
+	}
+
+	/* Description: the rendered Markdown wraps in place with no cap on its height and
+	   no scrollbar of its own, so the panel as a whole scrolls instead. MarkdownView's
+	   own embedded styling caps its height for the smaller previews it is normally
+	   used in, which is exactly what this view does not want. */
+	.description-display {
+		cursor: pointer;
+		border-radius: 3px;
+	}
+
+	.description-display:focus-visible {
+		outline: var(--focus-ring-width) solid var(--focus-ring);
+		outline-offset: 2px;
+	}
+
+	.description-display :global(.body) {
+		padding: 0;
+		flex: none;
+		max-height: none;
+		overflow: visible;
 	}
 
 	.pair {
