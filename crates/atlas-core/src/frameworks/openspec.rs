@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 
-use super::adapter::{mtime, read_within_root, rel, root_instruction_files, FrameworkAdapter};
+use super::adapter::{mtime, read_doc_file, read_within_root, rel, root_instruction_files, FrameworkAdapter};
 use super::md::{checkboxes, first_heading, section_bullets};
 use crate::models::{FrameworkDoc, FrameworkDocType, FrameworkInventory, FrameworkKind, ImportedDecision, ImportedTask, SourceRef};
 use crate::Result;
@@ -26,8 +26,23 @@ impl FrameworkAdapter for OpenspecAdapter {
         if roots.is_empty() {
             return None;
         }
-        let docs = self.documents(root).len();
-        let tasks = self.tasks(root).len();
+        // Listing and per-file existence checks only, no content read: `tasks`
+        // counts `tasks.md` files (the task source), not the checkbox items in
+        // them, since counting items exactly would mean reading every one.
+        let mut docs = md_files(&root.join(SPECS_DIR)).len();
+        let mut tasks = 0usize;
+        for change_dir in change_dirs(root) {
+            if change_dir.join("proposal.md").is_file() {
+                docs += 1;
+            }
+            if change_dir.join("tasks.md").is_file() {
+                docs += 1;
+                tasks += 1;
+            }
+            if change_dir.join("design.md").is_file() {
+                docs += 1;
+            }
+        }
         Some(FrameworkInventory { kind: self.kind(), roots, docs, tasks, detected_at: Utc::now() })
     }
 
@@ -59,18 +74,21 @@ impl FrameworkAdapter for OpenspecAdapter {
         let mut out = vec![];
         for change_dir in change_dirs(root) {
             let path = change_dir.join("tasks.md");
-            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let Some(text) = read_doc_file(&path) else { continue };
             let path_rel = rel(root, &path);
             for item in checkboxes(&text) {
+                // "<heading>#<ordinal>" when there is a heading, else the line
+                // number: both are unique within the file, so two items sharing a
+                // heading (or none) never collide.
+                let anchor = match &item.heading {
+                    Some(h) => format!("{h}#{}", item.ordinal),
+                    None => format!("L{}", item.line),
+                };
                 out.push(ImportedTask {
                     title: item.text,
                     description: item.heading.clone().unwrap_or_default(),
                     status_hint: Some(if item.checked { "done".to_string() } else { "todo".to_string() }),
-                    source_ref: SourceRef {
-                        framework: self.kind(),
-                        path: path_rel.clone(),
-                        anchor: item.heading.unwrap_or_else(|| format!("L{}", item.line)),
-                    },
+                    source_ref: SourceRef { framework: self.kind(), path: path_rel.clone(), anchor },
                 });
             }
         }
@@ -82,12 +100,12 @@ impl FrameworkAdapter for OpenspecAdapter {
         for change_dir in change_dirs(root) {
             for file in ["proposal.md", "design.md"] {
                 let path = change_dir.join(file);
-                let Ok(text) = std::fs::read_to_string(&path) else { continue };
+                let Some(text) = read_doc_file(&path) else { continue };
                 let path_rel = rel(root, &path);
-                for (text, _line) in section_bullets(&text, "Decisions") {
+                for (text, _line, ordinal) in section_bullets(&text, "Decisions") {
                     out.push(ImportedDecision {
                         text,
-                        source_ref: SourceRef { framework: self.kind(), path: path_rel.clone(), anchor: "Decisions".to_string() },
+                        source_ref: SourceRef { framework: self.kind(), path: path_rel.clone(), anchor: format!("Decisions#{ordinal}") },
                     });
                 }
             }
@@ -102,13 +120,14 @@ impl FrameworkAdapter for OpenspecAdapter {
 
 impl OpenspecAdapter {
     fn doc_at(&self, root: &Path, path: &Path, doc_type: FrameworkDocType) -> FrameworkDoc {
-        let text = std::fs::read_to_string(path).unwrap_or_default();
+        let text = read_doc_file(path).unwrap_or_default();
         let title = first_heading(&text).unwrap_or_else(|| file_stem(path));
         FrameworkDoc { kind: self.kind(), path: rel(root, path), title, doc_type, updated_at: mtime(path) }
     }
 }
 
 /// `*.md` files directly under `dir` (no recursion). Empty if `dir` doesn't exist.
+/// Metadata only: never opens a file.
 fn md_files(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else { return vec![] };
     let mut out: Vec<PathBuf> = entries
@@ -120,7 +139,7 @@ fn md_files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// `openspec/changes/*`: one listing of the `changes` directory.
+/// `openspec/changes/*`: one listing of the `changes` directory. Metadata only.
 fn change_dirs(root: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(root.join(CHANGES_DIR)) else { return vec![] };
     let mut out: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
@@ -147,7 +166,7 @@ mod tests {
         assert_eq!(inv.kind, FrameworkKind::Openspec);
         assert_eq!(inv.roots.len(), 2);
         assert_eq!(inv.docs, 4, "one spec, one proposal, one tasks, one design");
-        assert_eq!(inv.tasks, 3);
+        assert_eq!(inv.tasks, 1, "detect counts task-bearing files (one tasks.md), not checkbox items");
     }
 
     #[test]
@@ -170,11 +189,14 @@ mod tests {
     }
 
     #[test]
-    fn decisions_come_from_the_decisions_section() {
+    fn decisions_come_from_the_decisions_section_with_unique_anchors() {
         let a = OpenspecAdapter;
         let decisions = a.decisions(&fixture());
         assert_eq!(decisions.len(), 2);
         assert!(decisions.iter().all(|d| d.source_ref.framework == FrameworkKind::Openspec));
+        assert_ne!(decisions[0].source_ref.anchor, decisions[1].source_ref.anchor);
+        assert_eq!(decisions[0].source_ref.anchor, "Decisions#1");
+        assert_eq!(decisions[1].source_ref.anchor, "Decisions#2");
     }
 
     #[test]

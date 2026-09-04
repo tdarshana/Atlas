@@ -10,8 +10,11 @@ use crate::{AtlasError, Result};
 /// reads outside it, and `read` refuses a path that resolves outside it.
 pub trait FrameworkAdapter: Send + Sync {
     fn kind(&self) -> FrameworkKind;
-    /// Cheap existence checks (no recursion beyond two levels) for this
-    /// framework's roots. `None` when nothing was found.
+    /// Cheap existence checks and shallow directory listings (no recursion beyond
+    /// two levels) for this framework's roots: `docs`/`tasks` on the returned
+    /// inventory are file counts by name and extension, not document content.
+    /// `detect` never opens a document — `documents`, `tasks` and `decisions`
+    /// are the readers. `None` when nothing was found.
     fn detect(&self, root: &Path) -> Option<FrameworkInventory>;
     /// Every document this framework's roots hold, one directory listing per root.
     fn documents(&self, root: &Path) -> Vec<FrameworkDoc>;
@@ -36,13 +39,44 @@ pub(crate) fn read_within_root(root: &Path, rel: &str) -> Result<String> {
         .canonicalize()
         .map_err(|e| AtlasError::Invalid(format!("{}: {e}", root.display())))?;
     let candidate = root.join(rel);
+    // A plain sentence either way: whether `rel` simply doesn't exist or resolves
+    // outside `root`, the caller gets a message it can show as-is, never the raw
+    // OS error text (`No such file or directory (os error 2)`, and so on).
     let canon = candidate
         .canonicalize()
-        .map_err(|e| AtlasError::Invalid(format!("{}: {e}", candidate.display())))?;
+        .map_err(|_| AtlasError::Invalid(format!("{rel} does not exist under the project root")))?;
     if !canon.starts_with(&root) {
         return Err(AtlasError::Invalid(format!("{rel} escapes the project root")));
     }
     std::fs::read_to_string(&canon).map_err(AtlasError::from)
+}
+
+/// Reads a document's content for `documents`/`tasks`/`decisions`. The only place
+/// any adapter opens a file for its content: `detect` counts by name and
+/// extension only and never calls this. In tests, every call is tallied so a
+/// test can assert `detect` made none.
+pub(crate) fn read_doc_file(path: &Path) -> Option<String> {
+    #[cfg(test)]
+    OPEN_COUNT.with(|c| c.set(c.get() + 1));
+    std::fs::read_to_string(path).ok()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Number of `read_doc_file` calls since the last `reset_open_count`. Lets a
+    /// test prove `detect` never opened a document, without depending on OS
+    /// permission quirks (which behave differently when tests run as root).
+    pub(crate) static OPEN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_open_count() {
+    OPEN_COUNT.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn open_count() -> usize {
+    OPEN_COUNT.with(|c| c.get())
 }
 
 /// `path` relative to `root`, as a forward-slash-free-of-surprises string (native
@@ -91,6 +125,14 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let err = read_within_root(d.path(), "/etc/passwd").unwrap_err();
         assert!(matches!(err, AtlasError::Invalid(_)), "{err}");
+    }
+
+    #[test]
+    fn a_missing_path_refuses_with_a_plain_sentence_too() {
+        let d = tempfile::tempdir().unwrap();
+        let err = read_within_root(d.path(), "does/not/exist.md").unwrap_err().to_string();
+        assert!(!err.contains("os error"), "raw OS error text leaked into the message: {err}");
+        assert_eq!(err, "invalid input: does/not/exist.md does not exist under the project root");
     }
 
     #[cfg(unix)]

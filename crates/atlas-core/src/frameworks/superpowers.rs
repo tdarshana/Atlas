@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 
-use super::adapter::{mtime, read_within_root, rel, root_instruction_files, FrameworkAdapter};
+use super::adapter::{mtime, read_doc_file, read_within_root, rel, root_instruction_files, FrameworkAdapter};
 use super::md::{checkboxes, first_heading, ruling_lines};
 use crate::models::{FrameworkDoc, FrameworkDocType, FrameworkInventory, FrameworkKind, ImportedDecision, ImportedTask, SourceRef};
 use crate::Result;
@@ -27,9 +27,12 @@ impl FrameworkAdapter for SuperpowersAdapter {
         if roots.is_empty() {
             return None;
         }
-        let docs = self.documents(root).len();
-        let tasks = self.tasks(root).len();
-        Some(FrameworkInventory { kind: self.kind(), roots, docs, tasks, detected_at: Utc::now() })
+        // Listing only, no content read: `tasks` counts plan *files* (the task
+        // source), not the checkbox items inside them — getting an exact item
+        // count would mean reading every plan, which `detect` must not do.
+        let plans = md_files(&root.join(PLANS_DIR)).len();
+        let docs = md_files(&root.join(SPECS_DIR)).len() + plans + ledger_files(root).len();
+        Some(FrameworkInventory { kind: self.kind(), roots, docs, tasks: plans, detected_at: Utc::now() })
     }
 
     fn documents(&self, root: &Path) -> Vec<FrameworkDoc> {
@@ -52,18 +55,22 @@ impl FrameworkAdapter for SuperpowersAdapter {
     fn tasks(&self, root: &Path) -> Vec<ImportedTask> {
         let mut out = vec![];
         for path in md_files(&root.join(PLANS_DIR)) {
-            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let Some(text) = read_doc_file(&path) else { continue };
             let path_rel = rel(root, &path);
             for item in checkboxes(&text) {
                 // Only checkbox lines under a "### Task N" heading are plan tasks;
                 // a stray checklist elsewhere in the doc (there is none in practice,
                 // but the rule is explicit) is not imported.
                 let Some(heading) = item.heading.filter(|h| h.starts_with("Task ")) else { continue };
+                // "<heading>#<ordinal>": unique among the checkboxes under this
+                // heading, since two tasks in the same section (a real case: see
+                // the fixture) would otherwise share the same anchor.
+                let anchor = format!("{heading}#{}", item.ordinal);
                 out.push(ImportedTask {
                     title: item.text,
-                    description: heading.clone(),
+                    description: heading,
                     status_hint: Some(if item.checked { "done".to_string() } else { "todo".to_string() }),
-                    source_ref: SourceRef { framework: self.kind(), path: path_rel.clone(), anchor: heading },
+                    source_ref: SourceRef { framework: self.kind(), path: path_rel.clone(), anchor },
                 });
             }
         }
@@ -73,12 +80,12 @@ impl FrameworkAdapter for SuperpowersAdapter {
     fn decisions(&self, root: &Path) -> Vec<ImportedDecision> {
         let mut out = vec![];
         for path in ledger_files(root) {
-            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let Some(text) = read_doc_file(&path) else { continue };
             let path_rel = rel(root, &path);
-            for (text, _line) in ruling_lines(&text) {
+            for (text, _line, ordinal) in ruling_lines(&text) {
                 out.push(ImportedDecision {
                     text,
-                    source_ref: SourceRef { framework: self.kind(), path: path_rel.clone(), anchor: "Ruling".to_string() },
+                    source_ref: SourceRef { framework: self.kind(), path: path_rel.clone(), anchor: format!("Ruling#{ordinal}") },
                 });
             }
         }
@@ -92,13 +99,14 @@ impl FrameworkAdapter for SuperpowersAdapter {
 
 impl SuperpowersAdapter {
     fn doc_at(&self, root: &Path, path: &Path, doc_type: FrameworkDocType) -> FrameworkDoc {
-        let text = std::fs::read_to_string(path).unwrap_or_default();
+        let text = read_doc_file(path).unwrap_or_default();
         let title = first_heading(&text).unwrap_or_else(|| file_stem(path));
         FrameworkDoc { kind: self.kind(), path: rel(root, path), title, doc_type, updated_at: mtime(path) }
     }
 }
 
 /// `*.md` files directly under `dir` (no recursion). Empty if `dir` doesn't exist.
+/// Metadata only (`read_dir` plus `is_file`/extension checks): never opens a file.
 fn md_files(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else { return vec![] };
     let mut out: Vec<PathBuf> = entries
@@ -111,7 +119,7 @@ fn md_files(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// `.superpowers/sdd/*/progress.md`: one listing of the `sdd` directory, then one
-/// existence check per subdirectory.
+/// existence check per subdirectory. Metadata only, never opens a file.
 fn ledger_files(root: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(root.join(SDD_DIR)) else { return vec![] };
     let mut out: Vec<PathBuf> = entries
@@ -144,7 +152,7 @@ mod tests {
         assert_eq!(inv.kind, FrameworkKind::Superpowers);
         assert_eq!(inv.roots.len(), 3);
         assert_eq!(inv.docs, 3, "one spec, one plan, one ledger");
-        assert_eq!(inv.tasks, 3);
+        assert_eq!(inv.tasks, 1, "detect counts task-bearing files (one plan), not checkbox items");
     }
 
     #[test]
@@ -161,7 +169,7 @@ mod tests {
     }
 
     #[test]
-    fn tasks_come_from_checkboxes_under_task_headings() {
+    fn tasks_come_from_checkboxes_under_task_headings_with_unique_anchors() {
         let a = SuperpowersAdapter;
         let tasks = a.tasks(&fixture());
         assert_eq!(tasks.len(), 3);
@@ -169,14 +177,25 @@ mod tests {
         assert_eq!(done.len(), 1);
         assert!(tasks.iter().any(|t| t.title == "write the widget module"));
         assert!(tasks.iter().all(|t| t.source_ref.framework == FrameworkKind::Superpowers));
+
+        // The fixture's "Task 1" heading covers two checkboxes: their anchors must
+        // differ, or a re-import could not tell the two tasks apart.
+        let under_task_1: Vec<_> = tasks.iter().filter(|t| t.description == "Task 1: Set up the widget").collect();
+        assert_eq!(under_task_1.len(), 2);
+        assert_ne!(under_task_1[0].source_ref.anchor, under_task_1[1].source_ref.anchor);
+        assert_eq!(under_task_1[0].source_ref.anchor, "Task 1: Set up the widget#1");
+        assert_eq!(under_task_1[1].source_ref.anchor, "Task 1: Set up the widget#2");
     }
 
     #[test]
-    fn decisions_come_from_ruling_lines() {
+    fn decisions_come_from_ruling_lines_with_unique_anchors() {
         let a = SuperpowersAdapter;
         let decisions = a.decisions(&fixture());
         assert_eq!(decisions.len(), 2);
         assert!(decisions[0].text.contains("widget module"));
+        assert_ne!(decisions[0].source_ref.anchor, decisions[1].source_ref.anchor);
+        assert_eq!(decisions[0].source_ref.anchor, "Ruling#1");
+        assert_eq!(decisions[1].source_ref.anchor, "Ruling#2");
     }
 
     #[test]

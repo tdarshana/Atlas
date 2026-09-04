@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 
-use super::adapter::{mtime, read_within_root, rel, root_instruction_files, FrameworkAdapter};
+use super::adapter::{mtime, read_doc_file, read_within_root, rel, root_instruction_files, FrameworkAdapter};
 use super::md::{checkboxes, first_heading, section_bullets};
 use crate::models::{FrameworkDoc, FrameworkDocType, FrameworkInventory, FrameworkKind, ImportedDecision, ImportedTask, SourceRef};
 use crate::Result;
@@ -26,8 +26,23 @@ impl FrameworkAdapter for SpeckitAdapter {
         if roots.is_empty() {
             return None;
         }
-        let docs = self.documents(root).len();
-        let tasks = self.tasks(root).len();
+        // Listing and per-file existence checks only, no content read: `tasks`
+        // counts `tasks.md` files (the task source), not the checkbox items in
+        // them.
+        let mut docs = 0usize;
+        let mut tasks = 0usize;
+        for feature_dir in feature_dirs(root) {
+            if feature_dir.join("spec.md").is_file() {
+                docs += 1;
+            }
+            if feature_dir.join("plan.md").is_file() {
+                docs += 1;
+            }
+            if feature_dir.join("tasks.md").is_file() {
+                docs += 1;
+                tasks += 1;
+            }
+        }
         Some(FrameworkInventory { kind: self.kind(), roots, docs, tasks, detected_at: Utc::now() })
     }
 
@@ -52,18 +67,18 @@ impl FrameworkAdapter for SpeckitAdapter {
         let mut out = vec![];
         for feature_dir in feature_dirs(root) {
             let path = feature_dir.join("tasks.md");
-            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let Some(text) = read_doc_file(&path) else { continue };
             let path_rel = rel(root, &path);
             for item in checkboxes(&text) {
+                let anchor = match &item.heading {
+                    Some(h) => format!("{h}#{}", item.ordinal),
+                    None => format!("L{}", item.line),
+                };
                 out.push(ImportedTask {
                     title: item.text,
                     description: item.heading.clone().unwrap_or_default(),
                     status_hint: Some(if item.checked { "done".to_string() } else { "todo".to_string() }),
-                    source_ref: SourceRef {
-                        framework: self.kind(),
-                        path: path_rel.clone(),
-                        anchor: item.heading.unwrap_or_else(|| format!("L{}", item.line)),
-                    },
+                    source_ref: SourceRef { framework: self.kind(), path: path_rel.clone(), anchor },
                 });
             }
         }
@@ -74,21 +89,21 @@ impl FrameworkAdapter for SpeckitAdapter {
         let mut out = vec![];
         for feature_dir in feature_dirs(root) {
             let path = feature_dir.join("plan.md");
-            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let Some(text) = read_doc_file(&path) else { continue };
             let path_rel = rel(root, &path);
             // A plan's own "Decisions" section wins; a SpecKit plan without one
             // still carries its choices in "Technical Context", so fall back to it.
             let mut bullets = section_bullets(&text, "Decisions");
-            let anchor = if bullets.is_empty() {
+            let anchor_name = if bullets.is_empty() {
                 bullets = section_bullets(&text, "Technical Context");
                 "Technical Context"
             } else {
                 "Decisions"
             };
-            for (text, _line) in bullets {
+            for (text, _line, ordinal) in bullets {
                 out.push(ImportedDecision {
                     text,
-                    source_ref: SourceRef { framework: self.kind(), path: path_rel.clone(), anchor: anchor.to_string() },
+                    source_ref: SourceRef { framework: self.kind(), path: path_rel.clone(), anchor: format!("{anchor_name}#{ordinal}") },
                 });
             }
         }
@@ -104,13 +119,14 @@ impl FrameworkAdapter for SpeckitAdapter {
 
 impl SpeckitAdapter {
     fn doc_at(&self, root: &Path, path: &Path, doc_type: FrameworkDocType) -> FrameworkDoc {
-        let text = std::fs::read_to_string(path).unwrap_or_default();
+        let text = read_doc_file(path).unwrap_or_default();
         let title = first_heading(&text).unwrap_or_else(|| file_stem(path));
         FrameworkDoc { kind: self.kind(), path: rel(root, path), title, doc_type, updated_at: mtime(path) }
     }
 }
 
-/// `specs/*`: one listing of the `specs` directory.
+/// `specs/*`: one listing of the `specs` directory. Metadata only, never opens a
+/// file.
 fn feature_dirs(root: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(root.join(SPECS_DIR)) else { return vec![] };
     let mut out: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
@@ -137,7 +153,7 @@ mod tests {
         assert_eq!(inv.kind, FrameworkKind::Speckit);
         assert_eq!(inv.roots.len(), 2);
         assert_eq!(inv.docs, 3, "one spec, one plan, one tasks");
-        assert_eq!(inv.tasks, 3);
+        assert_eq!(inv.tasks, 1, "detect counts task-bearing files (one tasks.md), not checkbox items");
     }
 
     #[test]
@@ -159,11 +175,12 @@ mod tests {
     }
 
     #[test]
-    fn decisions_fall_back_to_technical_context() {
+    fn decisions_fall_back_to_technical_context_with_unique_anchors() {
         let a = SpeckitAdapter;
         let decisions = a.decisions(&fixture());
         assert_eq!(decisions.len(), 2);
-        assert_eq!(decisions[0].source_ref.anchor, "Technical Context");
+        assert_eq!(decisions[0].source_ref.anchor, "Technical Context#1");
+        assert_eq!(decisions[1].source_ref.anchor, "Technical Context#2");
     }
 
     #[test]

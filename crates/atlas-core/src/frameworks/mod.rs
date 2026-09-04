@@ -72,4 +72,46 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         assert!(detect_all(d.path()).is_empty());
     }
+
+    /// `detect` must complete without ever opening a document, even one that is
+    /// large and (on Unix, where permissions are meaningful) unreadable — proven
+    /// by a call counter in `adapter::read_doc_file`, the one function every
+    /// adapter's `documents`/`tasks`/`decisions` reads a file through.
+    #[test]
+    fn detect_never_opens_a_document() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("docs/superpowers/plans")).unwrap();
+        let huge = d.path().join("docs/superpowers/plans/huge.md");
+        // 8 MiB of content that isn't a real plan: large enough that a full read
+        // and parse would be noticeable if `detect` ever did it.
+        std::fs::write(&huge, vec![b'x'; 8 * 1024 * 1024]).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // No read permission: if anything in `detect`'s path tried to open
+            // this file, it would fail loudly rather than the failure being
+            // swallowed by a lenient `Ok(_) = ... else` further down the line.
+            std::fs::set_permissions(&huge, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+
+        adapter::reset_open_count();
+        let inv = detect_all(d.path());
+        assert_eq!(adapter::open_count(), 0, "detect must not open any document");
+        assert_eq!(inv.len(), 1);
+        assert_eq!(inv[0].tasks, 1, "the huge file still counts as one task-bearing file by listing alone");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Restore permissions so the tempdir can be cleaned up.
+            std::fs::set_permissions(&huge, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        // Sanity check the counter itself: reading the same tree's documents
+        // does open files, so a regression that made `detect` cheap by accident
+        // (e.g. an adapter that never reads anything) wouldn't pass silently.
+        adapter::reset_open_count();
+        let _ = adapters()[0].documents(d.path());
+        assert!(adapter::open_count() > 0, "documents() is expected to open files");
+    }
 }

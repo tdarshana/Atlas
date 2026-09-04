@@ -672,14 +672,19 @@ str_enum!(FrameworkDocType {
 });
 
 /// What `FrameworkAdapter::detect` found for one framework: which of its roots
-/// exist under the project, and how many documents and tasks it holds. Stored on
-/// `ProjectProfile.planning_frameworks` on connect and refresh.
+/// exist under the project, and shallow, listing-only counts of what it holds.
+/// Stored on `ProjectProfile.planning_frameworks` on connect and refresh.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FrameworkInventory {
     pub kind: FrameworkKind,
     /// Existing root paths for this framework, relative to the project root.
     pub roots: Vec<String>,
+    /// Matching document files by name and extension. Equal to `documents(root).len()`.
     pub docs: usize,
+    /// Files that hold tasks (a `tasks.md`, a plan file, and so on), counted by
+    /// name and extension, not by opening them: `detect` never reads a document,
+    /// so this is a file count, not the exact number of importable checkbox
+    /// items — call `tasks(root)` for that.
     pub tasks: usize,
     pub detected_at: DateTime<Utc>,
 }

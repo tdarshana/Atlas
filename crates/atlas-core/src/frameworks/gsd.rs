@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 
-use super::adapter::{mtime, read_within_root, rel, FrameworkAdapter};
+use super::adapter::{mtime, read_doc_file, read_within_root, rel, FrameworkAdapter};
 use super::md::{checkboxes, first_heading, section_bullets};
 use crate::models::{FrameworkDoc, FrameworkDocType, FrameworkInventory, FrameworkKind, ImportedDecision, ImportedTask, SourceRef};
 use crate::Result;
@@ -20,8 +20,28 @@ impl FrameworkAdapter for GsdAdapter {
         if !root.join(PLANNING_DIR).is_dir() {
             return None;
         }
-        let docs = self.documents(root).len();
-        let tasks = self.tasks(root).len();
+        // Listing and per-file existence checks only, no content read: `tasks`
+        // counts `PLAN.md` files (the task source), not the checkbox items in
+        // them.
+        let planning = root.join(PLANNING_DIR);
+        let mut docs = 0usize;
+        if planning.join("PROJECT.md").is_file() {
+            docs += 1;
+        }
+        if planning.join("ROADMAP.md").is_file() {
+            docs += 1;
+        }
+        let mut tasks = 0usize;
+        for phase_dir in phase_dirs(root) {
+            if phase_dir.join("PLAN.md").is_file() {
+                docs += 1;
+                tasks += 1;
+            }
+            if phase_dir.join("SUMMARY.md").is_file() {
+                docs += 1;
+            }
+        }
+        docs += todo_files(root).len();
         Some(FrameworkInventory { kind: self.kind(), roots: vec![PLANNING_DIR.to_string()], docs, tasks, detected_at: Utc::now() })
     }
 
@@ -56,18 +76,18 @@ impl FrameworkAdapter for GsdAdapter {
         let mut out = vec![];
         for phase_dir in phase_dirs(root) {
             let path = phase_dir.join("PLAN.md");
-            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let Some(text) = read_doc_file(&path) else { continue };
             let path_rel = rel(root, &path);
             for item in checkboxes(&text) {
+                let anchor = match &item.heading {
+                    Some(h) => format!("{h}#{}", item.ordinal),
+                    None => format!("L{}", item.line),
+                };
                 out.push(ImportedTask {
                     title: item.text,
                     description: item.heading.clone().unwrap_or_default(),
                     status_hint: Some(if item.checked { "done".to_string() } else { "todo".to_string() }),
-                    source_ref: SourceRef {
-                        framework: self.kind(),
-                        path: path_rel.clone(),
-                        anchor: item.heading.unwrap_or_else(|| format!("L{}", item.line)),
-                    },
+                    source_ref: SourceRef { framework: self.kind(), path: path_rel.clone(), anchor },
                 });
             }
         }
@@ -78,12 +98,12 @@ impl FrameworkAdapter for GsdAdapter {
         let mut out = vec![];
         for phase_dir in phase_dirs(root) {
             let path = phase_dir.join("SUMMARY.md");
-            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let Some(text) = read_doc_file(&path) else { continue };
             let path_rel = rel(root, &path);
-            for (text, _line) in section_bullets(&text, "Decisions") {
+            for (text, _line, ordinal) in section_bullets(&text, "Decisions") {
                 out.push(ImportedDecision {
                     text,
-                    source_ref: SourceRef { framework: self.kind(), path: path_rel.clone(), anchor: "Decisions".to_string() },
+                    source_ref: SourceRef { framework: self.kind(), path: path_rel.clone(), anchor: format!("Decisions#{ordinal}") },
                 });
             }
         }
@@ -99,13 +119,13 @@ impl FrameworkAdapter for GsdAdapter {
 
 impl GsdAdapter {
     fn doc_at(&self, root: &Path, path: &Path, doc_type: FrameworkDocType) -> FrameworkDoc {
-        let text = std::fs::read_to_string(path).unwrap_or_default();
+        let text = read_doc_file(path).unwrap_or_default();
         let title = first_heading(&text).unwrap_or_else(|| file_stem(path));
         FrameworkDoc { kind: self.kind(), path: rel(root, path), title, doc_type, updated_at: mtime(path) }
     }
 }
 
-/// `.planning/phases/*`: one listing of the `phases` directory.
+/// `.planning/phases/*`: one listing of the `phases` directory. Metadata only.
 fn phase_dirs(root: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(root.join(PLANNING_DIR).join("phases")) else { return vec![] };
     let mut out: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
@@ -113,7 +133,8 @@ fn phase_dirs(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// `.planning/todos/{pending,done}/*.md`: one listing per subdirectory.
+/// `.planning/todos/{pending,done}/*.md`: one listing per subdirectory. Metadata
+/// only, never opens a file.
 fn todo_files(root: &Path) -> Vec<PathBuf> {
     let todos = root.join(PLANNING_DIR).join("todos");
     let mut out = vec![];
@@ -149,7 +170,7 @@ mod tests {
         assert_eq!(inv.kind, FrameworkKind::Gsd);
         assert_eq!(inv.roots, vec![".planning".to_string()]);
         assert_eq!(inv.docs, 6, "project, roadmap, plan, summary, and two todos");
-        assert_eq!(inv.tasks, 2);
+        assert_eq!(inv.tasks, 1, "detect counts task-bearing files (one PLAN.md), not checkbox items");
     }
 
     #[test]
@@ -172,11 +193,13 @@ mod tests {
     }
 
     #[test]
-    fn decisions_come_from_summary_decisions_section() {
+    fn decisions_come_from_summary_decisions_section_with_unique_anchors() {
         let a = GsdAdapter;
         let decisions = a.decisions(&fixture());
         assert_eq!(decisions.len(), 2);
         assert!(decisions.iter().all(|d| d.source_ref.framework == FrameworkKind::Gsd));
+        assert_eq!(decisions[0].source_ref.anchor, "Decisions#1");
+        assert_eq!(decisions[1].source_ref.anchor, "Decisions#2");
     }
 
     #[test]
