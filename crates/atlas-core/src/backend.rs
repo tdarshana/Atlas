@@ -198,6 +198,18 @@ pub trait Backend: Send + Sync + 'static {
     /// same way a direct task move or memory write is, by the project's
     /// `agent_access`.
     async fn import_framework(&self, project_id: Uuid, kind: FrameworkKind, what: ImportWhat, actor: &str) -> Result<ImportReport>;
+
+    // ---- plugin MCP tools (Phase 13b) ----
+    /// Every MCP tool the running desktop plugins contribute. Defaulted to empty
+    /// because most backends have no plugins behind them: only the daemon (with a
+    /// `PluginToolHost` set) and `RemoteBackend` (which asks the daemon) answer
+    /// otherwise.
+    async fn plugin_tools(&self) -> Result<Vec<PluginToolDecl>> { Ok(vec![]) }
+    /// Forwards one plugin tool call to the app that declared it. Defaulted to a
+    /// refusal for the same reason.
+    async fn call_plugin_tool(&self, _plugin_id: &str, _name: &str, _args: serde_json::Value, _actor: &str) -> Result<serde_json::Value> {
+        Err(AtlasError::Invalid("plugin tools are not available here".into()))
+    }
 }
 
 pub struct LocalBackend {
@@ -210,6 +222,11 @@ pub struct LocalBackend {
     pub queue: Arc<JobQueue>,
     pub tasks: Arc<TaskRepo>,
     pub workflows: Arc<WorkflowRepo>,
+    /// Whoever can answer for the desktop plugins currently running, when anyone can.
+    /// Set by the daemon (`LocalBackend::with_plugin_tool_host`) to its loopback
+    /// WebSocket channel; `None` everywhere else, which leaves `plugin_tools` empty and
+    /// `call_plugin_tool` refusing.
+    pub plugin_tool_host: Option<Arc<dyn crate::plugin_tools::PluginToolHost>>,
 }
 
 /// `ProjectRepo` for `db`, built fresh each call rather than stored: it only borrows
@@ -320,7 +337,14 @@ impl LocalBackend {
         }
         let tasks = Arc::new(TaskRepo::new(db.clone(), memories.gate_handle()));
         let workflows = Arc::new(WorkflowRepo::new(db.clone(), memories.gate_handle()));
-        Ok(Self { jobs: Arc::new(JobRepo::new(db.clone())), queue: Arc::new(JobQueue::new()), memories, db, paths: paths.clone(), port, tasks, workflows })
+        Ok(Self { jobs: Arc::new(JobRepo::new(db.clone())), queue: Arc::new(JobQueue::new()), memories, db, paths: paths.clone(), port, tasks, workflows, plugin_tool_host: None })
+    }
+
+    /// Points `plugin_tools`/`call_plugin_tool` at a live host. Called once, at daemon
+    /// startup, before the backend is shared.
+    pub fn with_plugin_tool_host(mut self, host: Arc<dyn crate::plugin_tools::PluginToolHost>) -> Self {
+        self.plugin_tool_host = Some(host);
+        self
     }
 
     /// Runs a synchronous body that touches the Db, the BM25 index, the vectors or
@@ -956,6 +980,27 @@ impl Backend for LocalBackend {
                 }
             }
         }).await
+    }
+
+    async fn plugin_tools(&self) -> Result<Vec<PluginToolDecl>> {
+        Ok(self.plugin_tool_host.as_ref().map(|h| h.list()).unwrap_or_default())
+    }
+
+    /// Forwards the call and records it either way. The audit row is written after the
+    /// answer, not before, so `ok` tells the truth; a failure to write it does not
+    /// swallow the plugin's result, since the caller asked for the tool, not the row.
+    async fn call_plugin_tool(&self, plugin_id: &str, name: &str, args: serde_json::Value, actor: &str) -> Result<serde_json::Value> {
+        let Some(host) = self.plugin_tool_host.clone() else {
+            return Err(AtlasError::Invalid(format!("plugin {plugin_id} is not running")));
+        };
+        let out = host.call(plugin_id, name, args).await;
+        let memories = self.memories.clone();
+        let detail = serde_json::json!({ "plugin_id": plugin_id, "tool": name, "ok": out.is_ok() });
+        let actor = actor.to_string();
+        if let Err(e) = self.blocking(move || memories.audit(&actor, "plugin_tool_call", "plugin_tool", None, detail)).await {
+            tracing::warn!("failed to audit a plugin tool call: {e}");
+        }
+        out
     }
 }
 

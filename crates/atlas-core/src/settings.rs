@@ -1,9 +1,10 @@
 use crate::db::Db;
 use crate::memories::MemoryRepo;
+use crate::models::PluginToolDecl;
 use crate::{AtlasError, Result};
 use duckdb::params;
 use serde_json::{Map, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// The only keys the settings table accepts. `set_many` rejects anything else.
 /// `board.stages` is readable here but not writable: see [`SettingsRepo::set_many`].
@@ -74,8 +75,82 @@ pub const MCP_TOOL_NAMES: &[&str] = &[
 /// against, so a name that would silently gate nothing can never be stored by either.
 pub fn validate_mcp_tool_names(names: &[String]) -> Result<()> {
     for n in names {
-        if !MCP_TOOL_NAMES.contains(&n.as_str()) {
+        if !MCP_TOOL_NAMES.contains(&n.as_str()) && !is_plugin_mcp_tool_name(n) {
             return Err(AtlasError::Invalid(format!("unknown MCP tool name '{n}'")));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `n` has the shape `atlas-mcp`'s `plugin_tool_name` builds
+/// (`plugin__<id>__<name>`). Plugin tools are gated by the same `mcp.disabled_tools`
+/// list as the built-ins, but they are not in [`MCP_TOOL_NAMES`]: the set changes as
+/// plugins come and go, and a name has to stay disable-able while the plugin that
+/// declares it is not running. The shape, not the live registry, is what is checked, so
+/// the setting survives a restart with no app connected.
+fn is_plugin_mcp_tool_name(n: &str) -> bool {
+    n.strip_prefix("plugin__")
+        .and_then(|rest| rest.split_once("__"))
+        .is_some_and(|(id, name)| !id.is_empty() && !name.is_empty())
+}
+
+/// At most this many tools may be registered under one plugin id, so a plugin cannot
+/// flood every MCP client's tool list.
+pub const MAX_PLUGIN_TOOLS: usize = 32;
+/// The longest description a plugin tool may carry, in characters. Long enough for a
+/// useful sentence or two, short enough that 32 of them stay a reasonable tool list.
+pub const MAX_PLUGIN_TOOL_DESCRIPTION: usize = 400;
+
+/// Whether `s` matches `^[a-z0-9][a-z0-9-]{1,63}$`: the shape of a plugin id.
+fn is_plugin_id(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else { return false };
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() { return false; }
+    let rest: Vec<char> = chars.collect();
+    (1..=63).contains(&rest.len()) && rest.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-')
+}
+
+/// Whether `s` matches `^[a-z][a-z0-9_]{0,47}$`: the shape of a plugin tool name. The
+/// character set is deliberately narrower than a plugin id's, since the name is joined
+/// into an MCP tool name where `-` would be ambiguous against the `__` separators.
+fn is_plugin_tool_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else { return false };
+    if !first.is_ascii_lowercase() { return false; }
+    let rest: Vec<char> = chars.collect();
+    rest.len() <= 47 && rest.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_')
+}
+
+/// Checks a plugin's declared MCP tools before the daemon registers them. Every rule
+/// here exists because the decl reaches an MCP client's tool list unchanged: the id and
+/// name shapes keep `plugin_tool_name` reversible, the description bound keeps a tool
+/// list readable, and `args` has to be a JSON Schema object because that is what
+/// `inputSchema` means.
+pub fn validate_plugin_tool_decls(decls: &[PluginToolDecl]) -> Result<()> {
+    let mut per_plugin: HashMap<&str, Vec<&str>> = HashMap::new();
+    for d in decls {
+        if !is_plugin_id(&d.plugin_id) {
+            return Err(AtlasError::Invalid(format!("'{}' is not a plugin id: 2 to 64 characters of a-z, 0-9 and '-', starting with a letter or digit", d.plugin_id)));
+        }
+        if !is_plugin_tool_name(&d.name) {
+            return Err(AtlasError::Invalid(format!("'{}' is not a plugin tool name: 1 to 48 characters of a-z, 0-9 and '_', starting with a letter", d.name)));
+        }
+        if d.description.trim().is_empty() {
+            return Err(AtlasError::Invalid(format!("plugin tool '{}' needs a description", d.name)));
+        }
+        if d.description.chars().count() > MAX_PLUGIN_TOOL_DESCRIPTION {
+            return Err(AtlasError::Invalid(format!("plugin tool '{}' description is over {MAX_PLUGIN_TOOL_DESCRIPTION} characters", d.name)));
+        }
+        if d.args.get("type").and_then(|v| v.as_str()) != Some("object") {
+            return Err(AtlasError::Invalid(format!("plugin tool '{}' args must be a JSON Schema object with \"type\": \"object\"", d.name)));
+        }
+        let names = per_plugin.entry(d.plugin_id.as_str()).or_default();
+        if names.contains(&d.name.as_str()) {
+            return Err(AtlasError::Invalid(format!("plugin '{}' declares the tool '{}' twice", d.plugin_id, d.name)));
+        }
+        names.push(&d.name);
+        if names.len() > MAX_PLUGIN_TOOLS {
+            return Err(AtlasError::Invalid(format!("plugin '{}' declares more than {MAX_PLUGIN_TOOLS} tools", d.plugin_id)));
         }
     }
     Ok(())
@@ -362,12 +437,13 @@ fn check_type(key: &str, value: &Value) -> Result<()> {
             None => return wrong("a keyboard accelerator string"),
         },
         // A tool name outside the known list can never match a real tool, so it would
-        // silently do nothing while looking like it disabled something.
+        // silently do nothing while looking like it disabled something. A plugin tool's
+        // name is admitted by its shape instead: see `is_plugin_mcp_tool_name`.
         "mcp.disabled_tools" => match value.as_array() {
             Some(names) => {
                 for n in names {
                     match n.as_str() {
-                        Some(n) if MCP_TOOL_NAMES.contains(&n) => {}
+                        Some(n) if MCP_TOOL_NAMES.contains(&n) || is_plugin_mcp_tool_name(n) => {}
                         Some(n) => return wrong(&format!("an array of known MCP tool names (got '{n}')")),
                         None => return wrong("an array of strings"),
                     }
@@ -823,5 +899,67 @@ mod tests {
         let padding = "x".repeat(17 * 1024);
         let pack = format!(r#"{{"name":"x","base":"dark","tokens":{{}},"padding":"{padding}"}}"#);
         assert!(validate_theme_pack(&pack).is_err());
+    }
+
+    fn decl(plugin_id: &str, name: &str) -> PluginToolDecl {
+        PluginToolDecl {
+            plugin_id: plugin_id.into(),
+            name: name.into(),
+            description: "Counts something.".into(),
+            args: serde_json::json!({"type": "object", "properties": {}}),
+            scope: crate::models::PluginToolScope::Read,
+        }
+    }
+
+    #[test]
+    fn validate_plugin_tool_decls_accepts_a_well_formed_set() {
+        let decls = vec![decl("hello-world", "count"), decl("hello-world", "greet_twice")];
+        assert!(validate_plugin_tool_decls(&decls).is_ok());
+        assert!(validate_plugin_tool_decls(&[decl("a1", "z")]).is_ok(), "the shortest legal id and name");
+    }
+
+    #[test]
+    fn validate_plugin_tool_decls_rejects_a_malformed_plugin_id() {
+        for bad in ["", "a", "-lead", "Upper", "has space", "under_score", &"a".repeat(65)] {
+            assert!(validate_plugin_tool_decls(&[decl(bad, "count")]).is_err(), "accepted plugin id '{bad}'");
+        }
+    }
+
+    #[test]
+    fn validate_plugin_tool_decls_rejects_a_malformed_tool_name() {
+        for bad in ["", "1count", "Count", "with-dash", "has space", &"a".repeat(49)] {
+            assert!(validate_plugin_tool_decls(&[decl("hello-world", bad)]).is_err(), "accepted tool name '{bad}'");
+        }
+    }
+
+    #[test]
+    fn validate_plugin_tool_decls_rejects_a_bad_description_or_args() {
+        let mut blank = decl("hello-world", "count");
+        blank.description = "   ".into();
+        assert!(validate_plugin_tool_decls(&[blank]).is_err(), "a blank description");
+
+        let mut long = decl("hello-world", "count");
+        long.description = "x".repeat(MAX_PLUGIN_TOOL_DESCRIPTION + 1);
+        assert!(validate_plugin_tool_decls(&[long]).is_err(), "a description over the cap");
+
+        for args in [serde_json::json!([]), serde_json::json!("object"), serde_json::json!({}), serde_json::json!({"type": "string"})] {
+            let mut d = decl("hello-world", "count");
+            d.args = args.clone();
+            assert!(validate_plugin_tool_decls(&[d]).is_err(), "accepted args {args}");
+        }
+    }
+
+    #[test]
+    fn validate_plugin_tool_decls_rejects_duplicates_and_more_than_the_cap() {
+        let dupes = vec![decl("hello-world", "count"), decl("hello-world", "count")];
+        assert!(validate_plugin_tool_decls(&dupes).is_err(), "the same name twice under one plugin");
+
+        let across = vec![decl("hello-world", "count"), decl("other-plugin", "count")];
+        assert!(validate_plugin_tool_decls(&across).is_ok(), "the same name under two plugins is fine");
+
+        let at_cap: Vec<PluginToolDecl> = (0..MAX_PLUGIN_TOOLS).map(|i| decl("hello-world", &format!("t{i}"))).collect();
+        assert!(validate_plugin_tool_decls(&at_cap).is_ok());
+        let over_cap: Vec<PluginToolDecl> = (0..=MAX_PLUGIN_TOOLS).map(|i| decl("hello-world", &format!("t{i}"))).collect();
+        assert!(validate_plugin_tool_decls(&over_cap).is_err());
     }
 }

@@ -12,7 +12,7 @@ path = "src/main.rs"
 atlas-core = { path = "../atlas-core" }
 atlas-mcp = { path = "../atlas-mcp" }
 rmcp = { version = "3.2", features = ["server", "transport-streamable-http-server"] }
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["cors"] }
 tokio.workspace = true
 serde.workspace = true
@@ -29,3 +29,7 @@ reqwest.workspace = true
 tempfile.workspace = true
 uuid.workspace = true
 git2 = "0.21"
+# Test-only: stands in for the desktop app on the plugin channel. Already in the lock
+# file, and the daemon itself only ever serves the server half (axum's `ws`).
+tokio-tungstenite = "0.28"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }

@@ -1,5 +1,6 @@
 mod http;
 mod mcp_clients;
+mod plugin_tools;
 mod scheduler;
 mod state;
 mod worker;
@@ -62,9 +63,12 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], args.port))).await?;
     let addr = listener.local_addr()?;
     backend.port = Some(addr.port());
-    let backend = Arc::new(backend);
+    // The plugin channel is the backend's `PluginToolHost` and the routes' registry at
+    // once, so it is built before the backend is shared and handed to both.
+    let plugin_tools = Arc::new(plugin_tools::PluginToolChannel::new());
+    let backend = Arc::new(backend.with_plugin_tool_host(plugin_tools.clone()));
     let mcp_clients = Arc::new(mcp_clients::ClientRegistry::new());
-    let state = AppState { backend: backend.clone(), mcp_clients: mcp_clients.clone() };
+    let state = AppState { backend: backend.clone(), mcp_clients: mcp_clients.clone(), plugin_tools };
 
     // One worker, in this process: it drains the `jobs` table the API writes into,
     // and it is the only consumer, so a job is never claimed twice.

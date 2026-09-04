@@ -468,6 +468,31 @@ impl Backend for RemoteBackend {
         )
         .await
     }
+
+    // Plugin MCP tools (Phase 13b). Only the daemon holds the desktop app's socket, so
+    // the stdio shim reaches a plugin tool the same way it reaches everything else: over
+    // HTTP, which is what makes `atlas mcp` list and call exactly the tools the daemon's
+    // own streamable HTTP transport does.
+    async fn plugin_tools(&self) -> Result<Vec<PluginToolDecl>> {
+        Self::handle(self.client.get(format!("{}/mcp/plugin-tools", self.base)).send().await.map_err(Self::net)?).await
+    }
+
+    async fn call_plugin_tool(&self, plugin_id: &str, name: &str, args: serde_json::Value, actor: &str) -> Result<serde_json::Value> {
+        // The id and name are percent-encoded rather than interpolated: both are bounded
+        // to a safe character set at registration, but this URL is built from an MCP
+        // client's tool name, which nothing here validated.
+        let mut url = reqwest::Url::parse(&format!("{}/mcp/plugin-tools", self.base)).map_err(|e| AtlasError::Other(e.to_string()))?;
+        {
+            let mut segs = url.path_segments_mut().map_err(|_| AtlasError::Other("the daemon base URL cannot be a base".into()))?;
+            segs.push(plugin_id);
+            segs.push(name);
+            segs.push("call");
+        }
+        Self::handle(
+            self.client.post(url).header("X-Atlas-Actor", actor).json(&serde_json::json!({"args": args})).send().await.map_err(Self::net)?,
+        )
+        .await
+    }
 }
 
 /// The shape `GET /runs/{id}` answers with.

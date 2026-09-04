@@ -780,6 +780,33 @@ pub struct FrameworkListing {
     pub documents: Vec<FrameworkDoc>,
 }
 
+// ---- plugin MCP tools (Phase 13b) ----
+
+/// Whether a plugin tool only reads state or can change it. Mirrors `atlas-mcp`'s
+/// `ToolScope`, which this crate cannot import: `atlas-mcp` depends on `atlas-core`,
+/// not the other way round. Serialised the same way (`"read"` / `"write"`), so the
+/// `/api/v1/mcp/status` tools table renders a plugin row's badge exactly like a
+/// built-in's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum PluginToolScope { Read, Write }
+
+/// One MCP tool a desktop plugin contributes. The app registers a plugin's whole set
+/// with `PUT /api/v1/mcp/plugin-tools/{plugin_id}`, where the body omits `plugin_id`
+/// (the path already names it) and the daemon fills it in, which is why the field
+/// defaults rather than being required.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PluginToolDecl {
+    #[serde(default)]
+    pub plugin_id: String,
+    pub name: String,
+    pub description: String,
+    /// A JSON Schema object describing the tool's arguments, handed to MCP clients as
+    /// the tool's `inputSchema` unchanged.
+    pub args: serde_json::Value,
+    pub scope: PluginToolScope,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

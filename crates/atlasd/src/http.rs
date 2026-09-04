@@ -190,7 +190,10 @@ pub fn cors_layer() -> CorsLayer {
 
 #[derive(Deserialize)] pub struct RegisterMcpClientBody { pub id: String, pub transport: String, pub client_name: String, #[serde(default)] pub client_version: Option<String> }
 #[derive(Deserialize)] pub struct McpHeartbeatBody { pub tool_calls: u64 }
-#[derive(Serialize)] pub struct McpToolRow { pub name: &'static str, pub description: &'static str, pub args: &'static str, pub scope: ToolScope, pub enabled: bool }
+/// One row of `GET /api/v1/mcp/status`'s tools table. The strings are owned rather than
+/// `&'static str` because a plugin's tools are registered at run time; `source` says
+/// which they are: `"builtin"` for `TOOL_TABLE`, `"plugin:<id>"` for a plugin's.
+#[derive(Serialize)] pub struct McpToolRow { pub name: String, pub description: String, pub args: String, pub scope: ToolScope, pub enabled: bool, pub source: String }
 #[derive(Serialize)] pub struct McpStdioTransport { pub command: &'static str }
 #[derive(Serialize)] pub struct McpHttpTransport { pub url: String, pub protocol_version: String }
 #[derive(Serialize)] pub struct McpTransports { pub stdio: McpStdioTransport, pub http: McpHttpTransport }
@@ -230,6 +233,10 @@ pub fn cors_layer() -> CorsLayer {
     pub connect: ProjectMcpConnect,
 }
 #[derive(Deserialize)] pub struct McpToolsBody { pub disabled: Vec<String> }
+/// `PUT /api/v1/mcp/plugin-tools/{plugin_id}`'s body. Each decl's `plugin_id` is
+/// optional in the JSON and overwritten from the path.
+#[derive(Deserialize)] pub struct PluginToolsBody { pub tools: Vec<PluginToolDecl> }
+#[derive(Deserialize)] pub struct PluginToolCallBody { #[serde(default)] pub args: serde_json::Value }
 
 fn actor(q: &ActorQ) -> &str { q.actor.as_deref().unwrap_or("api") }
 
@@ -361,6 +368,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/mcp/clients/{id}", put(heartbeat_mcp_client).delete(unregister_mcp_client))
         .route("/api/v1/projects/{id}/mcp", get(project_mcp))
         .route("/api/v1/projects/{id}/mcp/tools", put(put_project_mcp_tools))
+        .route("/api/v1/mcp/plugin-tools", get(list_plugin_tools))
+        .route("/api/v1/mcp/plugin-tools/{plugin_id}", put(put_plugin_tools).delete(delete_plugin_tools))
+        .route("/api/v1/mcp/plugin-tools/{plugin_id}/{name}/call", post(call_plugin_tool))
+        .route("/api/v1/mcp/plugin-channel", get(plugin_channel))
         .with_state(state)
 }
 
@@ -729,9 +740,30 @@ async fn unregister_mcp_client(State(s): State<AppState>, ApiPath(id): ApiPath<S
 /// here, so the two cannot drift.
 async fn mcp_status(State(s): State<AppState>) -> Result<Json<McpStatusReport>, ApiError> {
     let disabled = atlas_mcp::disabled_tool_names(&*s.backend).await?;
-    let tools: Vec<McpToolRow> = TOOL_TABLE.iter()
-        .map(|m| McpToolRow { name: m.name, description: m.description, args: m.args, scope: m.scope, enabled: !disabled.contains(m.name) })
+    let mut tools: Vec<McpToolRow> = TOOL_TABLE.iter()
+        .map(|m| McpToolRow { name: m.name.into(), description: m.description.into(), args: m.args.into(), scope: m.scope, enabled: !disabled.contains(m.name), source: "builtin".into() })
         .collect();
+    // Plugin tools are listed under the same MCP names a client sees and gated by the
+    // same `mcp.disabled_tools` list. `args` is the schema's own property names, joined,
+    // since a plugin declares a JSON Schema rather than the hand-written summary
+    // `TOOL_TABLE` carries.
+    tools.extend(s.plugin_tools.list().into_iter().map(|d| {
+        let name = atlas_mcp::plugin_tool_name(&d.plugin_id, &d.name);
+        let required: Vec<&str> = d.args.get("required").and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
+        let args = d.args.get("properties").and_then(|v| v.as_object())
+            .map(|p| p.keys().map(|k| if required.contains(&k.as_str()) { format!("{k}*") } else { k.clone() }).collect::<Vec<_>>().join(", "))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "none".into());
+        McpToolRow {
+            enabled: !disabled.contains(&name),
+            name,
+            description: d.description,
+            args,
+            scope: match d.scope { PluginToolScope::Read => ToolScope::Read, PluginToolScope::Write => ToolScope::Write },
+            source: format!("plugin:{}", d.plugin_id),
+        }
+    }));
     let resources = atlas_mcp::resources_for(&*s.backend).await?;
     let prompts = atlas_mcp::prompts_for(&*s.backend).await?;
     let clients = s.mcp_clients.live();
@@ -791,4 +823,48 @@ async fn project_mcp(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> R
 /// apply; `disabled: []` clears the override.
 async fn put_project_mcp_tools(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor): Actor, ApiJson(b): ApiJson<McpToolsBody>) -> Result<Json<Project>, ApiError> {
     Ok(Json(s.backend.update_project(id, ProjectPatch { mcp_disabled_tools: Some(b.disabled), ..Default::default() }, &actor).await?))
+}
+
+// ---- plugin MCP tools (Phase 13b) ----
+
+/// `PUT /api/v1/mcp/plugin-tools/{plugin_id}`: replaces that plugin's whole tool set.
+/// The body's decls omit `plugin_id` (the path already names it) and it is filled in
+/// here, so a body can never register tools under a plugin other than the one it
+/// addressed. Validated before it is stored: these names reach every MCP client's tool
+/// list.
+async fn put_plugin_tools(State(s): State<AppState>, ApiPath(plugin_id): ApiPath<String>, ApiJson(b): ApiJson<PluginToolsBody>) -> Result<StatusCode, ApiError> {
+    let decls: Vec<PluginToolDecl> = b.tools.into_iter().map(|d| PluginToolDecl { plugin_id: plugin_id.clone(), ..d }).collect();
+    atlas_core::settings::validate_plugin_tool_decls(&decls)?;
+    s.plugin_tools.register(plugin_id, decls);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /api/v1/mcp/plugin-tools/{plugin_id}`: the plugin stopped. Always 204, the
+/// same reading `unregister_mcp_client` takes: a plugin that was never registered is
+/// already in the state the caller asked for.
+async fn delete_plugin_tools(State(s): State<AppState>, ApiPath(plugin_id): ApiPath<String>) -> StatusCode {
+    s.plugin_tools.unregister(&plugin_id);
+    StatusCode::NO_CONTENT
+}
+
+/// `GET /api/v1/mcp/plugin-tools`: every registered plugin tool, in the shape
+/// `RemoteBackend::plugin_tools` reads back, so the stdio shim lists exactly what the
+/// HTTP transport lists.
+async fn list_plugin_tools(State(s): State<AppState>) -> Json<Vec<PluginToolDecl>> {
+    Json(s.plugin_tools.list())
+}
+
+/// `POST /api/v1/mcp/plugin-tools/{plugin_id}/{name}/call`: the stdio shim's way to
+/// reach a plugin tool, since only this process holds the app's socket. The reply is the
+/// plugin's own JSON result, or the usual `{"error": string}` shape.
+async fn call_plugin_tool(State(s): State<AppState>, ApiPath((plugin_id, name)): ApiPath<(String, String)>, Actor(actor): Actor, ApiJson(b): ApiJson<PluginToolCallBody>) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(s.backend.call_plugin_tool(&plugin_id, &name, b.args, &actor).await?))
+}
+
+/// `GET /api/v1/mcp/plugin-channel`: the desktop app's end of the forwarding channel.
+/// Behind the same loopback guard as every other route, which is the whole of the
+/// authentication story here: anything that can reach this port can already read and
+/// write the database over the JSON API.
+async fn plugin_channel(State(s): State<AppState>, upgrade: axum::extract::ws::WebSocketUpgrade) -> Response {
+    upgrade.on_upgrade(move |socket| s.plugin_tools.clone().serve(socket))
 }

@@ -268,6 +268,40 @@ pub struct FrameworkDocsArgs {
 #[serde(rename_all = "lowercase")]
 pub enum ToolScope { Read, Write }
 
+/// The prefix every plugin-contributed MCP tool name carries. No name in [`TOOL_TABLE`]
+/// starts with it (asserted by `plugin_tool_names_never_collide_with_a_builtin`), so a
+/// plugin can never shadow a built-in tool.
+pub const PLUGIN_TOOL_PREFIX: &str = "plugin__";
+
+/// The MCP name a plugin's tool is listed and called under:
+/// `plugin__<plugin id, '-' as '_'>__<tool name>`. The id's dashes become underscores
+/// because MCP clients treat a tool name as an identifier; the doubled underscore keeps
+/// the two halves apart, since neither an id nor a tool name may contain one
+/// (`atlas_core::settings::validate_plugin_tool_decls`).
+pub fn plugin_tool_name(plugin_id: &str, name: &str) -> String {
+    format!("{PLUGIN_TOOL_PREFIX}{}__{name}", plugin_id.replace('-', "_"))
+}
+
+/// The inverse of [`plugin_tool_name`]: the underscored plugin id and the tool name, or
+/// `None` for any name that is not a plugin tool's. The id comes back underscored
+/// because the mapping loses which underscores were dashes; the caller resolves the real
+/// id against the registered decls.
+pub fn parse_plugin_tool_name(mcp_name: &str) -> Option<(String, String)> {
+    let rest = mcp_name.strip_prefix(PLUGIN_TOOL_PREFIX)?;
+    let (plugin_id, name) = rest.split_once("__")?;
+    if plugin_id.is_empty() || name.is_empty() { return None; }
+    Some((plugin_id.to_string(), name.to_string()))
+}
+
+/// The rmcp tool a plugin decl is listed as. `args` is handed through as the tool's
+/// `inputSchema` unchanged; anything that is not a JSON object (which
+/// `validate_plugin_tool_decls` refuses at registration) degrades to an empty object
+/// rather than dropping the tool.
+fn plugin_tool(decl: &PluginToolDecl) -> Tool {
+    let schema = decl.args.as_object().cloned().unwrap_or_default();
+    Tool::new(plugin_tool_name(&decl.plugin_id, &decl.name), decl.description.clone(), Arc::new(schema))
+}
+
 /// One row of the MCP tool status table: enough to render `docs/usage.md`'s table and
 /// the desktop Settings card without either hand-typing the other's copy or this
 /// crate depending on either. `atlas-mcp-tool-table-matches-the-router` (below) checks
@@ -1119,7 +1153,13 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
     async fn list_tools(&self, _request: Option<PaginatedRequestParams>, context: RequestContext<RoleServer>) -> Result<ListToolsResult, McpError> {
         let disabled = self.disabled_tools().await?;
         let supports_cache_hints = context.protocol_version().is_some_and(|version| version >= ProtocolVersion::V_2026_07_28);
-        let tools = self.tool_router.list_all().into_iter().filter(|t| !disabled.contains(t.name.as_ref())).collect();
+        // Plugin tools join the static list before the `disabled` filter, so
+        // `mcp.disabled_tools` hides one exactly the way it hides a built-in. A backend
+        // with no plugins behind it answers with an empty list, which is every backend
+        // but the daemon's and the shim's.
+        let mut tools = self.tool_router.list_all();
+        tools.extend(self.backend.plugin_tools().await.map_err(err)?.iter().map(plugin_tool));
+        let tools = tools.into_iter().filter(|t| !disabled.contains(t.name.as_ref())).collect();
         Ok(ListToolsResult {
             result_type: Some(ResultType::COMPLETE),
             tools,
@@ -1167,6 +1207,25 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_string);
             hook(session_id, context.client_info(), context.protocol_version(), project.as_ref().map(|p| p.id));
+        }
+        // A plugin tool is not in the static router, so it is dispatched here, after
+        // both gates and the hook have run on its MCP name exactly as they would on a
+        // built-in's.
+        if let Some((underscored_id, name)) = parse_plugin_tool_name(request.name.as_ref()) {
+            // The mapping to an MCP name loses which underscores in the plugin id were
+            // dashes, so the real id comes back from the registered decls. When nothing
+            // matches, the underscored id is forwarded as-is rather than refused here:
+            // an app that has just disconnected has no decls left, and the backend is
+            // the one that can tell "the plugin is not running" from "that plugin
+            // declares no such tool".
+            let decls = self.backend.plugin_tools().await.map_err(err)?;
+            let plugin_id = decls.iter()
+                .find(|d| d.name == name && d.plugin_id.replace('-', "_") == underscored_id)
+                .map(|d| d.plugin_id.clone())
+                .unwrap_or(underscored_id);
+            let args = request.arguments.clone().map(serde_json::Value::Object).unwrap_or_else(|| serde_json::json!({}));
+            let out = self.backend.call_plugin_tool(&plugin_id, &name, args, &self.source_tool).await.map_err(err)?;
+            return Ok(json_result(&out)?.into());
         }
         let tcc = ToolCallContext::new(self, request, context);
         self.tool_router.call(tcc).await
@@ -2301,5 +2360,159 @@ mod tests {
         let s = AtlasMcp::new(backend);
         let err = s.workflow_run(Parameters(WorkflowRunArgs { name: "does-not-exist".into(), input: None })).await.unwrap_err();
         assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS, "{err:?}");
+    }
+
+    // ---- plugin MCP tools (Phase 13b) ----
+
+    #[test]
+    fn plugin_tool_names_round_trip() {
+        assert_eq!(plugin_tool_name("hello-world", "count"), "plugin__hello_world__count");
+        assert_eq!(parse_plugin_tool_name("plugin__hello_world__count"), Some(("hello_world".into(), "count".into())));
+        // A tool name may hold single underscores; only the first doubled one splits.
+        assert_eq!(parse_plugin_tool_name("plugin__hello_world__greet_twice"), Some(("hello_world".into(), "greet_twice".into())));
+        for not_a_plugin_tool in ["memory_remember", "plugin__", "plugin__nodoubleunderscore", "plugin____count", "plugin__id__"] {
+            assert_eq!(parse_plugin_tool_name(not_a_plugin_tool), None, "parsed '{not_a_plugin_tool}'");
+        }
+    }
+
+    /// A plugin tool can never shadow a built-in, because no built-in name starts with
+    /// the prefix every plugin tool carries. Asserted rather than assumed: adding a
+    /// `plugin__`-prefixed tool to `TOOL_TABLE` would otherwise be silently shadowable.
+    #[test]
+    fn plugin_tool_names_never_collide_with_a_builtin() {
+        for meta in TOOL_TABLE {
+            assert!(!meta.name.starts_with(PLUGIN_TOOL_PREFIX), "{} would collide with a plugin tool", meta.name);
+        }
+    }
+
+    /// A `PluginToolHost` that answers from a fixed table and records what it was asked,
+    /// standing in for the daemon's WebSocket channel.
+    struct StubHost {
+        decls: Vec<PluginToolDecl>,
+        calls: Arc<Mutex<Vec<(String, String, serde_json::Value)>>>,
+        /// When false, every call answers the way an app that is not connected does.
+        connected: bool,
+    }
+
+    impl atlas_core::plugin_tools::PluginToolHost for StubHost {
+        fn list(&self) -> Vec<PluginToolDecl> { self.decls.clone() }
+        fn call(&self, plugin_id: &str, name: &str, args: serde_json::Value) -> atlas_core::plugin_tools::BoxFuture<'_, atlas_core::Result<serde_json::Value>> {
+            let connected = self.connected;
+            let plugin_id = plugin_id.to_string();
+            let name = name.to_string();
+            let calls = self.calls.clone();
+            Box::pin(async move {
+                if !connected {
+                    return Err(atlas_core::AtlasError::Invalid(format!("plugin {plugin_id} is not running")));
+                }
+                calls.lock().unwrap().push((plugin_id, name, args.clone()));
+                Ok(serde_json::json!({ "echoed": args }))
+            })
+        }
+    }
+
+    fn stub_decls() -> Vec<PluginToolDecl> {
+        ["count", "greet_twice"].into_iter().map(|name| PluginToolDecl {
+            plugin_id: "hello-world".into(),
+            name: name.into(),
+            description: format!("The {name} tool."),
+            args: serde_json::json!({"type": "object", "properties": {"n": {"type": "integer"}}}),
+            scope: atlas_core::models::PluginToolScope::Read,
+        }).collect()
+    }
+
+    /// Two plugin tools are listed under their MCP names alongside the built-ins,
+    /// `mcp.disabled_tools` hides one exactly as it hides a built-in, and a call is
+    /// forwarded to the host with the dashed plugin id and the caller's arguments.
+    #[tokio::test]
+    async fn plugin_tools_are_listed_gated_and_forwarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let host = Arc::new(StubHost { decls: stub_decls(), calls: calls.clone(), connected: true });
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(dir.path()), None, false).unwrap().with_plugin_tool_host(host));
+        let s = AtlasMcp::new(backend.clone()).with_source_tool("test");
+
+        let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+        let handle = tokio::spawn(async move {
+            let running = s.serve(server_io).await.unwrap();
+            running.waiting().await.unwrap();
+        });
+        let client: rmcp::service::RunningService<rmcp::RoleClient, ()> = ().serve(client_io).await.unwrap();
+
+        let tools = client.list_tools(None).await.unwrap();
+        let names: Vec<&str> = tools.tools.iter().map(|t| t.name.as_ref()).collect();
+        assert!(names.contains(&"plugin__hello_world__count"), "{names:?}");
+        assert!(names.contains(&"plugin__hello_world__greet_twice"), "{names:?}");
+        assert!(names.contains(&"memory_remember"), "the built-ins are still there: {names:?}");
+        let listed = tools.tools.iter().find(|t| t.name == "plugin__hello_world__count").unwrap();
+        assert_eq!(listed.description.as_deref(), Some("The count tool."));
+        assert_eq!(listed.input_schema.get("type").and_then(|v| v.as_str()), Some("object"), "the decl's args become the input schema");
+
+        let params = CallToolRequestParams::new("plugin__hello_world__count")
+            .with_arguments(serde_json::Map::from_iter([("n".to_string(), serde_json::json!(3))]));
+        let result = client.call_tool(params).await.unwrap();
+        let text: String = result.content.iter().filter_map(|c| c.as_text()).map(|t| t.text.clone()).collect();
+        let payload: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(payload["echoed"]["n"], 3, "{payload}");
+        let recorded = calls.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, "hello-world", "the dashed id, restored from the registry");
+        assert_eq!(recorded[0].1, "count");
+        assert_eq!(recorded[0].2["n"], 3);
+
+        // The call wrote an audit row, the same way every built-in write does.
+        let audited: i64 = backend.db.with_conn(|c| Ok(c.query_row("select count(*) from audit where action = 'plugin_tool_call'", [], |r| r.get::<_, i64>(0))?)).unwrap();
+        assert_eq!(audited, 1);
+
+        backend.set_settings(serde_json::Map::from_iter([("mcp.disabled_tools".to_string(), serde_json::json!(["plugin__hello_world__count"]))]), "t").await.unwrap();
+        let tools = client.list_tools(None).await.unwrap();
+        let names: Vec<&str> = tools.tools.iter().map(|t| t.name.as_ref()).collect();
+        assert!(!names.contains(&"plugin__hello_world__count"), "a disabled plugin tool is hidden: {names:?}");
+        assert!(names.contains(&"plugin__hello_world__greet_twice"), "{names:?}");
+        let refused = client.call_tool(CallToolRequestParams::new("plugin__hello_world__count")).await.unwrap_err();
+        assert!(matches!(&refused, rmcp::service::ServiceError::McpError(e) if e.code == rmcp::model::ErrorCode::METHOD_NOT_FOUND), "{refused:?}");
+
+        client.cancel().await.unwrap();
+        handle.await.unwrap();
+    }
+
+    /// An app that is not connected surfaces as `invalid_params` carrying the host's own
+    /// "is not running" message, not as an internal error.
+    #[tokio::test]
+    async fn a_plugin_tool_call_with_no_app_connected_is_invalid_params() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = Arc::new(StubHost { decls: stub_decls(), calls: Arc::new(Mutex::new(Vec::new())), connected: false });
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(dir.path()), None, false).unwrap().with_plugin_tool_host(host));
+        let s = AtlasMcp::new(backend).with_source_tool("test");
+
+        let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+        let handle = tokio::spawn(async move {
+            let running = s.serve(server_io).await.unwrap();
+            running.waiting().await.unwrap();
+        });
+        let client: rmcp::service::RunningService<rmcp::RoleClient, ()> = ().serve(client_io).await.unwrap();
+
+        let call = client.call_tool(CallToolRequestParams::new("plugin__hello_world__count")).await.unwrap_err();
+        match &call {
+            rmcp::service::ServiceError::McpError(e) => {
+                assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS, "{e:?}");
+                assert!(e.message.contains("hello-world is not running"), "{e:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        client.cancel().await.unwrap();
+        handle.await.unwrap();
+    }
+
+    /// A backend with no plugin host behind it lists no plugin tools and refuses a call
+    /// to one, which is what the CLI's in-process server and every test backend see.
+    #[tokio::test]
+    async fn a_backend_without_a_plugin_host_lists_none_and_refuses_a_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(dir.path()), None, false).unwrap());
+        assert!(backend.plugin_tools().await.unwrap().is_empty());
+        let e = backend.call_plugin_tool("hello-world", "count", serde_json::json!({}), "test").await.unwrap_err();
+        assert!(matches!(e, atlas_core::AtlasError::Invalid(ref m) if m.contains("is not running")), "{e:?}");
     }
 }
