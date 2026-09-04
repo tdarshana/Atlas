@@ -2597,6 +2597,29 @@ async fn plugin_tools_are_registered_listed_called_and_dropped_with_the_socket()
     })).send().await.unwrap();
     assert_eq!(bad.status(), 400, "a malformed tool name was accepted");
 
+    // A tool name or plugin id that would make the MCP name ambiguous is refused too.
+    let ambiguous_name = c.put(format!("{base}/mcp/plugin-tools/hello-world")).json(&serde_json::json!({
+        "tools": [{"name": "b__count", "description": "x", "args": {"type": "object"}, "scope": "read"}],
+    })).send().await.unwrap();
+    assert_eq!(ambiguous_name.status(), 400);
+    let message = ambiguous_name.json::<serde_json::Value>().await.unwrap()["error"].as_str().unwrap().to_string();
+    assert!(message.contains("cannot contain \"__\""), "{message}");
+
+    let ambiguous_id = c.put(format!("{base}/mcp/plugin-tools/hello--world")).json(&serde_json::json!({
+        "tools": [{"name": "count", "description": "x", "args": {"type": "object"}, "scope": "read"}],
+    })).send().await.unwrap();
+    assert_eq!(ambiguous_id.status(), 400);
+    let message = ambiguous_id.json::<serde_json::Value>().await.unwrap()["error"].as_str().unwrap().to_string();
+    assert!(message.contains("cannot contain \"--\""), "{message}");
+
+    // An empty set is an unregister, and it still refuses an id it would never store.
+    let empty_bad_id = c.put(format!("{base}/mcp/plugin-tools/Not%20An%20Id")).json(&serde_json::json!({"tools": []})).send().await.unwrap();
+    assert_eq!(empty_bad_id.status(), 400, "an empty set skipped the id check");
+
+    // The one good registration above is still the only thing in the registry.
+    let listed: Vec<serde_json::Value> = c.get(format!("{base}/mcp/plugin-tools")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(listed.len(), 1, "a refused registration changed the registry: {listed:?}");
+
     let (app, close_app) = plugin_app(d.port, |request| {
         assert_eq!(request["plugin_id"], "hello-world", "{request}");
         assert_eq!(request["tool"], "count", "{request}");
@@ -2700,12 +2723,29 @@ async fn a_plugin_error_and_the_call_route_both_carry_the_plugins_answer() {
     let message = unknown.json::<serde_json::Value>().await.unwrap()["error"].as_str().unwrap().to_string();
     assert!(message.contains("unknown plugin tool plugin__hello_world__no_such_tool"), "{message}");
 
-    // Unregistering drops the tools while the app stays connected.
+    // A second connection replaces the first, and the daemon hangs the first one up
+    // rather than leaving its task parked until that client notices.
+    let (second_app, close_second) = plugin_app(d.port, |request| serde_json::json!({"id": request["id"], "ok": true, "result": {}})).await;
+    let closed = tokio::time::timeout(Duration::from_secs(5), app).await;
+    assert!(closed.is_ok(), "the replaced connection was still open 5s after being replaced");
+    closed.unwrap().unwrap();
+    let _ = close_app.send(());
+
+    // The replacement serves calls, so the swap left a working channel behind.
+    let after = c.post(format!("{base}/mcp/plugin-tools/hello-world/ok_tool/call"))
+        .json(&serde_json::json!({"args": {}})).send().await.unwrap();
+    assert_eq!(after.status(), 200, "the replacement connection does not serve calls");
+
+    // An empty tool set unregisters, the same as DELETE.
+    let emptied = c.put(format!("{base}/mcp/plugin-tools/hello-world")).json(&serde_json::json!({"tools": []})).send().await.unwrap();
+    assert_eq!(emptied.status(), 204);
+    let listed: Vec<serde_json::Value> = c.get(format!("{base}/mcp/plugin-tools")).send().await.unwrap().json().await.unwrap();
+    assert!(listed.is_empty(), "an empty set left tools behind: {listed:?}");
+
+    // Unregistering an id that holds nothing is still 204.
     let removed = c.delete(format!("{base}/mcp/plugin-tools/hello-world")).send().await.unwrap();
     assert_eq!(removed.status(), 204);
-    let listed: Vec<serde_json::Value> = c.get(format!("{base}/mcp/plugin-tools")).send().await.unwrap().json().await.unwrap();
-    assert!(listed.is_empty(), "{listed:?}");
 
-    close_app.send(()).unwrap();
-    app.await.unwrap();
+    close_second.send(()).unwrap();
+    second_app.await.unwrap();
 }

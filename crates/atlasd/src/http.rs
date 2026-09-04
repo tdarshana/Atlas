@@ -830,12 +830,17 @@ async fn put_project_mcp_tools(State(s): State<AppState>, ApiPath(id): ApiPath<U
 /// `PUT /api/v1/mcp/plugin-tools/{plugin_id}`: replaces that plugin's whole tool set.
 /// The body's decls omit `plugin_id` (the path already names it) and it is filled in
 /// here, so a body can never register tools under a plugin other than the one it
-/// addressed. Validated before it is stored: these names reach every MCP client's tool
-/// list.
+/// addressed. `register` validates before it stores, since these names reach every MCP
+/// client's tool list; an empty set is an unregister, so a plugin whose last tool goes
+/// away leaves no entry behind and an unvalidated path segment is never stored as one.
 async fn put_plugin_tools(State(s): State<AppState>, ApiPath(plugin_id): ApiPath<String>, ApiJson(b): ApiJson<PluginToolsBody>) -> Result<StatusCode, ApiError> {
+    if b.tools.is_empty() {
+        atlas_core::settings::validate_plugin_id(&plugin_id)?;
+        s.plugin_tools.unregister(&plugin_id);
+        return Ok(StatusCode::NO_CONTENT);
+    }
     let decls: Vec<PluginToolDecl> = b.tools.into_iter().map(|d| PluginToolDecl { plugin_id: plugin_id.clone(), ..d }).collect();
-    atlas_core::settings::validate_plugin_tool_decls(&decls)?;
-    s.plugin_tools.register(plugin_id, decls);
+    s.plugin_tools.register(plugin_id, decls)?;
     Ok(StatusCode::NO_CONTENT)
 }
 

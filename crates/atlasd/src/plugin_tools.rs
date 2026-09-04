@@ -61,9 +61,17 @@ impl PluginToolChannel {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Replaces `plugin_id`'s whole tool set. The caller validates the decls first.
-    pub fn register(&self, plugin_id: String, tools: Vec<PluginToolDecl>) {
+    /// Replaces `plugin_id`'s whole tool set. Validation happens here, not in the route,
+    /// so nothing an MCP client will be offered can enter the registry unchecked however
+    /// many callers this grows.
+    pub fn register(&self, plugin_id: String, tools: Vec<PluginToolDecl>) -> Result<()> {
+        atlas_core::settings::validate_plugin_id(&plugin_id)?;
+        atlas_core::settings::validate_plugin_tool_decls(&tools)?;
+        if tools.iter().any(|t| t.plugin_id != plugin_id) {
+            return Err(AtlasError::Invalid(format!("every tool registered under {plugin_id} must carry that plugin id")));
+        }
         self.lock().registry.insert(plugin_id, tools);
+        Ok(())
     }
 
     /// Drops a plugin's tools. Silent when it had none: the app unregistering a plugin
@@ -98,7 +106,13 @@ impl PluginToolChannel {
         let (out, mut rx) = mpsc::unbounded_channel::<String>();
         let replaced = self.lock().socket.replace(Socket { generation, out });
         if let Some(old) = replaced {
-            self.drop_pending(old.generation, "plugin channel replaced", false);
+            let old_generation = old.generation;
+            // Dropping the predecessor's `out` sender is what ends its task rather than
+            // leaving it parked until its client happens to hang up: the registry held
+            // the only sender, so its `rx.recv()` arm sees the channel close, breaks, and
+            // drops its socket.
+            drop(old);
+            self.drop_pending(old_generation, "plugin channel replaced", false);
         }
 
         loop {

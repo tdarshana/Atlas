@@ -275,9 +275,15 @@ pub const PLUGIN_TOOL_PREFIX: &str = "plugin__";
 
 /// The MCP name a plugin's tool is listed and called under:
 /// `plugin__<plugin id, '-' as '_'>__<tool name>`. The id's dashes become underscores
-/// because MCP clients treat a tool name as an identifier; the doubled underscore keeps
-/// the two halves apart, since neither an id nor a tool name may contain one
-/// (`atlas_core::settings::validate_plugin_tool_decls`).
+/// because MCP clients treat a tool name as an identifier, and the doubled underscore
+/// separates the two halves.
+///
+/// The invariant this rests on is enforced at registration, not here:
+/// `atlas_core::settings::validate_plugin_tool_decls` refuses a plugin id containing
+/// `--` and a tool name containing `__`, so after the dash rewrite neither half can hold
+/// a `__` of its own and the separator is the only one in the name. Without those two
+/// rules the mapping would not be injective: plugin `a--b` with tool `count` and plugin
+/// `a` with tool `b__count` would both produce `plugin__a__b__count`.
 pub fn plugin_tool_name(plugin_id: &str, name: &str) -> String {
     format!("{PLUGIN_TOOL_PREFIX}{}__{name}", plugin_id.replace('-', "_"))
 }
@@ -286,6 +292,10 @@ pub fn plugin_tool_name(plugin_id: &str, name: &str) -> String {
 /// `None` for any name that is not a plugin tool's. The id comes back underscored
 /// because the mapping loses which underscores were dashes; the caller resolves the real
 /// id against the registered decls.
+///
+/// Splitting on the *first* `__` after the prefix is exact rather than a guess: a
+/// registered id holds no `--` and so no `__` after the rewrite, so the first one is the
+/// separator. A name built any other way is not one this function has to recover.
 pub fn parse_plugin_tool_name(mcp_name: &str) -> Option<(String, String)> {
     let rest = mcp_name.strip_prefix(PLUGIN_TOOL_PREFIX)?;
     let (plugin_id, name) = rest.split_once("__")?;
@@ -2372,6 +2382,39 @@ mod tests {
         assert_eq!(parse_plugin_tool_name("plugin__hello_world__greet_twice"), Some(("hello_world".into(), "greet_twice".into())));
         for not_a_plugin_tool in ["memory_remember", "plugin__", "plugin__nodoubleunderscore", "plugin____count", "plugin__id__"] {
             assert_eq!(parse_plugin_tool_name(not_a_plugin_tool), None, "parsed '{not_a_plugin_tool}'");
+        }
+    }
+
+    /// The mapping is injective over everything registration accepts, so no plugin can
+    /// take another plugin's calls and no plugin's tool is listed under a name that
+    /// resolves to someone else. `validate_plugin_tool_decls` is what makes this hold
+    /// (no `--` in an id, no `__` in a tool name), so every pair here is asserted valid
+    /// first: a rule loosened there would fail this test rather than ship quietly.
+    #[test]
+    fn distinct_plugin_tools_never_share_an_mcp_name() {
+        let ids = ["hello-world", "hello", "hello_world_is_not_an_id", "a1", "x-y-z", "helloworld", "hello-w"];
+        let names = ["count", "greet_twice", "c", "count_2", "b_count", "world_count"];
+        let mut seen: HashMap<String, (&str, &str)> = HashMap::new();
+        for id in ids {
+            for name in names {
+                let decl = PluginToolDecl {
+                    plugin_id: id.into(), name: name.into(), description: "x".into(),
+                    args: serde_json::json!({"type": "object"}),
+                    scope: atlas_core::models::PluginToolScope::Read,
+                };
+                let valid = atlas_core::settings::validate_plugin_tool_decls(&[decl]).is_ok();
+                let mcp_name = plugin_tool_name(id, name);
+                if !valid {
+                    // Only the deliberately illegal id in the list, kept here so the
+                    // test says out loud which shapes registration turns away.
+                    assert_eq!(id, "hello_world_is_not_an_id", "unexpectedly invalid: {id} / {name}");
+                    continue;
+                }
+                assert_eq!(parse_plugin_tool_name(&mcp_name), Some((id.replace('-', "_"), name.to_string())), "{mcp_name}");
+                if let Some(other) = seen.insert(mcp_name.clone(), (id, name)) {
+                    panic!("{mcp_name} is produced by both {other:?} and ({id}, {name})");
+                }
+            }
         }
     }
 
