@@ -93,6 +93,20 @@ fn short_id(id: uuid::Uuid) -> String {
     id.to_string()[..8].to_string()
 }
 
+/// The new `mcp_disabled_tools` list for `atlas project set --mcp-disable`/
+/// `--mcp-enable`: `current` plus `disable`, minus `enable`, deduplicated and sorted.
+/// The underlying patch field replaces the list wholesale rather than merging it, so
+/// this reads the project's current override and folds the two flags into it; the
+/// caller skips this entirely (leaving the override alone) when both flags are empty.
+fn merge_mcp_tools(current: Vec<String>, disable: Vec<String>, enable: Vec<String>) -> Vec<String> {
+    let mut tools: std::collections::BTreeSet<String> = current.into_iter().collect();
+    tools.extend(disable);
+    for t in &enable {
+        tools.remove(t);
+    }
+    tools.into_iter().collect()
+}
+
 pub async fn run(cmd: ProjectCmd, backend: &RemoteBackend) -> anyhow::Result<()> {
     match cmd {
         ProjectCmd::Connect { path } => super::print_json(&backend.connect_project(super::abs_path(path)?, "cli").await?),
@@ -117,12 +131,8 @@ pub async fn run(cmd: ProjectCmd, backend: &RemoteBackend) -> anyhow::Result<()>
             let mcp_disabled_tools = if mcp_disable.is_empty() && mcp_enable.is_empty() {
                 None
             } else {
-                let mut tools: std::collections::BTreeSet<String> = backend.get_project(id).await?.mcp_disabled_tools.into_iter().collect();
-                tools.extend(mcp_disable);
-                for t in &mcp_enable {
-                    tools.remove(t);
-                }
-                Some(tools.into_iter().collect())
+                let current = backend.get_project(id).await?.mcp_disabled_tools;
+                Some(merge_mcp_tools(current, mcp_disable, mcp_enable))
             };
             let patch = atlas_core::models::ProjectPatch { name, board_key: key, git_remote, mcp_disabled_tools };
             super::print_json(&backend.update_project(id, patch, "cli").await?)
@@ -163,5 +173,53 @@ pub async fn run(cmd: ProjectCmd, backend: &RemoteBackend) -> anyhow::Result<()>
             super::print_table(&["ID", "NAME", "ROOT", "LAST SEEN"], &rows);
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn mcp_disable_adds_to_an_empty_override() {
+        let merged = merge_mcp_tools(v(&[]), v(&["task_move", "memory_forget"]), v(&[]));
+        assert_eq!(merged, v(&["memory_forget", "task_move"]));
+    }
+
+    #[test]
+    fn mcp_disable_unions_with_the_current_override_without_duplicating() {
+        let merged = merge_mcp_tools(v(&["task_move"]), v(&["task_move", "memory_forget"]), v(&[]));
+        assert_eq!(merged, v(&["memory_forget", "task_move"]), "task_move must not appear twice");
+    }
+
+    #[test]
+    fn mcp_enable_removes_from_the_current_override() {
+        let merged = merge_mcp_tools(v(&["task_move", "memory_forget"]), v(&[]), v(&["task_move"]));
+        assert_eq!(merged, v(&["memory_forget"]));
+    }
+
+    /// Enabling a tool that was never disabled is a no-op, not an error.
+    #[test]
+    fn mcp_enable_of_a_tool_not_in_the_override_is_a_no_op() {
+        let merged = merge_mcp_tools(v(&["task_move"]), v(&[]), v(&["memory_forget"]));
+        assert_eq!(merged, v(&["task_move"]));
+    }
+
+    /// Disabling and enabling the same name in one call is not a contradiction: the
+    /// flags apply disable-then-enable, so the name ends up enabled.
+    #[test]
+    fn mcp_disable_and_enable_of_the_same_tool_leaves_it_enabled() {
+        let merged = merge_mcp_tools(v(&[]), v(&["task_move"]), v(&["task_move"]));
+        assert!(merged.is_empty(), "{merged:?}");
+    }
+
+    #[test]
+    fn mcp_disable_and_enable_together_apply_both_sides() {
+        let merged = merge_mcp_tools(v(&["memory_forget"]), v(&["task_move"]), v(&["memory_forget"]));
+        assert_eq!(merged, v(&["task_move"]));
     }
 }

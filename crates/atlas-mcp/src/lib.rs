@@ -452,6 +452,32 @@ impl<B: Backend> AtlasMcp<B> {
         Ok(Some(project))
     }
 
+    /// The project for the resolved root, for project-level MCP gating only (Task
+    /// MCP-A). Unlike `resolve_project`, this never connects: it always takes the
+    /// read-only "match an already-known project" step (the same one
+    /// `resolve_project_segment` gives a resource read, and `resolve_project` itself
+    /// falls back to when `project_connect` is disabled), regardless of whether
+    /// `project_connect` is disabled. Gating only needs to know which already-known
+    /// project's override applies to this call; it must never be the thing that
+    /// upserts a row, writes an audit entry, or triggers a profile build for a project
+    /// nobody has connected yet, which `resolve_project`'s connecting branch would do
+    /// on every uncached root while `project_connect` is enabled.
+    ///
+    /// A hit is not cached here: caching it would make a later, real `resolve_project`
+    /// call from the tool's own logic (if it needs one) see a stale hit and skip the
+    /// connect (and the profile refresh) it should still perform. Reading the cache
+    /// first is still safe and saves a rescan when an earlier real connect already
+    /// populated it.
+    async fn resolve_project_for_gating(&self, project_root: Option<PathBuf>) -> Result<Option<Project>, McpError> {
+        let Some(root) = self.root_for(project_root) else { return Ok(None) };
+        if let Some(p) = self.cached(&root) { return Ok(Some(p)); }
+        match self.resolve_project_segment(&root.to_string_lossy()).await {
+            Ok(Some(id)) => Ok(Some(self.backend.get_project(id).await.map_err(err)?)),
+            Ok(None) => Ok(None),
+            Err(e) => Err(err(e)),
+        }
+    }
+
     /// A lock poisoned by a panic in another session must not take this one down: the
     /// cache is a shortcut, so fall back to the backend rather than propagate.
     fn cached(&self, root: &PathBuf) -> Option<Project> {
@@ -1114,11 +1140,15 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
         // The project comes from the same precedence every other tool follows: this
         // call's own `project_root` argument, then `ATLAS_PROJECT_ROOT`, then the root
         // this server was started in; a call that resolves none is never gated by a
-        // project. A resolution error (for example project_connect disabled and the
-        // root unknown) is not this check's to report, so it is treated as "no project"
-        // and left for the tool's own logic to surface if it needs one.
+        // project. `resolve_project_for_gating`, not `resolve_project`, is what looks
+        // it up: this check must never connect an unknown project, upsert a row, or
+        // write an audit entry as a side effect of gating alone, for a tool that never
+        // touched the project store before (`agent_list` names `project_root` in its
+        // schema but never reads it). A resolution error (a malformed root, say) is not
+        // this check's to report, so it is treated as "no project" and left for the
+        // tool's own logic to surface if it needs one.
         let project_root = request.arguments.as_ref().and_then(|a| a.get("project_root")).and_then(|v| v.as_str()).map(PathBuf::from);
-        let project = self.resolve_project(project_root).await.unwrap_or(None);
+        let project = self.resolve_project_for_gating(project_root).await.unwrap_or(None);
         if let Some(p) = &project {
             if p.mcp_disabled_tools.iter().any(|t| t == request.name.as_ref()) {
                 return Err(McpError::method_not_found::<CallToolRequestMethod>());
@@ -1366,6 +1396,51 @@ mod tests {
         let mut args_b = JsonObject::new();
         args_b.insert("project_root".into(), serde_json::json!(repo_b.path().to_string_lossy()));
         client.call_tool(CallToolRequestParams::new("memory_list").with_arguments(args_b)).await.unwrap();
+
+        client.cancel().await.unwrap();
+        handle.await.unwrap();
+    }
+
+    /// Fix round 1: the gating check itself must never connect an unknown project or
+    /// write an audit row, only the tool's own logic may do that. `agent_list` names
+    /// `project_root` in its schema (`TOOL_TABLE`) but its handler never reads it
+    /// (`Parameters(_a)`), so it never touched the project store before this task; it
+    /// must not start now just because gating resolves a project on every call. True
+    /// whether `project_connect` is disabled (the default) or enabled: `resolve_project`
+    /// would connect (and audit) an uncached root once `project_connect` is enabled, so
+    /// `call_tool`'s gating step must go through `resolve_project_for_gating` instead,
+    /// which always takes the read-only "match a known project" path.
+    #[tokio::test]
+    async fn gating_a_read_tool_connects_nothing_and_writes_no_audit_row() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        let s = AtlasMcp::new(backend.clone()).with_env_project_root(false);
+
+        let (server_io, client_io) = tokio::io::duplex(16 * 1024);
+        let handle = tokio::spawn(async move {
+            let running = s.serve(server_io).await.unwrap();
+            running.waiting().await.unwrap();
+        });
+        let client: rmcp::service::RunningService<rmcp::RoleClient, ()> = ().serve(client_io).await.unwrap();
+
+        let mut args = JsonObject::new();
+        args.insert("project_root".into(), serde_json::json!(repo.path().to_string_lossy()));
+
+        // project_connect disabled (the default).
+        client.call_tool(CallToolRequestParams::new("agent_list").with_arguments(args.clone())).await.unwrap();
+        assert!(backend.list_projects().await.unwrap().is_empty(), "an unknown project must not be connected by gating alone");
+        assert_eq!(project_writes(&backend), 0, "gating must write no audit row");
+
+        // project_connect enabled: the branch that would make `resolve_project` connect
+        // an uncached root is now live; gating must still avoid it.
+        backend.set_settings(serde_json::Map::from_iter([("mcp.disabled_tools".to_string(), serde_json::json!([]))]), "t").await.unwrap();
+        client.call_tool(CallToolRequestParams::new("agent_list").with_arguments(args)).await.unwrap();
+        assert!(
+            backend.list_projects().await.unwrap().is_empty(),
+            "an unknown project must not be connected by gating alone, even with project_connect enabled"
+        );
+        assert_eq!(project_writes(&backend), 0, "gating must write no audit row, even with project_connect enabled");
 
         client.cancel().await.unwrap();
         handle.await.unwrap();
