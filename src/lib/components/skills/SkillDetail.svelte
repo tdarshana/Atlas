@@ -8,8 +8,7 @@
 	import { errorMessage } from '$lib/errors';
 	import { relativeAge } from '$lib/format';
 	import { copyText } from '$lib/shell';
-	import { sourceLabel } from '$lib/skills';
-	import { DETAIL_MAX, DETAIL_MIN } from '$lib/skills';
+	import { DETAIL_MAX, DETAIL_MIN, sourceLabel, splitFrontmatter } from '$lib/skills';
 	import type { Skill } from '$lib/types';
 	import MarkdownView from '$lib/ui/MarkdownView.svelte';
 	import ResizeBar from '$lib/ui/ResizeBar.svelte';
@@ -203,7 +202,14 @@
 				/>
 			{:else}
 				<div class="markdown">
-					<MarkdownView source={skill.body} path={skill.path ?? undefined} />
+					<!-- Preview skips the frontmatter: the name and the description it holds are
+					     already in this panel's header, and rendering the block prints it as a
+					     paragraph running into the first heading. Source still shows the file. -->
+					<MarkdownView
+						source={skill.body}
+						preview={splitFrontmatter(skill.body).markdown}
+						path={skill.path ?? undefined}
+					/>
 				</div>
 			{/if}
 

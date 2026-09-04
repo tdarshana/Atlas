@@ -12,8 +12,12 @@
 	type Mode = 'preview' | 'source';
 
 	interface Props {
-		/** Raw Markdown source. */
+		/** Raw Markdown source. Source mode always shows this, whole. */
 		source: string;
+		/** Rendered by Preview instead of `source`, for a document with a leading block
+		 * that should not be rendered as prose (a `SKILL.md`'s frontmatter). Source mode
+		 * still shows `source`, so nothing is hidden, only unrendered. */
+		preview?: string;
 		/** Shown in the header next to the switch, e.g. a document path. */
 		path?: string;
 		/** False hides the header and the switch, and always renders Preview. */
@@ -22,7 +26,13 @@
 		emptyText?: string;
 	}
 
-	let { source, path, showHeader = true, emptyText = 'Nothing to preview yet.' }: Props = $props();
+	let {
+		source,
+		preview,
+		path,
+		showHeader = true,
+		emptyText = 'Nothing to preview yet.'
+	}: Props = $props();
 
 	const MODE_KEY = 'atlas.markdown.mode';
 
@@ -53,8 +63,16 @@
 		writeStoredMode(next);
 	}
 
+	const previewSource = $derived(preview ?? source);
+
 	const contentHtml = $derived(
-		source ? (mode === 'preview' ? renderMarkdown(source) : highlightSource(source)) : ''
+		mode === 'preview'
+			? previewSource
+				? renderMarkdown(previewSource)
+				: ''
+			: source
+				? highlightSource(source)
+				: ''
 	);
 
 	async function openLink(href: string): Promise<void> {

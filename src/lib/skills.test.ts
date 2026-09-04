@@ -6,7 +6,8 @@ import {
 	nextDisabled,
 	skillCounts,
 	sourceGroup,
-	sourceLabel
+	sourceLabel,
+	splitFrontmatter
 } from './skills';
 import type { SkillSource, SkillSummary } from './types';
 
@@ -147,6 +148,39 @@ describe('enabledSummary', () => {
 		expect(enabledSummary([skill('a', 'native')])).toBe(
 			'1 of 1 skill enabled for this project'
 		);
+	});
+});
+
+describe('splitFrontmatter', () => {
+	it('lifts a closed block off the front', () => {
+		const body = '---\nname: deployer\ndescription: Ships it\n---\n\n# Deployer\n\nSteps.';
+		expect(splitFrontmatter(body)).toEqual({
+			frontmatter: '---\nname: deployer\ndescription: Ships it\n---',
+			markdown: '# Deployer\n\nSteps.'
+		});
+	});
+
+	it('leaves a body with no frontmatter alone', () => {
+		const body = '# Deployer\n\nSteps.';
+		expect(splitFrontmatter(body)).toEqual({ frontmatter: null, markdown: body });
+	});
+
+	it('treats an unterminated block as body text', () => {
+		const body = '---\nname: deployer\n\n# Deployer';
+		expect(splitFrontmatter(body)).toEqual({ frontmatter: null, markdown: body });
+	});
+
+	it('does not mistake a horizontal rule further down for a block', () => {
+		const body = '# Deployer\n\n---\n\nSteps.';
+		expect(splitFrontmatter(body)).toEqual({ frontmatter: null, markdown: body });
+	});
+
+	it('handles an empty block and an empty body', () => {
+		expect(splitFrontmatter('---\n---\n# Deployer')).toEqual({
+			frontmatter: '---\n---',
+			markdown: '# Deployer'
+		});
+		expect(splitFrontmatter('')).toEqual({ frontmatter: null, markdown: '' });
 	});
 });
 

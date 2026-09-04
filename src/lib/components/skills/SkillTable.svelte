@@ -60,7 +60,12 @@
 			{#if column.key === 'name'}
 				<span class="name" class:off={row.enabled_here === false}>{row.name}</span>
 			{:else if column.key === 'description'}
-				<span class="description" class:off={row.enabled_here === false}>{row.description}</span>
+				<span
+					class="description"
+					class:off={row.enabled_here === false}
+					title={row.description}
+					data-testid="skill-description-{row.id}"
+				>{row.description}</span>
 			{:else if column.key === 'source'}
 				<Badge
 					variant="outline"
@@ -101,7 +106,13 @@
 		overflow: hidden;
 	}
 
-	/* Two lines and then an ellipsis: a skill's description is a sentence, not a word. */
+	/* Two lines and then an ellipsis: a skill's description is a sentence, not a word, and
+	   some of them run to a paragraph. The DS row is a fixed 28px with `align-items:
+	   center`, so a cell taller than that is centred and spills over the rows above and
+	   below rather than being clipped by the cell's own `overflow: hidden`. The line
+	   height is therefore set so two lines fit inside the row (2 x 13px = 26px), and
+	   `max-height` holds that even if a font override changes the metrics. The full text
+	   is on the cell's `title`. */
 	.description {
 		display: -webkit-box;
 		-webkit-box-orient: vertical;
@@ -109,6 +120,9 @@
 		line-clamp: 2;
 		overflow: hidden;
 		white-space: normal;
+		font-size: 11px;
+		line-height: 13px;
+		max-height: 26px;
 	}
 
 	/* A skill this project has turned off is still listed, just visibly not in play. */

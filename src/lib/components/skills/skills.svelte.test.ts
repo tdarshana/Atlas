@@ -122,6 +122,41 @@ describe('SkillTable', () => {
 		expect(onopen).toHaveBeenCalledTimes(1);
 		expect(onopen.mock.calls[0][0].id).toBe('native:a');
 	});
+
+	it('opens from anywhere on the row, not just the name', async () => {
+		const onopen = vi.fn();
+		render(SkillTable, {
+			props: { id: 'skills', rows: [summary('a', 'native')], onopen }
+		});
+
+		// The description cell is the far side of the row from the name.
+		await fireEvent.click(screen.getByTestId('skill-description-native:a'));
+		expect(onopen).toHaveBeenCalledTimes(1);
+
+		// And the row itself is focusable, so Enter reaches it without a mouse.
+		const row = screen.getByTestId('skill-description-native:a').closest('[role="row"]')!;
+		expect(row.getAttribute('tabindex')).toBe('0');
+		await fireEvent.keyDown(row, { key: 'Enter' });
+		expect(onopen).toHaveBeenCalledTimes(2);
+	});
+
+	it('clamps the description to two lines and keeps the full text on the title', () => {
+		const long =
+			'A very long description that would otherwise wrap to several lines and paint ' +
+			'over the rows below it, which is exactly what the clamp is here to stop.';
+		render(SkillTable, {
+			props: {
+				id: 'skills',
+				rows: [summary('a', 'native', { description: long })],
+				onopen: () => {}
+			}
+		});
+
+		const cell = screen.getByTestId('skill-description-native:a');
+		// Svelte appends its scope class, so match the class rather than the whole string.
+		expect(cell.classList.contains('description')).toBe(true);
+		expect(cell.getAttribute('title')).toBe(long);
+	});
 });
 
 describe('SkillDetail', () => {
@@ -173,6 +208,19 @@ describe('SkillDetail', () => {
 		await fireEvent.click(screen.getByTestId('skill-delete'));
 		await fireEvent.click(screen.getByTestId('skill-delete-confirm'));
 		expect(ondelete).toHaveBeenCalledWith('uuid-1');
+	});
+
+	it('renders the body without its frontmatter, and keeps the file whole for Source', async () => {
+		const body = '---\nname: deployer\ndescription: Ships it\n---\n\n# Deployer\n\nSteps.';
+		render(SkillDetail, {
+			props: { ...base, skill: detail({ body }), onsave: async () => {} }
+		});
+
+		await fireEvent.click(screen.getByTestId('markdown-mode-preview'));
+		expect(screen.getByTestId('skill-detail').textContent).not.toContain('name: deployer');
+
+		await fireEvent.click(screen.getByTestId('markdown-mode-source'));
+		expect(screen.getByTestId('skill-detail').textContent).toContain('name: deployer');
 	});
 
 	it('lists the other files in the folder', () => {

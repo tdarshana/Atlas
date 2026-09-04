@@ -118,6 +118,45 @@ export function enabledSummary(items: SkillSummary[]): string {
 	return `${enabled} of ${items.length} ${noun} enabled for this project`;
 }
 
+// ---- the SKILL.md frontmatter ------------------------------------------------------
+
+export interface SplitBody {
+	/** The whole fenced block, `---` lines included, or null when there is none. */
+	frontmatter: string | null;
+	/** Everything after it, which is what Preview renders. */
+	markdown: string;
+}
+
+/**
+ * Splits a `SKILL.md` into its leading YAML block and the Markdown after it. The block
+ * counts only when the very first line is `---` and a later line closes it; an
+ * unterminated block, or a `---` further down that is a horizontal rule, is body text
+ * and comes back whole, so nothing is ever silently swallowed.
+ *
+ * Preview renders `markdown` alone: the name and the description are already in the
+ * detail panel's header, and feeding the raw block to the renderer prints
+ * `name: … description: …` as a paragraph running into the first heading.
+ */
+export function splitFrontmatter(body: string): SplitBody {
+	const lines = body.split('\n');
+	if (lines[0]?.trim() !== '---') return { frontmatter: null, markdown: body };
+
+	for (let i = 1; i < lines.length; i++) {
+		if (lines[i].trim() !== '---') continue;
+		return {
+			frontmatter: lines.slice(0, i + 1).join('\n'),
+			// Drop the blank lines the block is usually followed by, so Preview does not
+			// open on empty space.
+			markdown: lines
+				.slice(i + 1)
+				.join('\n')
+				.replace(/^\n+/, '')
+		};
+	}
+
+	return { frontmatter: null, markdown: body };
+}
+
 // ---- the detail panel's width ----------------------------------------------------
 
 export const DETAIL_KEY = 'atlas.skills.detail';
