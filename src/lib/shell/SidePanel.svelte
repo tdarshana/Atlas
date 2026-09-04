@@ -84,6 +84,9 @@
 		position: relative;
 		width: var(--side-w, 220px);
 		flex: 0 0 var(--side-w, 220px);
+		/* `.panel` clips its overflow, which would cut the resize bar down to the sliver
+		   inside the border. The list below scrolls on its own, so nothing else spills. */
+		overflow: visible;
 	}
 
 	.head {
