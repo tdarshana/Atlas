@@ -5,7 +5,7 @@
 	import { goto } from '$app/navigation';
 	import { Icon } from '$lib/ds';
 	import { shell, toggleRail } from './shell.svelte';
-	import { MAIN_VIEWS, SETTINGS_VIEW, VIEWS, shortcutText, type ViewDef } from './views';
+	import { MAIN_VIEWS, SETTINGS_VIEW, shortcutText, type ViewDef } from './views';
 
 	function hint(v: ViewDef): string {
 		return `${v.label}  ${shortcutText(v.combo, shell.platform)}`;
@@ -20,12 +20,8 @@
 	<nav class="expanded" aria-label="Views">
 		<div class="head">
 			<span class="heading">VIEWS</span>
-			<span class="spacer"></span>
-			<button class="collapse" type="button" title="Collapse rail" onclick={toggleRail}>
-				<Icon name="chevrons-left" size={13} title="Collapse rail" />
-			</button>
 		</div>
-		{#each VIEWS as v (v.id)}
+		{#each MAIN_VIEWS as v (v.id)}
 			{@const active = shell.view === v.id}
 			<button
 				class="row"
@@ -43,6 +39,28 @@
 				<span class="key">{shortcutText(v.combo, shell.platform)}</span>
 			</button>
 		{/each}
+		<!-- Settings and the collapse control stay at the foot in both rail modes. -->
+		<span class="spacer"></span>
+		<button
+			class="row"
+			class:active={shell.view === SETTINGS_VIEW.id}
+			type="button"
+			aria-current={shell.view === SETTINGS_VIEW.id ? 'page' : undefined}
+			onclick={() => open(SETTINGS_VIEW)}
+		>
+			<Icon
+				name={SETTINGS_VIEW.icon}
+				size={16}
+				color={shell.view === SETTINGS_VIEW.id ? 'var(--accent)' : 'var(--text-tertiary)'}
+			/>
+			<span class="label">{SETTINGS_VIEW.label}</span>
+			<span class="key">{shortcutText(SETTINGS_VIEW.combo, shell.platform)}</span>
+		</button>
+		<button class="row" type="button" title="Collapse rail" onclick={toggleRail}>
+			<Icon name="chevrons-left" size={16} color="var(--text-tertiary)" />
+			<span class="label">Collapse rail</span>
+			<span class="key">{shortcutText('Mod+B', shell.platform)}</span>
+		</button>
 	</nav>
 {:else}
 	<nav class="dbm-rail" aria-label="Views">
@@ -116,26 +134,6 @@
 
 	.spacer {
 		flex: 1;
-	}
-
-	.collapse {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 22px;
-		height: 22px;
-		padding: 0;
-		border: 0;
-		border-radius: 3px;
-		background: transparent;
-		color: inherit;
-		cursor: default;
-		transition: var(--transition-hover);
-	}
-
-	.collapse:hover {
-		background: var(--bg-hover);
-		color: var(--text-primary);
 	}
 
 	.row {

@@ -125,7 +125,7 @@
 		display: flex;
 		min-height: 0;
 		gap: 6px;
-		padding: 0 6px 6px 0;
+		padding: 0 6px 0 0;
 	}
 
 	.content {

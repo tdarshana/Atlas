@@ -29,7 +29,8 @@
 <style>
 	/* No bar of its own: the text sits on the window background under the content panel,
 	   starting where the panel starts, so the left edge follows the rail's width. The
-	   right edge lines up with the panel's 6px inset. */
+	   right edge lines up with the panel's 6px inset. The 24px row is the only space
+	   under the panel, so the text is as far from the panel as from the window edge. */
 	.bar {
 		display: flex;
 		align-items: center;
