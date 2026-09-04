@@ -273,6 +273,18 @@
 	function paint(live: number) {
 		panel?.style.setProperty('--detail-w', `${live}px`);
 	}
+
+	let modal = $state<HTMLDialogElement>();
+
+	// The modal opens as soon as it is in the document and closes with the mode switch.
+	$effect(() => {
+		const el = modal;
+		if (!el) return;
+		if (!el.open) el.showModal();
+		return () => {
+			if (el.open) el.close();
+		};
+	});
 </script>
 
 <svelte:window onkeydown={onWindowKey} />
@@ -502,9 +514,19 @@
 {/snippet}
 
 {#if mode === 'modal'}
-	<Dialog open onclose={onclose} class="detail-dialog">
+	<!-- A bare native dialog: the panel keeps its own chrome and close button, and the
+	     element only supplies the backdrop and the modal focus trap. -->
+	<dialog
+		bind:this={modal}
+		class="detail-modal"
+		data-testid="task-detail-modal"
+		onclose={onclose}
+		onclick={(e) => {
+			if (e.target === modal) onclose();
+		}}
+	>
 		{@render body()}
-	</Dialog>
+	</dialog>
 {:else}
 	{@render body()}
 {/if}
@@ -737,13 +759,23 @@
 		max-width: 60ch;
 	}
 
-	/* As a dialog the same panel floats over the board at a comfortable reading width. */
-	:global(.detail-dialog) .detail {
+	/* As a dialog the same panel floats over the board at a reading width. The dialog
+	   element itself is invisible: no frame, no padding, only the backdrop. */
+	.detail-modal {
+		padding: 0;
+		border: 0;
+		background: transparent;
+		overflow: visible;
+	}
+
+	.detail-modal::backdrop {
+		background: rgb(0 0 0 / 0.45);
+	}
+
+	.detail-modal .detail {
 		position: static;
 		flex: none;
-		width: min(760px, 92vw);
-		height: min(84vh, 960px);
-		border: 0;
-		box-shadow: none;
+		width: min(820px, 92vw);
+		height: min(80vh, 920px);
 	}
 </style>
