@@ -871,8 +871,8 @@ export interface SkillSummary {
 	/** False for a skill Atlas may read but not write. */
 	editable: boolean;
 	updated_at: string | null;
-	/** Only filled when the list was asked for with a `project_id`. */
-	enabled_here?: boolean;
+	/** Always present; `null` when the request named no project. */
+	enabled_here: boolean | null;
 }
 
 export interface Skill extends SkillSummary {

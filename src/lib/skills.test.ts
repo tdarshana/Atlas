@@ -26,6 +26,7 @@ function skill(
 		plugin: null,
 		editable: true,
 		updated_at: '2026-09-04T10:00:00Z',
+		enabled_here: null,
 		...extra
 	};
 }

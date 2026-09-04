@@ -29,7 +29,8 @@ function summary(name: string, source: SkillSource, plugin: string | null = null
 		path: null,
 		plugin,
 		editable: true,
-		updated_at: null
+		updated_at: null,
+		enabled_here: null
 	};
 }
 

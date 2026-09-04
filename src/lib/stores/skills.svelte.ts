@@ -66,10 +66,14 @@ export function closeSkill(): void {
 	skills.openError = null;
 }
 
-/** Edit in place. The daemon answers with the saved skill, so the panel and the row
- * both take their new text from the server rather than from the textarea. */
+/**
+ * Edit in place. The daemon answers with the saved skill, so the panel and the row both
+ * take their new text from the server rather than from the textarea. The project the
+ * list was loaded for goes with the write: a project-scoped discovered skill's id is
+ * resolved against that project's roots, so without it the daemon cannot find the file.
+ */
 export async function saveBody(id: string, body: string): Promise<Skill> {
-	const saved = await api().updateSkillBody(id, body);
+	const saved = await api().updateSkillBody(id, body, skills.projectId);
 	skills.open = saved;
 	await loadSkills(skills.projectId);
 	return saved;

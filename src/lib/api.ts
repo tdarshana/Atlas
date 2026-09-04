@@ -394,17 +394,27 @@ export class AtlasApi {
 		return this.req('POST', '/api/v1/skills', input);
 	}
 
-	/** Edit in place: rewrites a native skill's body, or the `SKILL.md` on disk. */
-	updateSkillBody(id: string, body: string): Promise<Skill> {
-		return this.req('PUT', `/api/v1/skills/${encodeURIComponent(id)}`, { body });
+	/**
+	 * Edit in place: rewrites a native skill's body, or the `SKILL.md` on disk. A
+	 * project-scoped discovered skill is only reachable with `projectId`, since the
+	 * daemon resolves the id against a listing of that project's roots taken right now.
+	 */
+	updateSkillBody(id: string, body: string, projectId?: Uuid | null): Promise<Skill> {
+		return this.req(
+			'PUT',
+			`/api/v1/skills/${encodeURIComponent(id)}${query({ project_id: projectId })}`,
+			{ body }
+		);
 	}
 
-	/** Name and description of a native skill. */
+	/** Name and description of a native skill. Native ids are bare UUIDs, so this route
+	 * takes no `project_id`. */
 	patchSkill(id: string, patch: SkillPatch): Promise<Skill> {
 		return this.req('PATCH', `/api/v1/skills/${encodeURIComponent(id)}`, patch);
 	}
 
-	/** Native skills only; a discovered one belongs to the folder it came from. */
+	/** Native skills only; a discovered one belongs to the folder it came from. Native ids
+	 * are bare UUIDs, so this route takes no `project_id` either. */
 	deleteSkill(id: string): Promise<void> {
 		return this.req('DELETE', `/api/v1/skills/${encodeURIComponent(id)}`);
 	}
