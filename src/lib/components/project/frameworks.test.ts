@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { FrameworkDoc, FrameworkInventory, FrameworkListing } from '$lib/types';
 
-import { DOC_TYPE_TONE, docRowKey, documentRows, reportText } from './frameworks';
+import { DOC_TYPE_TONE, docRowKey, documentRows, reportText, sidePanelFrameworks } from './frameworks';
 
 function inventory(overrides: Partial<FrameworkInventory> = {}): FrameworkInventory {
 	return {
@@ -82,6 +82,23 @@ describe('DOC_TYPE_TONE', () => {
 	it('gives tasks and todo the same warning tone, since both are actionable', () => {
 		expect(DOC_TYPE_TONE.tasks).toBe('warning');
 		expect(DOC_TYPE_TONE.todo).toBe('warning');
+	});
+});
+
+describe('sidePanelFrameworks', () => {
+	it('projects each listing down to its inventory, in order', () => {
+		const listings: FrameworkListing[] = [
+			{ inventory: inventory({ kind: 'superpowers' }), documents: [doc()] },
+			{ inventory: inventory({ kind: 'gsd', docs: 4 }), documents: [] }
+		];
+		expect(sidePanelFrameworks(listings)).toEqual([
+			inventory({ kind: 'superpowers' }),
+			inventory({ kind: 'gsd', docs: 4 })
+		]);
+	});
+
+	it('maps no detected frameworks to no rows', () => {
+		expect(sidePanelFrameworks([])).toEqual([]);
 	});
 });
 
