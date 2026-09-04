@@ -59,7 +59,7 @@ beforeEach(() => {
 	board.filters.projectId = null;
 	board.filters.assignee = '';
 	board.filters.query = '';
-	board.filters.showDone = false;
+	board.filters.hideDone = false;
 	board.error = null;
 	board.selected = null;
 });

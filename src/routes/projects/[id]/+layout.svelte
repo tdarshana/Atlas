@@ -62,7 +62,6 @@
 	     header: the header names the project, the toolbar belongs to what is open. -->
 	{#if project.actions}
 		<div class="tab-toolbar" data-testid="tab-toolbar">
-			<span class="spacer"></span>
 			<div class="actions">{@render project.actions()}</div>
 		</div>
 	{/if}
@@ -104,9 +103,13 @@
 		flex: 0 0 auto;
 	}
 
+	/* Fills the row and packs to the end, so a lone button sits right while a tab that
+	   wants filters on the left inserts its own flexible spacer before its action. */
 	.actions {
+		flex: 1;
 		display: flex;
 		align-items: center;
+		justify-content: flex-end;
 		gap: var(--space-2);
 	}
 </style>

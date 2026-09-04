@@ -158,7 +158,8 @@ export const board = $state({
 		projectId: null as Uuid | null,
 		assignee: '',
 		query: '',
-		showDone: false,
+		/** Done tasks show by default; this hides them on request. */
+		hideDone: false,
 		/**
 		 * One column, or null for all of them. Applied on the screen rather than in the
 		 * request: the filters panel counts every column from the same list, and a stage
@@ -280,7 +281,7 @@ let generation = 0;
 
 export async function refresh(): Promise<void> {
 	const g = ++generation;
-	const { projectId, assignee, query, showDone } = board.filters;
+	const { projectId, assignee, query, hideDone } = board.filters;
 	board.loading = true;
 	try {
 		const client = api();
@@ -290,7 +291,7 @@ export async function refresh(): Promise<void> {
 				project_id: projectId,
 				assignee: assignee.trim() || null,
 				query: query.trim() || null,
-				include_done: showDone
+				include_done: !hideDone
 			})
 		]);
 		if (g !== generation) return;

@@ -172,16 +172,8 @@
 </script>
 
 {#snippet headerActions()}
-	<div class="sm assignee">
-		<Input
-			bind:value={board.filters.assignee}
-			data-testid="board-assignee"
-			aria-label="Assignee"
-			placeholder="Assignee"
-			oninput={() => scheduleRefresh()}
-		/>
-	</div>
-	<div class="sm search">
+	<!-- Filters read left to right at the start of the row; the one action sits at the end. -->
+	<div class="search">
 		<Input
 			bind:value={board.filters.query}
 			data-testid="board-search"
@@ -190,12 +182,22 @@
 			oninput={() => scheduleRefresh()}
 		/>
 	</div>
+	<div class="assignee">
+		<Input
+			bind:value={board.filters.assignee}
+			data-testid="board-assignee"
+			aria-label="Assignee"
+			placeholder="Assignee"
+			oninput={() => scheduleRefresh()}
+		/>
+	</div>
 	<Checkbox
-		label="Show done"
-		bind:checked={board.filters.showDone}
-		data-testid="board-show-done"
+		label="Hide done"
+		bind:checked={board.filters.hideDone}
+		data-testid="board-hide-done"
 		onchange={() => scheduleRefresh(0)}
 	/>
+	<span class="grow"></span>
 	<Button variant="primary" data-testid="board-new" onclick={() => (creating = true)}>
 		New task
 	</Button>
@@ -282,18 +284,16 @@
 		--strip-reserve: calc(var(--detail-w) + 12px);
 	}
 
-	/* The design system has no small Input, and the header's row is 28px tall, so the
-	   two fields are stepped down here rather than everywhere. */
-	.sm :global(.dbm-input) {
-		height: var(--h-control-sm);
-		font-size: var(--text-xs);
-	}
-
+	/* Full-height DS inputs: the toolbar row under the tab strip has room for them. */
 	.assignee {
 		width: 180px;
 	}
 
 	.search {
 		width: 300px;
+	}
+
+	.grow {
+		flex: 1;
 	}
 </style>
