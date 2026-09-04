@@ -55,6 +55,7 @@
 	import { loadMcp, mcp } from '$lib/stores/mcp.svelte';
 	import { contributions, loadPlugins, plugins } from '$lib/plugins/host.svelte';
 	import { loadPluginThemes } from '$lib/plugins/themes';
+	import ToolChannelWarning from '$lib/plugins/ToolChannelWarning.svelte';
 	import { status } from '$lib/stores/status.svelte';
 	import { UI_FONT_MONO_KEY, UI_FONT_SIZE_KEY, UI_FONT_UI_KEY, UI_SCALE_KEY, UI_THEME_PACK_KEY } from '$lib/types';
 	import { THEME_PRESETS, themePreset } from '$lib/shell/theme-presets';
@@ -1033,6 +1034,7 @@
 			<div class="card-head"><span class="card-title">Plugins</span></div>
 			<div class="card-body">
 				<span class="hint" data-testid="plugins-settings-summary">{pluginsSummaryText}</span>
+				<ToolChannelWarning />
 				<span class="hint">
 					A plugin runs in a sandboxed frame and reaches Atlas only through the permissions its
 					manifest asks for. Install, enable and remove them on their own view.

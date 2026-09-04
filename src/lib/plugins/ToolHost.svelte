@@ -9,8 +9,14 @@
 	// Nothing renders for a plugin without tools, and nothing at all renders outside Tauri,
 	// where there is no plugin store and no daemon socket to speak of.
 	import { onMount } from 'svelte';
+	import { push } from '$lib/ui/toasts.svelte';
 	import PluginFrame from './PluginFrame.svelte';
 	import { BACKGROUND_VIEW, callPluginTool, loadPlugins, plugins } from './host.svelte';
+	import {
+		reportChannelError,
+		setChannelConnected,
+		setChannelWanted
+	} from './tool-channel.svelte';
 	import {
 		channelUrl,
 		createToolChannel,
@@ -27,19 +33,34 @@
 	let channel: ToolChannel | null = null;
 
 	function openChannel(): ToolChannel {
+		setChannelWanted(true);
 		return createToolChannel({
 			url: channelUrl(),
 			socketFactory: (url) => new WebSocket(url) as unknown as ToolSocket,
 			registry: () => toolRegistry(plugins.items),
 			register: putPluginTools,
 			unregister: deletePluginTools,
-			onCall: callPluginTool
+			onCall: callPluginTool,
+			onStatus: setChannelConnected,
+			// A refused registration is the plugin's own problem, not the transport's: the
+			// plugin is installed and running and its tools will stay missing until its
+			// author fixes the manifest, so it is worth a toast rather than a console line.
+			onRegisterError: (pluginId, message) => {
+				const text = `Plugin ${pluginId}: the daemon refused its MCP tools. ${message}`;
+				reportChannelError(text);
+				push('error', text);
+			},
+			onError: (message) => {
+				reportChannelError(message);
+				console.warn(message);
+			}
 		});
 	}
 
 	function closeChannel(): void {
 		channel?.dispose();
 		channel = null;
+		setChannelWanted(false);
 	}
 
 	onMount(() => {

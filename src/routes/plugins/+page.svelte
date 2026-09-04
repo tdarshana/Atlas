@@ -13,6 +13,7 @@
 		setEnabled,
 		uninstall
 	} from '$lib/plugins/host.svelte';
+	import ToolChannelWarning from '$lib/plugins/ToolChannelWarning.svelte';
 	import type { PluginInfo } from '$lib/plugins/types';
 	import { inTauri, setStatusItems } from '$lib/shell';
 	import Button from '$lib/ui/Button.svelte';
@@ -146,6 +147,7 @@
 		{#if plugins.error}
 			<p class="bad" role="alert" data-testid="plugins-error">{plugins.error}</p>
 		{/if}
+		<ToolChannelWarning />
 		<div class="table">
 			<Table
 				id="plugins"

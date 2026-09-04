@@ -6,10 +6,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
 	channelUrl,
 	createToolChannel,
+	deletePluginTools,
+	putPluginTools,
 	toolDecls,
 	toolPlugins,
 	toolRegistry,
 	type PluginTools,
+	type ToolDecl,
 	type ToolChannel,
 	type ToolSocket
 } from './tools';
@@ -43,7 +46,16 @@ function plugin(
 		permissions,
 		contributes: { sections: [], themes: [], components: [], commands: [], tools }
 	};
-	return { id, manifest, enabled: true, compatible: true, reason: null, dir: `/p/${id}`, ...overrides };
+	return {
+		id,
+		manifest,
+		enabled: true,
+		compatible: true,
+		reason: null,
+		dir: `/p/${id}`,
+		granted: [...permissions],
+		...overrides
+	};
 }
 
 /** A socket the test opens, feeds and closes itself. */
@@ -71,10 +83,12 @@ function fakeSocket() {
 
 function channelHarness(registry: () => PluginTools[]) {
 	const sockets: ReturnType<typeof fakeSocket>[] = [];
-	const register = vi.fn(async () => {});
-	const unregister = vi.fn(async () => {});
+	const register = vi.fn(async (_pluginId: string, _tools: ToolDecl[]) => {});
+	const unregister = vi.fn(async (_pluginId: string) => {});
 	const onCall = vi.fn(async () => ({ count: 3 }));
 	const onError = vi.fn();
+	const onRegisterError = vi.fn();
+	const onStatus = vi.fn();
 	const channel = createToolChannel({
 		url: 'ws://127.0.0.1:7433/api/v1/mcp/plugin-channel',
 		socketFactory: () => {
@@ -86,9 +100,21 @@ function channelHarness(registry: () => PluginTools[]) {
 		register,
 		unregister,
 		onCall,
-		onError
+		onError,
+		onRegisterError,
+		onStatus
 	});
-	return { channel, sockets, register, unregister, onCall, onError, latest: () => sockets[sockets.length - 1] };
+	return {
+		channel,
+		sockets,
+		register,
+		unregister,
+		onCall,
+		onError,
+		onRegisterError,
+		onStatus,
+		latest: () => sockets[sockets.length - 1]
+	};
 }
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -264,5 +290,155 @@ describe('createToolChannel', () => {
 		expect(h.onError).toHaveBeenCalledTimes(2);
 		expect(h.onCall).not.toHaveBeenCalled();
 		expect(h.latest().frames()).toEqual([]);
+	});
+});
+
+describe('createToolChannel, after the first review', () => {
+	it('caps the reconnect backoff at 30 seconds', async () => {
+		vi.useFakeTimers();
+		const h = channelHarness(() => []);
+		channels.push(h.channel);
+
+		// 1s, 2s, 4s, 8s, 16s, then 30s twice: seven drops with no open in between, so
+		// nothing ever resets the backoff.
+		const waits = [1000, 2000, 4000, 8000, 16_000, 30_000, 30_000];
+		for (const [index, wait] of waits.entries()) {
+			h.latest().drop();
+			await vi.advanceTimersByTimeAsync(wait - 1);
+			expect(h.sockets).toHaveLength(index + 1);
+			await vi.advanceTimersByTimeAsync(1);
+			expect(h.sockets).toHaveLength(index + 2);
+		}
+	});
+
+	it('reports the socket coming up and going down', async () => {
+		const h = channelHarness(() => []);
+		channels.push(h.channel);
+
+		h.latest().open();
+		await flush();
+		h.latest().drop();
+
+		expect(h.onStatus.mock.calls.map((c) => c[0])).toEqual([true, false]);
+	});
+
+	it('reports a refused registration separately, naming the plugin', async () => {
+		const h = channelHarness(() => [{ pluginId: 'hello-world', tools: toolDecls([READY_COUNT]) }]);
+		channels.push(h.channel);
+		h.register.mockRejectedValueOnce(new Error("tool name 'a__b' may not contain '__'."));
+
+		h.latest().open();
+		await flush();
+
+		expect(h.onRegisterError).toHaveBeenCalledWith(
+			'hello-world',
+			"tool name 'a__b' may not contain '__'."
+		);
+		// A refusal is not a transport failure, so the quiet channel of last resort is unused.
+		expect(h.onError).not.toHaveBeenCalled();
+	});
+
+	it('runs overlapping syncs one after another rather than interleaving them', async () => {
+		const order: string[] = [];
+		const h = channelHarness(() => [
+			{ pluginId: 'a', tools: toolDecls([READY_COUNT]) },
+			{ pluginId: 'b', tools: toolDecls([READY_COUNT]) }
+		]);
+		channels.push(h.channel);
+		// A register that yields halfway, so an unserialised second sync would start its
+		// own `a` before this one finished.
+		h.register.mockImplementation(async (id: string) => {
+			order.push(`start ${id}`);
+			await flush();
+			order.push(`end ${id}`);
+		});
+
+		h.latest().open();
+		await Promise.all([h.channel.sync(), h.channel.sync()]);
+
+		// Three syncs of two plugins each, and every start is closed by its own end before
+		// the next start.
+		expect(order).toHaveLength(12);
+		for (let i = 0; i < order.length; i += 2) {
+			expect(order[i + 1]).toBe(order[i].replace('start', 'end'));
+		}
+	});
+});
+
+describe('putPluginTools and deletePluginTools', () => {
+	interface Call {
+		url: string;
+		method?: string;
+		headers?: Record<string, string>;
+		body?: string;
+	}
+
+	function fakeFetch(response: { ok: boolean; status?: number; body?: unknown }) {
+		const calls: Call[] = [];
+		const fn = vi.fn(async (url: string, init: Record<string, unknown>) => {
+			calls.push({ url, ...(init as object) } as Call);
+			return {
+				ok: response.ok,
+				status: response.status ?? (response.ok ? 204 : 400),
+				json: async () => {
+					if (response.body === undefined) throw new Error('not JSON');
+					return response.body;
+				}
+			} as unknown as Response;
+		});
+		vi.stubGlobal('fetch', fn);
+		return calls;
+	}
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it('PUTs the whole set to the plugin path, as the desktop actor', async () => {
+		const calls = fakeFetch({ ok: true });
+
+		await putPluginTools('hello-world', toolDecls([READY_COUNT]));
+
+		expect(calls).toHaveLength(1);
+		expect(calls[0].url).toBe('http://127.0.0.1:7433/api/v1/mcp/plugin-tools/hello-world');
+		expect(calls[0].method).toBe('PUT');
+		expect(calls[0].headers).toEqual({
+			'Content-Type': 'application/json',
+			'X-Atlas-Actor': 'desktop'
+		});
+		expect(JSON.parse(calls[0].body ?? '')).toEqual({ tools: toolDecls([READY_COUNT]) });
+	});
+
+	it('DELETEs the whole set from the same path, with no body', async () => {
+		const calls = fakeFetch({ ok: true });
+
+		await deletePluginTools('hello-world');
+
+		expect(calls[0].url).toBe('http://127.0.0.1:7433/api/v1/mcp/plugin-tools/hello-world');
+		expect(calls[0].method).toBe('DELETE');
+		expect(calls[0].headers?.['X-Atlas-Actor']).toBe('desktop');
+		expect(calls[0].body).toBeUndefined();
+	});
+
+	it('escapes the plugin id in the path', async () => {
+		const calls = fakeFetch({ ok: true });
+
+		await deletePluginTools('a/b');
+
+		expect(calls[0].url).toBe('http://127.0.0.1:7433/api/v1/mcp/plugin-tools/a%2Fb');
+	});
+
+	it('throws the daemon own words when it refuses the set', async () => {
+		fakeFetch({ ok: false, status: 400, body: { error: "tool name 'a__b' may not contain '__'." } });
+
+		await expect(putPluginTools('hello-world', [])).rejects.toThrow(
+			"tool name 'a__b' may not contain '__'."
+		);
+	});
+
+	it('falls back to the status when the refusal is not JSON', async () => {
+		fakeFetch({ ok: false, status: 500 });
+
+		await expect(putPluginTools('hello-world', [])).rejects.toThrow('the daemon answered 500');
 	});
 });

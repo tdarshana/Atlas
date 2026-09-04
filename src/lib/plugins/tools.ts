@@ -60,6 +60,14 @@ export interface ToolChannelOptions {
 	onCall(pluginId: string, tool: string, args: unknown): Promise<unknown>;
 	/** Where a failure that has nowhere else to go is reported. Defaults to `console.warn`. */
 	onError?(message: string): void;
+	/**
+	 * A registration the daemon refused, which is a different thing from a socket that
+	 * dropped: the plugin is installed and running, and its tools will stay missing until
+	 * its author fixes the manifest. Defaults to `onError`.
+	 */
+	onRegisterError?(pluginId: string, message: string): void;
+	/** Called on every open and every close, so a surface can say the channel is down. */
+	onStatus?(connected: boolean): void;
 }
 
 export interface ToolChannel {
@@ -121,6 +129,21 @@ export function toolRegistry(items: PluginInfo[]): PluginTools[] {
 
 const JSON_HEADERS = { 'Content-Type': 'application/json', 'X-Atlas-Actor': 'desktop' };
 
+/**
+ * The daemon's own words for a refusal. It answers a malformed decl with
+ * `400 {"error": ...}`, and that sentence is the only thing that says which rule the
+ * manifest broke, so it is what a plugin's author needs to read.
+ */
+async function refusal(res: Response): Promise<string> {
+	try {
+		const body = (await res.json()) as { error?: unknown };
+		if (typeof body?.error === 'string' && body.error !== '') return body.error;
+	} catch {
+		// Not JSON, so the status is all there is.
+	}
+	return `the daemon answered ${res.status}`;
+}
+
 /** `PUT /api/v1/mcp/plugin-tools/{id}`: replaces that plugin's whole set. */
 export async function putPluginTools(pluginId: string, tools: ToolDecl[]): Promise<void> {
 	const res = await fetch(`${baseUrl()}/api/v1/mcp/plugin-tools/${encodeURIComponent(pluginId)}`, {
@@ -128,7 +151,7 @@ export async function putPluginTools(pluginId: string, tools: ToolDecl[]): Promi
 		headers: JSON_HEADERS,
 		body: JSON.stringify({ tools })
 	});
-	if (!res.ok) throw new Error(`registering ${pluginId}'s tools failed: ${res.status}`);
+	if (!res.ok) throw new Error(await refusal(res));
 }
 
 /** `DELETE /api/v1/mcp/plugin-tools/{id}`: drops that plugin's whole set. */
@@ -137,12 +160,14 @@ export async function deletePluginTools(pluginId: string): Promise<void> {
 		method: 'DELETE',
 		headers: JSON_HEADERS
 	});
-	if (!res.ok) throw new Error(`dropping ${pluginId}'s tools failed: ${res.status}`);
+	if (!res.ok) throw new Error(await refusal(res));
 }
 
 export function createToolChannel(options: ToolChannelOptions): ToolChannel {
 	const { url, socketFactory, registry, register, unregister, onCall } = options;
 	const report = options.onError ?? ((message: string) => console.warn(message));
+	const reportRegister =
+		options.onRegisterError ?? ((pluginId: string, message: string) => report(`${pluginId}: ${message}`));
 
 	let socket: ToolSocket | null = null;
 	let open = false;
@@ -152,8 +177,14 @@ export function createToolChannel(options: ToolChannelOptions): ToolChannel {
 	/** The plugin ids the daemon holds for us, so a plugin that lost its tools can be
 	 * told apart from one that never had any. Cleared on close: the daemon drops the lot. */
 	let registered = new Set<string>();
+	/**
+	 * The syncs run one after another. Two overlapping ones could otherwise order a `PUT`
+	 * for a plugin after a `DELETE` for the same plugin, leaving the daemon advertising a
+	 * tool the app has no frame for until something else happened to sync again.
+	 */
+	let queue: Promise<void> = Promise.resolve();
 
-	async function sync(): Promise<void> {
+	async function runSync(): Promise<void> {
 		if (!open) return;
 		const current = registry();
 		const ids = new Set(current.map((entry) => entry.pluginId));
@@ -162,7 +193,7 @@ export function createToolChannel(options: ToolChannelOptions): ToolChannel {
 				await register(entry.pluginId, entry.tools);
 				registered.add(entry.pluginId);
 			} catch (e) {
-				report(e instanceof Error ? e.message : String(e));
+				reportRegister(entry.pluginId, e instanceof Error ? e.message : String(e));
 			}
 		}
 		for (const id of [...registered]) {
@@ -170,10 +201,17 @@ export function createToolChannel(options: ToolChannelOptions): ToolChannel {
 			try {
 				await unregister(id);
 			} catch (e) {
-				report(e instanceof Error ? e.message : String(e));
+				reportRegister(id, e instanceof Error ? e.message : String(e));
 			}
 			registered.delete(id);
 		}
+	}
+
+	function sync(): Promise<void> {
+		// The `catch` keeps the chain alive: a rejection left on `queue` would make every
+		// later `sync` skip its turn.
+		queue = queue.then(runSync).catch((e) => report(e instanceof Error ? e.message : String(e)));
+		return queue;
 	}
 
 	function answer(frame: CallFrame): void {
@@ -224,12 +262,14 @@ export function createToolChannel(options: ToolChannelOptions): ToolChannel {
 			// so `sync` registers the whole current set rather than diffing against a
 			// registry the daemon no longer holds.
 			registered = new Set();
+			options.onStatus?.(true);
 			void sync();
 		};
 		socket.onmessage = (event) => receive(event.data);
 		socket.onclose = () => {
 			open = false;
 			socket = null;
+			options.onStatus?.(false);
 			scheduleReconnect();
 		};
 		socket.onerror = () => {
