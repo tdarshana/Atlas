@@ -373,7 +373,7 @@ pub const TOOL_TABLE: &[ToolMeta] = &[
     ToolMeta { name: "status", description: "Report Atlas daemon status: version, database path, active memory count, embedding availability.", args: "none", scope: ToolScope::Read },
     ToolMeta { name: "framework_docs", description: "List the planning frameworks detected in a project (Superpowers, OpenSpec, SpecKit, GSD) with the documents each holds, or fetch one document's text. Pass kind and path together, from a prior listing, to read a document.", args: "project_root, kind, path", scope: ToolScope::Read },
     ToolMeta { name: "skill_list", description: "List the skills that apply here: the SKILL.md folders Claude Code and Codex read, the ones installed plugins carry, and Atlas's own. A project's switched-off skills are left out. Call before starting work to see which skills are in play.", args: "project_root", scope: ToolScope::Read },
-    ToolMeta { name: "skill_get", description: "Fetch one skill's full text by id, from a prior skill_list. Call when a listed skill looks relevant to the task.", args: "id*, project_root", scope: ToolScope::Read },
+    ToolMeta { name: "skill_get", description: "Fetch one skill's full text by id, from a prior skill_list. Call when a listed skill looks relevant to the task. A skill this project switched off is not found here either.", args: "id*, project_root", scope: ToolScope::Read },
 ];
 
 /// Called on every accepted `call_tool`, so the daemon and the stdio shim can each
@@ -744,10 +744,18 @@ impl<B: Backend> AtlasMcp<B> {
         })
     }
 
-    #[tool(description = "Fetch one skill's full text by id, from a prior skill_list. Call when a listed skill looks relevant to the task.")]
+    #[tool(description = "Fetch one skill's full text by id, from a prior skill_list. Call when a listed skill looks relevant to the task. A skill this project switched off is not found here either.")]
     async fn skill_get(&self, Parameters(a): Parameters<SkillGetArgs>) -> Result<CallToolResult, McpError> {
         let project_id = self.resolve_project(a.project_root).await?.map(|p| p.id);
-        json_result(&self.backend.get_skill(project_id, &a.id).await.map_err(err)?)
+        let skill = self.backend.get_skill(project_id, &a.id).await.map_err(err)?;
+        // `skill_list` hides a skill this project switched off, so fetching it by id
+        // cannot be the way around that gate. Refused with the same not-found an unknown
+        // id gets: an agent that listed once and cached the id learns the skill is not
+        // available here, not that it exists and is withheld.
+        if skill.summary.enabled_here == Some(false) {
+            return Err(err(atlas_core::AtlasError::NotFound(format!("skill {}", a.id))));
+        }
+        json_result(&skill)
     }
 
     /// Resolves the `{name}` segment of an `atlas://projects/{name}/...` resource URI
@@ -1303,7 +1311,16 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
         } else if let Some(name) = uri.strip_prefix(WORKFLOWS) {
             (workflow_markdown(&self.backend.get_workflow(name).await.map_err(|e| resource_err(&uri, e))?), MARKDOWN)
         } else if uri == SKILLS {
-            let list = self.backend.list_skills(None).await.map_err(|e| resource_err(&uri, e))?;
+            // A resource read carries no argument, so the project comes from the session's
+            // own root the read-only way, and a skill this project switched off is left
+            // out exactly as `skill_list` leaves it out. Without this the resource path
+            // was the way around a project's disabled list.
+            let project_id = self.resolve_project_for_gating(None).await?.map(|p| p.id);
+            let list = self.backend.list_skills(project_id).await.map_err(|e| resource_err(&uri, e))?;
+            let list = SkillList {
+                skills: list.skills.into_iter().filter(|s| s.enabled_here != Some(false)).collect(),
+                warnings: list.warnings,
+            };
             (serde_json::to_string_pretty(&list).map_err(|e| McpError::internal_error(e.to_string(), None))?, JSON)
         } else if let Some(rest) = uri.strip_prefix(SKILLS) {
             // A skill id carries a `:` and, for a plugin skill, slashes; a client that
@@ -1312,7 +1329,12 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
                 .decode_utf8()
                 .map_err(|e| McpError::invalid_params(format!("{uri}: skill id is not valid UTF-8: {e}"), None))?
                 .into_owned();
-            (self.backend.get_skill(None, &id).await.map_err(|e| resource_err(&uri, e))?.body, MARKDOWN)
+            let project_id = self.resolve_project_for_gating(None).await?.map(|p| p.id);
+            let skill = self.backend.get_skill(project_id, &id).await.map_err(|e| resource_err(&uri, e))?;
+            if skill.summary.enabled_here == Some(false) {
+                return Err(resource_err(&uri, atlas_core::AtlasError::NotFound(format!("skill {id}"))));
+            }
+            (skill.body, MARKDOWN)
         } else if uri == MEMORIES_RECENT {
             let mut memories = self.backend.list_memories(MemoryStatus::Active, None, MemoryScopeFilter::All).await.map_err(err)?;
             memories.truncate(MEMORIES_RECENT_LIMIT);
@@ -2075,6 +2097,81 @@ mod tests {
 
     /// A full client/server round trip over an in-memory duplex: the board resource
     /// (now at `atlas://projects/{name}/board`) renders Markdown containing the
+    /// A project's disabled-skill list gates every path that hands out a skill, not just
+    /// `skill_list`: `skill_get` answers the same not-found an unknown id gets, and the
+    /// `atlas://skills` listing and `atlas://skills/{id}` resource read do too. Either
+    /// the gate means something or it does not.
+    #[tokio::test]
+    async fn a_projects_disabled_skill_is_hidden_from_skill_get_and_the_resources() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let skill = |dir: std::path::PathBuf, name: &str| {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), format!("---\nname: {name}\ndescription: A skill.\n---\n\nSecret body of {name}.\n")).unwrap();
+        };
+        skill(repo.path().join(".claude/skills/deployer"), "deployer");
+        skill(home.path().join(".claude/skills/greeter"), "greeter");
+
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        let project = backend.connect_project(repo.path().to_path_buf(), "test").await.unwrap();
+        backend.set_project_skills_disabled(project.id, vec!["claude-project:deployer".into()], "test").await.unwrap();
+
+        let s = AtlasMcp::new(backend.clone()).with_env_project_root(false).with_project_root(repo.path().to_path_buf());
+        let (server_io, client_io) = tokio::io::duplex(16 * 1024);
+        tokio::spawn(async move {
+            let running = s.serve(server_io).await.unwrap();
+            running.waiting().await.unwrap();
+        });
+        let client: rmcp::service::RunningService<rmcp::RoleClient, ()> = ().serve(client_io).await.unwrap();
+
+        let listed = client
+            .call_tool(CallToolRequestParams::new("skill_list").with_arguments(serde_json::Map::new()))
+            .await
+            .unwrap();
+        let text: String = listed.content.iter().filter_map(|c| c.as_text()).map(|t| t.text.clone()).collect();
+        assert!(!text.contains("claude-project:deployer"), "skill_list still lists it: {text}");
+        assert!(text.contains("claude-user:greeter"), "{text}");
+
+        // The tool: the same `NotFound` an id no skill holds would get.
+        let err = client
+            .call_tool(CallToolRequestParams::new("skill_get")
+                .with_arguments(serde_json::json!({"id": "claude-project:deployer"}).as_object().cloned().unwrap()))
+            .await
+            .expect_err("skill_get handed out a skill this project switched off");
+        let message = err.to_string();
+        assert!(message.contains("skill claude-project:deployer"), "{message}");
+        assert!(!message.contains("Secret body"), "the body leaked through the error: {message}");
+
+        // An enabled skill still comes back whole, so the gate is a gate and not a wall.
+        let ok = client
+            .call_tool(CallToolRequestParams::new("skill_get")
+                .with_arguments(serde_json::json!({"id": "claude-user:greeter"}).as_object().cloned().unwrap()))
+            .await
+            .unwrap();
+        let text: String = ok.content.iter().filter_map(|c| c.as_text()).map(|t| t.text.clone()).collect();
+        assert!(text.contains("Secret body of greeter"), "{text}");
+
+        // The resource listing, gated the same way `skill_list` is.
+        let listing = client.read_resource(ReadResourceRequestParams::new(SKILLS.to_string())).await.unwrap();
+        let text: String = listing.contents.iter().filter_map(|c| match c {
+            ResourceContents::TextResourceContents { text, .. } => Some(text.clone()),
+            _ => None,
+        }).collect();
+        assert!(!text.contains("claude-project:deployer"), "the resource listing still names it: {text}");
+        assert!(text.contains("claude-user:greeter"), "{text}");
+
+        // And the direct read, which used to serve the whole file.
+        let err = client
+            .read_resource(ReadResourceRequestParams::new(format!("{SKILLS}claude-project:deployer")))
+            .await
+            .expect_err("atlas://skills/ served a skill this project switched off");
+        let message = err.to_string();
+        assert!(message.contains("skill claude-project:deployer"), "{message}");
+        assert!(!message.contains("Secret body"), "the body leaked through the error: {message}");
+
+        client.cancel().await.unwrap();
+    }
+
     /// task's key, and the atlas.board_workflow prompt is listed and names the
     /// project's stages.
     #[tokio::test]

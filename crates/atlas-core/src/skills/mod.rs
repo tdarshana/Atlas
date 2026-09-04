@@ -239,6 +239,53 @@ mod tests {
         assert!(list.warnings[0].contains("resolves outside"), "{:?}", list.warnings);
     }
 
+    /// The user's own two roots are fenced to the home, not to themselves: symlinking a
+    /// skill folder in from elsewhere in one's own home is how people keep skills, and
+    /// the strict rule hid every one of them. The body and the sibling files come back
+    /// too, since the fence is what every later read re-checks against.
+    #[cfg(unix)]
+    #[test]
+    fn a_user_root_symlink_that_stays_in_the_home_is_listed() {
+        let home = tempfile::tempdir().unwrap();
+        let elsewhere = home.path().join("dev/my-skills");
+        let target = skill_at(&elsewhere, "ffmpeg-analyse-video", "---\nname: ffmpeg\ndescription: Analyse a video.\n---\n\nBody.\n");
+        std::fs::write(target.join("notes.md"), "notes").unwrap();
+        let root = home.path().join(".claude/skills");
+        skill_at(&root, "real", "---\nname: real\n---\n");
+        std::os::unix::fs::symlink(&target, root.join("ffmpeg-analyse-video")).unwrap();
+
+        let db = Db::open_in_memory().unwrap();
+        let list = list_skills(&db, None, home.path()).unwrap();
+        let mut ids: Vec<&str> = list.skills.iter().map(|s| s.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["claude-user:ffmpeg-analyse-video", "claude-user:real"], "{ids:?}");
+        assert!(list.warnings.is_empty(), "{:?}", list.warnings);
+
+        let skill = get_skill(&db, None, "claude-user:ffmpeg-analyse-video", home.path()).unwrap();
+        assert!(skill.body.contains("Body."), "{skill:?}");
+        assert_eq!(skill.files, vec!["notes.md".to_string()], "{skill:?}");
+    }
+
+    /// The relaxation is the user's two roots only. A project's `.claude/skills` keeps
+    /// the strict same-root rule even when the link lands inside the user's home, since
+    /// a hostile repository must not be able to surface `~/.ssh` by checking in a link.
+    #[cfg(unix)]
+    #[test]
+    fn a_project_root_symlink_into_the_home_is_still_refused() {
+        let home = tempfile::tempdir().unwrap();
+        let private = skill_at(&home.path().join("private"), "diary", "---\nname: diary\ndescription: Mine.\n---\n");
+        let work = home.path().join("work");
+        let db = Db::open_in_memory().unwrap();
+        let project = project_at(&work, &db);
+        std::os::unix::fs::symlink(&private, work.join(".claude/skills/diary")).unwrap();
+
+        let list = list_skills(&db, Some(&project), home.path()).unwrap();
+        assert!(list.skills.iter().all(|s| s.name != "diary"), "a project link reached into the home: {:?}", list.skills);
+        let warning = list.warnings.iter().find(|w| w.contains("diary")).unwrap_or_else(|| panic!("{:?}", list.warnings));
+        assert!(warning.starts_with("skill 'diary' skipped:"), "{warning}");
+        assert!(warning.contains("resolves outside"), "{warning}");
+    }
+
     /// A real skill folder whose `SKILL.md` is a symlink to a file outside the root is
     /// not read at all: without this, that file's first paragraph would become the
     /// public description and `skill_get` would serve its whole text.

@@ -11,11 +11,18 @@
 /// that a huge or accidental file cannot be pulled into the daemon's memory.
 pub const MAX_SKILL_BYTES: usize = 256 * 1024;
 
-/// The longest value either key can carry, whether it came from the frontmatter or from
-/// the first paragraph of the body. Without a cap, one unterminated quote would fold the
-/// rest of the file into a field that every listing, `project_context` and `skill_list`
-/// then carries.
-const MAX_VALUE_CHARS: usize = 280;
+/// The longest value a frontmatter `name` or `description` can carry. Real skill
+/// descriptions run to 400 to 600 characters, and the tail of one is the trigger list an
+/// agent reads to decide whether the skill applies, so cutting them at the fallback's
+/// length would throw away the part that matters. Still bounded: without a cap, one
+/// unterminated quote would fold the rest of the file into a field that every listing,
+/// `project_context` and `skill_list` then carries.
+const MAX_FRONTMATTER_CHARS: usize = 2000;
+
+/// The longest description taken from the body when the frontmatter carries none. The
+/// first paragraph of a `SKILL.md` is prose written for a human reader, not a trigger
+/// list, so two lines of it is the useful part.
+const MAX_PARAGRAPH_CHARS: usize = 280;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Frontmatter {
@@ -54,7 +61,7 @@ pub fn parse(text: &str) -> Frontmatter {
                 // the value is past the cap so an unterminated quote cannot fold the
                 // whole file.
                 if let Some(quote) = opening_quote(&value) {
-                    while !closes_with(&value, quote) && value.chars().count() <= MAX_VALUE_CHARS {
+                    while !closes_with(&value, quote) && value.chars().count() <= MAX_FRONTMATTER_CHARS {
                         let Some(next) = lines.next() else { break };
                         value.push(' ');
                         value.push_str(next.trim());
@@ -63,7 +70,7 @@ pub fn parse(text: &str) -> Frontmatter {
                 unquote(&value)
             }
         };
-        let value = cap(&value);
+        let value = cap(&value, MAX_FRONTMATTER_CHARS);
         if value.is_empty() {
             continue;
         }
@@ -112,7 +119,7 @@ fn read_block_scalar<'a>(lines: &mut std::iter::Peekable<std::str::Lines<'a>>, s
         collected.push(lines.next().unwrap_or_default());
         // The block cannot be longer than the value it will produce, plus room for the
         // indent it is about to lose.
-        if collected.len() > MAX_VALUE_CHARS {
+        if collected.len() > MAX_FRONTMATTER_CHARS {
             break;
         }
     }
@@ -166,13 +173,13 @@ fn strip_indent(line: &str, indent: usize) -> &str {
     }
 }
 
-/// Cuts a value to [`MAX_VALUE_CHARS`] characters, counting characters rather than
-/// bytes so a multi-byte one is never split.
-fn cap(value: &str) -> String {
-    if value.chars().count() <= MAX_VALUE_CHARS {
+/// Cuts a value to `max` characters, counting characters rather than bytes so a
+/// multi-byte one is never split.
+fn cap(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
         return value.to_string();
     }
-    value.chars().take(MAX_VALUE_CHARS).collect()
+    value.chars().take(max).collect()
 }
 
 /// The description to show when the frontmatter carries none: the first non-empty
@@ -198,7 +205,7 @@ pub fn first_paragraph(text: &str) -> String {
         }
         paragraph.push(line);
     }
-    cap(&paragraph.join(" "))
+    cap(&paragraph.join(" "), MAX_PARAGRAPH_CHARS)
 }
 
 /// The text between the first two `---` lines, or `None` when the file does not open
@@ -308,15 +315,46 @@ mod tests {
     #[test]
     fn first_paragraph_is_capped() {
         let text = format!("---\nname: x\n---\n\n{}\n", "word ".repeat(200));
-        assert_eq!(first_paragraph(&text).chars().count(), MAX_VALUE_CHARS);
+        assert_eq!(first_paragraph(&text).chars().count(), MAX_PARAGRAPH_CHARS);
+        assert_eq!(MAX_PARAGRAPH_CHARS, 280, "the fallback cap is quoted in docs/usage.md and docs/features/skills.md");
     }
 
     /// An unterminated quote must not fold the rest of the file into the description.
+    /// The fixture runs past the frontmatter cap so the cut is the thing being asserted.
     #[test]
     fn a_frontmatter_value_is_capped_too() {
-        let text = format!("---\nname: x\ndescription: \"{}\n---\n", "word ".repeat(200));
+        let text = format!("---\nname: x\ndescription: \"{}\n---\n", "word ".repeat(500));
         let fm = parse(&text);
-        assert_eq!(fm.description.unwrap().chars().count(), MAX_VALUE_CHARS);
+        assert_eq!(fm.description.unwrap().chars().count(), MAX_FRONTMATTER_CHARS);
+    }
+
+    /// The two caps are different numbers on purpose. A real skill's frontmatter
+    /// description runs to 400 to 600 characters and its tail is the trigger list an
+    /// agent reads, so it survives whole; the body paragraph that stands in when there is
+    /// no frontmatter description is still cut to two lines.
+    #[test]
+    fn a_frontmatter_description_keeps_far_more_than_the_fallback_paragraph() {
+        let long = "trigger word ".repeat(60);
+        assert!(long.chars().count() > 600, "the fixture has to exceed a real description");
+
+        let text = format!("---\nname: x\ndescription: {long}\n---\n\nbody\n");
+        let kept = parse(&text).description.unwrap();
+        assert_eq!(kept.chars().count(), long.trim_end().chars().count(), "a 780-character description is not cut");
+        assert!(kept.chars().count() > MAX_PARAGRAPH_CHARS, "and it is longer than the fallback would allow");
+
+        let text = format!("---\nname: x\n---\n\n{long}\n");
+        assert!(parse(&text).description.is_none(), "no frontmatter description here");
+        assert_eq!(first_paragraph(&text).chars().count(), MAX_PARAGRAPH_CHARS, "the fallback is still 280");
+    }
+
+    /// The frontmatter cap is a cap, not an absence of one: past 2000 characters the
+    /// value is cut like any other.
+    #[test]
+    fn a_frontmatter_description_over_two_thousand_characters_is_cut() {
+        let long = "x".repeat(MAX_FRONTMATTER_CHARS + 500);
+        let text = format!("---\nname: x\ndescription: {long}\n---\n");
+        assert_eq!(parse(&text).description.unwrap().chars().count(), MAX_FRONTMATTER_CHARS);
+        assert_eq!(MAX_FRONTMATTER_CHARS, 2000, "the cap is quoted in docs/usage.md and docs/features/skills.md");
     }
 
     /// `>` folds its indented lines onto one, keeping a blank line as a break, and
@@ -414,7 +452,7 @@ mod tests {
             let fm = parse(case);
             // Whatever came back is still bounded and still valid UTF-8 by construction.
             for value in [fm.name, fm.description].into_iter().flatten() {
-                assert!(value.chars().count() <= MAX_VALUE_CHARS, "{case:?} produced {value:?}");
+                assert!(value.chars().count() <= MAX_FRONTMATTER_CHARS, "{case:?} produced {value:?}");
             }
             let _ = first_paragraph(case);
         }

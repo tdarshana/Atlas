@@ -1610,6 +1610,38 @@ async fn project_mcp_route_reports_and_gates_a_project_override() {
     assert_eq!(task_move["enabled_globally"], true, "{task_move}");
     assert_eq!(task_move["enabled_here"], false, "{task_move}");
 
+    // A plugin's tools belong on this tab too, carrying `source` so the desktop's
+    // `Plugin` badge lights, and meeting both gates the same way a built-in does.
+    let registered = c.put(format!("{base}/mcp/plugin-tools/hello-world")).json(&serde_json::json!({
+        "tools": [{
+            "name": "count",
+            "description": "Counts the things.",
+            "args": {"type": "object", "properties": {"of": {"type": "string"}}, "required": ["of"]},
+            "scope": "read",
+        }],
+    })).send().await.unwrap();
+    assert_eq!(registered.status(), 204, "register failed");
+
+    let with_plugin: serde_json::Value = c.get(format!("{base}/projects/{id}/mcp")).send().await.unwrap().json().await.unwrap();
+    let plugin_row = with_plugin["tools"].as_array().unwrap().iter()
+        .find(|t| t["name"] == "plugin__hello_world__count")
+        .unwrap_or_else(|| panic!("the project tab has no plugin row: {with_plugin}")).clone();
+    assert_eq!(plugin_row["source"], "plugin:hello-world", "{plugin_row}");
+    assert_eq!(plugin_row["scope"], "read", "{plugin_row}");
+    assert_eq!(plugin_row["args"], "of*", "{plugin_row}");
+    assert_eq!(plugin_row["enabled_globally"], true, "{plugin_row}");
+    assert_eq!(plugin_row["enabled_here"], true, "{plugin_row}");
+    let builtin_row = with_plugin["tools"].as_array().unwrap().iter().find(|t| t["name"] == "memory_remember").unwrap();
+    assert_eq!(builtin_row["source"], "builtin", "{builtin_row}");
+
+    let put = c.put(format!("{base}/projects/{id}/mcp/tools")).header("X-Atlas-Actor", "desktop")
+        .json(&serde_json::json!({"disabled": ["task_move", "plugin__hello_world__count"]})).send().await.unwrap();
+    assert_eq!(put.status(), 200, "disabling a plugin tool per project failed: {}", put.text().await.unwrap());
+    let gated: serde_json::Value = c.get(format!("{base}/projects/{id}/mcp")).send().await.unwrap().json().await.unwrap();
+    let plugin_row = gated["tools"].as_array().unwrap().iter().find(|t| t["name"] == "plugin__hello_world__count").unwrap().clone();
+    assert_eq!(plugin_row["enabled_globally"], true, "{plugin_row}");
+    assert_eq!(plugin_row["enabled_here"], false, "the project override must reach a plugin tool: {plugin_row}");
+
     let missing = c.get(format!("{base}/projects/{}/mcp", uuid::Uuid::new_v4())).send().await.unwrap();
     assert_eq!(missing.status(), 404);
 

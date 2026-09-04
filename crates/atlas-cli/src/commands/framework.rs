@@ -67,7 +67,10 @@ pub async fn run(cmd: FrameworkCmd, backend: &RemoteBackend) -> anyhow::Result<(
             };
             let p = resolve_project(project.as_deref(), backend).await?;
             let report = backend.import_framework(p.id, kind, what, &backend.actor).await?;
-            println!("created {}, updated {}, skipped {}", report.created, report.updated, report.skipped);
+            println!(
+                "created {}, updated {}, reparented {}, skipped {}",
+                report.created, report.updated, report.reparented, report.skipped
+            );
         }
     }
     Ok(())

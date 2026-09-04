@@ -3,10 +3,14 @@
 //! `~/.codex/skills`, and the skills inside every installed Claude Code plugin under
 //! `~/.claude/plugins/cache`.
 //!
-//! Read-only, and fenced to one root at a time. Nothing here creates a directory, and
-//! every path it reads or writes, the skill folder, its `SKILL.md` and any file listed
-//! beside it, is canonicalised and required to stay under the canonicalised root, so a
-//! symlink can never carry a read out of the root it was found in. No file is read past
+//! Read-only, and fenced. Nothing here creates a directory, and every path it reads or
+//! writes, the skill folder, its `SKILL.md` and any file listed beside it, is
+//! canonicalised and required to stay under a fence. For a project root and a plugin
+//! cache the fence is that root itself, so a hostile repository or plugin cannot surface
+//! `~/.ssh` through a symlink. For the user's own `~/.claude/skills` and `~/.codex/skills`
+//! the fence is the user's home directory, because symlinking a skill folder in from
+//! elsewhere in one's own home is how people actually keep skills, and everything under
+//! that home is already the user's. No file is read past
 //! [`frontmatter::MAX_SKILL_BYTES`]. An entry that cannot be read is skipped and
 //! reported as a warning rather than failing the whole listing.
 
@@ -45,9 +49,10 @@ const MAX_FILE_ENTRIES_SCANNED: usize = 10_000;
 pub struct Discovered {
     pub summary: SkillSummary,
     pub dir: PathBuf,
-    /// The canonicalised source root `dir` was found under. Every later read or write
-    /// re-checks against it, so a symlink planted between the listing and the read
-    /// cannot widen what Atlas will open.
+    /// The canonicalised fence `dir` was accepted under: the source root itself for a
+    /// project root or a plugin cache, the user's home for `~/.claude/skills` and
+    /// `~/.codex/skills`. Every later read or write re-checks against it, so a symlink
+    /// planted between the listing and the read cannot widen what Atlas will open.
     pub root: PathBuf,
 }
 
@@ -64,8 +69,12 @@ pub struct Found {
 /// `ATLAS_SYNC_HOME` or the user's own home.
 pub fn discover_global_in(home: &Path) -> Found {
     let mut found = Found::default();
-    scan_root(&home.join(".claude/skills"), SkillSource::ClaudeUser, MemoryScope::Global, None, None, &mut found);
-    scan_root(&home.join(".codex/skills"), SkillSource::CodexUser, MemoryScope::Global, None, None, &mut found);
+    // The user's own two roots are fenced to the home rather than to themselves: a skill
+    // symlinked in from elsewhere in the user's home is theirs already, and the strict
+    // rule hid it. The plugin cache below keeps the strict rule, since its contents come
+    // from third parties.
+    scan_root(&home.join(".claude/skills"), SkillSource::ClaudeUser, MemoryScope::Global, None, None, Some(home), &mut found);
+    scan_root(&home.join(".codex/skills"), SkillSource::CodexUser, MemoryScope::Global, None, None, Some(home), &mut found);
     scan_plugins(&home.join(".claude/plugins/cache"), &mut found);
     found
 }
@@ -74,8 +83,8 @@ pub fn discover_global_in(home: &Path) -> Found {
 /// `<root>/.codex/skills`.
 pub fn discover_project(root: &Path, project_id: Uuid) -> Found {
     let mut found = Found::default();
-    scan_root(&root.join(".claude/skills"), SkillSource::ClaudeProject, MemoryScope::Project, Some(project_id), None, &mut found);
-    scan_root(&root.join(".codex/skills"), SkillSource::CodexProject, MemoryScope::Project, Some(project_id), None, &mut found);
+    scan_root(&root.join(".claude/skills"), SkillSource::ClaudeProject, MemoryScope::Project, Some(project_id), None, None, &mut found);
+    scan_root(&root.join(".codex/skills"), SkillSource::CodexProject, MemoryScope::Project, Some(project_id), None, None, &mut found);
     found
 }
 
@@ -96,7 +105,7 @@ fn scan_plugins(cache: &Path, found: &mut Found) {
                 .map(|(_, v)| v);
             let Some(version) = newest else { continue };
             let label = format!("{}/{}", name_of(&marketplace), name_of(&plugin));
-            scan_root(&version.join("skills"), SkillSource::Plugin, MemoryScope::Global, None, Some(label), found);
+            scan_root(&version.join("skills"), SkillSource::Plugin, MemoryScope::Global, None, Some(label), None, found);
         }
     }
 }
@@ -110,6 +119,7 @@ fn scan_root(
     scope: MemoryScope,
     project_id: Option<Uuid>,
     plugin: Option<String>,
+    fence: Option<&Path>,
     found: &mut Found,
 ) {
     let Some(entries) = read_dirs(root, found) else { return };
@@ -120,20 +130,36 @@ fn scan_root(
             return;
         }
     };
+    // What a skill found under this root is allowed to resolve into, and the boundary
+    // every later read and write re-checks against. `None` fences the root to itself.
+    let fence = match fence {
+        None => canonical_root.clone(),
+        Some(f) => match f.canonicalize() {
+            Ok(c) => c,
+            Err(e) => {
+                found.warnings.push(format!("{}: {e}", f.display()));
+                return;
+            }
+        },
+    };
     for dir in entries {
-        // A symlink that leaves the root is not this root's skill, and following it
-        // would let a link inside the user's home hand out any directory the daemon can
-        // read.
-        match inside_root(&dir, &canonical_root) {
+        // A symlink that leaves the fence is not this root's skill, and following it
+        // would let a link hand out any directory the daemon can read.
+        match inside_root(&dir, &fence) {
             Ok(Some(_)) => {}
             // Said rather than skipped in silence: a user who symlinked a skill folder
-            // in from elsewhere should be told why it is missing, not left guessing.
+            // in from elsewhere should be told which one is missing and why.
             Ok(None) => {
-                found.warnings.push(format!("{}: resolves outside {}", dir.display(), root.display()));
+                found.warnings.push(format!(
+                    "skill '{}' skipped: {} resolves outside {}",
+                    name_of(&dir),
+                    dir.display(),
+                    fence.display()
+                ));
                 continue;
             }
             Err(e) => {
-                found.warnings.push(format!("{}: {e}", dir.display()));
+                found.warnings.push(format!("skill '{}' skipped: {e}", name_of(&dir)));
                 continue;
             }
         }
@@ -141,13 +167,17 @@ fn scan_root(
         // to a private file outside the root would otherwise have that file's first
         // paragraph published as a description and its whole text served by `skill_get`.
         let file = dir.join(SKILL_FILE);
-        let file = match inside_root(&file, &canonical_root) {
+        let file = match inside_root(&file, &fence) {
             // Canonicalising resolves the link, so an absent `SKILL.md` lands in `Err`
             // (not found) rather than being reported as an escape. That is the common
             // case, a directory that is not a skill, so it is silent.
             Ok(Some(real)) => real,
             Ok(None) => {
-                found.warnings.push(format!("{}: SKILL.md resolves outside {}", dir.display(), root.display()));
+                found.warnings.push(format!(
+                    "skill '{}' skipped: its SKILL.md resolves outside {}",
+                    name_of(&dir),
+                    fence.display()
+                ));
                 continue;
             }
             Err(_) => continue,
@@ -203,7 +233,7 @@ fn scan_root(
                 enabled_here: None,
             },
             dir,
-            root: canonical_root.clone(),
+            root: fence.clone(),
         });
     }
 }

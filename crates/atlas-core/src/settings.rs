@@ -967,6 +967,46 @@ mod tests {
         }
     }
 
+    /// The upper boundary of the actor-list cap, from both sides. The `bad` table above
+    /// covers an empty list and duplicates; 64 is the last accepted length and 65 the
+    /// first refused one, so an off-by-one in the cap fails here rather than quietly
+    /// widening what a global access list may hold.
+    #[test]
+    fn access_lists_accept_exactly_64_actors_and_refuse_65() {
+        let db = Db::open_in_memory().unwrap();
+        let repo = SettingsRepo::new(&db);
+        for key in ["access.memory_writers", "access.task_movers"] {
+            let at_cap: Vec<String> = (0..64).map(|i| format!("agent-{i}")).collect();
+            let values = Map::from_iter([(key.to_string(), serde_json::json!(at_cap))]);
+            repo.set_many(&values, "t").unwrap_or_else(|e| panic!("{key} refused 64 actors: {e}"));
+
+            let over_cap: Vec<String> = (0..65).map(|i| format!("agent-{i}")).collect();
+            let values = Map::from_iter([(key.to_string(), serde_json::json!(over_cap))]);
+            let err = repo.set_many(&values, "t").unwrap_err();
+            assert!(matches!(err, AtlasError::Invalid(_)), "{key} accepted 65 actors: {err}");
+        }
+    }
+
+    /// `is_plugin_id`'s trailing-dash clause on its own, through the shape check
+    /// `mcp.disabled_tools` runs. `plugin__ab-__count` splits into the id `ab-` and the
+    /// name `count`: the name is legal and the id holds no `--`, so the trailing dash is
+    /// the only clause that can refuse it. No registry ever holds that id, so storing the
+    /// name would gate nothing. The neighbouring legal name is accepted in the same test
+    /// so a blanket refusal cannot pass it.
+    #[test]
+    fn mcp_disabled_tools_refuses_a_plugin_name_whose_id_ends_in_a_dash() {
+        let db = Db::open_in_memory().unwrap();
+        let repo = SettingsRepo::new(&db);
+
+        let values = Map::from_iter([("mcp.disabled_tools".to_string(), serde_json::json!(["plugin__ab-__count"]))]);
+        let err = repo.set_many(&values, "t").unwrap_err();
+        assert!(matches!(err, AtlasError::Invalid(_)), "{err}");
+        assert!(err.to_string().contains("plugin__ab-__count"), "{err}");
+
+        let values = Map::from_iter([("mcp.disabled_tools".to_string(), serde_json::json!(["plugin__ab__count"]))]);
+        repo.set_many(&values, "t").expect("a legal plugin tool name must still be storable");
+    }
+
     #[test]
     fn validate_theme_pack_accepts_a_well_formed_pack() {
         let pack = r##"{"name":"Ocean","base":"light","tokens":{"--accent":"#2563EB","--bg-base":"rgba(0,0,0,0.1)","--radius-md":"6px"}}"##;
