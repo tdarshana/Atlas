@@ -728,9 +728,18 @@
 
 	// The contributed themes follow the plugin list: enabling a plugin from the Plugins
 	// page and coming back here shows its themes without a reload.
+	//
+	// Each run reads every theme file, so two runs started close together (enable then
+	// disable a plugin quickly) can land out of order. The generation counter drops any
+	// answer that is not the newest, rather than letting a slow earlier read overwrite a
+	// fast later one and leave the select stale until the next change.
+	let themeLoadGeneration = 0;
 	$effect(() => {
 		const contribs = contributions();
-		void loadPluginThemes(contribs).then((packs) => (pluginThemes = packs));
+		const generation = ++themeLoadGeneration;
+		void loadPluginThemes(contribs).then((packs) => {
+			if (generation === themeLoadGeneration) pluginThemes = packs;
+		});
 	});
 
 	// `/settings#<section>` (the side panel's Sections rows) scrolls to that card once its

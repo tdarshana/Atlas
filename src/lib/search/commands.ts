@@ -207,7 +207,7 @@ export function pluginCommands(contribs: Contributions): PaletteCommand[] {
 			id: `plugin:${command.pluginId}:${command.id}`,
 			label: `${command.pluginName}: ${command.title}`,
 			hint: keys ? `plugin command, ${keys} inside the plugin` : 'plugin command',
-			icon: 'plug' as IconName,
+			icon: 'plug',
 			run: (ctx: CommandContext) => {
 				if (dispatchCommand(command.pluginId, command.id) > 0) return;
 				if (section) return ctx.goto(sectionHref(section));
@@ -219,8 +219,10 @@ export function pluginCommands(contribs: Contributions): PaletteCommand[] {
 
 /** Case-insensitive substring over the label and the hint. Blank keeps them all.
  * `desktopOnly` commands are left out entirely outside Tauri, where invoking them would
- * only log a fallback warning and do nothing. `extra` is the contributed commands, which
- * the palette passes in so this module stays free of the plugin store. */
+ * only log a fallback warning and do nothing. `extra` is the contributed commands, passed
+ * in rather than read here so that filtering stays a plain function of its arguments: the
+ * palette reads the reactive plugin store where a read can be tracked, and this keeps
+ * working from a test or anywhere else outside a component. */
 export function filterCommands(text: string, extra: PaletteCommand[] = []): PaletteCommand[] {
 	const available = [...COMMANDS, ...extra].filter((c) => !c.desktopOnly || inTauri());
 	const needle = text.trim().toLowerCase();

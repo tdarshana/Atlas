@@ -14,7 +14,14 @@ describe('BRIDGE_CLIENT_JS', () => {
 	});
 
 	it('defines the client API the host protocol answers', () => {
-		for (const name of ['window.atlas', 'atlas:request', 'atlas:response', 'atlas:resize']) {
+		for (const name of [
+			'window.atlas',
+			'atlas:request',
+			'atlas:response',
+			'atlas:resize',
+			'atlas:context',
+			'onContext'
+		]) {
 			expect(BRIDGE_CLIENT_JS).toContain(name);
 		}
 	});
