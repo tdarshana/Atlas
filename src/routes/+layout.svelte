@@ -113,7 +113,11 @@
 		inset: 0;
 		display: flex;
 		flex-direction: column;
-		height: 100vh;
+		/* Under the UI scale setting's `zoom`, WebKit sizes `inset: 0` to the unzoomed
+		   height and the bottom of the shell falls off screen. Dividing by the same factor
+		   (`--ui-zoom`, set beside `zoom` by the boot script and `applyAppearance`) lands the
+		   body exactly on the viewport, at 100% as much as at 150%. */
+		height: calc(100vh / var(--ui-zoom, 1));
 		overflow: hidden;
 		background: var(--bg-base);
 	}

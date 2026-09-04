@@ -59,6 +59,7 @@ describe('applyAppearance', () => {
 		applyAppearance('dark', null, 'system', 'jetbrains-mono', 12, 125);
 
 		expect(document.documentElement.style.zoom).toBe('1.25');
+		expect(document.documentElement.style.getPropertyValue('--ui-zoom')).toBe('1.25');
 		expect(localStorage.getItem(SCALE_KEY)).toBe('125');
 	});
 
@@ -70,6 +71,7 @@ describe('applyAppearance', () => {
 		applyAppearance('dark', null, 'system', 'jetbrains-mono', 12, 100);
 
 		expect(removeProperty).toHaveBeenCalledWith('zoom');
+		expect(removeProperty).toHaveBeenCalledWith('--ui-zoom');
 		expect(localStorage.getItem(SCALE_KEY)).toBeNull();
 	});
 });

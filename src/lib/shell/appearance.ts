@@ -59,8 +59,16 @@ export function applyAppearance(
 	shell.theme = base;
 	if (typeof document !== 'undefined') {
 		document.documentElement.dataset.theme = base;
-		if (scale === 100) document.documentElement.style.removeProperty('zoom');
-		else document.documentElement.style.zoom = String(scale / 100);
+		// `--ui-zoom` rides along for the body rule in the root layout: WebKit's zoom gets
+		// a fixed body's bottom edge wrong, so the body divides its height by this instead.
+		const root = document.documentElement.style;
+		if (scale === 100) {
+			root.removeProperty('zoom');
+			root.removeProperty('--ui-zoom');
+		} else {
+			root.zoom = String(scale / 100);
+			root.setProperty('--ui-zoom', String(scale / 100));
+		}
 	}
 	if (pack) applyThemePack(pack);
 	else clearThemePack();
