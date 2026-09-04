@@ -9,11 +9,47 @@
   </head>
   <body data-sveltekit-preload-data="hover">
     <script>
-      // Paint the stored theme before anything renders, so the window never flashes the
-      // wrong ramp. Dark is the default; storage can throw when site data is blocked.
+      // Paint the stored theme, theme pack and fonts before anything renders, so the
+      // window never flashes the wrong ramp, colours or fonts. Dark is the default;
+      // storage can throw when site data is blocked, and any bad value here is simply
+      // skipped rather than failing the boot.
       try {
+        var pack = null;
+        try {
+          var rawPack = localStorage.getItem('atlas.theme_pack');
+          if (rawPack) pack = JSON.parse(rawPack);
+        } catch (e) {
+          pack = null;
+        }
         var t = localStorage.getItem('atlas.theme');
-        document.documentElement.dataset.theme = t === 'light' ? 'light' : 'dark';
+        var base = pack && (pack.base === 'light' || pack.base === 'dark') ? pack.base : t === 'light' ? 'light' : 'dark';
+        document.documentElement.dataset.theme = base;
+
+        if (pack && pack.tokens && typeof pack.tokens === 'object') {
+          for (var k in pack.tokens) {
+            if (Object.prototype.hasOwnProperty.call(pack.tokens, k) && k.indexOf('--') === 0) {
+              document.documentElement.style.setProperty(k, String(pack.tokens[k]));
+            }
+          }
+        }
+
+        var fontUiStacks = {
+          system: '-apple-system,"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif',
+          inter: 'Inter,-apple-system,"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif',
+          'jetbrains-mono': '"JetBrains Mono","SF Mono","Cascadia Code",Menlo,Consolas,monospace'
+        };
+        var fontMonoStacks = {
+          'jetbrains-mono': '"JetBrains Mono","SF Mono","Cascadia Code",Menlo,Consolas,monospace',
+          'system-mono': 'ui-monospace,"SF Mono","Cascadia Code",Menlo,Consolas,monospace'
+        };
+        var fontUi = fontUiStacks[localStorage.getItem('atlas.font_ui')];
+        if (fontUi) document.documentElement.style.setProperty('--font-ui', fontUi);
+        var fontMono = fontMonoStacks[localStorage.getItem('atlas.font_mono')];
+        if (fontMono) document.documentElement.style.setProperty('--font-mono', fontMono);
+        var fontSize = localStorage.getItem('atlas.font_size');
+        if (fontSize === '11' || fontSize === '12' || fontSize === '13') {
+          document.documentElement.style.setProperty('--text-sm', fontSize + 'px');
+        }
       } catch (e) {
         document.documentElement.dataset.theme = 'dark';
       }

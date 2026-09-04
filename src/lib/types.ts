@@ -293,6 +293,27 @@ export type Settings = Record<string, unknown>;
 /** The desktop theme, mirrored into the daemon so a second client agrees. */
 export const UI_THEME_KEY = 'ui.theme';
 
+/** An imported theme pack's JSON text, or unset for none. */
+export const UI_THEME_PACK_KEY = 'ui.theme_pack';
+/** `"system"`, `"inter"` or `"jetbrains-mono"`. */
+export const UI_FONT_UI_KEY = 'ui.font_ui';
+/** `"jetbrains-mono"` or `"system-mono"`. */
+export const UI_FONT_MONO_KEY = 'ui.font_mono';
+/** The UI size scale's base step: 11, 12 or 13. */
+export const UI_FONT_SIZE_KEY = 'ui.font_size';
+
+/**
+ * `{ "name", "base": "dark"|"light", "tokens": { "--token": "value" } }`. Overrides
+ * colour tokens and the two radius tokens (`--radius-sm`, `--radius-md`) on top of its
+ * base theme; the allowed token names and value syntax are validated both by the
+ * daemon (`crates/atlas-core/src/settings.rs`) and by `$lib/shell/theme-pack.ts`.
+ */
+export interface ThemePack {
+	name: string;
+	base: 'dark' | 'light';
+	tokens: Record<string, string>;
+}
+
 export type JobStatus = 'queued' | 'running' | 'done' | 'failed';
 
 /** A background extraction job, returned by `POST /ingest` (as `job_id`) and `GET /jobs/{id}`. */

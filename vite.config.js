@@ -13,6 +13,7 @@ export default defineConfig(async () => ({
   resolve: process.env.VITEST ? { conditions: ["browser"] } : {},
   test: {
     include: ["src/**/*.{test,spec}.{js,ts}"],
+    css: true,
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`

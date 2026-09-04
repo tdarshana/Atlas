@@ -3,6 +3,7 @@ use crate::memories::MemoryRepo;
 use crate::{AtlasError, Result};
 use duckdb::params;
 use serde_json::{Map, Value};
+use std::collections::HashSet;
 
 /// The only keys the settings table accepts. `set_many` rejects anything else.
 /// `board.stages` is readable here but not writable: see [`SettingsRepo::set_many`].
@@ -17,6 +18,10 @@ pub const SETTING_KEYS: &[&str] = &[
     "board.stages",
     "board.mirror_tasks_md",
     "ui.theme",
+    "ui.theme_pack",
+    "ui.font_ui",
+    "ui.font_mono",
+    "ui.font_size",
     "ui.autostart",
     "ui.global_shortcut",
     "ui.notify.review_pending",
@@ -106,6 +111,132 @@ pub(crate) fn same_endpoint(a: &str, b: &str) -> bool {
     a.trim().trim_end_matches('/') == b.trim().trim_end_matches('/')
 }
 
+// ---- theme packs (`ui.theme_pack`) ----
+//
+// A pack is `{ "name", "base": "dark"|"light", "tokens": { "--token": "value" } }`. It
+// may only override colour tokens and the two radius tokens (`--radius-sm`,
+// `--radius-md`); the allowed names are read out of the same token files the desktop
+// app ships (`colors.css`, `spacing.css`) rather than hand-copied here, so an added or
+// renamed token follows automatically instead of silently going stale.
+
+const COLORS_CSS: &str = include_str!("../../../src/lib/ds/tokens/colors.css");
+const SPACING_CSS: &str = include_str!("../../../src/lib/ds/tokens/spacing.css");
+
+/// The only two length tokens a pack may override, per the design requirements
+/// (inputs/buttons and cards/popovers). Checked against `spacing.css` itself, not just
+/// asserted, so a rename there fails loudly instead of this list going stale.
+const RADIUS_TOKEN_NAMES: &[&str] = &["--radius-sm", "--radius-md"];
+
+/// Strips `/* ... */` comments out of a CSS file so a colon inside a comment (e.g. an
+/// "AA fix: ..." note) is never mistaken for part of a declaration.
+fn strip_css_comments(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(start) = rest.find("/*") {
+        out.push_str(&rest[..start]);
+        rest = match rest[start + 2..].find("*/") {
+            Some(end) => &rest[start + 2 + end + 2..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Every `--name: value;` custom property declared in a CSS file, in source order.
+fn parse_declarations(css: &str) -> Vec<(String, String)> {
+    let cleaned = strip_css_comments(css);
+    let mut out = Vec::new();
+    for chunk in cleaned.split(';') {
+        let chunk = chunk.trim();
+        let Some(rest) = chunk.strip_prefix("--") else { continue };
+        let Some((name, value)) = rest.split_once(':') else { continue };
+        let (name, value) = (name.trim(), value.trim());
+        if !name.is_empty() && !value.is_empty() {
+            out.push((format!("--{name}"), value.to_string()));
+        }
+    }
+    out
+}
+
+/// The set of custom properties a theme pack may override: every token in
+/// `colors.css` whose declared value is a literal colour (not a `var()` alias or a
+/// shadow), plus the two named radius tokens, checked present in `spacing.css`.
+fn theme_token_allowlist() -> HashSet<String> {
+    let mut names: HashSet<String> = HashSet::new();
+    for (name, value) in parse_declarations(COLORS_CSS) {
+        if is_css_color(&value) {
+            names.insert(name);
+        }
+    }
+    for radius in RADIUS_TOKEN_NAMES {
+        if parse_declarations(SPACING_CSS).iter().any(|(name, _)| name == radius) {
+            names.insert((*radius).to_string());
+        }
+    }
+    names
+}
+
+/// Whether `value` is a CSS colour: `#rgb`, `#rrggbb`, `#rrggbbaa`, or a
+/// `rgb()`/`rgba()`/`hsl()`/`hsla()`/`oklch()` function call. Not a full CSS grammar
+/// check, just enough to keep a pack from writing an arbitrary declaration into a
+/// custom property.
+fn is_css_color(value: &str) -> bool {
+    let v = value.trim();
+    if let Some(hex) = v.strip_prefix('#') {
+        return matches!(hex.len(), 3 | 4 | 6 | 8) && hex.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    ["rgb(", "rgba(", "hsl(", "hsla(", "oklch("].iter().any(|p| v.starts_with(p) && v.ends_with(')'))
+}
+
+/// Whether `value` is a plain CSS length (`3px`, `0.5rem`, `0`), the shape the two
+/// radius tokens take.
+fn is_css_length(value: &str) -> bool {
+    let v = value.trim();
+    if v == "0" {
+        return true;
+    }
+    for unit in ["px", "rem", "em", "%"] {
+        if let Some(num) = v.strip_suffix(unit) {
+            if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit() || c == '.') && num.matches('.').count() <= 1 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Validates a theme pack's JSON text against the shape `{ name, base, tokens }`, the
+/// known token allow list, and colour/length syntax for each value, before it is ever
+/// stored: a pack that failed this can never reach `documentElement.style`.
+fn validate_theme_pack(s: &str) -> Result<()> {
+    let bad = |msg: String| AtlasError::Invalid(msg);
+    let v: Value = serde_json::from_str(s).map_err(|e| bad(format!("ui.theme_pack must be valid JSON: {e}")))?;
+    let obj = v.as_object().ok_or_else(|| bad("ui.theme_pack must be a JSON object".into()))?;
+    match obj.get("name").and_then(|n| n.as_str()) {
+        Some(n) if !n.trim().is_empty() => {}
+        _ => return Err(bad("ui.theme_pack.name must be a non-empty string".into())),
+    }
+    match obj.get("base").and_then(|b| b.as_str()) {
+        Some("dark") | Some("light") => {}
+        _ => return Err(bad("ui.theme_pack.base must be \"dark\" or \"light\"".into())),
+    }
+    let tokens = obj.get("tokens").and_then(|t| t.as_object()).ok_or_else(|| bad("ui.theme_pack.tokens must be an object".into()))?;
+    let allowed = theme_token_allowlist();
+    for (name, value) in tokens {
+        if !allowed.contains(name.as_str()) {
+            return Err(bad(format!("ui.theme_pack.tokens has an unknown token '{name}'")));
+        }
+        let value = value.as_str().ok_or_else(|| bad(format!("ui.theme_pack.tokens['{name}'] must be a string")))?;
+        let ok = if RADIUS_TOKEN_NAMES.contains(&name.as_str()) { is_css_length(value) } else { is_css_color(value) };
+        if !ok {
+            let want = if RADIUS_TOKEN_NAMES.contains(&name.as_str()) { "a CSS length" } else { "a CSS colour" };
+            return Err(bad(format!("ui.theme_pack.tokens['{name}'] must be {want}")));
+        }
+    }
+    Ok(())
+}
+
 /// Rejects a value whose JSON type does not match the key. Without this a client could
 /// store, say, an object under `extraction.api_key`, and the extraction worker would then
 /// read a value it cannot use out of the database. `Value::Null` means "unset" and is
@@ -149,6 +280,27 @@ fn check_type(key: &str, value: &Value) -> Result<()> {
         "ui.theme" => match value.as_str() {
             Some("dark") | Some("light") => {}
             _ => return wrong("\"dark\" or \"light\""),
+        },
+        // The imported theme pack's JSON text, or null for none. Validated against the
+        // known token names and colour/length syntax so a bad pack never reaches
+        // `documentElement.style` on any client that reads this setting.
+        "ui.theme_pack" => match value.as_str() {
+            Some(s) => validate_theme_pack(s)?,
+            None => return wrong("a JSON string or null"),
+        },
+        "ui.font_ui" => match value.as_str() {
+            Some("system") | Some("inter") | Some("jetbrains-mono") => {}
+            _ => return wrong("\"system\", \"inter\" or \"jetbrains-mono\""),
+        },
+        "ui.font_mono" => match value.as_str() {
+            Some("jetbrains-mono") | Some("system-mono") => {}
+            _ => return wrong("\"jetbrains-mono\" or \"system-mono\""),
+        },
+        // The UI size scale's base step; 11/12/13 per the design requirements (15 is
+        // the largest step, never the default and not offered here).
+        "ui.font_size" => match value.as_u64() {
+            Some(11) | Some(12) | Some(13) => {}
+            _ => return wrong("11, 12 or 13"),
         },
         // Mirrors of desktop-only Tauri plugin state (autostart, the notification
         // toggles), kept here so a second client opens on the same settings.
@@ -358,6 +510,33 @@ mod tests {
             ("daemon.port", Value::from(70000)),
             ("ui.theme", Value::String("solarized".into())),
             ("ui.theme", Value::from(1)),
+            ("ui.theme_pack", Value::from(1)),
+            ("ui.theme_pack", Value::String("not json".into())),
+            ("ui.theme_pack", Value::String("[]".into())),
+            ("ui.theme_pack", Value::String(r#"{"name":"x","base":"purple","tokens":{}}"#.into())),
+            ("ui.theme_pack", Value::String(r#"{"name":"","base":"dark","tokens":{}}"#.into())),
+            ("ui.theme_pack", Value::String(r#"{"name":"x","base":"dark"}"#.into())),
+            (
+                "ui.theme_pack",
+                Value::String(r##"{"name":"x","base":"dark","tokens":{"--not-a-token":"#000"}}"##.into()),
+            ),
+            (
+                "ui.theme_pack",
+                Value::String(r#"{"name":"x","base":"dark","tokens":{"--accent":"not-a-colour"}}"#.into()),
+            ),
+            (
+                "ui.theme_pack",
+                Value::String(r#"{"name":"x","base":"dark","tokens":{"--radius-sm":"not-a-length"}}"#.into()),
+            ),
+            (
+                "ui.theme_pack",
+                Value::String(r#"{"name":"x","base":"dark","tokens":{"--radius-lg":"3px"}}"#.into()),
+            ),
+            ("ui.font_ui", Value::String("comic-sans".into())),
+            ("ui.font_ui", Value::from(1)),
+            ("ui.font_mono", Value::String("comic-sans".into())),
+            ("ui.font_size", Value::from(14)),
+            ("ui.font_size", Value::String("12".into())),
             ("mcp.disabled_tools", Value::String("memory_review".into())),
             ("mcp.disabled_tools", serde_json::json!(["memory_review", "no_such_tool"])),
             ("mcp.disabled_tools", serde_json::json!([1])),
@@ -405,6 +584,13 @@ mod tests {
             ("daemon.port".to_string(), Value::from(7433)),
             ("embedding.model".to_string(), Value::Null),
             ("ui.theme".to_string(), Value::String("light".into())),
+            (
+                "ui.theme_pack".to_string(),
+                Value::String(r##"{"name":"Ocean","base":"dark","tokens":{"--accent":"#4C8DF6","--radius-sm":"4px"}}"##.into()),
+            ),
+            ("ui.font_ui".to_string(), Value::String("inter".into())),
+            ("ui.font_mono".to_string(), Value::String("system-mono".into())),
+            ("ui.font_size".to_string(), Value::from(13)),
             ("mcp.disabled_tools".to_string(), serde_json::json!(["project_connect", "memory_review"])),
             ("ui.autostart".to_string(), Value::from(true)),
             ("ui.notify.review_pending".to_string(), Value::from(true)),
@@ -414,6 +600,13 @@ mod tests {
         ]);
         repo.set_many(&values, "t").unwrap();
         assert_eq!(repo.get_raw("ui.theme").unwrap(), Some(Value::String("light".into())));
+        assert_eq!(
+            repo.get_raw("ui.theme_pack").unwrap(),
+            Some(Value::String(r##"{"name":"Ocean","base":"dark","tokens":{"--accent":"#4C8DF6","--radius-sm":"4px"}}"##.into()))
+        );
+        assert_eq!(repo.get_raw("ui.font_ui").unwrap(), Some(Value::String("inter".into())));
+        assert_eq!(repo.get_raw("ui.font_mono").unwrap(), Some(Value::String("system-mono".into())));
+        assert_eq!(repo.get_raw("ui.font_size").unwrap(), Some(Value::from(13)));
         assert_eq!(repo.get_raw("ui.global_shortcut").unwrap(), Some(Value::String("CmdOrCtrl+Shift+K".into())));
         assert_eq!(repo.get_raw("mcp.disabled_tools").unwrap(), Some(serde_json::json!(["project_connect", "memory_review"])));
         assert_eq!(repo.get_raw("extraction.enabled").unwrap(), Some(Value::from(true)));
@@ -507,5 +700,49 @@ mod tests {
             .with_conn(|c| Ok(c.query_row("select detail::text from audit where entity = 'setting' and actor = 't' order by \"at\" desc limit 1", [], |r| r.get(0))?))
             .unwrap();
         assert!(!detail.contains("sk-secret"), "the api key value must not appear in the audit log: {detail}");
+    }
+
+    // ---- theme pack token allow list and value syntax ----
+
+    #[test]
+    fn theme_token_allowlist_has_colours_and_the_two_radius_tokens_but_not_aliases_or_shadows() {
+        let allowed = theme_token_allowlist();
+        for name in ["--bg-base", "--bg-surface", "--accent", "--accent-muted", "--text-primary", "--border-strong"] {
+            assert!(allowed.contains(name), "{name} should be a colour token");
+        }
+        assert!(allowed.contains("--radius-sm"));
+        assert!(allowed.contains("--radius-md"));
+        // Not offered: aliases resolve through `var()` rather than a literal colour,
+        // shadows are not colours, and radius-lg is a modal radius, not one of the
+        // two the design requirements call out.
+        assert!(!allowed.contains("--surface-window"), "aliases are var() references, not literal colours");
+        assert!(!allowed.contains("--shadow-sm"), "shadows are not colours");
+        assert!(!allowed.contains("--radius-lg"), "only radius-sm and radius-md are offered");
+    }
+
+    #[test]
+    fn is_css_color_accepts_hex_and_function_forms_and_rejects_everything_else() {
+        for good in ["#fff", "#ffff", "#4C8DF6", "#4C8DF6AA", "rgb(1,2,3)", "rgba(1,2,3,0.5)", "hsl(1,2%,3%)", "oklch(0.5 0.1 200)"] {
+            assert!(is_css_color(good), "{good} should be a valid colour");
+        }
+        for bad in ["red", "3px", "#gggggg", "#12345", "var(--bg-base)", ""] {
+            assert!(!is_css_color(bad), "{bad} should not be a valid colour");
+        }
+    }
+
+    #[test]
+    fn is_css_length_accepts_plain_lengths_and_rejects_everything_else() {
+        for good in ["0", "3px", "0.5rem", "12em", "50%"] {
+            assert!(is_css_length(good), "{good} should be a valid length");
+        }
+        for bad in ["px", "3", "3xy", "-3px-", ""] {
+            assert!(!is_css_length(bad), "{bad} should not be a valid length");
+        }
+    }
+
+    #[test]
+    fn validate_theme_pack_accepts_a_well_formed_pack() {
+        let pack = r##"{"name":"Ocean","base":"light","tokens":{"--accent":"#2563EB","--bg-base":"rgba(0,0,0,0.1)","--radius-md":"6px"}}"##;
+        assert!(validate_theme_pack(pack).is_ok());
     }
 }
