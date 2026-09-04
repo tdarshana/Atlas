@@ -455,6 +455,20 @@ fn list_filters_by_project_stage_assignee_text_and_done() {
     assert!(keys(TaskFilter { project_id: Some(p.id), include_done: true, ..Default::default() }).contains(&b.key));
 }
 
+/// `global_only` is the literal global board: tasks with no project at all, not a
+/// bare `project_id: None`, which leaves every project's tasks in.
+#[test]
+fn list_global_only_keeps_just_the_project_less_tasks() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    let g = repo.create(&new_task(None, "no project"), "t").unwrap();
+    repo.create(&new_task(Some(p.id), "has a project"), "t").unwrap();
+
+    let keys = |f: TaskFilter| repo.list(&f).unwrap().into_iter().map(|t| t.key).collect::<Vec<_>>();
+    assert_eq!(keys(TaskFilter { global_only: true, ..Default::default() }), vec![g.key.clone()]);
+    assert_eq!(keys(TaskFilter::default()).len(), 2, "no filter still shows every task");
+}
+
 // -- stage administration ---------------------------------------------------
 
 #[test]

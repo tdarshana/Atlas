@@ -14,6 +14,7 @@ import type {
 	LogFilter,
 	McpStatusReport,
 	Memory,
+	MemoryFacets,
 	MemoryListScope,
 	MemoryStatus,
 	NewAgent,
@@ -98,6 +99,15 @@ export class AtlasApi {
 			'GET',
 			`/api/v1/memories${query({ status, project_id: projectId, scope })}`
 		);
+	}
+
+	/**
+	 * Kind and tag counts, plus the total, over active memories, `project_id`/`scope`
+	 * read the same way `listMemories` reads them. Lets a side panel show counts
+	 * without loading every matching memory first.
+	 */
+	memoryFacets(projectId?: Uuid | null, scope?: MemoryListScope | null): Promise<MemoryFacets> {
+		return this.req('GET', `/api/v1/memories/facets${query({ project_id: projectId, scope })}`);
 	}
 
 	/**

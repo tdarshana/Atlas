@@ -184,6 +184,47 @@ impl<'a> MemoryRepo<'a> {
         self.get(id)
     }
 
+    /// Kind and tag counts, plus the total, over active memories, `project_id` read
+    /// the same way [`list_by_status_scoped`](Self::list_by_status_scoped) reads it.
+    /// Tags are a list column, so counting them unnests it in the `from` clause rather
+    /// than loading every memory to count client-side.
+    pub fn facets(&self, project_id: Option<Uuid>, only: MemoryScopeFilter) -> Result<MemoryFacets> {
+        self.db.with_conn(|c| {
+            let mut project_clause = String::new();
+            let mut args: Vec<String> = Vec::new();
+            if let Some(p) = project_id {
+                match only {
+                    MemoryScopeFilter::All => project_clause.push_str(" and (project_id = ? or scope = 'global')"),
+                    MemoryScopeFilter::ProjectOnly => project_clause.push_str(" and project_id = ?"),
+                }
+                args.push(p.to_string());
+            }
+            let total: i64 = c.query_row(
+                &format!("select count(*) from memories where status = 'active'{project_clause}"),
+                duckdb::params_from_iter(args.iter()),
+                |r| r.get(0),
+            )?;
+            let mut kinds = std::collections::HashMap::new();
+            {
+                let mut st = c.prepare(&format!(
+                    "select kind, count(*) from memories where status = 'active'{project_clause} group by kind"
+                ))?;
+                let rows = st.query_map(duckdb::params_from_iter(args.iter()), |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+                for row in rows { let (k, n) = row?; kinds.insert(k, n); }
+            }
+            let mut tags = std::collections::HashMap::new();
+            {
+                let mut st = c.prepare(&format!(
+                    "select t.tag, count(*) from memories, unnest(memories.tags) as t(tag) \
+                     where status = 'active'{project_clause} group by t.tag"
+                ))?;
+                let rows = st.query_map(duckdb::params_from_iter(args.iter()), |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+                for row in rows { let (t, n) = row?; tags.insert(t, n); }
+            }
+            Ok(MemoryFacets { kinds, tags, total })
+        })
+    }
+
     pub fn count_active(&self) -> Result<i64> {
         self.db.with_conn(|c| Ok(c.query_row("select count(*) from memories where status='active'", [], |r| r.get(0))?))
     }
@@ -243,6 +284,39 @@ mod tests {
         let audits: i64 = db.with_conn(|c| Ok(c.query_row("select count(*) from audit", [], |r| r.get(0))?)).unwrap();
         assert_eq!(audits, 3);
     }
+    #[test]
+    fn facets_count_kinds_tags_and_total_over_active_memories() {
+        let db = Db::open_in_memory().unwrap();
+        let repo = MemoryRepo::new(&db);
+        let mut a = mem("use bun not pnpm", MemoryScope::Global);
+        a.tags = vec!["tooling".into(), "runtime".into()];
+        let mut b = mem("tailwind lives in css", MemoryScope::Global);
+        b.kind = MemoryKind::Decision;
+        b.tags = vec!["tooling".into()];
+        let c = mem("no tags here", MemoryScope::Global);
+        repo.insert(&a, "test").unwrap();
+        let inserted_b = repo.insert(&b, "test").unwrap();
+        repo.insert(&c, "test").unwrap();
+        // Rejected memories are not active, so they must not inflate any count.
+        let mut d = mem("rejected one", MemoryScope::Global);
+        d.status = MemoryStatus::Rejected;
+        repo.insert(&d, "test").unwrap();
+
+        let facets = repo.facets(None, MemoryScopeFilter::All).unwrap();
+        assert_eq!(facets.total, 3);
+        assert_eq!(facets.kinds.get("fact").copied(), Some(2));
+        assert_eq!(facets.kinds.get("decision").copied(), Some(1));
+        assert_eq!(facets.tags.get("tooling").copied(), Some(2));
+        assert_eq!(facets.tags.get("runtime").copied(), Some(1));
+        // `c` kept `mem()`'s default tag.
+        assert_eq!(facets.tags.get("t1").copied(), Some(1));
+
+        repo.set_status(inserted_b.id, MemoryStatus::Superseded, "test").unwrap();
+        let after = repo.facets(None, MemoryScopeFilter::All).unwrap();
+        assert_eq!(after.total, 2);
+        assert!(!after.kinds.contains_key("decision"), "the superseded decision drops out");
+    }
+
     #[test]
     fn get_missing_is_not_found() {
         let db = Db::open_in_memory().unwrap();

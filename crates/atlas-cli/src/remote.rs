@@ -147,6 +147,11 @@ impl Backend for RemoteBackend {
     async fn set_memory_status(&self, id: Uuid, status: MemoryStatus, actor: &str) -> Result<Memory> {
         Self::handle(self.client.post(format!("{}/memories/{id}/status?actor={actor}", self.base)).json(&serde_json::json!({"status": status})).send().await.map_err(Self::net)?).await
     }
+    async fn memory_facets(&self, project_id: Option<Uuid>, scope: MemoryScopeFilter) -> Result<MemoryFacets> {
+        atlas_core::backend::check_scope(project_id, scope)?;
+        let project = project_id.map(|p| format!("&project_id={p}")).unwrap_or_default();
+        Self::handle(self.client.get(format!("{}/memories/facets?scope={scope}{project}", self.base)).send().await.map_err(Self::net)?).await
+    }
 
     async fn connect_project(&self, root: PathBuf, actor: &str) -> Result<Project> {
         Self::handle(self.client.post(format!("{}/projects/connect?actor={actor}", self.base)).json(&serde_json::json!({"root": root})).send().await.map_err(Self::net)?).await
@@ -232,10 +237,11 @@ impl Backend for RemoteBackend {
     }
 
     /// The daemon runs the extraction, so a 409 here is its "extraction is
-    /// disabled", carried back as the same error a `LocalBackend` would raise.
+    /// disabled", carried back as the same error a `LocalBackend` would raise. The
+    /// actor goes in `X-Atlas-Actor`, not the deprecated `source_tool` body field.
     async fn ingest_transcript(&self, text: String, source_tool: String, project_root: Option<PathBuf>) -> Result<Uuid> {
-        let body = serde_json::json!({"text": text, "source_tool": source_tool, "project_root": project_root});
-        let r = self.client.post(format!("{}/ingest", self.base)).json(&body).send().await.map_err(Self::net)?;
+        let body = serde_json::json!({"text": text, "project_root": project_root});
+        let r = self.client.post(format!("{}/ingest", self.base)).header("X-Atlas-Actor", &source_tool).json(&body).send().await.map_err(Self::net)?;
         let v: serde_json::Value = Self::handle(r).await?;
         v["job_id"].as_str().and_then(|s| Uuid::parse_str(s).ok())
             .ok_or_else(|| AtlasError::Other(format!("ingest response had no job_id: {v}")))
@@ -270,6 +276,7 @@ impl Backend for RemoteBackend {
         if f.ready { parts.push("ready=true".into()); }
         if let Some(text) = f.query { parts.push(format!("q={text}")); }
         if f.include_done { parts.push("include_done=true".into()); }
+        if f.global_only { parts.push("scope=global".into()); }
         let q = if parts.is_empty() { String::new() } else { format!("?{}", parts.join("&")) };
         Self::handle(self.client.get(format!("{}/tasks{q}", self.base)).header("X-Atlas-Actor", &self.actor).send().await.map_err(Self::net)?).await
     }

@@ -75,10 +75,24 @@ where
     }
 }
 
-/// The board's caller identity: `X-Atlas-Actor`, trimmed, defaulting to `api` when the
-/// header is absent. Present but out of range (empty after trimming, or over 64
-/// characters) is a 400, not a silent clamp: a caller who sent a bad header should be
-/// told, not have it quietly replaced.
+/// Parses `X-Atlas-Actor`, trimmed. `None` when the header is absent; present but out
+/// of range (empty after trimming, or over 64 characters) is `Invalid`, not a silent
+/// clamp: a caller who sent a bad header should be told, not have it quietly replaced.
+fn parse_actor_header(headers: &HeaderMap) -> std::result::Result<Option<String>, ApiError> {
+    match headers.get("x-atlas-actor") {
+        None => Ok(None),
+        Some(v) => {
+            let s = v.to_str().map_err(|e| ApiError(AtlasError::Invalid(format!("X-Atlas-Actor: {e}"))))?.trim();
+            if s.is_empty() || s.chars().count() > 64 {
+                return Err(ApiError(AtlasError::Invalid("X-Atlas-Actor must be 1..64 characters".into())));
+            }
+            Ok(Some(s.to_string()))
+        }
+    }
+}
+
+/// The board's caller identity: `X-Atlas-Actor`, defaulting to `api` when the header
+/// is absent.
 pub struct Actor(pub String);
 impl<S> FromRequestParts<S> for Actor
 where
@@ -86,16 +100,7 @@ where
 {
     type Rejection = ApiError;
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        match parts.headers.get("x-atlas-actor") {
-            None => Ok(Self("api".into())),
-            Some(v) => {
-                let s = v.to_str().map_err(|e| ApiError(AtlasError::Invalid(format!("X-Atlas-Actor: {e}"))))?.trim();
-                if s.is_empty() || s.chars().count() > 64 {
-                    return Err(ApiError(AtlasError::Invalid("X-Atlas-Actor must be 1..64 characters".into())));
-                }
-                Ok(Self(s.to_string()))
-            }
-        }
+        Ok(Self(parse_actor_header(&parts.headers)?.unwrap_or_else(|| "api".into())))
     }
 }
 
@@ -165,6 +170,7 @@ pub fn cors_layer() -> CorsLayer {
 #[derive(Deserialize)] pub struct StatusBody { pub status: String }
 #[derive(Deserialize)] pub struct ProjectQ { pub project_id: Option<Uuid> }
 #[derive(Deserialize)] pub struct ListMemoriesQ { pub status: Option<String>, pub project_id: Option<Uuid>, pub scope: Option<String> }
+#[derive(Deserialize)] pub struct MemoryFacetsQ { pub project_id: Option<Uuid>, pub scope: Option<String> }
 #[derive(Deserialize)] pub struct LogQ {
     #[serde(default)] pub source: Option<String>,
     #[serde(default)] pub kind: Option<String>,
@@ -172,7 +178,13 @@ pub fn cors_layer() -> CorsLayer {
     #[serde(default)] pub after: Option<DateTime<Utc>>,
     #[serde(default)] pub limit: Option<usize>,
 }
-#[derive(Deserialize)] pub struct IngestBody { pub text: String, pub source_tool: String, #[serde(default)] pub project_root: Option<std::path::PathBuf> }
+#[derive(Deserialize)] pub struct IngestBody {
+    pub text: String,
+    /// Deprecated: send the actor as `X-Atlas-Actor` instead. Kept for one release so
+    /// an older caller still works; the header wins when both are sent.
+    #[serde(default)] pub source_tool: Option<String>,
+    #[serde(default)] pub project_root: Option<std::path::PathBuf>,
+}
 
 // ---- MCP (Phase 10) ----
 
@@ -212,6 +224,9 @@ fn query_flag<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<boo
     #[serde(default, deserialize_with = "query_flag")] pub ready: bool,
     #[serde(default)] pub q: Option<String>,
     #[serde(default, deserialize_with = "query_flag")] pub include_done: bool,
+    /// `global`, for the literal global board (tasks with no project); anything else,
+    /// including absent or empty, is the existing widen-or-narrow-by-`project_id` read.
+    #[serde(default)] pub scope: Option<String>,
 }
 #[derive(Deserialize)] pub struct MoveBody { pub stage: String, #[serde(default)] pub expected_updated_at: Option<DateTime<Utc>> }
 #[derive(Deserialize)] pub struct CommentBody { pub body: String }
@@ -247,6 +262,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/status", get(status))
         .route("/api/v1/memories", post(create_memory).get(list_memories))
+        .route("/api/v1/memories/facets", get(memory_facets))
         .route("/api/v1/memories/search", post(search))
         .route("/api/v1/memories/{id}", get(get_memory))
         .route("/api/v1/memories/{id}/forget", post(forget))
@@ -303,6 +319,13 @@ async fn list_memories(State(s): State<AppState>, ApiQuery(q): ApiQuery<ListMemo
     let status = match q.status.as_deref().filter(|v| !v.is_empty()) { Some(v) => v.parse()?, None => MemoryStatus::Active };
     let scope = match q.scope.as_deref().filter(|v| !v.is_empty()) { Some(v) => v.parse()?, None => MemoryScopeFilter::All };
     Ok(Json(s.backend.list_memories(status, q.project_id, scope).await?))
+}
+/// Kind and tag counts, plus the total, over active memories, filtered the same way
+/// `GET /memories` filters `project_id`: a bare `project_id` widens to that project plus
+/// every global memory, `scope=project_only` narrows to just the project's own.
+async fn memory_facets(State(s): State<AppState>, ApiQuery(q): ApiQuery<MemoryFacetsQ>) -> Result<Json<MemoryFacets>, ApiError> {
+    let scope = match q.scope.as_deref().filter(|v| !v.is_empty()) { Some(v) => v.parse()?, None => MemoryScopeFilter::All };
+    Ok(Json(s.backend.memory_facets(q.project_id, scope).await?))
 }
 async fn set_memory_status(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, ApiQuery(q): ApiQuery<ActorQ>, ApiJson(b): ApiJson<StatusBody>) -> Result<Json<Memory>, ApiError> {
     Ok(Json(s.backend.set_memory_status(id, b.status.parse()?, actor(&q)).await?))
@@ -417,8 +440,19 @@ async fn set_settings(State(s): State<AppState>, ApiQuery(q): ApiQuery<ActorQ>, 
 /// not here: the MCP `ingest_transcript` tool reaches the same backend and is just as
 /// unauthenticated, so a guard in this handler would only cover half the doors. This
 /// route keeps the status mapping, where 413 comes from `AtlasError::TooLarge`.
-async fn ingest(State(s): State<AppState>, ApiJson(b): ApiJson<IngestBody>) -> Response {
-    match s.backend.ingest_transcript(b.text, b.source_tool, b.project_root).await {
+///
+/// The actor comes from `X-Atlas-Actor` when present; the body's `source_tool` is the
+/// deprecated fallback for a caller that has not moved to the header yet. Neither one
+/// present is a 400 naming both ways to send it.
+async fn ingest(State(s): State<AppState>, headers: HeaderMap, ApiJson(b): ApiJson<IngestBody>) -> Response {
+    let source_tool = match parse_actor_header(&headers) {
+        Ok(header) => match header.or(b.source_tool) {
+            Some(v) => v,
+            None => return ApiError(AtlasError::Invalid("ingest needs an actor: send X-Atlas-Actor, or the deprecated source_tool body field".into())).into_response(),
+        },
+        Err(e) => return e.into_response(),
+    };
+    match s.backend.ingest_transcript(b.text, source_tool, b.project_root).await {
         Ok(job_id) => (StatusCode::ACCEPTED, Json(serde_json::json!({"job_id": job_id}))).into_response(),
         Err(e) => ApiError(e).into_response(),
     }
@@ -456,7 +490,15 @@ async fn test_extraction(State(s): State<AppState>, ApiQuery(q): ApiQuery<Projec
 // ---- board ----
 
 async fn list_tasks(State(s): State<AppState>, ApiQuery(q): ApiQuery<TaskListQ>) -> Result<Json<Vec<Task>>, ApiError> {
-    let f = TaskFilter { project_id: q.project_id, stage: q.stage, assignee: q.assignee, ready: q.ready, query: q.q, include_done: q.include_done };
+    let global_only = match q.scope.as_deref().filter(|v| !v.is_empty()) {
+        Some("global") => true,
+        Some(other) => return Err(ApiError(AtlasError::Invalid(format!("unknown scope: {other}")))),
+        None => false,
+    };
+    if global_only && q.project_id.is_some() {
+        return Err(ApiError(AtlasError::Invalid("project_id and scope=global cannot both be set".into())));
+    }
+    let f = TaskFilter { project_id: q.project_id, stage: q.stage, assignee: q.assignee, ready: q.ready, query: q.q, include_done: q.include_done, global_only };
     Ok(Json(s.backend.list_tasks(f).await?))
 }
 async fn create_task(State(s): State<AppState>, Actor(actor): Actor, ApiJson(t): ApiJson<NewTask>) -> Result<(StatusCode, Json<Task>), ApiError> {

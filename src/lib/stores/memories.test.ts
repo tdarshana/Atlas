@@ -6,7 +6,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Memory, MemoryKind } from '$lib/types';
 
-const mocks = vi.hoisted(() => ({ listMemories: vi.fn(), search: vi.fn(), forget: vi.fn() }));
+const mocks = vi.hoisted(() => ({ listMemories: vi.fn(), search: vi.fn(), forget: vi.fn(), memoryFacets: vi.fn() }));
 
 vi.mock('$lib/daemon.svelte', () => ({
 	api: () => mocks,
@@ -40,7 +40,9 @@ const rows = [memory('a', 'fact'), memory('b', 'decision'), memory('c', 'fact')]
 beforeEach(() => {
 	mocks.listMemories.mockReset();
 	mocks.search.mockReset();
+	mocks.memoryFacets.mockReset();
 	mocks.listMemories.mockResolvedValue(rows);
+	mocks.memoryFacets.mockResolvedValue({ kinds: { fact: 2, decision: 1 }, tags: {}, total: 3 });
 	memories.query = '';
 	memories.scope = 'all';
 	memories.projectId = '';
@@ -72,6 +74,19 @@ describe('memories store', () => {
 
 		expect(mocks.listMemories).toHaveBeenCalledTimes(1);
 		expect(memories.hits).toHaveLength(3);
+	});
+
+	it('loads facets from GET /memories/facets, not derived from the rows', async () => {
+		await loadMemories();
+		expect(mocks.memoryFacets).toHaveBeenCalledTimes(1);
+		expect(memories.facets).toEqual({ kinds: { fact: 2, decision: 1 }, tags: {}, total: 3 });
+	});
+
+	it('clears facets on a failed load, same as the rows', async () => {
+		mocks.listMemories.mockRejectedValueOnce(new Error('boom'));
+		memories.facets = { kinds: { fact: 1 }, tags: {}, total: 1 };
+		await loadMemories();
+		expect(memories.facets).toEqual({ kinds: {}, tags: {}, total: 0 });
 	});
 
 	it('never sends the kind filter to the search route', async () => {

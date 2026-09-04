@@ -90,6 +90,9 @@ pub trait Backend: Send + Sync + 'static {
     /// global memories, `ProjectOnly` keeps only the project's own rows. `ProjectOnly`
     /// without a `project_id` is `Invalid`: there is no project to narrow to.
     async fn list_memories(&self, status: MemoryStatus, project_id: Option<Uuid>, scope: MemoryScopeFilter) -> Result<Vec<Memory>>;
+    /// Kind and tag counts, plus the total, over active memories, `project_id` read the
+    /// same way [`list_memories`](Self::list_memories) reads it.
+    async fn memory_facets(&self, project_id: Option<Uuid>, scope: MemoryScopeFilter) -> Result<MemoryFacets>;
     async fn set_memory_status(&self, id: Uuid, status: MemoryStatus, actor: &str) -> Result<Memory>;
 
     // ---- projects ----
@@ -324,6 +327,10 @@ impl Backend for LocalBackend {
     async fn list_memories(&self, status: MemoryStatus, project_id: Option<Uuid>, scope: MemoryScopeFilter) -> Result<Vec<Memory>> {
         check_scope(project_id, scope)?;
         self.memories.list_scoped(status, None, project_id, scope)
+    }
+    async fn memory_facets(&self, project_id: Option<Uuid>, scope: MemoryScopeFilter) -> Result<MemoryFacets> {
+        check_scope(project_id, scope)?;
+        self.memories.facets(project_id, scope)
     }
     async fn set_memory_status(&self, id: Uuid, status: MemoryStatus, actor: &str) -> Result<Memory> { self.memories.set_status(id, status, actor) }
 

@@ -7,7 +7,8 @@ use std::path::PathBuf;
 pub enum ProjectCmd {
     /// Detect and record the project at PATH (default: the working directory)
     Connect { path: Option<PathBuf> },
-    /// List every project Atlas knows about
+    /// List every project Atlas knows about, with each one's short id; `atlas project
+    /// show <path>` reaches the full one
     List,
     /// Print the project at PATH with its memories, practices and workflows
     Show { path: Option<PathBuf> },
@@ -79,6 +80,12 @@ async fn resolve(target: &str, backend: &RemoteBackend) -> anyhow::Result<uuid::
     }
 }
 
+/// The first 8 hex characters of a project's id, for a table column narrow enough to
+/// read alongside the name and root; `atlas project show <path>` prints the full id.
+fn short_id(id: uuid::Uuid) -> String {
+    id.to_string()[..8].to_string()
+}
+
 pub async fn run(cmd: ProjectCmd, backend: &RemoteBackend) -> anyhow::Result<()> {
     match cmd {
         ProjectCmd::Connect { path } => super::print_json(&backend.connect_project(super::abs_path(path)?, "cli").await?),
@@ -131,9 +138,9 @@ pub async fn run(cmd: ProjectCmd, backend: &RemoteBackend) -> anyhow::Result<()>
             let projects = backend.list_projects().await?;
             let rows: Vec<Vec<String>> = projects
                 .iter()
-                .map(|p| vec![p.name.clone(), p.root_path.clone(), p.last_seen_at.format("%Y-%m-%d %H:%M").to_string()])
+                .map(|p| vec![short_id(p.id), p.name.clone(), p.root_path.clone(), p.last_seen_at.format("%Y-%m-%d %H:%M").to_string()])
                 .collect();
-            super::print_table(&["NAME", "ROOT", "LAST SEEN"], &rows);
+            super::print_table(&["ID", "NAME", "ROOT", "LAST SEEN"], &rows);
             Ok(())
         }
     }

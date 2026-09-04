@@ -1,36 +1,25 @@
 <script lang="ts">
-	// Facets over the whole active set. The store's `hits` are already narrowed by the kind
-	// filter, so counting those would zero every kind the user just filtered out and leave
-	// them nothing to widen back to. `memories.all` is the same load before the kind filter,
-	// so the panel reads that and issues no request of its own.
+	// Kind and tag counts come from `GET /memories/facets` (`memories.facets`), over the
+	// whole active set regardless of the current search text or the kind filter, so the
+	// panel issues no fetch of its own and stays whole while its own chips narrow the
+	// table. Sources have no facets-endpoint counterpart, so those still come from
+	// `memories.all`, the same load before the kind filter.
 	import { MEMORY_KINDS, memories, toggleKind } from '$lib/stores/memories.svelte';
 	import TreeGroup from '../TreeGroup.svelte';
 	import TreeRow from '../TreeRow.svelte';
-
-	const facets = $derived(memories.all);
 
 	/** Descending by count, then alphabetical, so the panel does not jump about. */
 	function ranked(counts: Map<string, number>): [string, number][] {
 		return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
 	}
 
-	const kindCounts = $derived.by(() => {
-		const counts = new Map<string, number>(MEMORY_KINDS.map((k) => [k, 0]));
-		for (const hit of facets) counts.set(hit.memory.kind, (counts.get(hit.memory.kind) ?? 0) + 1);
-		return counts;
-	});
+	const kindCounts = $derived(new Map(MEMORY_KINDS.map((k) => [k, memories.facets.kinds[k] ?? 0])));
 
-	const tags = $derived.by(() => {
-		const counts = new Map<string, number>();
-		for (const hit of facets) {
-			for (const tag of hit.memory.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1);
-		}
-		return ranked(counts);
-	});
+	const tags = $derived(ranked(new Map(Object.entries(memories.facets.tags))));
 
 	const sources = $derived.by(() => {
 		const counts = new Map<string, number>();
-		for (const hit of facets) {
+		for (const hit of memories.all) {
 			const source = hit.memory.source_agent ?? hit.memory.source_tool ?? 'unknown';
 			counts.set(source, (counts.get(source) ?? 0) + 1);
 		}

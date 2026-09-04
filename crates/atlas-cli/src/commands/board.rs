@@ -144,13 +144,17 @@ pub async fn run_task(cmd: TaskCmd, backend: &RemoteBackend) -> anyhow::Result<(
     let actor = backend.actor.clone();
     match cmd {
         TaskCmd::List { project, global, stage, assignee, ready, all } => {
+            // `resolve_project` answers `None` for the global board (see its own doc),
+            // which means tasks with no project at all, not every project's tasks.
+            let target = resolve_project(project.as_deref(), global, backend).await?;
             let filter = TaskFilter {
-                project_id: project_id(project.as_deref(), global, backend).await?,
+                project_id: target.as_ref().map(|p| p.id),
                 stage,
                 assignee,
                 ready,
                 query: None,
                 include_done: all,
+                global_only: target.is_none(),
             };
             let tasks = backend.list_tasks(filter).await?;
             let rows: Vec<Vec<String>> = tasks

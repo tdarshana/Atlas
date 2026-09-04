@@ -4,7 +4,10 @@
 
 import { api } from '$lib/daemon.svelte';
 import { errorLogPath, errorMessage } from '$lib/errors';
-import type { Memory, MemoryKind, RecallHit, Uuid } from '$lib/types';
+import type { Memory, MemoryFacets, MemoryKind, MemoryListScope, RecallHit, Uuid } from '$lib/types';
+
+/** `memories.facets` before a load has ever landed, or after one failed. */
+const EMPTY_FACETS: MemoryFacets = { kinds: {}, tags: {}, total: 0 };
 
 export type ScopeFilter = 'all' | 'global' | 'project';
 
@@ -28,6 +31,12 @@ export const memories = $state({
 	all: [] as RecallHit[],
 	hits: [] as RecallHit[],
 	scored: false,
+	/**
+	 * Kind and tag counts over the active set, scoped like `all` but from `GET
+	 * /memories/facets` rather than derived from the loaded rows: unlike `all`, this
+	 * always covers the whole active set, a search query included.
+	 */
+	facets: EMPTY_FACETS,
 	loading: false,
 	error: null as string | null,
 	/** Set only for a connection failure, so the error state can point at the log. */
@@ -45,6 +54,15 @@ let generation = 0;
 /** The project filter, or null when it does not apply. */
 function activeProjectId(): Uuid | null {
 	return memories.scope === 'project' && memories.projectId ? memories.projectId : null;
+}
+
+/**
+ * The `list_scope` facets are fetched with: `project_only` narrows to that project's
+ * own memories, the same narrowing `activeProjectId` already applies for the list
+ * itself, so the two never disagree about what "this project" means.
+ */
+function facetsListScope(): MemoryListScope | null {
+	return activeProjectId() ? 'project_only' : null;
 }
 
 /** Client-side backstop: the list route takes neither a scope nor kinds. */
@@ -79,6 +97,9 @@ export async function loadMemories(): Promise<void> {
 	try {
 		let hits: RecallHit[];
 		let scored: boolean;
+		// Independent of the query text and the kind filter: this is always the whole
+		// active set's facets, not just what the current search matched.
+		const facetsPromise = api().memoryFacets(projectId, facetsListScope());
 		if (query) {
 			// No `kinds` here on purpose: one fetch per load, and the side panel needs the
 			// counts for the kinds the filter is currently hiding.
@@ -99,9 +120,11 @@ export async function loadMemories(): Promise<void> {
 			hits = rows.map((memory) => ({ memory, score: 0 }));
 			scored = false;
 		}
+		const facets = await facetsPromise;
 		if (g !== generation) return;
 		memories.all = hits.filter(inScope);
 		memories.scored = scored;
+		memories.facets = facets;
 		applyKinds();
 		memories.error = null;
 		memories.errorLogPath = null;
@@ -109,6 +132,7 @@ export async function loadMemories(): Promise<void> {
 		if (g !== generation) return;
 		memories.all = [];
 		memories.hits = [];
+		memories.facets = EMPTY_FACETS;
 		memories.selected = null;
 		memories.error = errorMessage(e);
 		memories.errorLogPath = errorLogPath(e);

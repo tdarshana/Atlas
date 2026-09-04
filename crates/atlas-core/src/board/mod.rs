@@ -456,6 +456,9 @@ impl TaskRepo {
                 sql.push_str(" and project_id = ?");
                 args.push(p.to_string());
             }
+            if f.global_only {
+                sql.push_str(" and project_id is null");
+            }
             if let Some(s) = &f.stage {
                 sql.push_str(" and lower(stage) = lower(?)");
                 args.push(s.clone());

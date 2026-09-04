@@ -184,6 +184,12 @@ impl MemoryService {
         self.repo().list_by_status_scoped(status, scope, project_id, only)
     }
 
+    /// Kind and tag counts, plus the total, over active memories; `project_id` read the
+    /// same narrowing [`list_scoped`](Self::list_scoped) takes.
+    pub fn facets(&self, project_id: Option<Uuid>, only: MemoryScopeFilter) -> Result<MemoryFacets> {
+        self.repo().facets(project_id, only)
+    }
+
     /// Moves a memory between statuses, keeping the search index in step: becoming
     /// active makes it searchable, leaving active takes it back out.
     pub fn set_status(&self, id: Uuid, status: MemoryStatus, actor: &str) -> Result<Memory> {

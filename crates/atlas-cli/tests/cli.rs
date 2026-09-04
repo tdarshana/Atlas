@@ -40,9 +40,13 @@ fn project_agent_sync_export_and_import_round_trip() {
     let (code, out, err) = run(&["project", "connect", repo_path]);
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("\"name\""), "connect should print the project as JSON: {out}");
+    let connected: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let project_id = connected["id"].as_str().unwrap().to_string();
     let (code, out, err) = run(&["project", "list"]);
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("NAME"), "list should print a table: {out}");
+    assert!(out.contains("ID"), "list should have an ID column: {out}");
+    assert!(out.contains(&project_id[..8]), "list should print the project's short id: {out}");
 
     let instructions = work.path().join("reviewer.md");
     std::fs::write(&instructions, "Review the diff and report only real defects.\n").unwrap();

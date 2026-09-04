@@ -20,7 +20,32 @@ pub async fn ensure_daemon(paths: &AtlasPaths, port: u16) -> anyhow::Result<u16>
 /// Like [`ensure_daemon`], but spawns an explicitly named `atlasd`. The desktop app passes
 /// its bundled sidecar so a packaged install works on a machine with no `atlasd` on PATH.
 /// `None` keeps the default search: next to the current executable, then PATH.
+/// How long a caller waits, in short steps, for another caller's already-in-flight
+/// daemon start to announce itself (`daemon.json` written, or the port answering)
+/// before spawning a competing one. A manual `atlas daemon start` moments earlier may
+/// still be mid-startup, with its atlasd spawned but neither signal there yet; a
+/// second caller that spawns anyway only loses the DuckDB file lock race and dies, so
+/// this is worth a short wait first, not the full readiness deadline below.
+const START_RACE_TIMEOUT: Duration = Duration::from_millis(1_500);
+const START_RACE_STEP: Duration = Duration::from_millis(150);
+
+/// Waits up to `timeout`, polling every `step`, for the daemon to announce itself
+/// either by its port answering or by `daemon.json` appearing. Returns whether either
+/// happened before the timeout elapsed; a stale `daemon.json` left by a crash (see
+/// [`stop_daemon`]) still counts here, since the worst case is a caller waiting up to
+/// `timeout` before spawning anyway, not one stuck waiting forever on it.
+async fn wait_for_daemon(paths: &AtlasPaths, port: u16, timeout: Duration, step: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if is_up(port).await || daemon_info(paths).is_some() { return true; }
+        if Instant::now() >= deadline { return false; }
+        tokio::time::sleep(step).await;
+    }
+}
+
 pub async fn ensure_daemon_with(paths: &AtlasPaths, port: u16, atlasd: Option<PathBuf>) -> anyhow::Result<u16> {
+    if is_up(port).await { return Ok(port); }
+    wait_for_daemon(paths, port, START_RACE_TIMEOUT, START_RACE_STEP).await;
     if is_up(port).await { return Ok(port); }
     paths.ensure()?;
     let bin = atlasd.unwrap_or_else(atlasd_path);
@@ -33,7 +58,10 @@ pub async fn ensure_daemon_with(paths: &AtlasPaths, port: u16, atlasd: Option<Pa
     let mut child = cmd.spawn().map_err(|e| anyhow::anyhow!("failed to start atlasd ({}): {e}", bin.display()))?;
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
-        if is_up(port).await { return Ok(port); }
+        // Both signals, not just the port: `daemon.json` is written just before atlasd
+        // starts serving (see its main), but a caller reading it right after this
+        // returns (`daemon stop`, for one) must not race the write.
+        if is_up(port).await && daemon_info(paths).is_some() { return Ok(port); }
         // An atlasd that dies on startup (port taken, DB locked, bad home) must not cost
         // the caller the full 30 s wait, so notice the dead child and report it at once.
         if let Some(status) = child.try_wait()? {
@@ -103,5 +131,61 @@ mod tests {
         let ran = std::fs::read_to_string(&marker).expect("the fake atlasd never ran");
         assert!(ran.contains(fake.to_str().unwrap()), "a different binary ran: {ran}");
         assert!(ran.contains(&format!("--port {port}")), "the fake did not get the port: {ran}");
+    }
+
+    /// The pre-spawn wait notices `daemon.json` as soon as it appears, rather than
+    /// sitting out its whole budget: proof it would let an already-in-flight start
+    /// catch up instead of always paying the full wait before spawning a competitor.
+    #[tokio::test]
+    async fn wait_for_daemon_returns_as_soon_as_daemon_json_appears() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AtlasPaths::at(dir.path().join("home"));
+        paths.ensure().unwrap();
+        let daemon_file = paths.daemon_file();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            std::fs::write(&daemon_file, r#"{"pid":1,"port":1,"started_at":"x"}"#).unwrap();
+        });
+        // Nothing is listening here; only `daemon.json` should trip the wait.
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+
+        let started = Instant::now();
+        // A generous budget and tolerance either side: this only has to show the wait
+        // ends well short of its ceiling once the file appears, not pin an exact time,
+        // so it stays reliable when the suite runs every test in parallel.
+        let found = wait_for_daemon(&paths, port, Duration::from_secs(5), Duration::from_millis(50)).await;
+        assert!(found, "wait_for_daemon should have noticed daemon.json");
+        assert!(started.elapsed() < Duration::from_secs(3), "took {:?}, should have returned well under the 5 s timeout", started.elapsed());
+    }
+
+    /// With neither signal, the wait times out rather than hanging.
+    #[tokio::test]
+    async fn wait_for_daemon_times_out_when_nothing_appears() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AtlasPaths::at(dir.path().join("home"));
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let found = wait_for_daemon(&paths, port, Duration::from_millis(300), Duration::from_millis(50)).await;
+        assert!(!found);
+    }
+
+    /// A `daemon.json` left behind by a crash (see `stop_daemon`) must not block a
+    /// spawn forever when nothing is actually listening: the pre-spawn wait notices it
+    /// and moves on, and the fallback spawn still runs.
+    #[tokio::test]
+    async fn a_stale_daemon_json_does_not_block_a_needed_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("ran");
+        let fake = dir.path().join("fake-atlasd");
+        std::fs::write(&fake, format!("#!/bin/sh\necho \"$0 $*\" > {}\n", marker.display())).unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let paths = AtlasPaths::at(dir.path().join("home"));
+        paths.ensure().unwrap();
+        std::fs::write(paths.daemon_file(), r#"{"pid":1,"port":1,"started_at":"x"}"#).unwrap();
+
+        let err = ensure_daemon_with(&paths, port, Some(fake.clone())).await.unwrap_err().to_string();
+        assert!(err.contains("exited with"), "expected the fake to still be spawned, got: {err}");
+        assert!(marker.exists(), "a stale daemon.json must not stop a spawn when nothing answers the port");
     }
 }

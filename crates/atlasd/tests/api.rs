@@ -834,6 +834,42 @@ async fn ingest_is_refused_while_extraction_is_disabled() {
     assert_eq!(body["error"], "extraction is disabled", "{body}");
 }
 
+/// The actor for `POST /ingest` comes from `X-Atlas-Actor` when present, falls back
+/// to the deprecated `source_tool` body field, and is a 400 naming both ways to send
+/// it when neither is there. The header wins when both are sent.
+#[tokio::test]
+async fn ingest_actor_comes_from_the_header_over_the_deprecated_body_field() {
+    let stub = stub_llm().await;
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    c.put(format!("{base}/settings")).json(&serde_json::json!({
+        "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub", "extraction.api_key": "k",
+    })).send().await.unwrap();
+
+    // The header wins over a body field that disagrees with it.
+    let queued = c.post(format!("{base}/ingest")).header("X-Atlas-Actor", "from-header")
+        .json(&serde_json::json!({"text": "user: a\nassistant: b", "source_tool": "from-body"}))
+        .send().await.unwrap();
+    assert_eq!(queued.status(), 202);
+    let body: serde_json::Value = queued.json().await.unwrap();
+    let job = wait_for_job(&c, &base, body["job_id"].as_str().unwrap()).await;
+    assert_eq!(job["payload"]["source_tool"], "from-header", "{job}");
+
+    // No body field at all still works from the header alone.
+    let header_only = c.post(format!("{base}/ingest")).header("X-Atlas-Actor", "header-only")
+        .json(&serde_json::json!({"text": "user: c\nassistant: d"}))
+        .send().await.unwrap();
+    assert_eq!(header_only.status(), 202, "{:?}", header_only.text().await);
+
+    // Neither the header nor the deprecated body field is a 400, not a queued job
+    // with no attribution.
+    let neither = c.post(format!("{base}/ingest")).json(&serde_json::json!({"text": "user: e\nassistant: f"})).send().await.unwrap();
+    assert_eq!(neither.status(), 400);
+    let body: serde_json::Value = neither.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("actor"), "{body}");
+}
+
 /// `POST /ingest` refuses a transcript over the 1,000,000 character cap with 413
 /// before it ever reaches the queue, so no oversized body can spend a model call. The
 /// cap now lives in the backend, which is what MCP reaches too, and the route maps
@@ -1107,6 +1143,38 @@ async fn board_list_flags_take_true_or_one_and_never_answer_400() {
     let list: serde_json::Value = c.get(format!("{base}/tasks")).send().await.unwrap().json().await.unwrap();
     let keys: Vec<&str> = list.as_array().unwrap().iter().map(|t| t["key"].as_str().unwrap()).collect();
     assert_eq!(keys, vec![open["key"].as_str().unwrap()]);
+}
+
+/// `scope=global` is the literal global board: tasks with no project at all, not a
+/// bare `project_id`-less request, which leaves every project's tasks in. It is
+/// refused alongside `project_id`.
+#[tokio::test]
+async fn tasks_scope_global_keeps_just_the_project_less_tasks() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    let dir = repo_free_tempdir();
+    fixture_repo(dir.path());
+
+    let project: serde_json::Value = c.post(format!("{base}/projects/connect")).json(&serde_json::json!({"root": dir.path()})).send().await.unwrap().json().await.unwrap();
+    let id = project["id"].as_str().unwrap().to_string();
+    let global: serde_json::Value = c.post(format!("{base}/tasks")).header("X-Atlas-Actor", "alice").json(&serde_json::json!({"title": "no project"})).send().await.unwrap().json().await.unwrap();
+    c.post(format!("{base}/tasks")).header("X-Atlas-Actor", "alice").json(&serde_json::json!({"title": "has a project", "project_id": id})).send().await.unwrap();
+
+    let list: serde_json::Value = c.get(format!("{base}/tasks?scope=global")).send().await.unwrap().json().await.unwrap();
+    let keys: Vec<&str> = list.as_array().unwrap().iter().map(|t| t["key"].as_str().unwrap()).collect();
+    assert_eq!(keys, vec![global["key"].as_str().unwrap()], "{list}");
+
+    let unfiltered: serde_json::Value = c.get(format!("{base}/tasks")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(unfiltered.as_array().unwrap().len(), 2, "no filter still shows every task: {unfiltered}");
+
+    let both = c.get(format!("{base}/tasks?scope=global&project_id={id}")).send().await.unwrap();
+    assert_eq!(both.status(), 400);
+    let body: serde_json::Value = both.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("project_id") && body["error"].as_str().unwrap().contains("scope=global"), "{body}");
+
+    let bad = c.get(format!("{base}/tasks?scope=nonsense")).send().await.unwrap();
+    assert_eq!(bad.status(), 400);
 }
 
 /// A stale `expected_updated_at` on `PATCH` is a 409; claiming a task alice holds
@@ -1611,6 +1679,45 @@ async fn memories_can_be_listed_for_one_project_only() {
     assert!(body["error"].as_str().unwrap().contains("project_id"), "{body}");
 
     let bad = c.get(format!("{base}/memories?project_id={id}&scope=nonsense")).send().await.unwrap();
+    assert_eq!(bad.status(), 400);
+}
+
+/// `GET /memories/facets` counts kinds and tags over the active set, scoped by
+/// `project_id`/`scope` the same way `GET /memories` reads them, without a client
+/// having to load every memory first.
+#[tokio::test]
+async fn memory_facets_counts_active_memories_scoped_like_the_list_route() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    let dir = repo_free_tempdir();
+    fixture_repo(dir.path());
+
+    let project: serde_json::Value = c.post(format!("{base}/projects/connect")).json(&serde_json::json!({"root": dir.path()})).send().await.unwrap().json().await.unwrap();
+    let id = project["id"].as_str().unwrap().to_string();
+    c.post(format!("{base}/memories?actor=desktop")).json(&serde_json::json!({
+        "scope": "global", "kind": "fact", "text": "a global memory", "tags": ["alpha"]
+    })).send().await.unwrap();
+    c.post(format!("{base}/memories?actor=desktop")).json(&serde_json::json!({
+        "scope": "project", "project_id": id, "kind": "decision", "text": "a project memory", "tags": ["alpha", "beta"]
+    })).send().await.unwrap();
+
+    let widened: serde_json::Value = c.get(format!("{base}/memories/facets?project_id={id}")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(widened["total"], 2, "{widened}");
+    assert_eq!(widened["kinds"]["fact"], 1, "{widened}");
+    assert_eq!(widened["kinds"]["decision"], 1, "{widened}");
+    assert_eq!(widened["tags"]["alpha"], 2, "{widened}");
+    assert_eq!(widened["tags"]["beta"], 1, "{widened}");
+
+    let narrowed: serde_json::Value = c.get(format!("{base}/memories/facets?project_id={id}&scope=project_only")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(narrowed["total"], 1, "{narrowed}");
+    assert_eq!(narrowed["kinds"]["decision"], 1, "{narrowed}");
+    assert!(narrowed["kinds"].get("fact").is_none(), "{narrowed}");
+
+    let no_project = c.get(format!("{base}/memories/facets?scope=project_only")).send().await.unwrap();
+    assert_eq!(no_project.status(), 400);
+
+    let bad = c.get(format!("{base}/memories/facets?project_id={id}&scope=nonsense")).send().await.unwrap();
     assert_eq!(bad.status(), 400);
 }
 

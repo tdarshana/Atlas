@@ -51,6 +51,17 @@ export interface RecallHit {
  */
 export type MemoryListScope = 'all' | 'project_only';
 
+/**
+ * Kind and tag counts, plus the total, over the active memories `GET
+ * /memories/facets` was asked about, `project_id`/`scope` read the same way `GET
+ * /memories` reads them.
+ */
+export interface MemoryFacets {
+	kinds: Record<string, number>;
+	tags: Record<string, number>;
+	total: number;
+}
+
 export interface RecallQuery {
 	query: string;
 	limit?: number;

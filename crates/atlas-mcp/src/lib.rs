@@ -524,6 +524,7 @@ impl<B: Backend> AtlasMcp<B> {
             ready: a.ready.unwrap_or(false),
             query: a.query,
             include_done: a.include_done.unwrap_or(false),
+            ..Default::default()
         };
         json_result(&self.backend.list_tasks(filter).await.map_err(board_err)?)
     }

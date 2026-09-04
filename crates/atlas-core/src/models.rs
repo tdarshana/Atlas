@@ -72,6 +72,17 @@ pub struct Memory {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RecallHit { pub memory: Memory, pub score: f64 }
 
+/// Kind and tag counts, plus the total, over the active memories `GET
+/// /memories/facets` was asked about; filtered the same way `GET /memories` filters
+/// `project_id`, via `MemoryScopeFilter`. A side panel renders these without loading
+/// every matching memory first.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct MemoryFacets {
+    pub kinds: std::collections::HashMap<String, i64>,
+    pub tags: std::collections::HashMap<String, i64>,
+    pub total: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct StatusReport {
     pub version: String,
@@ -425,6 +436,9 @@ pub struct TaskFilter {
     /// Case-insensitive substring match over key, title and description.
     #[serde(default)] pub query: Option<String>,
     #[serde(default)] pub include_done: bool,
+    /// Keep only tasks with no project at all: the literal global board, distinct from
+    /// a bare `project_id: None`, which leaves every project's tasks in.
+    #[serde(default)] pub global_only: bool,
 }
 
 // ---- workflows ----
