@@ -8,6 +8,7 @@ pub mod frameworks;
 pub mod jobs;
 pub mod library;
 pub mod llm;
+pub mod mcp_servers;
 pub mod memories;
 pub mod models;
 pub mod paths;

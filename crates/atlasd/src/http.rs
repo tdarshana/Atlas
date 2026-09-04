@@ -1,4 +1,4 @@
-use axum::{body::Bytes, extract::{FromRequest, FromRequestParts, Path, Query, Request, State}, http::{header, request::Parts, HeaderMap, Method, StatusCode}, middleware::{self, Next}, response::{IntoResponse, Response}, routing::{get, post, put}, Json, Router};
+use axum::{body::Bytes, extract::{FromRequest, FromRequestParts, Path, Query, Request, State}, http::{header, request::Parts, HeaderMap, Method, StatusCode}, middleware::{self, Next}, response::{IntoResponse, Response}, routing::{delete, get, post, put}, Json, Router};
 use atlas_core::{backend::Backend, jobs::Job, models::*, search::global::{SearchKind, SearchQuery, SearchResult, DEFAULT_LIMIT}, AtlasError};
 use atlas_mcp::{ToolScope, TOOL_TABLE};
 use chrono::{DateTime, Utc};
@@ -303,6 +303,11 @@ fn query_flag_opt<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result
 #[derive(Deserialize)] pub struct SkillBodyBody { pub body: String }
 #[derive(Deserialize)] pub struct SkillsDisabledBody { pub disabled: Vec<String> }
 
+// ---- the agents' MCP servers (Phase 16) ----
+
+#[derive(Deserialize)] pub struct McpServersQ { #[serde(default)] pub project_id: Option<Uuid> }
+#[derive(Deserialize)] pub struct McpEnabledBody { pub enabled: bool }
+
 // ---- workflows (Phase 9) ----
 
 #[derive(Deserialize)] pub struct WorkflowListQ { #[serde(default)] pub project_id: Option<Uuid> }
@@ -385,6 +390,16 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/mcp/plugin-tools/{plugin_id}", put(put_plugin_tools).delete(delete_plugin_tools))
         .route("/api/v1/mcp/plugin-tools/{plugin_id}/{name}/call", post(call_plugin_tool))
         .route("/api/v1/mcp/plugin-channel", get(plugin_channel))
+        // An MCP server id carries `:` and, for a plugin server, slashes. Unlike a skill
+        // id it cannot travel as a wildcard, because two of these routes have a segment
+        // after the id and a wildcard may only end a route. So the id is one ordinary
+        // segment with its slashes percent-encoded (`%2F`), which axum decodes back into
+        // the whole id; `RemoteBackend::mcp_server_url` and `encodeURIComponent` both
+        // produce exactly that.
+        .route("/api/v1/mcp/servers", get(list_mcp_servers).post(add_mcp_server))
+        .route("/api/v1/mcp/servers/{id}/check", post(check_mcp_server))
+        .route("/api/v1/mcp/servers/{id}/enabled", put(set_mcp_server_enabled))
+        .route("/api/v1/mcp/servers/{id}", delete(remove_mcp_server))
         .with_state(state)
 }
 
@@ -699,6 +714,43 @@ async fn delete_skill(State(s): State<AppState>, ApiPath(id): ApiPath<String>, A
 /// `PUT /projects/{id}/mcp/tools` takes for tool names.
 async fn put_project_skills(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor): Actor, ApiJson(b): ApiJson<SkillsDisabledBody>) -> Result<Json<Project>, ApiError> {
     Ok(Json(s.backend.set_project_skills_disabled(id, b.disabled, &actor).await?))
+}
+
+// ---- the agents' MCP servers (Phase 16) ----
+
+/// Every MCP server the user's agents are wired to, plus whatever discovery could not
+/// read. `project_id` swaps the user-level scopes for that project's own; the plugin
+/// servers and Atlas are in both, since they apply wherever the user works.
+async fn list_mcp_servers(State(s): State<AppState>, ApiQuery(q): ApiQuery<McpServersQ>) -> Result<Json<McpServerList>, ApiError> {
+    Ok(Json(s.backend.list_mcp_servers(q.project_id).await?))
+}
+
+/// Starts the server and lists its tools. A server that will not start answers 200 with
+/// `ok: false` and the reason: the request was fine, the server was not.
+///
+/// The id arrives as one percent-encoded path segment (see the route table), so
+/// `plugin:acme/tools:one` is sent as `plugin%3Aacme%2Ftools%3Aone`.
+async fn check_mcp_server(State(s): State<AppState>, ApiPath(id): ApiPath<String>, ApiQuery(q): ApiQuery<McpServersQ>) -> Result<Json<McpCheckResult>, ApiError> {
+    Ok(Json(s.backend.check_mcp_server(q.project_id, &id).await?))
+}
+
+async fn set_mcp_server_enabled(
+    State(s): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    ApiQuery(q): ApiQuery<McpServersQ>,
+    Actor(actor): Actor,
+    ApiJson(b): ApiJson<McpEnabledBody>,
+) -> Result<Json<McpServerEntry>, ApiError> {
+    Ok(Json(s.backend.set_mcp_server_enabled(q.project_id, &id, b.enabled, &actor).await?))
+}
+
+async fn add_mcp_server(State(s): State<AppState>, Actor(actor): Actor, ApiJson(b): ApiJson<NewMcpServer>) -> Result<(StatusCode, Json<McpServerEntry>), ApiError> {
+    Ok((StatusCode::CREATED, Json(s.backend.add_mcp_server(b, &actor).await?)))
+}
+
+async fn remove_mcp_server(State(s): State<AppState>, ApiPath(id): ApiPath<String>, ApiQuery(q): ApiQuery<McpServersQ>, Actor(actor): Actor) -> Result<StatusCode, ApiError> {
+    s.backend.remove_mcp_server(q.project_id, &id, &actor).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---- workflows (Phase 9) ----

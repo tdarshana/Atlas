@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "packaged": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/server",
+      "args": ["--serve"],
+      "env": {
+        "PLUGIN_TOKEN": "SECRET-DO-NOT-LEAK"
+      }
+    }
+  }
+}

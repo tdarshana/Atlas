@@ -1,0 +1,9 @@
+{
+  "theme": "Default",
+  "mcpServers": {
+    "gemini-one": {
+      "command": "gemini-server",
+      "args": ["--serve"]
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "enabledPlugins": {
+    "tools@acme": true,
+    "unused@acme": false
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "approved": {
+      "command": "repo-server",
+      "args": ["--repo"]
+    },
+    "unapproved": {
+      "type": "http",
+      "url": "https://repo.example/mcp"
+    }
+  }
+}

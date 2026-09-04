@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "windsurf-one": {
+      "command": "windsurf-server",
+      "args": ["--x"]
+    }
+  }
+}

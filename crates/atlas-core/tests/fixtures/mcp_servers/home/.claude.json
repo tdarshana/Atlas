@@ -1,0 +1,40 @@
+{
+  "numStartups": 7,
+  "mcpServers": {
+    "svelte": {
+      "type": "http",
+      "url": "https://svelte.example/mcp",
+      "headers": {
+        "Authorization": "Bearer SECRET-DO-NOT-LEAK"
+      }
+    },
+    "user-stdio": {
+      "command": "user-server",
+      "args": ["--stdio"],
+      "env": {
+        "USER_TOKEN": "SECRET-DO-NOT-LEAK"
+      }
+    }
+  },
+  "projects": {
+    "__PROJECT_ROOT__": {
+      "mcpServers": {
+        "playwright": {
+          "type": "stdio",
+          "command": "npx",
+          "args": ["@playwright/mcp@latest"],
+          "env": {
+            "PW_TOKEN": "SECRET-DO-NOT-LEAK"
+          }
+        },
+        "switched-off": {
+          "command": "nothing",
+          "args": []
+        }
+      },
+      "disabledMcpServers": ["switched-off"],
+      "enabledMcpjsonServers": ["approved"],
+      "disabledMcpjsonServers": []
+    }
+  }
+}

@@ -233,6 +233,22 @@ pub trait Backend: Send + Sync + 'static {
     /// applies to the project right now.
     async fn set_project_skills_disabled(&self, project_id: Uuid, ids: Vec<String>, actor: &str) -> Result<Project>;
 
+    // ---- the agents' MCP servers (Phase 16) ----
+    /// Every MCP server the user's agents are wired to. Without `project_id` this is each
+    /// agent's user-level configuration, the installed plugins' servers and Atlas; with
+    /// one it is that project's own files, plus the plugins and Atlas.
+    async fn list_mcp_servers(&self, project_id: Option<Uuid>) -> Result<McpServerList>;
+    /// Starts the server `id` names and lists its tools, capped at 15 seconds. Runs the
+    /// user's own configured command, so it is always an explicit action.
+    async fn check_mcp_server(&self, project_id: Option<Uuid>, id: &str) -> Result<McpCheckResult>;
+    /// Flips the agent's own enable switch. `Invalid` where the agent has none.
+    async fn set_mcp_server_enabled(&self, project_id: Option<Uuid>, id: &str, enabled: bool, actor: &str) -> Result<McpServerEntry>;
+    /// Writes a new server into one agent's configuration. `Conflict` when that file
+    /// already holds the name.
+    async fn add_mcp_server(&self, input: NewMcpServer, actor: &str) -> Result<McpServerEntry>;
+    /// Deletes a server from the file it came from. `Invalid` for a plugin's or Atlas's.
+    async fn remove_mcp_server(&self, project_id: Option<Uuid>, id: &str, actor: &str) -> Result<()>;
+
     // ---- plugin MCP tools (Phase 13b) ----
     /// Every MCP tool the running desktop plugins contribute. Defaulted to empty
     /// because most backends have no plugins behind them: only the daemon (with a
@@ -1096,6 +1112,61 @@ impl Backend for LocalBackend {
         let actor = actor.to_string();
         let home = self.paths.skills_home.clone();
         self.blocking(move || crate::skills::set_project_skills_disabled(&db, project_id, ids, &actor, &home)).await
+    }
+
+    // ---- the agents' MCP servers (Phase 16) ----
+
+    async fn list_mcp_servers(&self, project_id: Option<Uuid>) -> Result<McpServerList> {
+        let db = self.db.clone();
+        let home = self.paths.agent_home().to_path_buf();
+        self.blocking(move || {
+            let project = project_id.map(|id| projects_repo(&db).get(id)).transpose()?;
+            Ok(crate::mcp_servers::list_mcp_servers(&home, project.as_ref()))
+        })
+        .await
+    }
+    /// The one call here that is not blocking work: it spawns a process or opens a
+    /// connection and waits on it, so it runs on the async runtime and does its own
+    /// discovery on a blocking thread.
+    async fn check_mcp_server(&self, project_id: Option<Uuid>, id: &str) -> Result<McpCheckResult> {
+        let project = match project_id {
+            None => None,
+            Some(id) => {
+                let db = self.db.clone();
+                Some(self.blocking(move || projects_repo(&db).get(id)).await?)
+            }
+        };
+        crate::mcp_servers::check_mcp_server(self.paths.agent_home(), project.as_ref(), id).await
+    }
+    async fn set_mcp_server_enabled(&self, project_id: Option<Uuid>, id: &str, enabled: bool, actor: &str) -> Result<McpServerEntry> {
+        let db = self.db.clone();
+        let home = self.paths.agent_home().to_path_buf();
+        let (id, actor) = (id.to_string(), actor.to_string());
+        self.blocking(move || {
+            let project = project_id.map(|p| projects_repo(&db).get(p)).transpose()?;
+            crate::mcp_servers::set_mcp_server_enabled(&db, &home, project.as_ref(), &id, enabled, &actor)
+        })
+        .await
+    }
+    async fn add_mcp_server(&self, input: NewMcpServer, actor: &str) -> Result<McpServerEntry> {
+        let db = self.db.clone();
+        let home = self.paths.agent_home().to_path_buf();
+        let actor = actor.to_string();
+        self.blocking(move || {
+            let project = input.project_id.map(|p| projects_repo(&db).get(p)).transpose()?;
+            crate::mcp_servers::add_mcp_server(&db, &home, project.as_ref(), &input, &actor)
+        })
+        .await
+    }
+    async fn remove_mcp_server(&self, project_id: Option<Uuid>, id: &str, actor: &str) -> Result<()> {
+        let db = self.db.clone();
+        let home = self.paths.agent_home().to_path_buf();
+        let (id, actor) = (id.to_string(), actor.to_string());
+        self.blocking(move || {
+            let project = project_id.map(|p| projects_repo(&db).get(p)).transpose()?;
+            crate::mcp_servers::remove_mcp_server(&db, &home, project.as_ref(), &id, &actor)
+        })
+        .await
     }
 
     async fn plugin_tools(&self) -> Result<Vec<PluginToolDecl>> {

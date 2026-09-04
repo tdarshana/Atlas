@@ -910,6 +910,140 @@ pub struct PluginToolDecl {
     pub scope: PluginToolScope,
 }
 
+// ---------------------------------------------------------------------------
+// The agents' own MCP servers (Phase 16)
+// ---------------------------------------------------------------------------
+
+// Which agent's configuration a server was read from. `atlas` is Atlas's own MCP
+// server, synthesised rather than read from a file.
+str_enum!(McpServerSource {
+    Claude => "claude",
+    Codex => "codex",
+    Cursor => "cursor",
+    Gemini => "gemini",
+    Windsurf => "windsurf",
+    Plugin => "plugin",
+    Atlas => "atlas",
+});
+
+// Which of an agent's scopes the server sits in. `user` is the agent's home-directory
+// configuration; `project` is a file checked into the repository (`<root>/.mcp.json`,
+// `<root>/.codex/config.toml`, `<root>/.cursor/mcp.json`); `local` is Claude Code's
+// per-project block inside `~/.claude.json`, which is the user's own machine-local
+// setting for one repository; `plugin` is a Claude Code plugin's bundled `.mcp.json`.
+str_enum!(McpServerScope {
+    User => "user",
+    Project => "project",
+    Local => "local",
+    Plugin => "plugin",
+});
+
+/// How a server is started or reached, with secrets reduced to key names. The values of
+/// `env` and `headers` stay in the file they came from: [`McpTransport`] carries only
+/// `env_keys` and `header_keys`, so a listing can say what a server needs without ever
+/// putting a token on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum McpTransport {
+    Stdio {
+        command: String,
+        #[serde(default)] args: Vec<String>,
+        #[serde(default)] env_keys: Vec<String>,
+    },
+    Http {
+        url: String,
+        #[serde(default)] header_keys: Vec<String>,
+    },
+}
+
+/// One MCP server as a listing shows it.
+///
+/// `id` is `"<source>:<scope>:<name>"`, with `plugin:<marketplace>/<plugin>:<name>` for a
+/// plugin server and the bare `atlas` for Atlas's own. Ids are stable across restarts, so
+/// a desktop row keeps its meaning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct McpServerEntry {
+    pub id: String,
+    /// The key the agent's own configuration files it under.
+    pub name: String,
+    pub source: McpServerSource,
+    pub scope: McpServerScope,
+    pub transport: McpTransport,
+    /// Absolute path of the configuration file this entry was read from. `None` for
+    /// Atlas's own synthesised entry, which no file declares.
+    pub file: Option<String>,
+    /// `"<marketplace>/<plugin>"` for a plugin server, `None` otherwise.
+    pub plugin: Option<String>,
+    /// Whether the agent will actually start this server, as its own configuration says.
+    pub enabled: bool,
+    /// Whether the agent has a native switch Atlas can flip. Where it is false, `Remove`
+    /// is the only way to stop a server.
+    pub can_toggle: bool,
+    /// Whether Atlas can delete this entry from the file it came from.
+    pub can_remove: bool,
+    /// Atlas's own server, which the desktop renders with its client and gating detail.
+    pub is_atlas: bool,
+    /// The project a `project` or `local` scoped entry belongs to.
+    pub project_id: Option<Uuid>,
+}
+
+/// A server listing plus whatever discovery could not read. A warning never fails the
+/// listing: one unreadable agent config must not hide every other server.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct McpServerList {
+    pub servers: Vec<McpServerEntry>,
+    #[serde(default)] pub warnings: Vec<String>,
+}
+
+/// One tool a checked server reported.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct McpToolInfo {
+    pub name: String,
+    pub description: Option<String>,
+}
+
+/// What starting a server and asking it for its tools found. `ok: false` carries the
+/// reason in `error` rather than failing the call: a server that will not start is an
+/// answer, not a broken request.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct McpCheckResult {
+    pub ok: bool,
+    pub server_name: Option<String>,
+    pub server_version: Option<String>,
+    pub protocol_version: Option<String>,
+    #[serde(default)] pub tools: Vec<McpToolInfo>,
+    pub error: Option<String>,
+    pub elapsed_ms: u64,
+}
+
+/// The transport of a server being added, with the secret values the file will hold.
+/// This shape only ever travels inwards: a listing answers with [`McpTransport`], which
+/// has key names and no values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum McpTransportInput {
+    Stdio {
+        command: String,
+        #[serde(default)] args: Vec<String>,
+        #[serde(default)] env: std::collections::BTreeMap<String, String>,
+    },
+    Http {
+        url: String,
+        #[serde(default)] headers: std::collections::BTreeMap<String, String>,
+    },
+}
+
+/// A server to write into one agent's configuration. `project_id` is required for a
+/// `project` or `local` scope and refused for `user`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct NewMcpServer {
+    pub source: McpServerSource,
+    pub scope: McpServerScope,
+    #[serde(default)] pub project_id: Option<Uuid>,
+    pub name: String,
+    pub transport: McpTransportInput,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

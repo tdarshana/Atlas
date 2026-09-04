@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "half-installed": {
+      "command": "never",
+      "args": []
+    }
+  }
+}

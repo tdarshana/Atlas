@@ -1,0 +1,18 @@
+# Codex's own file, comments and all.
+model = "gpt-5"
+
+[mcp_servers.playwright]
+command = "npx"
+args = [ "@playwright/mcp@latest" ]
+
+[mcp_servers.computer-use]
+command = "./SkyComputerUseClient"
+args = [ "mcp" ]
+enabled = false
+
+[mcp_servers.node_repl]
+command = "node_repl"
+args = []
+
+[mcp_servers.node_repl.env]
+NODE_TOKEN = "SECRET-DO-NOT-LEAK"

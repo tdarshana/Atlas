@@ -1,0 +1,3 @@
+[mcp_servers.repo-codex]
+command = "repo-codex-server"
+args = [ "--serve" ]

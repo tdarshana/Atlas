@@ -22,6 +22,11 @@ fastembed = "6"
 git2 = "0.21"
 ignore = "0.4"
 reqwest.workspace = true
+# Checking an MCP server means being an MCP client: the client half of rmcp, with the
+# child-process transport for a stdio server and the streamable HTTP one for a remote
+# server. The server half, its macros and its schema generation are the daemon's and the
+# stdio shim's, and are deliberately not enabled here.
+rmcp = { version = "3.2", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
 # Codex's config.toml is the user's file: edited in place so comments and
 # formatting survive a hook install.
 toml_edit = "0.25"

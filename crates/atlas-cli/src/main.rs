@@ -19,7 +19,12 @@ enum Cmd {
     /// Control the atlasd daemon
     Daemon { #[command(subcommand)] action: DaemonCmd },
     /// Run an MCP server on stdio (for Claude Code, Codex, other MCP clients); starts the daemon if needed
-    Mcp,
+    ///
+    /// Bare `atlas mcp` is what those clients launch, so it keeps serving stdio and the
+    /// subcommand is optional. Anything that changes that breaks every configured agent.
+    Mcp {
+        #[command(subcommand)] action: Option<commands::mcp::McpCmd>,
+    },
     /// Store a memory
     Remember { text: String, #[arg(long, default_value = "fact")] kind: String, #[arg(long = "tag")] tags: Vec<String>, #[arg(long)] project_id: Option<uuid::Uuid>, #[arg(long)] agent: Option<String> },
     /// Search memories
@@ -118,7 +123,8 @@ async fn main() -> anyhow::Result<()> {
             if daemon_ctl::is_up(cli.port).await { let s = RemoteBackend::new(cli.port).status().await?; println!("{}", serde_json::to_string_pretty(&s)?); }
             else { println!("atlasd is not running on port {}", cli.port); std::process::exit(1); }
         }
-        Cmd::Mcp => {
+        Cmd::Mcp { action: Some(action) } => commands::mcp::run(action, &backend(&paths, cli.port).await?).await?,
+        Cmd::Mcp { action: None } => {
             let port = daemon_ctl::ensure_daemon(&paths, cli.port).await?;
             let remote = Arc::new(RemoteBackend::new(port));
             // Counts this session's tool calls locally rather than reaching the daemon

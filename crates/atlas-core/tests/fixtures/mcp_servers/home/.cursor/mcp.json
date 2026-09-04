@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "cursor-one": {
+      "command": "cursor-server",
+      "args": ["--go"],
+      "env": {
+        "CURSOR_TOKEN": "SECRET-DO-NOT-LEAK"
+      }
+    },
+    "cursor-off": {
+      "command": "cursor-server",
+      "args": [],
+      "disabled": true
+    }
+  }
+}

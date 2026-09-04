@@ -46,6 +46,11 @@ impl AtlasPaths {
         self.skills_home = skills_home.as_ref().to_path_buf();
         self
     }
+    /// The same home under a name that fits every reader of it, not only skills: MCP
+    /// server discovery reads `.claude.json`, `.codex/config.toml`, `.cursor/mcp.json`
+    /// and the plugin cache from here too. One field, two names, so neither call site
+    /// has to read a misleading one.
+    pub fn agent_home(&self) -> &Path { &self.skills_home }
     pub fn db_path(&self) -> PathBuf { self.home.join("atlas.duckdb") }
     pub fn models_dir(&self) -> PathBuf { self.home.join("models") }
     pub fn daemon_file(&self) -> PathBuf { self.home.join("daemon.json") }
