@@ -3,7 +3,8 @@ use crate::daemon_ctl;
 use atlas_core::backend::Backend;
 use atlas_core::paths::AtlasPaths;
 use atlas_core::AtlasError;
-use std::io::Read;
+use std::collections::VecDeque;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -91,17 +92,19 @@ fn read_transcript(args: &IngestArgs) -> anyhow::Result<(String, Option<PathBuf>
         let cwd = hook["cwd"].as_str().map(PathBuf::from);
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let path = resolve_transcript(named, cwd.as_deref(), home.as_deref());
-        let raw = std::fs::read_to_string(&path).map_err(|e| anyhow::anyhow!("failed to read the transcript at {}: {e}", path.display()))?;
-        return Ok((transcript_to_text(&raw), cwd));
+        let text = stream_transcript(&path).map_err(|e| anyhow::anyhow!("failed to read the transcript at {}: {e}", path.display()))?;
+        return Ok((text, cwd));
     }
     if let Some(json) = &args.hook_arg {
         let note: serde_json::Value = serde_json::from_str(json).map_err(|e| anyhow::anyhow!("the notification argument was not JSON: {e}"))?;
         return Ok((notification_to_text(&note), note["cwd"].as_str().map(PathBuf::from)));
     }
     if let Some(path) = &args.file {
-        let raw = super::read_source(path)?;
-        let text = if path.extension().is_some_and(|e| e == "jsonl") { transcript_to_text(&raw) } else { raw };
-        return Ok((text, None));
+        if path.extension().is_some_and(|e| e == "jsonl") {
+            let text = stream_transcript(path).map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
+            return Ok((text, None));
+        }
+        return Ok((super::read_source(path)?, None));
     }
     Ok((stdin()?, None))
 }
@@ -136,21 +139,71 @@ fn stdin() -> std::io::Result<String> {
 pub fn transcript_to_text(jsonl: &str) -> String {
     let mut out = String::new();
     for line in jsonl.lines() {
-        let Ok(record) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
-        let role = match record["type"].as_str() {
-            Some(r @ ("user" | "assistant")) => r,
-            _ => continue,
-        };
-        let text = content_text(&record["message"]["content"]);
-        if text.trim().is_empty() {
-            continue;
+        if let Some(entry) = transcript_line(line) {
+            out.push_str(&entry);
         }
-        out.push_str(role);
-        out.push_str(": ");
-        out.push_str(text.trim());
-        out.push('\n');
     }
     out
+}
+
+/// Converts one line of a Claude Code transcript into its `role: text\n`
+/// form, or `None` when the line is not a `user`/`assistant` record worth
+/// keeping. Shared by `transcript_to_text` and `stream_transcript` so both
+/// read the same record the same way.
+fn transcript_line(line: &str) -> Option<String> {
+    let record: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    let role = match record["type"].as_str() {
+        Some(r @ ("user" | "assistant")) => r,
+        _ => return None,
+    };
+    let text = content_text(&record["message"]["content"]);
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(format!("{role}: {}\n", text.trim()))
+}
+
+/// Reads a Claude Code transcript at `path` one line at a time and converts
+/// it exactly as `transcript_to_text` would, but never holds more than the
+/// last `MAX_CHARS` characters of converted text: a transcript can reach
+/// hundreds of megabytes, and loading the whole file first would hold all of
+/// it in memory only to throw most of it away in `tail`.
+fn stream_transcript(path: &Path) -> std::io::Result<String> {
+    let reader = BufReader::new(std::fs::File::open(path)?);
+    let mut buffer: VecDeque<String> = VecDeque::new();
+    let mut total = 0usize;
+    for line in reader.lines() {
+        // A line that is not valid UTF-8 is as unusable as one that is not
+        // valid JSON, so it is skipped the same way rather than failing the
+        // whole transcript.
+        let Ok(line) = line else { continue };
+        if let Some(entry) = transcript_line(&line) {
+            push_bounded(&mut buffer, &mut total, entry);
+        }
+    }
+    Ok(buffer.into_iter().collect())
+}
+
+/// Appends `entry` to the ring buffer, then trims from the front until at
+/// most `MAX_CHARS` characters remain. Applying this after every line keeps
+/// exactly the same characters as building the whole text and calling `tail`
+/// once at the end, since "keep only the last N characters" gives the same
+/// result whether it runs once or after every append.
+fn push_bounded(buffer: &mut VecDeque<String>, total: &mut usize, entry: String) {
+    *total += entry.chars().count();
+    buffer.push_back(entry);
+    while *total > MAX_CHARS {
+        let excess = *total - MAX_CHARS;
+        let front_len = buffer.front().expect("total > 0 implies a front entry").chars().count();
+        if front_len <= excess {
+            buffer.pop_front();
+            *total -= front_len;
+        } else {
+            let front = buffer.front_mut().expect("checked above");
+            *front = front.chars().skip(excess).collect();
+            *total -= excess;
+        }
+    }
 }
 
 /// `message.content` is either a plain string or a list of blocks. Only `text`
@@ -265,5 +318,72 @@ mod tests {
         let kept = tail(long);
         assert_eq!(kept.chars().count(), MAX_CHARS);
         assert!(kept.ends_with("TAIL"), "the end of the transcript is what must survive");
+    }
+
+    #[test]
+    fn stream_transcript_matches_the_full_read_under_the_limit() {
+        let jsonl = concat!(
+            r#"{"type":"summary","summary":"a session"}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":"we deploy to fly.io"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Noted."},{"type":"tool_use","name":"Read","input":{"file_path":"/x"}}]}}"#,
+            "\n",
+            "not json at all\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Recorded the decision."}]}}"#,
+            "\n",
+        );
+        let dir = std::env::temp_dir().join(format!("atlas-ingest-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("small.jsonl");
+        std::fs::write(&path, jsonl).unwrap();
+
+        let streamed = stream_transcript(&path).unwrap();
+        assert_eq!(streamed, transcript_to_text(jsonl));
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    /// Generates a transcript well past `MAX_CHARS` of converted text and
+    /// streams it, so the test both proves the tail matches a full read and,
+    /// by never building the whole converted string, that memory use is
+    /// bounded by the ring buffer rather than the file's size.
+    #[test]
+    fn stream_transcript_bounds_a_large_transcript_to_the_tail() {
+        let dir = std::env::temp_dir().join("atlas-ingest-large-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("large-{}.jsonl", std::process::id()));
+
+        let last_line;
+        {
+            use std::io::Write as _;
+            let mut writer = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+            let mut written = 0usize;
+            let mut i = 0usize;
+            // 50 MB of JSONL, far more than the 200,000 converted characters
+            // that can survive, so the ring buffer is forced to drop the start.
+            while written < 50 * 1024 * 1024 {
+                let role = if i.is_multiple_of(2) { "user" } else { "assistant" };
+                let text = format!("line {i} {}", "x".repeat(400));
+                let record = serde_json::json!({"type": role, "message": {"content": text}}).to_string();
+                writeln!(writer, "{record}").unwrap();
+                written += record.len() + 1;
+                i += 1;
+            }
+            writer.flush().unwrap();
+            last_line = i - 1;
+        }
+
+        let start = std::time::Instant::now();
+        let text = stream_transcript(&path).unwrap();
+        eprintln!("stream_transcript on a 50 MB transcript took {:?}", start.elapsed());
+
+        assert!(text.chars().count() <= MAX_CHARS);
+        assert!(
+            text.ends_with(&format!("line {last_line} {}\n", "x".repeat(400))),
+            "the converted text must end with the transcript's last line"
+        );
+
+        std::fs::remove_file(&path).unwrap();
     }
 }
