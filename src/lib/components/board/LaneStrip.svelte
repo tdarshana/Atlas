@@ -67,7 +67,10 @@
 		min-height: 0;
 		overflow-x: auto;
 		overflow-y: hidden;
-		padding-bottom: 2px;
+		/* The strip reaches down through the panel's 16px padding so its scrollbar sits
+		   on the panel's bottom edge, while the lanes keep 12px of clearance above it. */
+		margin-bottom: -16px;
+		padding-bottom: 12px;
 		/* The docked detail is out of flow and sits over this strip's right edge, so the
 		   scroll range has to be lengthened by its width or the last lane and the `Add
 		   column` slot end up under it with no scroll left to reach them. The dock sets
