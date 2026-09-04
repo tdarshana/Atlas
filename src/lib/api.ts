@@ -28,6 +28,7 @@ import type {
 	NewWorkflow,
 	Project,
 	ProjectExtraction,
+	ProjectMcpReport,
 	ProjectPatch,
 	ProjectContext,
 	RecallHit,
@@ -341,6 +342,22 @@ export class AtlasApi {
 	/** Transports, counts, the tools table, resources, prompts and connected clients. */
 	mcpStatus(): Promise<McpStatusReport> {
 		return this.req('GET', '/api/v1/mcp/status');
+	}
+
+	/**
+	 * What MCP looks like from one project's point of view: its tools table with
+	 * `enabled_globally`/`enabled_here`, only this project's own resources, its
+	 * prompts, the clients whose last call resolved here, and its connect info.
+	 * Tool gating applies at call time, not at the live tool list, so this is where a
+	 * project's own overrides show.
+	 */
+	projectMcp(id: Uuid): Promise<ProjectMcpReport> {
+		return this.req('GET', `/api/v1/projects/${encodeURIComponent(id)}/mcp`);
+	}
+
+	/** Replaces the project's MCP tool override wholesale; an empty list clears it. */
+	setProjectMcpTools(id: Uuid, disabled: string[]): Promise<Project> {
+		return this.req('PUT', `/api/v1/projects/${encodeURIComponent(id)}/mcp/tools`, { disabled });
 	}
 
 	// ---- extraction ----

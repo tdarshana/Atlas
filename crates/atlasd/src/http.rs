@@ -204,6 +204,33 @@ pub fn cors_layer() -> CorsLayer {
     pub clients: Vec<McpClient>,
 }
 
+/// Task MCP-A: `GET /api/v1/projects/{id}/mcp`'s tool row. Unlike `McpToolRow`'s single
+/// `enabled`, this project view carries the two flags separately, since a tool can be
+/// enabled globally and disabled here, or (with `mcp.disabled_tools` naming it) the
+/// other way, and the desktop's badges need to tell those apart.
+#[derive(Serialize)] pub struct ProjectMcpToolRow {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub args: &'static str,
+    pub scope: ToolScope,
+    pub enabled_globally: bool,
+    /// Actually callable here: enabled globally and not in this project's own override.
+    pub enabled_here: bool,
+}
+#[derive(Serialize)] pub struct ProjectMcpConnect {
+    pub stdio: McpStdioTransport,
+    pub http: McpHttpTransport,
+    pub project_root: String,
+}
+#[derive(Serialize)] pub struct ProjectMcpReport {
+    pub tools: Vec<ProjectMcpToolRow>,
+    pub resources: Vec<rmcp::model::Resource>,
+    pub prompts: Vec<rmcp::model::Prompt>,
+    pub clients: Vec<McpClient>,
+    pub connect: ProjectMcpConnect,
+}
+#[derive(Deserialize)] pub struct McpToolsBody { pub disabled: Vec<String> }
+
 fn actor(q: &ActorQ) -> &str { q.actor.as_deref().unwrap_or("api") }
 
 // ---- board ----
@@ -319,6 +346,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/mcp/status", get(mcp_status))
         .route("/api/v1/mcp/clients", post(register_mcp_client))
         .route("/api/v1/mcp/clients/{id}", put(heartbeat_mcp_client).delete(unregister_mcp_client))
+        .route("/api/v1/projects/{id}/mcp", get(project_mcp))
+        .route("/api/v1/projects/{id}/mcp/tools", put(put_project_mcp_tools))
         .with_state(state)
 }
 
@@ -705,4 +734,48 @@ async fn mcp_status(State(s): State<AppState>) -> Result<Json<McpStatusReport>, 
         prompts,
         clients,
     }))
+}
+
+/// `GET /api/v1/projects/{id}/mcp` (Task MCP-A): what MCP looks like from one
+/// project's point of view. `enabled_here` reflects both gates a call actually meets
+/// (the global list, then this project's own), the same order `atlas_mcp::AtlasMcp`
+/// checks them in. `tools/list` itself stays global (see `atlas_mcp::AtlasMcp::call_tool`),
+/// so this route, not the live tool list, is where a project's overrides show.
+async fn project_mcp(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Result<Json<ProjectMcpReport>, ApiError> {
+    let project = s.backend.get_project(id).await?;
+    let disabled_globally = atlas_mcp::disabled_tool_names(&*s.backend).await?;
+    let disabled_here: std::collections::HashSet<&str> = project.mcp_disabled_tools.iter().map(String::as_str).collect();
+    let tools: Vec<ProjectMcpToolRow> = TOOL_TABLE.iter()
+        .map(|m| {
+            let enabled_globally = !disabled_globally.contains(m.name);
+            ProjectMcpToolRow {
+                name: m.name, description: m.description, args: m.args, scope: m.scope,
+                enabled_globally,
+                enabled_here: enabled_globally && !disabled_here.contains(m.name),
+            }
+        })
+        .collect();
+    let resources = atlas_mcp::resources_for_project(&project);
+    let prompts = atlas_mcp::prompts_for(&*s.backend).await?;
+    let clients = s.mcp_clients.live().into_iter().filter(|c| c.last_project_id == Some(id)).collect();
+    let port = s.backend.port.unwrap_or(0);
+    Ok(Json(ProjectMcpReport {
+        tools,
+        resources,
+        prompts,
+        clients,
+        connect: ProjectMcpConnect {
+            stdio: McpStdioTransport { command: "atlas mcp" },
+            http: McpHttpTransport { url: format!("http://127.0.0.1:{port}/mcp"), protocol_version: rmcp::model::ProtocolVersion::LATEST.to_string() },
+            project_root: project.root_path,
+        },
+    }))
+}
+
+/// `PUT /api/v1/projects/{id}/mcp/tools` (Task MCP-A): replaces this project's MCP
+/// tool override wholesale. Goes through `ProjectPatch` like `PATCH
+/// /api/v1/projects/{id}`, so the same known-tool-name validation and audit trail
+/// apply; `disabled: []` clears the override.
+async fn put_project_mcp_tools(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor): Actor, ApiJson(b): ApiJson<McpToolsBody>) -> Result<Json<Project>, ApiError> {
+    Ok(Json(s.backend.update_project(id, ProjectPatch { mcp_disabled_tools: Some(b.disabled), ..Default::default() }, &actor).await?))
 }

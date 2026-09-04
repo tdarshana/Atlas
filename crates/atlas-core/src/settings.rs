@@ -67,6 +67,19 @@ pub const MCP_TOOL_NAMES: &[&str] = &[
     "framework_docs",
 ];
 
+/// Rejects any name outside [`MCP_TOOL_NAMES`]. The rule the global
+/// `mcp.disabled_tools` setting (`check_type`, below) and a project's
+/// `mcp_disabled_tools` override (`projects::ProjectRepo::update`) both validate
+/// against, so a name that would silently gate nothing can never be stored by either.
+pub fn validate_mcp_tool_names(names: &[String]) -> Result<()> {
+    for n in names {
+        if !MCP_TOOL_NAMES.contains(&n.as_str()) {
+            return Err(AtlasError::Invalid(format!("unknown MCP tool name '{n}'")));
+        }
+    }
+    Ok(())
+}
+
 /// `mcp.disabled_tools` default when the setting is unset: `project_connect` writes a
 /// project row on any local caller's say-so, and `memory_review` decides which pending
 /// memories become active, so both stay opt-in rather than exposed to every agent by

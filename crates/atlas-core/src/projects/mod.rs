@@ -17,7 +17,7 @@ pub struct ProjectRepo<'a> {
 }
 
 const SEL: &str = "id::text, name, root_path, git_remote, profile::text, created_at::text, last_seen_at::text, board_key, board_stages::text, \
-     agent_access::text, extraction::text";
+     agent_access::text, extraction::text, mcp_disabled_tools::text";
 
 /// A board key: two to six characters, a letter first, then letters or digits.
 /// Uppercased before the check, so `atl` is accepted and stored as `ATL`.
@@ -116,6 +116,12 @@ fn row(r: &Row) -> duckdb::Result<Project> {
     let profile = profile
         .map(|s| serde_json::from_str::<ProjectProfile>(&s).map_err(|e| conv_err(4, Type::Text, e)))
         .transpose()?;
+    let mcp_disabled_tools: Option<String> = r.get(11)?;
+    let mcp_disabled_tools = mcp_disabled_tools
+        .map(|s| serde_json::from_str::<Option<Vec<String>>>(&s).map_err(|e| conv_err(11, Type::Text, e)))
+        .transpose()?
+        .flatten()
+        .unwrap_or_default();
     Ok(Project {
         id: Uuid::parse_str(&r.get::<_, String>(0)?).map_err(|e| conv_err(0, Type::Text, e))?,
         name: r.get(1)?,
@@ -128,6 +134,7 @@ fn row(r: &Row) -> duckdb::Result<Project> {
         board_stages,
         agent_access,
         extraction,
+        mcp_disabled_tools,
     })
 }
 
@@ -320,6 +327,12 @@ impl<'a> ProjectRepo<'a> {
                 Some(name.to_string())
             }
         };
+        // Same known-tool-name rule the global `mcp.disabled_tools` setting validates
+        // against, checked before the transaction opens for the same reason the board
+        // key is: a bad name is a plain `Invalid`, not a rollback.
+        if let Some(names) = &patch.mcp_disabled_tools {
+            crate::settings::validate_mcp_tool_names(names)?;
+        }
 
         // One transaction for the whole patch, not one for the rename and a bare write
         // after it: a failure between the two would otherwise leave the board renamed
@@ -352,6 +365,10 @@ impl<'a> ProjectRepo<'a> {
                     let remote = remote.as_deref().map(str::trim).filter(|r| !r.is_empty());
                     c.execute("update projects set git_remote = ? where id = ?", params![remote, id.to_string()])?;
                 }
+                if let Some(names) = &patch.mcp_disabled_tools {
+                    let json = serde_json::to_string(names)?;
+                    c.execute("update projects set mcp_disabled_tools = ?::json where id = ?", params![json, id.to_string()])?;
+                }
                 Ok(tasks)
             })();
             match applied {
@@ -372,6 +389,9 @@ impl<'a> ProjectRepo<'a> {
         }
         if name.is_some() || patch.git_remote.is_some() {
             repo.audit(actor, "update", "project", Some(id), serde_json::json!({"name": name, "git_remote": patch.git_remote}))?;
+        }
+        if let Some(names) = &patch.mcp_disabled_tools {
+            repo.audit(actor, "set_mcp_disabled_tools", "project", Some(id), serde_json::json!({"disabled": names}))?;
         }
         self.get(id)
     }
@@ -688,6 +708,37 @@ mod tests {
         assert!(matches!(repo.update(p.id, &ProjectPatch { name: Some("  ".into()), ..Default::default() }, "t"), Err(AtlasError::Invalid(_))));
     }
 
+    /// A project's MCP tool override: stored, read back, refused when a name is not a
+    /// known tool, and audited under its own action rather than folded into `update`.
+    #[test]
+    fn update_sets_and_validates_mcp_disabled_tools() {
+        let db = Db::open_in_memory().unwrap();
+        let repo = ProjectRepo::new(&db);
+        let p = repo.upsert(&Detected { root: "/tmp/mcp".into(), remote: None }, None, "t").unwrap();
+        assert!(p.mcp_disabled_tools.is_empty(), "an unset column reads as an empty list");
+
+        let updated = repo
+            .update(p.id, &ProjectPatch { mcp_disabled_tools: Some(vec!["task_move".into()]), ..Default::default() }, "t")
+            .unwrap();
+        assert_eq!(updated.mcp_disabled_tools, vec!["task_move".to_string()]);
+        assert_eq!(repo.get(p.id).unwrap().mcp_disabled_tools, vec!["task_move".to_string()]);
+
+        let err = repo
+            .update(p.id, &ProjectPatch { mcp_disabled_tools: Some(vec!["no_such_tool".into()]), ..Default::default() }, "t")
+            .unwrap_err();
+        assert!(matches!(err, AtlasError::Invalid(_)), "{err}");
+        // The refused patch changed nothing.
+        assert_eq!(repo.get(p.id).unwrap().mcp_disabled_tools, vec!["task_move".to_string()]);
+
+        let cleared = repo.update(p.id, &ProjectPatch { mcp_disabled_tools: Some(vec![]), ..Default::default() }, "t").unwrap();
+        assert!(cleared.mcp_disabled_tools.is_empty());
+
+        let audits: i64 = db
+            .with_conn(|c| Ok(c.query_row("select count(*) from audit where action = 'set_mcp_disabled_tools'", [], |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(audits, 2);
+    }
+
     /// The access rules: a `None` list admits anyone, a list is an allow-list matched on
     /// the label or its tool half, and the user's own hands are never checked.
     #[test]
@@ -775,7 +826,8 @@ mod tests {
             let mut st = c.prepare(
                 "select 'not-a-uuid' as id, 'name' as name, '/root' as root_path, null as git_remote, \
                  null as profile, '2026-01-01 00:00:00' as created_at, '2026-01-01 00:00:00' as last_seen_at, \
-                 null as board_key, null as board_stages, null as agent_access, null as extraction",
+                 null as board_key, null as board_stages, null as agent_access, null as extraction, \
+                 null as mcp_disabled_tools",
             )?;
             let mut rows = st.query([])?;
             let r = rows.next()?.ok_or_else(|| AtlasError::NotFound("no row".into()))?;
@@ -791,7 +843,8 @@ mod tests {
             let mut st = c.prepare(
                 "select gen_random_uuid()::text as id, 'name' as name, '/root' as root_path, null as git_remote, \
                  'not json' as profile, '2026-01-01 00:00:00' as created_at, '2026-01-01 00:00:00' as last_seen_at, \
-                 null as board_key, null as board_stages, null as agent_access, null as extraction",
+                 null as board_key, null as board_stages, null as agent_access, null as extraction, \
+                 null as mcp_disabled_tools",
             )?;
             let mut rows = st.query([])?;
             let r = rows.next()?.ok_or_else(|| AtlasError::NotFound("no row".into()))?;

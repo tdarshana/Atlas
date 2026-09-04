@@ -319,8 +319,11 @@ pub const TOOL_TABLE: &[ToolMeta] = &[
 /// anything about that registry. `session_id` is the `Mcp-Session-Id` header read out
 /// of the streamable HTTP transport's injected request parts (there is no clean
 /// `initialize` hook in rmcp's streamable HTTP service), `None` for the stdio shim,
-/// which has no such header and registers itself explicitly over the API instead.
-pub type OnToolCall = Arc<dyn Fn(Option<String>, Option<Implementation>, Option<ProtocolVersion>) + Send + Sync>;
+/// which has no such header and registers itself explicitly over the API instead. The
+/// last argument is the project this call resolved (the same one project gating just
+/// checked), `None` when the call named none; best effort, since the registry only
+/// learns of it on a call the router happened to resolve a project for.
+pub type OnToolCall = Arc<dyn Fn(Option<String>, Option<Implementation>, Option<ProtocolVersion>, Option<Uuid>) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct AtlasMcp<B: Backend> {
@@ -1000,6 +1003,24 @@ pub async fn disabled_tool_names<B: Backend>(backend: &B) -> atlas_core::Result<
     Ok(names)
 }
 
+/// The three `atlas://projects/{name}/...` resources one project owns: its context,
+/// its practices, and its board. Shared by `resources_for` (every project) and
+/// `resources_for_project` (Task MCP-A's `GET /api/v1/projects/{id}/mcp`, one project).
+fn project_resources(p: &Project) -> [Resource; 3] {
+    let seg = utf8_percent_encode(&p.name, PROJECT_URI_SEGMENT).to_string();
+    [
+        Resource::new(format!("{PROJECTS}{seg}/context"), p.name.clone())
+            .with_description(format!("Profile, practices, workflows and top memories for {}", p.root_path))
+            .with_mime_type(JSON),
+        Resource::new(format!("{PROJECTS}{seg}/practices"), format!("{} practices", p.name))
+            .with_description(format!("Global and project practices for {}, as Markdown", p.root_path))
+            .with_mime_type(MARKDOWN),
+        Resource::new(format!("{PROJECTS}{seg}/board"), format!("{} board", p.name))
+            .with_description(format!("Task board for {}, as Markdown", p.root_path))
+            .with_mime_type(MARKDOWN),
+    ]
+}
+
 /// Every resource `list_resources` would return, from the same backend calls the
 /// router itself makes. Free of `self` so `GET /api/v1/mcp/status` can count them
 /// without a live session.
@@ -1015,16 +1036,7 @@ pub async fn resources_for<B: Backend>(backend: &B) -> atlas_core::Result<Vec<Re
         out.push(Resource::new(format!("{WORKFLOWS}{}", w.name), w.name.clone()).with_description(w.description.clone()).with_mime_type(MARKDOWN));
     }
     for p in backend.list_projects().await? {
-        let seg = utf8_percent_encode(&p.name, PROJECT_URI_SEGMENT).to_string();
-        out.push(Resource::new(format!("{PROJECTS}{seg}/context"), p.name.clone())
-            .with_description(format!("Profile, practices, workflows and top memories for {}", p.root_path))
-            .with_mime_type(JSON));
-        out.push(Resource::new(format!("{PROJECTS}{seg}/practices"), format!("{} practices", p.name))
-            .with_description(format!("Global and project practices for {}, as Markdown", p.root_path))
-            .with_mime_type(MARKDOWN));
-        out.push(Resource::new(format!("{PROJECTS}{seg}/board"), format!("{} board", p.name))
-            .with_description(format!("Task board for {}, as Markdown", p.root_path))
-            .with_mime_type(MARKDOWN));
+        out.extend(project_resources(&p));
     }
     out.push(Resource::new(format!("{PROJECTS}global/practices"), "Global practices".to_string())
         .with_description("Practices with no project, as Markdown")
@@ -1036,6 +1048,13 @@ pub async fn resources_for<B: Backend>(backend: &B) -> atlas_core::Result<Vec<Re
         .with_description(format!("The last {MEMORIES_RECENT_LIMIT} active memories, as Markdown"))
         .with_mime_type(MARKDOWN));
     Ok(out)
+}
+
+/// The `atlas://` resources that belong to one project: its own three (`context`,
+/// `practices`, `board`), for Task MCP-A's `GET /api/v1/projects/{id}/mcp`. Unlike
+/// `resources_for`, this never lists another project's resources or the global ones.
+pub fn resources_for_project(p: &Project) -> Vec<Resource> {
+    project_resources(p).into_iter().collect()
 }
 
 /// Every prompt `list_prompts` would return, from the same backend call the router
@@ -1089,6 +1108,22 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
         if disabled.contains(request.name.as_ref()) {
             return Err(McpError::method_not_found::<CallToolRequestMethod>());
         }
+        // Project-level gating (Task MCP-A), on top of the global list just checked.
+        // `tools/list` cannot do this: it has no call in hand to resolve a project
+        // from, so a project's own overrides only ever take effect here, at call time.
+        // The project comes from the same precedence every other tool follows: this
+        // call's own `project_root` argument, then `ATLAS_PROJECT_ROOT`, then the root
+        // this server was started in; a call that resolves none is never gated by a
+        // project. A resolution error (for example project_connect disabled and the
+        // root unknown) is not this check's to report, so it is treated as "no project"
+        // and left for the tool's own logic to surface if it needs one.
+        let project_root = request.arguments.as_ref().and_then(|a| a.get("project_root")).and_then(|v| v.as_str()).map(PathBuf::from);
+        let project = self.resolve_project(project_root).await.unwrap_or(None);
+        if let Some(p) = &project {
+            if p.mcp_disabled_tools.iter().any(|t| t == request.name.as_ref()) {
+                return Err(McpError::method_not_found::<CallToolRequestMethod>());
+            }
+        }
         if let Some(hook) = &self.on_tool_call {
             // The streamable HTTP transport injects the raw `http::request::Parts` into
             // the request's extensions; the stdio shim never does, so `session_id` is
@@ -1100,7 +1135,7 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
                 .and_then(|p| p.headers.get("mcp-session-id"))
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_string);
-            hook(session_id, context.client_info(), context.protocol_version());
+            hook(session_id, context.client_info(), context.protocol_version(), project.as_ref().map(|p| p.id));
         }
         let tcc = ToolCallContext::new(self, request, context);
         self.tool_router.call(tcc).await
@@ -1287,6 +1322,50 @@ mod tests {
         let names: Vec<&str> = tools.tools.iter().map(|t| t.name.as_ref()).collect();
         assert!(names.contains(&"project_connect"), "{names:?}");
         assert!(names.contains(&"memory_review"), "{names:?}");
+
+        client.cancel().await.unwrap();
+        handle.await.unwrap();
+    }
+
+    /// Task MCP-A: a project's own `mcp_disabled_tools` refuses a tool only for calls
+    /// that resolve to that project, on top of (never instead of) the global list.
+    /// `tools/list` stays global, since it has no call in hand to resolve a project
+    /// from; the resolved project's gating is checked on every `call_tool`.
+    #[tokio::test]
+    async fn project_disabled_tools_are_refused_for_that_project_and_allowed_for_another() {
+        let home = tempfile::tempdir().unwrap();
+        let repo_a = tempfile::tempdir().unwrap();
+        let repo_b = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        let project_a = backend.connect_project(repo_a.path().to_path_buf(), "t").await.unwrap();
+        let _project_b = backend.connect_project(repo_b.path().to_path_buf(), "t").await.unwrap();
+        backend
+            .update_project(project_a.id, ProjectPatch { mcp_disabled_tools: Some(vec!["memory_list".into()]), ..Default::default() }, "t")
+            .await
+            .unwrap();
+
+        let s = AtlasMcp::new(backend.clone()).with_env_project_root(false);
+        let (server_io, client_io) = tokio::io::duplex(16 * 1024);
+        let handle = tokio::spawn(async move {
+            let running = s.serve(server_io).await.unwrap();
+            running.waiting().await.unwrap();
+        });
+        let client: rmcp::service::RunningService<rmcp::RoleClient, ()> = ().serve(client_io).await.unwrap();
+
+        // `tools/list` cannot know which project is asking, so it still lists a tool a
+        // project has disabled.
+        let tools = client.list_tools(None).await.unwrap();
+        assert!(tools.tools.iter().any(|t| t.name == "memory_list"));
+
+        let mut args_a = JsonObject::new();
+        args_a.insert("project_root".into(), serde_json::json!(repo_a.path().to_string_lossy()));
+        let call = client.call_tool(CallToolRequestParams::new("memory_list").with_arguments(args_a)).await.unwrap_err();
+        assert!(matches!(&call, rmcp::service::ServiceError::McpError(e) if e.code == rmcp::model::ErrorCode::METHOD_NOT_FOUND), "{call:?}");
+
+        // The same tool, called against the project that never disabled it, still works.
+        let mut args_b = JsonObject::new();
+        args_b.insert("project_root".into(), serde_json::json!(repo_b.path().to_string_lossy()));
+        client.call_tool(CallToolRequestParams::new("memory_list").with_arguments(args_b)).await.unwrap();
 
         client.cancel().await.unwrap();
         handle.await.unwrap();

@@ -144,6 +144,29 @@ impl RemoteBackend {
     pub async fn unregister_mcp_client(&self, id: &str) -> Result<()> {
         Self::handle_empty(self.client.delete(format!("{}/mcp/clients/{id}", self.base)).send().await.map_err(Self::net)?).await
     }
+
+    /// Task MCP-A: `GET /projects/{id}/mcp`, what MCP looks like from one project's
+    /// point of view (the tools table with `enabled_globally`/`enabled_here`, this
+    /// project's own resources and prompts, its connected clients, and the connect
+    /// info). Raw JSON, like `get_settings`: the report's shape lives in `atlasd::http`
+    /// and this crate does not depend on it.
+    pub async fn project_mcp(&self, id: Uuid) -> Result<serde_json::Value> {
+        Self::handle(self.client.get(format!("{}/projects/{id}/mcp", self.base)).send().await.map_err(Self::net)?).await
+    }
+    /// `PUT /projects/{id}/mcp/tools`: replaces this project's MCP tool override
+    /// wholesale. `disabled: []` clears it.
+    pub async fn set_project_mcp_tools(&self, id: Uuid, disabled: Vec<String>, actor: &str) -> Result<Project> {
+        Self::handle(
+            self.client
+                .put(format!("{}/projects/{id}/mcp/tools", self.base))
+                .header("X-Atlas-Actor", actor)
+                .json(&serde_json::json!({"disabled": disabled}))
+                .send()
+                .await
+                .map_err(Self::net)?,
+        )
+        .await
+    }
 }
 
 #[async_trait::async_trait]

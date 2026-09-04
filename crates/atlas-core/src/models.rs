@@ -130,6 +130,9 @@ pub struct Project {
     /// Per-project extraction override. `None` means "use the global settings".
     /// `api_key` is masked to `"***"` on every read, like the global setting.
     #[serde(default)] pub extraction: Option<ProjectExtraction>,
+    /// MCP tool names disabled for this project on top of the global
+    /// `mcp.disabled_tools` list. Empty means no project override.
+    #[serde(default)] pub mcp_disabled_tools: Vec<String>,
 }
 
 /// Who may write to a project, by actor label. `None` means any actor; a list is an
@@ -164,6 +167,9 @@ pub struct ProjectPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")] pub board_key: Option<String>,
     #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
     pub git_remote: Option<Option<String>>,
+    /// Replaces the project's MCP tool override wholesale when present. Validated
+    /// against the same known-tool-name list as the global `mcp.disabled_tools`.
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub mcp_disabled_tools: Option<Vec<String>>,
 }
 
 /// What a log entry points at: a task (with its key), a memory, a job, a project or a

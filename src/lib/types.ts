@@ -196,6 +196,8 @@ export interface Project {
 	agent_access: AgentAccess;
 	/** Null until an override is stored. `api_key` reads back as `"***"`. */
 	extraction: ProjectExtraction | null;
+	/** MCP tool names disabled for this project on top of the global `mcp.disabled_tools` list. */
+	mcp_disabled_tools: string[];
 }
 
 /**
@@ -231,6 +233,8 @@ export interface ProjectPatch {
 	name?: string;
 	board_key?: string;
 	git_remote?: string | null;
+	/** Replaces the project's MCP tool override wholesale when present. */
+	mcp_disabled_tools?: string[];
 }
 
 /**
@@ -752,6 +756,12 @@ export interface McpClient {
 	first_seen: Timestamp;
 	last_seen: Timestamp;
 	tool_calls: number;
+	/**
+	 * The project this client's last tool call resolved, best effort: only an HTTP
+	 * session reports one (it comes from the router's own project resolution on that
+	 * call); null for a stdio session, or a call that named no project.
+	 */
+	last_project_id: Uuid | null;
 }
 
 export interface McpStatusReport {
@@ -764,6 +774,35 @@ export interface McpStatusReport {
 	resources: McpResource[];
 	prompts: McpPrompt[];
 	clients: McpClient[];
+}
+
+// ---- Project MCP view (Task MCP-A) ----
+// `GET /api/v1/projects/{id}/mcp` (crates/atlasd/src/http.rs: ProjectMcpReport). Tool
+// gating applies at call time, not at `tools/list`, so this route (not the live tool
+// list) is where a project's own MCP overrides show.
+
+export interface ProjectMcpToolRow {
+	name: string;
+	description: string;
+	args: string;
+	scope: McpToolScope;
+	enabled_globally: boolean;
+	/** Actually callable here: enabled globally and not in this project's own override. */
+	enabled_here: boolean;
+}
+
+export interface ProjectMcpReport {
+	tools: ProjectMcpToolRow[];
+	/** Only this project's own `atlas://` resources (its context, practices and board). */
+	resources: McpResource[];
+	prompts: McpPrompt[];
+	/** Registry entries whose last call resolved to this project. */
+	clients: McpClient[];
+	connect: {
+		stdio: { command: string };
+		http: { url: string; protocol_version: string };
+		project_root: string;
+	};
 }
 
 /** Query string for `GET /api/v1/search`. `project_id` takes one project, not a list. */

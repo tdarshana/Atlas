@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use uuid::Uuid;
 
 /// An entry with no heartbeat in this long is dropped from `ClientRegistry::live`.
 const STALE_AFTER_MINUTES: i64 = 10;
@@ -34,6 +35,11 @@ pub struct McpClient {
     pub first_seen: DateTime<Utc>,
     pub last_seen: DateTime<Utc>,
     pub tool_calls: u64,
+    /// The project this client's last tool call resolved, best effort: only the HTTP
+    /// transport (`record_http_call`) reports one, since it comes from the router's own
+    /// project resolution on that call. `None` for a stdio session, or a call that named
+    /// no project.
+    #[serde(default)] pub last_project_id: Option<Uuid>,
 }
 
 #[derive(Default)]
@@ -58,6 +64,7 @@ impl ClientRegistry {
             first_seen: now,
             last_seen: now,
             tool_calls: 0,
+            last_project_id: None,
         });
         entry.last_seen = now;
         entry.transport = transport;
@@ -81,8 +88,10 @@ impl ClientRegistry {
 
     /// An HTTP MCP session's tool call: registers the session on its first call and
     /// bumps `tool_calls` and `last_seen` on every one after. There is no `initialize`
-    /// hook to register from instead; see `atlas_mcp::OnToolCall`.
-    pub fn record_http_call(&self, session_id: String, client_name: String, client_version: Option<String>) {
+    /// hook to register from instead; see `atlas_mcp::OnToolCall`. `project_id` is
+    /// whatever the router resolved this call's project to (or `None`), and always
+    /// overwrites `last_project_id`: the field tracks the *last* call, not the first.
+    pub fn record_http_call(&self, session_id: String, client_name: String, client_version: Option<String>, project_id: Option<Uuid>) {
         let now = Utc::now();
         let mut clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
         let entry = clients.entry(session_id.clone()).or_insert_with(|| McpClient {
@@ -93,9 +102,11 @@ impl ClientRegistry {
             first_seen: now,
             last_seen: now,
             tool_calls: 0,
+            last_project_id: None,
         });
         entry.last_seen = now;
         entry.tool_calls += 1;
+        entry.last_project_id = project_id;
         if !client_name.is_empty() {
             entry.client_name = client_name;
         }
@@ -151,14 +162,27 @@ mod tests {
     #[test]
     fn record_http_call_registers_on_first_call_and_counts_every_one() {
         let reg = ClientRegistry::new();
-        reg.record_http_call("sess-1".into(), "codex".into(), Some("1.0".into()));
-        reg.record_http_call("sess-1".into(), "codex".into(), Some("1.0".into()));
-        reg.record_http_call("sess-1".into(), "codex".into(), Some("1.0".into()));
+        reg.record_http_call("sess-1".into(), "codex".into(), Some("1.0".into()), None);
+        reg.record_http_call("sess-1".into(), "codex".into(), Some("1.0".into()), None);
+        reg.record_http_call("sess-1".into(), "codex".into(), Some("1.0".into()), None);
         let live = reg.live();
         assert_eq!(live.len(), 1);
         assert_eq!(live[0].tool_calls, 3);
         assert_eq!(live[0].transport, Transport::Http);
         assert_eq!(live[0].client_name, "codex");
+    }
+
+    /// The registry's `last_project_id` tracks the *last* call, not the first: a call
+    /// with no project resolves clears it, matching `Task MCP-A`'s "last call touched
+    /// this project" contract for `GET /api/v1/projects/{id}/mcp`.
+    #[test]
+    fn record_http_call_tracks_the_last_resolved_project() {
+        let reg = ClientRegistry::new();
+        let p = Uuid::new_v4();
+        reg.record_http_call("sess-1".into(), "codex".into(), None, Some(p));
+        assert_eq!(reg.live()[0].last_project_id, Some(p));
+        reg.record_http_call("sess-1".into(), "codex".into(), None, None);
+        assert_eq!(reg.live()[0].last_project_id, None);
     }
 
     #[test]

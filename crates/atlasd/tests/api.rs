@@ -1515,6 +1515,84 @@ async fn agent_access_is_stored_and_enforced() {
     assert_eq!(missing.status(), 404);
 }
 
+/// Task MCP-A: `GET /projects/{id}/mcp` before any override shows every tool
+/// `enabled_here`, only this project's own `atlas://` resources, and the `connect`
+/// shape; `PUT /projects/{id}/mcp/tools` writes the override (reflected on the very
+/// next `GET`, and on the resolved-call gate a live MCP session meets), refuses an
+/// unknown tool name with a 400, and 404s an unknown project.
+#[tokio::test]
+async fn project_mcp_route_reports_and_gates_a_project_override() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let url = format!("http://127.0.0.1:{}/mcp", d.port);
+    let c = reqwest::Client::new();
+    let dir = repo_free_tempdir();
+    fixture_repo(dir.path());
+
+    let project: serde_json::Value = c.post(format!("{base}/projects/connect")).json(&serde_json::json!({"root": dir.path()})).send().await.unwrap().json().await.unwrap();
+    let id = project["id"].as_str().unwrap().to_string();
+
+    let before: serde_json::Value = c.get(format!("{base}/projects/{id}/mcp")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(before["connect"]["stdio"]["command"], "atlas mcp", "{before}");
+    assert!(before["connect"]["http"]["url"].as_str().unwrap().ends_with("/mcp"), "{before}");
+    assert_eq!(before["connect"]["project_root"], project["root_path"], "{before}");
+    let tools = before["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 30, "{tools:?}");
+    let task_move = tools.iter().find(|t| t["name"] == "task_move").unwrap();
+    assert_eq!(task_move["enabled_globally"], true, "{task_move}");
+    assert_eq!(task_move["enabled_here"], true, "{task_move}");
+    // `project_connect` is disabled by default globally, so it must read as such here too.
+    let connect_tool = tools.iter().find(|t| t["name"] == "project_connect").unwrap();
+    assert_eq!(connect_tool["enabled_globally"], false, "{connect_tool}");
+    assert_eq!(connect_tool["enabled_here"], false, "{connect_tool}");
+    let resources = before["resources"].as_array().unwrap();
+    assert_eq!(resources.len(), 3, "only this project's context, practices and board: {resources:?}");
+    assert!(resources.iter().all(|r| r["uri"].as_str().unwrap().contains(project["name"].as_str().unwrap())), "{resources:?}");
+    assert!(before["clients"].as_array().unwrap().is_empty(), "{before}");
+
+    let bad = c.put(format!("{base}/projects/{id}/mcp/tools")).header("X-Atlas-Actor", "desktop")
+        .json(&serde_json::json!({"disabled": ["no_such_tool"]})).send().await.unwrap();
+    assert_eq!(bad.status(), 400);
+    let bad_body: serde_json::Value = bad.json().await.unwrap();
+    assert!(bad_body["error"].as_str().unwrap().contains("no_such_tool"), "{bad_body}");
+
+    let put = c.put(format!("{base}/projects/{id}/mcp/tools")).header("X-Atlas-Actor", "desktop")
+        .json(&serde_json::json!({"disabled": ["task_move"]})).send().await.unwrap();
+    assert_eq!(put.status(), 200);
+    let put_body: serde_json::Value = put.json().await.unwrap();
+    assert_eq!(put_body["mcp_disabled_tools"], serde_json::json!(["task_move"]), "{put_body}");
+
+    let after: serde_json::Value = c.get(format!("{base}/projects/{id}/mcp")).send().await.unwrap().json().await.unwrap();
+    let task_move = after["tools"].as_array().unwrap().iter().find(|t| t["name"] == "task_move").unwrap().clone();
+    assert_eq!(task_move["enabled_globally"], true, "{task_move}");
+    assert_eq!(task_move["enabled_here"], false, "{task_move}");
+
+    let missing = c.get(format!("{base}/projects/{}/mcp", uuid::Uuid::new_v4())).send().await.unwrap();
+    assert_eq!(missing.status(), 404);
+
+    // The gate a live call actually meets: `task_move` is refused when the call
+    // resolves to this project, over the same MCP session the daemon serves at `/mcp`.
+    let init = c.post(&url).header("Accept", "application/json, text/event-stream").header("Content-Type", "application/json")
+        .json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"gate-test","version":"1.0"}}}))
+        .send().await.unwrap();
+    let session = init.headers().get("mcp-session-id").map(|v| v.to_str().unwrap().to_string());
+    let _ = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})).await;
+    let root = dir.path().to_string_lossy().to_string();
+    let call = rpc(&c, &url, &session, serde_json::json!({
+        "jsonrpc":"2.0","id":2,"method":"tools/call",
+        "params":{"name":"task_move","arguments":{"key":"NOPE-1","stage":"Done","project_root": root}}
+    })).await;
+    assert_eq!(rpc_json(&call)["error"]["code"], -32601, "{call}");
+
+    // A tool this project never disabled still resolves normally against it (past the
+    // gate, into the tool's own not-found error for a bogus key rather than method-not-found).
+    let allowed = rpc(&c, &url, &session, serde_json::json!({
+        "jsonrpc":"2.0","id":3,"method":"tools/call",
+        "params":{"name":"task_get","arguments":{"key":"NOPE-1"}}
+    })).await;
+    assert_ne!(rpc_json(&allowed)["error"]["code"], -32601, "{allowed}");
+}
+
 /// The three frameworks routes (Phase 12): the inventory-plus-documents listing, a
 /// document's text by path, and importing tasks or decisions — including the 400 for
 /// an unknown `{kind}` and the 409 an agent not on `agent_access` gets from an import.

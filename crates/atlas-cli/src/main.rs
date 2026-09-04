@@ -127,7 +127,7 @@ async fn main() -> anyhow::Result<()> {
             let hook_calls = tool_calls.clone();
             let mut server = AtlasMcp::new(remote.clone())
                 .with_source_tool(std::env::var("ATLAS_SOURCE_TOOL").unwrap_or_else(|_| "stdio".into()))
-                .with_on_tool_call(Arc::new(move |_session_id, _client_info, _protocol_version| {
+                .with_on_tool_call(Arc::new(move |_session_id, _client_info, _protocol_version, _project_id| {
                     hook_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }));
             // The client launches the shim in the repository it is working in, so the cwd

@@ -649,6 +649,7 @@ mod tests {
             board_stages: None,
             agent_access: Default::default(),
             extraction: None,
+            mcp_disabled_tools: vec![],
         }
     }
 

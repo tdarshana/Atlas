@@ -84,11 +84,11 @@ async fn main() -> anyhow::Result<()> {
             // the client registry picks up an HTTP session on its first tool call
             // instead, keyed by the `Mcp-Session-Id` header `AtlasMcp` reads out of the
             // request's injected `http::request::Parts`.
-            let on_tool_call: atlas_mcp::OnToolCall = Arc::new(move |session_id, client_info, _protocol_version| {
+            let on_tool_call: atlas_mcp::OnToolCall = Arc::new(move |session_id, client_info, _protocol_version, project_id| {
                 let Some(session_id) = session_id else { return };
                 let name = client_info.as_ref().map(|i| i.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| "unknown".into());
                 let version = client_info.map(|i| i.version).filter(|v| !v.is_empty());
-                clients.record_http_call(session_id, name, version);
+                clients.record_http_call(session_id, name, version, project_id);
             });
             Ok(AtlasMcp::new(mcp_backend.clone()).with_env_project_root(false).with_on_tool_call(on_tool_call))
         },

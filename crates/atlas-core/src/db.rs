@@ -133,6 +133,12 @@ create table if not exists workflow_steps (
 -- same `if not exists` shape migration 3 and 5 use for a column added to a
 -- table already carrying rows.
 alter table tasks add column if not exists source_ref json;
+"#), (8, r#"
+-- Task MCP-A: a project can disable MCP tools on top of the global
+-- `mcp.disabled_tools` list, the same `if not exists` shape migration 3, 5 and 7
+-- use for a column added to a table already carrying rows. Null means "no
+-- project override"; `Project::mcp_disabled_tools` reads that as an empty list.
+alter table projects add column if not exists mcp_disabled_tools json;
 "#)];
 
 /// Moves the Markdown workflow documents aside so migration 6 can give the name
@@ -195,18 +201,18 @@ mod tests {
     #[test]
     fn migrate_creates_tables_and_is_idempotent() {
         let db = Db::open_in_memory().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 7);
+        assert_eq!(db.schema_version().unwrap(), 8);
         let n: i64 = db.with_conn(|c| Ok(c.query_row(
             "select count(*) from information_schema.tables where table_name in ('memories','memory_embeddings','audit','settings','projects','agents','practices','workflow_docs','sync_targets','jobs','tasks','task_blockers','task_events','board_counters','workflows','workflow_runs','workflow_steps')",
             [], |r| r.get(0))?)).unwrap();
         assert_eq!(n, 17);
-        // Migrations 3 and 5 widen `projects` in place.
+        // Migrations 3, 5 and 8 widen `projects` in place.
         let cols: i64 = db.with_conn(|c| Ok(c.query_row(
-            "select count(*) from information_schema.columns where table_name='projects' and column_name in ('board_key','board_stages','agent_access','extraction')",
+            "select count(*) from information_schema.columns where table_name='projects' and column_name in ('board_key','board_stages','agent_access','extraction','mcp_disabled_tools')",
             [], |r| r.get(0))?)).unwrap();
-        assert_eq!(cols, 4);
+        assert_eq!(cols, 5);
         db.migrate().unwrap(); // second run is a no-op
-        assert_eq!(db.schema_version().unwrap(), 7);
+        assert_eq!(db.schema_version().unwrap(), 8);
     }
 
     /// Migration 6 renames the Markdown doc table out of the way and puts the real
@@ -249,7 +255,7 @@ mod tests {
         .unwrap();
         assert_eq!(db.schema_version().unwrap(), 4);
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 7);
+        assert_eq!(db.schema_version().unwrap(), 8);
     }
 
     /// A database stamped 3 by the build that shipped migration 3 without
@@ -266,10 +272,35 @@ mod tests {
         assert_eq!(db.schema_version().unwrap(), 3);
 
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 7);
+        assert_eq!(db.schema_version().unwrap(), 8);
         let n: i64 = db
             .with_conn(|c| {
                 Ok(c.query_row("select count(*) from information_schema.tables where table_name = 'board_counters'", [], |r| r.get(0))?)
+            })
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    /// Migration 8 adds its column with `if not exists`, so replaying it over a
+    /// database that already has it is a no-op rather than a failure.
+    #[test]
+    fn migration_8_is_a_no_op_on_a_database_that_already_has_the_column() {
+        let db = Db::open_in_memory().unwrap();
+        db.with_conn(|c| {
+            c.execute_batch("delete from schema_version where version >= 8;")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(db.schema_version().unwrap(), 7);
+        db.migrate().unwrap();
+        assert_eq!(db.schema_version().unwrap(), 8);
+        let n: i64 = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "select count(*) from information_schema.columns where table_name = 'projects' and column_name = 'mcp_disabled_tools'",
+                    [],
+                    |r| r.get(0),
+                )?)
             })
             .unwrap();
         assert_eq!(n, 1);

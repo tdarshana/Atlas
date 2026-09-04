@@ -33,6 +33,13 @@ pub enum ProjectCmd {
         /// Clear the git remote
         #[arg(long)]
         no_remote: bool,
+        /// MCP tool names to disable for this project, on top of the global list, e.g.
+        /// --mcp-disable task_move,memory_forget
+        #[arg(long, value_delimiter = ',')]
+        mcp_disable: Vec<String>,
+        /// MCP tool names to re-enable for this project
+        #[arg(long, value_delimiter = ',')]
+        mcp_enable: Vec<String>,
     },
     /// Show a project's unified log: task events, memory writes, project and sync
     /// audit rows, and extraction jobs, newest first
@@ -96,7 +103,7 @@ pub async fn run(cmd: ProjectCmd, backend: &RemoteBackend) -> anyhow::Result<()>
             println!("forgot project {id}");
             Ok(())
         }
-        ProjectCmd::Set { target, name, key, remote, no_remote } => {
+        ProjectCmd::Set { target, name, key, remote, no_remote, mcp_disable, mcp_enable } => {
             let id = resolve(&target, backend).await?;
             // Absent leaves the remote alone; `--no-remote` clears it; `--remote` sets it.
             let git_remote = match (remote, no_remote) {
@@ -104,7 +111,20 @@ pub async fn run(cmd: ProjectCmd, backend: &RemoteBackend) -> anyhow::Result<()>
                 (None, true) => Some(None),
                 (None, false) => None,
             };
-            let patch = atlas_core::models::ProjectPatch { name, board_key: key, git_remote };
+            // `--mcp-disable`/`--mcp-enable` add to and remove from the project's
+            // current override; absent both leaves it alone, since the underlying
+            // patch field replaces the list wholesale rather than merging it.
+            let mcp_disabled_tools = if mcp_disable.is_empty() && mcp_enable.is_empty() {
+                None
+            } else {
+                let mut tools: std::collections::BTreeSet<String> = backend.get_project(id).await?.mcp_disabled_tools.into_iter().collect();
+                tools.extend(mcp_disable);
+                for t in &mcp_enable {
+                    tools.remove(t);
+                }
+                Some(tools.into_iter().collect())
+            };
+            let patch = atlas_core::models::ProjectPatch { name, board_key: key, git_remote, mcp_disabled_tools };
             super::print_json(&backend.update_project(id, patch, "cli").await?)
         }
         ProjectCmd::Log { target, source, kind, limit, json } => {
