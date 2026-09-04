@@ -46,10 +46,23 @@ async fn wait_for_daemon(paths: &AtlasPaths, port: u16, timeout: Duration, step:
     }
 }
 
+/// Whether `ensure_daemon_with`'s pre-spawn wait is worth paying, judged from the same
+/// first probe `wait_for_daemon` itself would poll on: a genuinely cold start, with no
+/// `daemon.json` anywhere, has no in-flight start to catch up to, so the wait would
+/// only delay the spawn every such start was always going to need. `daemon.json`
+/// existing is the signal that an in-flight start, or a crash-stale file (harmless to
+/// wait a moment on; it still falls through to a fresh spawn either way), might
+/// resolve, so the wait stays worth it there.
+fn needs_start_race_wait(paths: &AtlasPaths) -> bool {
+    daemon_info(paths).is_some()
+}
+
 pub async fn ensure_daemon_with(paths: &AtlasPaths, port: u16, atlasd: Option<PathBuf>) -> anyhow::Result<u16> {
     if is_up(port).await { return Ok(port); }
-    wait_for_daemon(paths, port, START_RACE_TIMEOUT, START_RACE_STEP).await;
-    if is_up(port).await { return Ok(port); }
+    if needs_start_race_wait(paths) {
+        wait_for_daemon(paths, port, START_RACE_TIMEOUT, START_RACE_STEP).await;
+        if is_up(port).await { return Ok(port); }
+    }
     // `daemon.json` lands before atlasd serves, so a live pid in it means a start is
     // in flight: wait for that port instead of spawning a competitor that would only
     // lose the DuckDB lock race. A stale file from a crash (dead or recycled pid) falls
@@ -130,6 +143,12 @@ mod tests {
     /// check that script is what ran. The fake exits immediately, which makes the call fail
     /// with "exited with" instead of waiting out the 30 s readiness deadline; that error is
     /// itself proof the spawn succeeded, and the marker file says which binary it spawned.
+    ///
+    /// No `daemon.json` is ever written here, so this also exercises the genuinely
+    /// cold start `needs_start_race_wait` skips the pre-spawn wait for (L5); the
+    /// timing itself is pinned separately, without real process spawns, by
+    /// `needs_start_race_wait_is_false_cold_and_true_with_daemon_json` below, since a
+    /// wall-clock bound on a real spawn is unreliable when the suite runs in parallel.
     #[tokio::test]
     async fn ensure_daemon_with_uses_the_explicit_path() {
         let dir = tempfile::tempdir().unwrap();
@@ -147,6 +166,24 @@ mod tests {
         let ran = std::fs::read_to_string(&marker).expect("the fake atlasd never ran");
         assert!(ran.contains(fake.to_str().unwrap()), "a different binary ran: {ran}");
         assert!(ran.contains(&format!("--port {port}")), "the fake did not get the port: {ran}");
+    }
+
+    /// L5: `ensure_daemon_with`'s pre-spawn wait is worth paying only when
+    /// `daemon.json` exists at the first probe. Checked directly against the pure
+    /// predicate rather than by timing a real `ensure_daemon_with` call, since a
+    /// wall-clock bound around a process spawn is unreliable when the suite runs
+    /// every test in parallel (both paths are also exercised end to end, without
+    /// timing, by `ensure_daemon_with_uses_the_explicit_path` above and
+    /// `a_stale_daemon_json_does_not_block_a_needed_spawn` below).
+    #[test]
+    fn needs_start_race_wait_is_false_cold_and_true_with_daemon_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AtlasPaths::at(dir.path().join("home"));
+        assert!(!needs_start_race_wait(&paths), "no daemon.json anywhere: a genuinely cold start, nothing to wait on");
+
+        paths.ensure().unwrap();
+        std::fs::write(paths.daemon_file(), r#"{"pid":1,"port":1,"started_at":"x"}"#).unwrap();
+        assert!(needs_start_race_wait(&paths), "daemon.json present: an in-flight start might still resolve, worth the wait");
     }
 
     /// The pre-spawn wait notices `daemon.json` as soon as it appears, rather than
@@ -187,6 +224,11 @@ mod tests {
     /// A `daemon.json` left behind by a crash (see `stop_daemon`) must not block a
     /// spawn forever when nothing is actually listening: the pre-spawn wait notices it
     /// and moves on, and the fallback spawn still runs.
+    ///
+    /// Also exercises the `daemon.json`-exists half of `needs_start_race_wait` (L5)
+    /// end to end: the pre-spawn wait is entered (unlike the genuinely cold start in
+    /// `ensure_daemon_with_uses_the_explicit_path`) and still falls through to a
+    /// fresh spawn once it finds nothing actually listening.
     #[tokio::test]
     async fn a_stale_daemon_json_does_not_block_a_needed_spawn() {
         let dir = tempfile::tempdir().unwrap();

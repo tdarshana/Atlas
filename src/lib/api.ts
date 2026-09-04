@@ -347,11 +347,12 @@ export class AtlasApi {
 	 * 409 and the daemon's "extraction is disabled" message.
 	 */
 	ingest(text: string, sourceTool: string, projectRoot?: string): Promise<{ job_id: Uuid }> {
-		return this.req('POST', '/api/v1/ingest', {
-			text,
-			source_tool: sourceTool,
-			project_root: projectRoot
-		});
+		return this.req(
+			'POST',
+			'/api/v1/ingest',
+			{ text, project_root: projectRoot },
+			{ 'X-Atlas-Actor': sourceTool }
+		);
 	}
 
 	getJob(id: Uuid): Promise<Job> {

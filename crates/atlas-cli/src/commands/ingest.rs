@@ -106,7 +106,8 @@ fn read_transcript(args: &IngestArgs) -> anyhow::Result<(String, Option<PathBuf>
         }
         return Ok((super::read_source(path)?, None));
     }
-    Ok((stdin()?, None))
+    let text = stream_plain(std::io::stdin().lock()).map_err(|e| anyhow::anyhow!("failed to read standard input: {e}"))?;
+    Ok((text, None))
 }
 
 /// Claude Code documents an absolute `transcript_path`, but it costs nothing to
@@ -180,6 +181,25 @@ fn stream_transcript(path: &Path) -> std::io::Result<String> {
         if let Some(entry) = transcript_line(&line) {
             push_bounded(&mut buffer, &mut total, entry);
         }
+    }
+    Ok(buffer.into_iter().collect())
+}
+
+/// Reads a plain (non-JSONL) transcript one line at a time, bounded by the same
+/// ring buffer [`stream_transcript`] uses for a Claude Code file: piped in over
+/// standard input, a transcript can be arbitrarily large, and reading it whole
+/// before trimming in [`tail`] would hold all of it in memory only to throw most
+/// of it away.
+fn stream_plain(r: impl BufRead) -> std::io::Result<String> {
+    let mut buffer: VecDeque<String> = VecDeque::new();
+    let mut total = 0usize;
+    for line in r.lines() {
+        // A line that is not valid UTF-8 is skipped, the same way stream_transcript
+        // skips one, rather than failing the whole transcript.
+        let Ok(line) = line else { continue };
+        let mut entry = line;
+        entry.push('\n');
+        push_bounded(&mut buffer, &mut total, entry);
     }
     Ok(buffer.into_iter().collect())
 }
@@ -342,6 +362,38 @@ mod tests {
         assert_eq!(streamed, transcript_to_text(jsonl));
 
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn stream_plain_matches_the_full_read_under_the_limit() {
+        let text = "line one\nline two\nline three\n";
+        let streamed = stream_plain(text.as_bytes()).unwrap();
+        assert_eq!(streamed, text);
+    }
+
+    /// Plain stdin ingest (no `--file`, `--hook-stdin` or `--hook-arg`) has no JSON to
+    /// parse, but it must still bound memory the same way `stream_transcript` does for
+    /// a file: proof that only the tail survives, without ever building the whole
+    /// converted string in memory.
+    #[test]
+    fn stream_plain_bounds_a_large_input_to_the_tail() {
+        let mut text = String::new();
+        let mut i = 0usize;
+        while text.len() < MAX_CHARS + 1_000_000 {
+            text.push_str(&format!("line {i} {}\n", "x".repeat(400)));
+            i += 1;
+        }
+        let last_line = i - 1;
+
+        let streamed = stream_plain(text.as_bytes()).unwrap();
+        let expected = tail(text);
+
+        assert_eq!(streamed, expected);
+        assert!(streamed.chars().count() <= MAX_CHARS);
+        assert!(
+            streamed.ends_with(&format!("line {last_line} {}\n", "x".repeat(400))),
+            "the streamed text must end with the input's last line"
+        );
     }
 
     /// Generates a transcript well past `MAX_CHARS` of converted text and

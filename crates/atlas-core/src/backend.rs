@@ -156,7 +156,11 @@ pub trait Backend: Send + Sync + 'static {
     async fn board_stages(&self, project_id: Option<Uuid>) -> Result<StageList>;
     async fn set_board_stages(&self, stages: Vec<Stage>, renames: HashMap<String, String>, actor: &str) -> Result<Vec<Stage>>;
     async fn set_project_stages(&self, project_id: Uuid, stages: Option<Vec<Stage>>, renames: HashMap<String, String>, actor: &str) -> Result<StageList>;
-    async fn task_counts(&self, project_id: Option<Uuid>) -> Result<Vec<(String, i64)>>;
+    /// Task counts per stage, scoped the same way [`list_tasks`](Self::list_tasks)
+    /// reads `project_id`/`global_only`: neither set counts every project, `project_id`
+    /// alone counts just that project, `global_only` counts just the project-less
+    /// tasks. The caller (the HTTP route) refuses both being set together.
+    async fn task_counts(&self, project_id: Option<Uuid>, global_only: bool) -> Result<Vec<(String, i64)>>;
 
     // ---- workflows (Phase 9) ----
     async fn list_workflows(&self, project_id: Option<Uuid>) -> Result<Vec<Workflow>>;
@@ -788,9 +792,9 @@ impl Backend for LocalBackend {
         let actor = actor.to_string();
         self.blocking(move || tasks.set_project_stages(project_id, stages, &renames, &actor)).await
     }
-    async fn task_counts(&self, project_id: Option<Uuid>) -> Result<Vec<(String, i64)>> {
+    async fn task_counts(&self, project_id: Option<Uuid>, global_only: bool) -> Result<Vec<(String, i64)>> {
         let tasks = self.tasks.clone();
-        self.blocking(move || tasks.counts_by_stage(project_id)).await
+        self.blocking(move || tasks.counts_by_stage(project_id, global_only)).await
     }
 
     async fn list_workflows(&self, project_id: Option<Uuid>) -> Result<Vec<Workflow>> {

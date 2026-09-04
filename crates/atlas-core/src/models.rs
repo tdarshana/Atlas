@@ -31,11 +31,13 @@ str_enum!(MemoryStatus { Active => "active", Pending => "pending", Rejected => "
 // rule, where a project widens rather than narrows: that project's memories *plus*
 // every global one, which is what an agent starting work wants. `ProjectOnly` narrows
 // to the project's own rows, for a screen that has already said whose memories it is
-// showing and would be lying to mix the global ones in.
+// showing and would be lying to mix the global ones in. `GlobalOnly` narrows to the
+// project-less memories, ignoring any `project_id` given alongside it, for a screen
+// whose scope filter is the literal global scope rather than one project.
 // `All` is the default wherever one is needed; it is spelled out at each call site
 // rather than through `Default`, since `str_enum!` builds the enum and a derived
 // default would have to be threaded through the macro for one use.
-str_enum!(MemoryScopeFilter { All => "all", ProjectOnly => "project_only" });
+str_enum!(MemoryScopeFilter { All => "all", ProjectOnly => "project_only", GlobalOnly => "global_only" });
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NewMemory {

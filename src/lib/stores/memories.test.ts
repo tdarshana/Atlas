@@ -50,6 +50,7 @@ beforeEach(() => {
 	memories.all = [];
 	memories.hits = [];
 	memories.selected = null;
+	memories.facetsError = null;
 });
 
 describe('memories store', () => {
@@ -87,6 +88,30 @@ describe('memories store', () => {
 		memories.facets = { kinds: { fact: 1 }, tags: {}, total: 1 };
 		await loadMemories();
 		expect(memories.facets).toEqual({ kinds: {}, tags: {}, total: 0 });
+	});
+
+	it('asks the facets route for global_only when the scope filter is global', async () => {
+		memories.scope = 'global';
+		await loadMemories();
+		expect(mocks.memoryFacets).toHaveBeenCalledWith(null, 'global_only');
+	});
+
+	it('keeps the previous facets and rows when only the facets fetch fails', async () => {
+		memories.facets = { kinds: { fact: 1 }, tags: {}, total: 1 };
+		mocks.memoryFacets.mockRejectedValueOnce(new Error('facets boom'));
+
+		await loadMemories();
+
+		expect(memories.all).toHaveLength(3);
+		expect(memories.facets).toEqual({ kinds: { fact: 1 }, tags: {}, total: 1 });
+		expect(memories.facetsError).toBe('facets boom');
+		expect(memories.error).toBeNull();
+	});
+
+	it('clears a stale facetsError once the facets fetch succeeds again', async () => {
+		memories.facetsError = 'stale error';
+		await loadMemories();
+		expect(memories.facetsError).toBeNull();
 	});
 
 	it('never sends the kind filter to the search route', async () => {

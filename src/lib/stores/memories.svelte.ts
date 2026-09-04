@@ -37,6 +37,12 @@ export const memories = $state({
 	 * always covers the whole active set, a search query included.
 	 */
 	facets: EMPTY_FACETS,
+	/**
+	 * Set only when the facets fetch itself failed while the rows loaded fine; `facets`
+	 * then keeps whatever it already had rather than going blank, the same way
+	 * `board.detail`/`board.detailError` keep a task's own load failure off the list.
+	 */
+	facetsError: null as string | null,
 	loading: false,
 	error: null as string | null,
 	/** Set only for a connection failure, so the error state can point at the log. */
@@ -59,9 +65,12 @@ function activeProjectId(): Uuid | null {
 /**
  * The `list_scope` facets are fetched with: `project_only` narrows to that project's
  * own memories, the same narrowing `activeProjectId` already applies for the list
- * itself, so the two never disagree about what "this project" means.
+ * itself, so the two never disagree about what "this project" means; `global_only`
+ * does the same for the `global` scope filter, so the panel's counts agree with the
+ * `m.scope === 'global'` rows `inScope` keeps for the table.
  */
 function facetsListScope(): MemoryListScope | null {
+	if (memories.scope === 'global') return 'global_only';
 	return activeProjectId() ? 'project_only' : null;
 }
 
@@ -101,7 +110,8 @@ export async function loadMemories(): Promise<void> {
 		// active set's facets, not just what the current search matched.
 		const facetsPromise = api().memoryFacets(projectId, facetsListScope());
 		// If the hits fetch throws first, the facets promise must still be observed
-		// or a second failure becomes an unhandled rejection.
+		// or a second failure becomes an unhandled rejection; the outer catch below
+		// handles that case (a failed row load), so this stays a no-op here.
 		facetsPromise.catch(() => {});
 		if (query) {
 			// No `kinds` here on purpose: one fetch per load, and the side panel needs the
@@ -123,11 +133,20 @@ export async function loadMemories(): Promise<void> {
 			hits = rows.map((memory) => ({ memory, score: 0 }));
 			scored = false;
 		}
-		const facets = await facetsPromise;
+		// A facets failure on its own must not blank a row list that loaded fine, so it
+		// is caught here rather than joining the outer catch below: `facets` keeps
+		// whatever it already had, and the failure is surfaced through `facetsError`.
+		const facets = await facetsPromise.catch((e) => {
+			memories.facetsError = errorMessage(e);
+			return null;
+		});
 		if (g !== generation) return;
 		memories.all = hits.filter(inScope);
 		memories.scored = scored;
-		memories.facets = facets;
+		if (facets) {
+			memories.facets = facets;
+			memories.facetsError = null;
+		}
 		applyKinds();
 		memories.error = null;
 		memories.errorLogPath = null;
@@ -136,6 +155,7 @@ export async function loadMemories(): Promise<void> {
 		memories.all = [];
 		memories.hits = [];
 		memories.facets = EMPTY_FACETS;
+		memories.facetsError = null;
 		memories.selected = null;
 		memories.error = errorMessage(e);
 		memories.errorLogPath = errorLogPath(e);

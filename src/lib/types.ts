@@ -46,10 +46,11 @@ export interface RecallHit {
 /**
  * A request-time narrowing, not a value of a memory's own `scope` column (that is
  * `MemoryScope`). `project_only` asks `GET /memories` and `POST /memories/search` for
- * exactly one project's own memories, nothing global; `all` is the default, where a
- * project widens to its own memories plus every global one.
+ * exactly one project's own memories, nothing global; `global_only` narrows to the
+ * project-less memories, ignoring any `project_id` sent alongside it; `all` is the
+ * default, where a project widens to its own memories plus every global one.
  */
-export type MemoryListScope = 'all' | 'project_only';
+export type MemoryListScope = 'all' | 'project_only' | 'global_only';
 
 /**
  * Kind and tag counts, plus the total, over the active memories `GET

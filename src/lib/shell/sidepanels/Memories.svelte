@@ -27,6 +27,10 @@
 	});
 </script>
 
+{#if memories.facetsError}
+	<p class="bad" role="alert">{memories.facetsError}</p>
+{/if}
+
 <TreeGroup label="Kinds">
 	{#each MEMORY_KINDS as kind (kind)}
 		{@const on = memories.kinds.includes(kind)}
@@ -52,3 +56,12 @@
 		<TreeRow icon="terminal" label={source} mono meta={count} />
 	{/each}
 </TreeGroup>
+
+<style>
+	.bad {
+		margin: 0 12px;
+		color: var(--danger-text);
+		font-size: 12px;
+		overflow-wrap: anywhere;
+	}
+</style>

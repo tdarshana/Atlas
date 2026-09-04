@@ -233,6 +233,12 @@ fn query_flag<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<boo
 #[derive(Deserialize, Default)] pub struct ClaimBody { #[serde(default)] pub force: bool }
 #[derive(Deserialize)] pub struct BlockersBody { pub blocked_by: Vec<String> }
 #[derive(Deserialize)] pub struct BoardStagesQ { pub project_id: Option<Uuid> }
+#[derive(Deserialize)] pub struct TaskCountsQ {
+    #[serde(default)] pub project_id: Option<Uuid>,
+    /// Read exactly like `TaskListQ::scope`, so `/tasks/counts` never disagrees with
+    /// `/tasks` about what a bare request or `scope=global` means.
+    #[serde(default)] pub scope: Option<String>,
+}
 #[derive(Deserialize)] pub struct SetStagesBody { pub stages: Vec<Stage>, #[serde(default)] pub renames: HashMap<String, String> }
 #[derive(Deserialize)] pub struct SetProjectStagesBody { #[serde(default)] pub stages: Option<Vec<Stage>>, #[serde(default)] pub renames: HashMap<String, String> }
 #[derive(Serialize)] pub struct StageCount { pub stage: String, pub count: i64 }
@@ -489,15 +495,24 @@ async fn test_extraction(State(s): State<AppState>, ApiQuery(q): ApiQuery<Projec
 
 // ---- board ----
 
-async fn list_tasks(State(s): State<AppState>, ApiQuery(q): ApiQuery<TaskListQ>) -> Result<Json<Vec<Task>>, ApiError> {
-    let global_only = match q.scope.as_deref().filter(|v| !v.is_empty()) {
+/// Parses a task list/counts `scope` query param the one way both routes read it:
+/// `global` names the literal global board (tasks with no project); anything else,
+/// including absent or empty, is the existing widen-or-narrow-by-`project_id` read.
+/// Refuses `project_id` and `scope=global` together, since a caller cannot mean both
+/// "just this project" and "just no project" at once.
+fn task_global_only(scope: Option<&str>, project_id: Option<Uuid>) -> Result<bool, ApiError> {
+    let global_only = match scope.filter(|v| !v.is_empty()) {
         Some("global") => true,
         Some(other) => return Err(ApiError(AtlasError::Invalid(format!("unknown scope: {other}")))),
         None => false,
     };
-    if global_only && q.project_id.is_some() {
+    if global_only && project_id.is_some() {
         return Err(ApiError(AtlasError::Invalid("project_id and scope=global cannot both be set".into())));
     }
+    Ok(global_only)
+}
+async fn list_tasks(State(s): State<AppState>, ApiQuery(q): ApiQuery<TaskListQ>) -> Result<Json<Vec<Task>>, ApiError> {
+    let global_only = task_global_only(q.scope.as_deref(), q.project_id)?;
     let f = TaskFilter { project_id: q.project_id, stage: q.stage, assignee: q.assignee, ready: q.ready, query: q.q, include_done: q.include_done, global_only };
     Ok(Json(s.backend.list_tasks(f).await?))
 }
@@ -535,8 +550,9 @@ async fn put_board_stages(State(s): State<AppState>, Actor(actor): Actor, ApiJso
 async fn put_project_stages(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor): Actor, ApiJson(b): ApiJson<SetProjectStagesBody>) -> Result<Json<StageList>, ApiError> {
     Ok(Json(s.backend.set_project_stages(id, b.stages, b.renames, &actor).await?))
 }
-async fn task_counts(State(s): State<AppState>, ApiQuery(q): ApiQuery<BoardStagesQ>) -> Result<Json<Vec<StageCount>>, ApiError> {
-    let counts = s.backend.task_counts(q.project_id).await?;
+async fn task_counts(State(s): State<AppState>, ApiQuery(q): ApiQuery<TaskCountsQ>) -> Result<Json<Vec<StageCount>>, ApiError> {
+    let global_only = task_global_only(q.scope.as_deref(), q.project_id)?;
+    let counts = s.backend.task_counts(q.project_id, global_only).await?;
     Ok(Json(counts.into_iter().map(|(stage, count)| StageCount { stage, count }).collect()))
 }
 

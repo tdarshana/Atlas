@@ -279,7 +279,7 @@ pub const TOOL_TABLE: &[ToolMeta] = &[
     ToolMeta { name: "project_connect", description: "Register a repository with Atlas and build its profile (languages, frameworks, tree, recent commits). Call this once when starting work in a repository Atlas has not seen.", args: "root_path*", scope: ToolScope::Write },
     ToolMeta { name: "project_context", description: "Call at the start of a session to load the current project's profile, practices, workflows and top memories. Pass project_root to name a repository other than the one this server was started in.", args: "project_root", scope: ToolScope::Write },
     ToolMeta { name: "task_create", description: "Create a task on the board. Pass project_root to name a project other than the one this server was started in, or \"global\" for a task with no project.", args: "title*, description, kind, priority, labels, parent, blocked_by, project_root, agent", scope: ToolScope::Write },
-    ToolMeta { name: "task_list", description: "List board tasks for the current project. Pass ready=true to get work whose blockers are done and is safe to start; pass stage or assignee to narrow further.", args: "project_root, stage, assignee, ready, query, include_done, agent", scope: ToolScope::Read },
+    ToolMeta { name: "task_list", description: "List board tasks for the current project. Pass ready=true to get work whose blockers are done and is safe to start; pass stage or assignee to narrow further, or project_root: \"global\" for tasks with no project.", args: "project_root, stage, assignee, ready, query, include_done, agent", scope: ToolScope::Read },
     ToolMeta { name: "task_get", description: "Fetch one task by key, including its subtasks and full event history. Call before updating or moving a task you have not read recently.", args: "key*, agent", scope: ToolScope::Read },
     ToolMeta { name: "task_claim", description: "Claim a task: assign it to you and, if it is still in the board's first stage, move it to the second. Fails if someone else already holds it unless force is set.", args: "key*, force, agent", scope: ToolScope::Write },
     ToolMeta { name: "task_move", description: "Move a task to another stage on its board. Fails naming the valid stages if the stage does not exist, or with a conflict if expected_updated_at no longer matches.", args: "key*, stage*, expected_updated_at, agent", scope: ToolScope::Write },
@@ -492,12 +492,18 @@ impl<B: Backend> AtlasMcp<B> {
     /// root this server was started in). Unlike `memory_remember`, which is content to
     /// stay unscoped, a board tool errors when none of those resolves: a task's key
     /// is a project prefix, so there is nowhere to file it without one.
-    async fn board_project_id(&self, project_root: Option<PathBuf>) -> Result<Option<Uuid>, McpError> {
+    ///
+    /// The second element of the returned pair is `true` only when the caller passed
+    /// the literal "global": callers that need to distinguish "no project scope was
+    /// asked for" (list everything) from "the project-less board was asked for
+    /// explicitly" (list only project-less tasks) read it; callers that only need the
+    /// scoping id ignore it.
+    async fn board_project_id(&self, project_root: Option<PathBuf>) -> Result<(Option<Uuid>, bool), McpError> {
         if project_root.as_deref().map(|p| p.as_os_str() == "global").unwrap_or(false) {
-            return Ok(None);
+            return Ok((None, true));
         }
         match self.resolve_project(project_root).await? {
-            Some(p) => Ok(Some(p.id)),
+            Some(p) => Ok((Some(p.id), false)),
             None => Err(McpError::invalid_params(
                 "no project is connected: pass project_root, set ATLAS_PROJECT_ROOT, or pass project_root: \"global\" for the global board",
                 None,
@@ -514,9 +520,9 @@ impl<B: Backend> AtlasMcp<B> {
         disabled_tool_names(&*self.backend).await.map_err(err)
     }
 
-    #[tool(description = "List board tasks for the current project. Pass ready=true to get work whose blockers are done and is safe to start; pass stage or assignee to narrow further.")]
+    #[tool(description = "List board tasks for the current project. Pass ready=true to get work whose blockers are done and is safe to start; pass stage or assignee to narrow further, or project_root: \"global\" for tasks with no project.")]
     async fn task_list(&self, Parameters(a): Parameters<TaskListArgs>) -> Result<CallToolResult, McpError> {
-        let project_id = self.board_project_id(a.project_root).await?;
+        let (project_id, global_only) = self.board_project_id(a.project_root).await?;
         let filter = TaskFilter {
             project_id,
             stage: a.stage,
@@ -524,7 +530,7 @@ impl<B: Backend> AtlasMcp<B> {
             ready: a.ready.unwrap_or(false),
             query: a.query,
             include_done: a.include_done.unwrap_or(false),
-            ..Default::default()
+            global_only,
         };
         json_result(&self.backend.list_tasks(filter).await.map_err(board_err)?)
     }
@@ -536,7 +542,7 @@ impl<B: Backend> AtlasMcp<B> {
 
     #[tool(description = "Create a task on the board. Pass project_root to name a project other than the one this server was started in, or \"global\" for a task with no project.")]
     async fn task_create(&self, Parameters(a): Parameters<TaskCreateArgs>) -> Result<CallToolResult, McpError> {
-        let project_id = self.board_project_id(a.project_root).await?;
+        let (project_id, _) = self.board_project_id(a.project_root).await?;
         let new = NewTask {
             project_id,
             title: a.title,
@@ -597,7 +603,7 @@ impl<B: Backend> AtlasMcp<B> {
 
     #[tool(description = "List the stages this project's board moves tasks through, in order. Call before task_move so you never invent a stage name.")]
     async fn board_stages(&self, Parameters(a): Parameters<ProjectRootArgs>) -> Result<CallToolResult, McpError> {
-        let project_id = self.board_project_id(a.project_root).await?;
+        let (project_id, _) = self.board_project_id(a.project_root).await?;
         json_result(&self.backend.board_stages(project_id).await.map_err(board_err)?)
     }
 
@@ -1134,7 +1140,7 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
         }
         if request.name == BOARD_WORKFLOW_PROMPT {
             let project_root = request.arguments.as_ref().and_then(|a| a.get("project_root")).and_then(|v| v.as_str()).map(PathBuf::from);
-            let project_id = self.board_project_id(project_root).await?;
+            let (project_id, _) = self.board_project_id(project_root).await?;
             let stages = self.backend.board_stages(project_id).await.map_err(err)?.stages;
             let names = stages.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ");
             let text = format!("{BOARD_WORKFLOW_TEXT}\n\nStages for this project: {names}");
@@ -1648,6 +1654,62 @@ mod tests {
             .unwrap();
         let task: atlas_core::models::Task = serde_json::from_str(&text_of(&global)).unwrap();
         assert!(task.key.starts_with("ATLAS-"), "{}", task.key);
+    }
+
+    /// `task_create` with `project_root: "global"` files a project-less task, and
+    /// `task_list` with the same `"global"` must be able to see it again (M1): before
+    /// the fix, `task_list("global")` widened to every project instead of narrowing to
+    /// the project-less board `task_create` had just filed onto. A project's own
+    /// `task_list` (no `project_root` argument, run from inside a connected project)
+    /// must not include the global task.
+    #[tokio::test]
+    async fn task_list_global_round_trips_with_task_create_global() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        backend.connect_project(repo.path().to_path_buf(), "test").await.unwrap();
+        let s = AtlasMcp::new(backend.clone()).with_env_project_root(false).with_project_root(repo.path().to_path_buf());
+
+        let global = s
+            .task_create(Parameters(TaskCreateArgs {
+                title: "global task".into(), description: None, kind: None, priority: None,
+                labels: None, parent: None, blocked_by: None, project_root: Some("global".into()), agent: None,
+            }))
+            .await
+            .unwrap();
+        let global_task: atlas_core::models::Task = serde_json::from_str(&text_of(&global)).unwrap();
+
+        let project_task = s
+            .task_create(Parameters(TaskCreateArgs {
+                title: "project task".into(), description: None, kind: None, priority: None,
+                labels: None, parent: None, blocked_by: None, project_root: None, agent: None,
+            }))
+            .await
+            .unwrap();
+        let project_task: atlas_core::models::Task = serde_json::from_str(&text_of(&project_task)).unwrap();
+
+        let listed_global = s
+            .task_list(Parameters(TaskListArgs {
+                project_root: Some("global".into()), stage: None, assignee: None, ready: None,
+                query: None, include_done: None, agent: None,
+            }))
+            .await
+            .unwrap();
+        let listed_global: Vec<atlas_core::models::Task> = serde_json::from_str(&text_of(&listed_global)).unwrap();
+        let listed_global_keys: Vec<&str> = listed_global.iter().map(|t| t.key.as_str()).collect();
+        assert_eq!(listed_global_keys, vec![global_task.key.as_str()], "{listed_global_keys:?}");
+
+        let listed_project = s
+            .task_list(Parameters(TaskListArgs {
+                project_root: None, stage: None, assignee: None, ready: None,
+                query: None, include_done: None, agent: None,
+            }))
+            .await
+            .unwrap();
+        let listed_project: Vec<atlas_core::models::Task> = serde_json::from_str(&text_of(&listed_project)).unwrap();
+        let listed_project_keys: Vec<&str> = listed_project.iter().map(|t| t.key.as_str()).collect();
+        assert_eq!(listed_project_keys, vec![project_task.key.as_str()], "{listed_project_keys:?}");
+        assert!(!listed_project_keys.contains(&global_task.key.as_str()), "{listed_project_keys:?}");
     }
 
     /// A full client/server round trip over an in-memory duplex: the board resource

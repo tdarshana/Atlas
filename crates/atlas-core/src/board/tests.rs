@@ -125,11 +125,30 @@ fn counts_by_stage_covers_every_column_in_board_order() {
     repo.create(&new_task(Some(p.id), "a"), "t").unwrap();
     let b = repo.create(&new_task(Some(p.id), "b"), "t").unwrap();
     repo.move_stage(&b.key, "Testing", None, "t").unwrap();
-    let counts = repo.counts_by_stage(Some(p.id)).unwrap();
+    let counts = repo.counts_by_stage(Some(p.id), false).unwrap();
     assert_eq!(
         counts,
         vec![("Backlog".to_string(), 1), ("In Progress".to_string(), 0), ("Testing".to_string(), 1), ("Done".to_string(), 0)]
     );
+}
+
+/// `counts_by_stage` follows the same three-way scoping `list` does: neither
+/// `project_id` nor `global_only` counts every project's tasks, `global_only`
+/// narrows to just the project-less ones.
+#[test]
+fn counts_by_stage_with_neither_scope_counts_every_project() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    repo.create(&new_task(Some(p.id), "in a project"), "t").unwrap();
+    repo.create(&new_task(None, "no project"), "t").unwrap();
+
+    let every = repo.counts_by_stage(None, false).unwrap();
+    let backlog = every.iter().find(|(s, _)| s == "Backlog").unwrap().1;
+    assert_eq!(backlog, 2, "{every:?}");
+
+    let global = repo.counts_by_stage(None, true).unwrap();
+    let backlog = global.iter().find(|(s, _)| s == "Backlog").unwrap().1;
+    assert_eq!(backlog, 1, "{global:?}");
 }
 
 // -- blockers, subtasks, ready ---------------------------------------------

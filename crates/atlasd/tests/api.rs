@@ -1177,6 +1177,40 @@ async fn tasks_scope_global_keeps_just_the_project_less_tasks() {
     assert_eq!(bad.status(), 400);
 }
 
+/// `/tasks/counts` reads `project_id`/`scope` exactly like `/tasks` does: a bare
+/// request counts every project's tasks (not just the project-less ones), `scope=
+/// global` narrows to just the project-less ones, and `project_id` together with
+/// `scope=global` is refused the same way.
+#[tokio::test]
+async fn task_counts_follows_the_same_scope_rules_as_task_list() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    let dir = repo_free_tempdir();
+    fixture_repo(dir.path());
+
+    let project: serde_json::Value = c.post(format!("{base}/projects/connect")).json(&serde_json::json!({"root": dir.path()})).send().await.unwrap().json().await.unwrap();
+    let id = project["id"].as_str().unwrap().to_string();
+    c.post(format!("{base}/tasks")).header("X-Atlas-Actor", "alice").json(&serde_json::json!({"title": "in a project", "project_id": id})).send().await.unwrap();
+    c.post(format!("{base}/tasks")).header("X-Atlas-Actor", "alice").json(&serde_json::json!({"title": "no project"})).send().await.unwrap();
+
+    let sum_backlog = |counts: &serde_json::Value| -> i64 {
+        counts.as_array().unwrap().iter().find(|c| c["stage"] == "Backlog").unwrap()["count"].as_i64().unwrap()
+    };
+
+    let bare: serde_json::Value = c.get(format!("{base}/tasks/counts")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(sum_backlog(&bare), 2, "a bare request should count every project's tasks: {bare}");
+
+    let global: serde_json::Value = c.get(format!("{base}/tasks/counts?scope=global")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(sum_backlog(&global), 1, "scope=global should count just the project-less task: {global}");
+
+    let scoped: serde_json::Value = c.get(format!("{base}/tasks/counts?project_id={id}")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(sum_backlog(&scoped), 1, "project_id should count just that project's task: {scoped}");
+
+    let both = c.get(format!("{base}/tasks/counts?scope=global&project_id={id}")).send().await.unwrap();
+    assert_eq!(both.status(), 400);
+}
+
 /// A stale `expected_updated_at` on `PATCH` is a 409; claiming a task alice holds
 /// fails for bob with 409 and succeeds with `force`; a comment lands as an event in
 /// `GET /tasks/{key}` carrying the actor from the `X-Atlas-Actor` header.

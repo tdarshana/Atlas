@@ -114,6 +114,21 @@ describe('AtlasApi', () => {
 		expect(err.status).toBe(409);
 	});
 
+	it('sends the ingest actor as X-Atlas-Actor, not as a source_tool body field', async () => {
+		const calls = stubFetch([{ status: 202, body: { job_id: 'j1' } }]);
+
+		await api().ingest('some transcript text', 'claude-code', 'p1');
+
+		expect(calls[0].url).toBe('http://127.0.0.1:7433/api/v1/ingest');
+		expect(calls[0].init.method).toBe('POST');
+		const headers = new Headers(calls[0].init.headers);
+		expect(headers.get('X-Atlas-Actor')).toBe('claude-code');
+		expect(JSON.parse(calls[0].init.body as string)).toEqual({
+			text: 'some transcript text',
+			project_root: 'p1'
+		});
+	});
+
 	it('maps doc kinds onto the plural routes', async () => {
 		const calls = stubFetch([
 			{ status: 200, body: [] },

@@ -137,10 +137,13 @@ impl<'a> MemoryRepo<'a> {
             let mut sql = format!("select {} from memories where status = ?", select_cols());
             let mut args: Vec<String> = vec![status.as_str().to_string()];
             if let Some(s) = scope { sql.push_str(" and scope = ?"); args.push(s.as_str().to_string()); }
-            if let Some(p) = project_id {
+            if only == MemoryScopeFilter::GlobalOnly {
+                sql.push_str(" and scope = 'global'");
+            } else if let Some(p) = project_id {
                 match only {
                     MemoryScopeFilter::All => sql.push_str(" and (project_id = ? or scope = 'global')"),
                     MemoryScopeFilter::ProjectOnly => sql.push_str(" and project_id = ?"),
+                    MemoryScopeFilter::GlobalOnly => unreachable!("handled above"),
                 }
                 args.push(p.to_string());
             }
@@ -192,10 +195,13 @@ impl<'a> MemoryRepo<'a> {
         self.db.with_conn(|c| {
             let mut project_clause = String::new();
             let mut args: Vec<String> = Vec::new();
-            if let Some(p) = project_id {
+            if only == MemoryScopeFilter::GlobalOnly {
+                project_clause.push_str(" and scope = 'global'");
+            } else if let Some(p) = project_id {
                 match only {
                     MemoryScopeFilter::All => project_clause.push_str(" and (project_id = ? or scope = 'global')"),
                     MemoryScopeFilter::ProjectOnly => project_clause.push_str(" and project_id = ?"),
+                    MemoryScopeFilter::GlobalOnly => unreachable!("handled above"),
                 }
                 args.push(p.to_string());
             }

@@ -339,10 +339,13 @@ impl Backend for RemoteBackend {
         )
         .await
     }
-    async fn task_counts(&self, project_id: Option<Uuid>) -> Result<Vec<(String, i64)>> {
-        let project = project_id.map(|p| format!("?project_id={p}")).unwrap_or_default();
+    async fn task_counts(&self, project_id: Option<Uuid>, global_only: bool) -> Result<Vec<(String, i64)>> {
+        let mut params = Vec::new();
+        if let Some(p) = project_id { params.push(format!("project_id={p}")); }
+        if global_only { params.push("scope=global".to_string()); }
+        let query = if params.is_empty() { String::new() } else { format!("?{}", params.join("&")) };
         let rows: Vec<StageCount> =
-            Self::handle(self.client.get(format!("{}/tasks/counts{project}", self.base)).header("X-Atlas-Actor", &self.actor).send().await.map_err(Self::net)?).await?;
+            Self::handle(self.client.get(format!("{}/tasks/counts{query}", self.base)).header("X-Atlas-Actor", &self.actor).send().await.map_err(Self::net)?).await?;
         Ok(rows.into_iter().map(|r| (r.stage, r.count)).collect())
     }
 

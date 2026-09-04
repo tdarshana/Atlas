@@ -516,23 +516,34 @@ impl TaskRepo {
     }
 
     /// One row per stage of the effective list, in board order, counting the tasks
-    /// sitting in it. Stages with no tasks are present with a zero.
-    pub fn counts_by_stage(&self, project_id: Option<Uuid>) -> Result<Vec<(String, i64)>> {
+    /// sitting in it. Stages with no tasks are present with a zero. Scoped the same
+    /// way [`list`](Self::list) reads `project_id`/`global_only`: neither set counts
+    /// every project's tasks, `project_id` alone counts just that project's, and
+    /// `global_only` counts just the project-less ones (the caller refuses passing
+    /// both at once).
+    pub fn counts_by_stage(&self, project_id: Option<Uuid>, global_only: bool) -> Result<Vec<(String, i64)>> {
         self.db.with_conn(|c| {
             let stages = self.stages_for(c, project_id)?.stages;
             let mut out = Vec::with_capacity(stages.len());
             for s in stages {
-                let n: i64 = match project_id {
-                    Some(p) => c.query_row(
-                        "select count(*) from tasks where project_id = ? and lower(stage) = lower(?)",
-                        params![p.to_string(), s.name],
-                        |r| r.get(0),
-                    )?,
-                    None => c.query_row(
+                let n: i64 = if global_only {
+                    c.query_row(
                         "select count(*) from tasks where project_id is null and lower(stage) = lower(?)",
                         params![s.name],
                         |r| r.get(0),
-                    )?,
+                    )?
+                } else if let Some(p) = project_id {
+                    c.query_row(
+                        "select count(*) from tasks where project_id = ? and lower(stage) = lower(?)",
+                        params![p.to_string(), s.name],
+                        |r| r.get(0),
+                    )?
+                } else {
+                    c.query_row(
+                        "select count(*) from tasks where lower(stage) = lower(?)",
+                        params![s.name],
+                        |r| r.get(0),
+                    )?
                 };
                 out.push((s.name, n));
             }
