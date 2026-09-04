@@ -114,12 +114,14 @@
 		background: var(--bg-base);
 	}
 
+	/* No top padding: the title bar already centres its command box, so any extra space
+	   here would make the gap under the box larger than the gap above it. */
 	.body {
 		flex: 1;
 		display: flex;
 		min-height: 0;
 		gap: 6px;
-		padding: 6px 6px 6px 0;
+		padding: 0 6px 6px 0;
 	}
 
 	.content {
