@@ -330,6 +330,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/projects/{id}", get(get_project).patch(patch_project).delete(delete_project))
         .route("/api/v1/projects/{id}/refresh", post(refresh_project))
         .route("/api/v1/projects/{id}/agent-access", put(put_agent_access))
+        .route("/api/v1/projects/{id}/access", get(get_project_access))
         .route("/api/v1/projects/{id}/extraction", put(put_project_extraction))
         .route("/api/v1/projects/{id}/log", get(get_project_log))
         .route("/api/v1/projects/{id}/log/export", get(export_project_log))
@@ -427,6 +428,11 @@ async fn patch_project(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Ac
 }
 async fn put_agent_access(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor): Actor, ApiJson(a): ApiJson<AgentAccess>) -> Result<Json<Project>, ApiError> {
     Ok(Json(s.backend.set_agent_access(id, a, &actor).await?))
+}
+/// The project's own `agent_access`, the global `access.*` defaults, and the two
+/// resolved together, so a client can show the rule that actually applies.
+async fn get_project_access(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Result<Json<ProjectAccess>, ApiError> {
+    Ok(Json(s.backend.project_access(id).await?))
 }
 /// A body of `null` clears the override and puts the project back on the global
 /// extraction settings.

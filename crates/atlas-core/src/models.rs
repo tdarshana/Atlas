@@ -138,13 +138,26 @@ pub struct Project {
 /// Who may write to a project, by actor label. `None` means any actor; a list is an
 /// allow-list matched against the full actor string (`claude-code/reviewer`) or the
 /// part before the slash (`claude-code`). The user's own hands are always exempt:
-/// see [`crate::projects::actor_is_user`].
+/// see [`crate::projects::actor_is_user`]. A project's unset field falls back to the
+/// global `access.*` settings default (`require_review` as a floor it can only raise):
+/// see [`crate::projects::effective_access`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct AgentAccess {
     #[serde(default)] pub memory_writers: Option<Vec<String>>,
     #[serde(default)] pub task_movers: Option<Vec<String>>,
     /// Forces a memory written here by an agent to land `pending` instead of `active`.
     #[serde(default)] pub require_review: bool,
+}
+
+/// A project's access rules in all three shapes at once: its own `agent_access`, the
+/// global `access.*` defaults, and the two resolved together (`crate::projects::effective_access`).
+/// `GET /api/v1/projects/{id}/access` answers with this so a client can show the rule
+/// that actually applies without also fetching `GET /api/v1/settings` to compute it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ProjectAccess {
+    pub access: AgentAccess,
+    pub defaults: AgentAccess,
+    pub effective: AgentAccess,
 }
 
 /// A project's extraction override, with the same fields as the global

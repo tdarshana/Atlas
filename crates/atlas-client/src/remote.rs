@@ -209,6 +209,9 @@ impl Backend for RemoteBackend {
     async fn set_agent_access(&self, id: Uuid, access: AgentAccess, actor: &str) -> Result<Project> {
         Self::handle(self.client.put(format!("{}/projects/{id}/agent-access", self.base)).header("X-Atlas-Actor", actor).json(&access).send().await.map_err(Self::net)?).await
     }
+    async fn project_access(&self, id: Uuid) -> Result<ProjectAccess> {
+        Self::handle(self.client.get(format!("{}/projects/{id}/access", self.base)).send().await.map_err(Self::net)?).await
+    }
     async fn set_project_extraction(&self, id: Uuid, over: Option<ProjectExtraction>, actor: &str) -> Result<Project> {
         Self::handle(self.client.put(format!("{}/projects/{id}/extraction", self.base)).header("X-Atlas-Actor", actor).json(&over).send().await.map_err(Self::net)?).await
     }

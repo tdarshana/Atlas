@@ -2009,6 +2009,69 @@ async fn require_review_holds_back_extracted_memories() {
     assert_eq!(active, vec!["the package manager here is bun", "the runtime here is bun"]);
 }
 
+/// The global `access.*` defaults fill in a project's unset `agent_access` fields; the
+/// project's own value, once set, wins over the default outright. `require_review` is a
+/// floor: a project that never set its own flag still lands an agent's memory `pending`
+/// once the global default turns it on. `GET /projects/{id}/access` reports the
+/// project's own rule, the global defaults and the two resolved together.
+#[tokio::test]
+async fn agent_access_defaults_are_inherited_and_overridable_per_project() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    let dir = repo_free_tempdir();
+    fixture_repo(dir.path());
+
+    let project: serde_json::Value = c.post(format!("{base}/projects/connect")).json(&serde_json::json!({"root": dir.path()})).send().await.unwrap().json().await.unwrap();
+    let id = project["id"].as_str().unwrap().to_string();
+
+    let put_settings = |body: serde_json::Value| c.put(format!("{base}/settings")).header("X-Atlas-Actor", "desktop").json(&body).send();
+    let remember = |actor: &str, text: &str| {
+        let (c, base, id, actor, text) = (c.clone(), base.clone(), id.clone(), actor.to_string(), text.to_string());
+        async move {
+            c.post(format!("{base}/memories?actor={actor}"))
+                .json(&serde_json::json!({"scope": "project", "project_id": id, "kind": "fact", "text": text}))
+                .send().await.unwrap()
+        }
+    };
+
+    // The project's own `memory_writers` is unset; the global default admits only
+    // `claude-code`.
+    let set = put_settings(serde_json::json!({"access.memory_writers": ["claude-code"]})).await.unwrap();
+    assert_eq!(set.status(), 200, "{}", set.text().await.unwrap());
+
+    let refused = remember("codex", "codex writes under the default").await;
+    assert_eq!(refused.status(), 409, "{}", refused.text().await.unwrap());
+    let accepted = remember("claude-code", "claude-code writes under the default").await;
+    assert_eq!(accepted.status(), 201, "{}", accepted.text().await.unwrap());
+
+    // The project sets its own list, which wins over the default outright, flipping
+    // both actors.
+    let put_access = c.put(format!("{base}/projects/{id}/agent-access")).header("X-Atlas-Actor", "desktop")
+        .json(&serde_json::json!({"memory_writers": ["codex"]})).send().await.unwrap();
+    assert_eq!(put_access.status(), 200, "{}", put_access.text().await.unwrap());
+
+    let now_accepted = remember("codex", "codex writes once the project admits it").await;
+    assert_eq!(now_accepted.status(), 201, "{}", now_accepted.text().await.unwrap());
+    let now_refused = remember("claude-code", "claude-code is refused once the project narrows to codex").await;
+    assert_eq!(now_refused.status(), 409, "{}", now_refused.text().await.unwrap());
+
+    // `GET /projects/{id}/access` shows all three shapes.
+    let access: serde_json::Value = c.get(format!("{base}/projects/{id}/access")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(access["access"]["memory_writers"], serde_json::json!(["codex"]), "{access}");
+    assert_eq!(access["defaults"]["memory_writers"], serde_json::json!(["claude-code"]), "{access}");
+    assert_eq!(access["effective"]["memory_writers"], serde_json::json!(["codex"]), "{access}");
+
+    // `access.require_review` is a floor: this project never set its own flag, and
+    // still lands its agent's memory `pending` once the global default turns it on.
+    let review_on = put_settings(serde_json::json!({"access.require_review": true})).await.unwrap();
+    assert_eq!(review_on.status(), 200, "{}", review_on.text().await.unwrap());
+    let pending = remember("codex", "codex's memory lands pending under the global floor").await;
+    assert_eq!(pending.status(), 201, "{}", pending.text().await.unwrap());
+    let pending_body: serde_json::Value = pending.json().await.unwrap();
+    assert_eq!(pending_body["status"], "pending", "{pending_body}");
+}
+
 /// `POST /memories/search` takes the same narrowing the listing does, under
 /// `list_scope`: the project Memories tab's search box must not mix the global
 /// memories back in, and the field must not collide with `scope`, which still names

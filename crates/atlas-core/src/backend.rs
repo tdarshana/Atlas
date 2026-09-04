@@ -106,6 +106,9 @@ pub trait Backend: Send + Sync + 'static {
     /// its remote. `Invalid` on a malformed or already-used board key.
     async fn update_project(&self, id: Uuid, patch: ProjectPatch, actor: &str) -> Result<Project>;
     async fn set_agent_access(&self, id: Uuid, access: AgentAccess, actor: &str) -> Result<Project>;
+    /// The project's own `agent_access`, the global `access.*` defaults, and the two
+    /// resolved together, for `GET /api/v1/projects/{id}/access`.
+    async fn project_access(&self, id: Uuid) -> Result<ProjectAccess>;
     /// Replaces the project's extraction override, or clears it with `None`. The
     /// project comes back with the key masked.
     async fn set_project_extraction(&self, id: Uuid, over: Option<ProjectExtraction>, actor: &str) -> Result<Project>;
@@ -244,8 +247,9 @@ fn settings_repo(db: &Db) -> crate::settings::SettingsRepo<'_> { crate::settings
 fn memory_gate(db: &Db, project_id: Option<Uuid>, actor: &str) -> Result<bool> {
     let Some(pid) = project_id.filter(|_| !crate::projects::actor_is_user(actor)) else { return Ok(false) };
     let project = projects_repo(db).get(pid)?;
-    crate::projects::check_memory_write(actor, &project)?;
-    Ok(project.agent_access.require_review)
+    let defaults = crate::projects::access_defaults(&settings_repo(db))?;
+    crate::projects::check_memory_write(actor, &project, &defaults)?;
+    Ok(crate::projects::effective_access(&project.agent_access, &defaults).require_review)
 }
 
 /// Refuses an agent that may not move tasks on this task's board. The task read is
@@ -255,7 +259,9 @@ fn task_move_gate(db: &Db, tasks: &TaskRepo, id_or_key: &str, actor: &str) -> Re
         return Ok(());
     }
     let Some(pid) = tasks.get(id_or_key)?.task.project_id else { return Ok(()) };
-    crate::projects::check_task_move(actor, &projects_repo(db).get(pid)?)
+    let project = projects_repo(db).get(pid)?;
+    let defaults = crate::projects::access_defaults(&settings_repo(db))?;
+    crate::projects::check_task_move(actor, &project, &defaults)
 }
 
 /// Refuses to trigger a run for an actor this project's `agent_access` would
@@ -274,11 +280,12 @@ fn workflow_trigger_gate(db: &Db, workflow: &Workflow, actor: &str) -> Result<()
     let Some(output) = workflow.graph.nodes.iter().find(|n| n.kind == NodeKind::Output) else { return Ok(()) };
     let NodeData::Output { propose_memories, file_tasks } = &output.data else { return Ok(()) };
     let project = projects_repo(db).get(pid)?;
+    let defaults = crate::projects::access_defaults(&settings_repo(db))?;
     if *propose_memories {
-        crate::projects::check_memory_write(actor, &project)?;
+        crate::projects::check_memory_write(actor, &project, &defaults)?;
     }
     if *file_tasks {
-        crate::projects::check_task_move(actor, &project)?;
+        crate::projects::check_task_move(actor, &project, &defaults)?;
     }
     Ok(())
 }
@@ -527,6 +534,15 @@ impl Backend for LocalBackend {
         let db = self.db.clone();
         let actor = actor.to_string();
         self.blocking(move || projects_repo(&db).set_agent_access(id, &access, &actor)).await
+    }
+    async fn project_access(&self, id: Uuid) -> Result<ProjectAccess> {
+        let db = self.db.clone();
+        self.blocking(move || {
+            let access = projects_repo(&db).get(id)?.agent_access;
+            let defaults = crate::projects::access_defaults(&settings_repo(&db))?;
+            let effective = crate::projects::effective_access(&access, &defaults);
+            Ok(ProjectAccess { access, defaults, effective })
+        }).await
     }
     async fn set_project_extraction(&self, id: Uuid, over: Option<ProjectExtraction>, actor: &str) -> Result<Project> {
         let db = self.db.clone();
@@ -968,14 +984,15 @@ impl Backend for LocalBackend {
         let actor = actor.to_string();
         self.blocking(move || {
             let project = projects_repo(&db).get(project_id)?;
+            let defaults = crate::projects::access_defaults(&settings_repo(&db))?;
             let memories = crate::memories::MemoryRepo::new(&db);
             match what {
                 ImportWhat::Tasks => {
-                    crate::projects::check_task_move(&actor, &project)?;
+                    crate::projects::check_task_move(&actor, &project, &defaults)?;
                     crate::frameworks::import::import_tasks(&tasks, &memories, &project, kind, &actor)
                 }
                 ImportWhat::Decisions => {
-                    crate::projects::check_memory_write(&actor, &project)?;
+                    crate::projects::check_memory_write(&actor, &project, &defaults)?;
                     crate::frameworks::import::import_decisions(&memories, &project, kind, &actor)
                 }
             }

@@ -31,6 +31,9 @@ pub const SETTING_KEYS: &[&str] = &[
     "ui.notify.daemon_errors",
     "workflows.docs_migrated",
     "mcp.disabled_tools",
+    "access.memory_writers",
+    "access.task_movers",
+    "access.require_review",
 ];
 
 /// Every MCP tool name `mcp.disabled_tools` may name. The single source of truth for
@@ -480,6 +483,36 @@ fn check_type(key: &str, value: &Value) -> Result<()> {
             }
             None => return wrong("an array of strings"),
         },
+        // The global agent-access defaults `projects::effective_access` fills a
+        // project's unset `memory_writers`/`task_movers` from. Same shape as the
+        // project-level field: null (any actor) or 1 to 64 non-empty, non-duplicate
+        // actor strings of at most 128 characters each.
+        "access.memory_writers" | "access.task_movers" => match value.as_array() {
+            Some(items) => {
+                if items.is_empty() || items.len() > 64 {
+                    return wrong("null or an array of 1 to 64 actor strings");
+                }
+                let mut seen = HashSet::new();
+                for item in items {
+                    match item.as_str() {
+                        Some(s) if !s.is_empty() && s.chars().count() <= 128 => {
+                            if !seen.insert(s) {
+                                return wrong("an array with no duplicate actor strings");
+                            }
+                        }
+                        _ => return wrong("an array of non-empty actor strings of at most 128 characters each"),
+                    }
+                }
+            }
+            None => return wrong("null or an array of actor strings"),
+        },
+        // A floor a project's own `require_review` can only raise; see
+        // `projects::effective_access`.
+        "access.require_review" => {
+            if !value.is_boolean() {
+                return wrong("a boolean");
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -700,6 +733,17 @@ mod tests {
             ("mcp.disabled_tools", Value::String("memory_review".into())),
             ("mcp.disabled_tools", serde_json::json!(["memory_review", "no_such_tool"])),
             ("mcp.disabled_tools", serde_json::json!([1])),
+            ("access.memory_writers", Value::from(1)),
+            ("access.memory_writers", serde_json::json!([])),
+            ("access.memory_writers", serde_json::json!([""])),
+            ("access.memory_writers", serde_json::json!([1])),
+            ("access.memory_writers", serde_json::json!(["claude-code", "claude-code"])),
+            ("access.memory_writers", serde_json::json!(["x".repeat(129)])),
+            ("access.task_movers", Value::String("claude-code".into())),
+            ("access.task_movers", serde_json::json!([""])),
+            ("access.task_movers", serde_json::json!(["codex", "codex"])),
+            ("access.require_review", Value::String("true".into())),
+            ("access.require_review", Value::from(1)),
             ("ui.autostart", Value::String("yes".into())),
             ("ui.notify.review_pending", Value::from(1)),
             ("ui.notify.workflow_runs", Value::String("true".into())),
@@ -753,6 +797,9 @@ mod tests {
             ("ui.font_size".to_string(), Value::from(13)),
             ("ui.scale".to_string(), Value::from(125)),
             ("mcp.disabled_tools".to_string(), serde_json::json!(["project_connect", "memory_review"])),
+            ("access.memory_writers".to_string(), serde_json::json!(["claude-code"])),
+            ("access.task_movers".to_string(), Value::Null),
+            ("access.require_review".to_string(), Value::from(true)),
             ("ui.autostart".to_string(), Value::from(true)),
             ("ui.notify.review_pending".to_string(), Value::from(true)),
             ("ui.notify.workflow_runs".to_string(), Value::from(false)),
@@ -771,6 +818,9 @@ mod tests {
         assert_eq!(repo.get_raw("ui.scale").unwrap(), Some(Value::from(125)));
         assert_eq!(repo.get_raw("ui.global_shortcut").unwrap(), Some(Value::String("CmdOrCtrl+Shift+K".into())));
         assert_eq!(repo.get_raw("mcp.disabled_tools").unwrap(), Some(serde_json::json!(["project_connect", "memory_review"])));
+        assert_eq!(repo.get_raw("access.memory_writers").unwrap(), Some(serde_json::json!(["claude-code"])));
+        assert_eq!(repo.get_raw("access.task_movers").unwrap(), Some(Value::Null));
+        assert_eq!(repo.get_raw("access.require_review").unwrap(), Some(Value::from(true)));
         assert_eq!(repo.get_raw("extraction.enabled").unwrap(), Some(Value::from(true)));
         assert_eq!(repo.get_raw("daemon.port").unwrap(), Some(Value::from(7433)));
         // The bounds are inclusive at both ends.

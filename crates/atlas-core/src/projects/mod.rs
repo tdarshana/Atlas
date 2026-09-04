@@ -61,17 +61,48 @@ fn allowed_by(allowed: &Option<Vec<String>>, actor: &str) -> bool {
     list.iter().any(|l| l == actor || l == tool)
 }
 
-/// Refuses an agent that may not write memories here.
-pub fn check_memory_write(actor: &str, p: &Project) -> Result<()> {
-    if actor_is_user(actor) || allowed_by(&p.agent_access.memory_writers, actor) {
+/// Resolves a project's access against the global defaults `access_defaults` reads.
+/// Each list takes the project's own value when it is `Some`, else the default's;
+/// `require_review` is a floor a project can only raise, never lower, so it is true
+/// when either side is true.
+pub fn effective_access(project: &AgentAccess, defaults: &AgentAccess) -> AgentAccess {
+    AgentAccess {
+        memory_writers: project.memory_writers.clone().or_else(|| defaults.memory_writers.clone()),
+        task_movers: project.task_movers.clone().or_else(|| defaults.task_movers.clone()),
+        require_review: project.require_review || defaults.require_review,
+    }
+}
+
+/// Reads the three `access.*` settings keys into the global agent-access defaults.
+/// An unset key reads as `AgentAccess::default()` (all-null, `require_review` false),
+/// the same "admits anyone" meaning an unset project's own `agent_access` carries.
+pub fn access_defaults(settings: &crate::settings::SettingsRepo) -> Result<AgentAccess> {
+    let list = |key: &str| -> Result<Option<Vec<String>>> {
+        match settings.get_raw(key)? {
+            Some(v) => Ok(serde_json::from_value(v)?),
+            None => Ok(None),
+        }
+    };
+    Ok(AgentAccess {
+        memory_writers: list("access.memory_writers")?,
+        task_movers: list("access.task_movers")?,
+        require_review: settings.get_raw("access.require_review")?.and_then(|v| v.as_bool()).unwrap_or(false),
+    })
+}
+
+/// Refuses an agent that may not write memories here, checked against the project's
+/// own rule filled in by `defaults` where the project leaves a field unset.
+pub fn check_memory_write(actor: &str, p: &Project, defaults: &AgentAccess) -> Result<()> {
+    if actor_is_user(actor) || allowed_by(&effective_access(&p.agent_access, defaults).memory_writers, actor) {
         return Ok(());
     }
     Err(AtlasError::Conflict(format!("actor '{actor}' may not write memories in project {}", p.name)))
 }
 
-/// Refuses an agent that may not move tasks here.
-pub fn check_task_move(actor: &str, p: &Project) -> Result<()> {
-    if actor_is_user(actor) || allowed_by(&p.agent_access.task_movers, actor) {
+/// Refuses an agent that may not move tasks here, checked against the project's own
+/// rule filled in by `defaults` where the project leaves a field unset.
+pub fn check_task_move(actor: &str, p: &Project, defaults: &AgentAccess) -> Result<()> {
+    if actor_is_user(actor) || allowed_by(&effective_access(&p.agent_access, defaults).task_movers, actor) {
         return Ok(());
     }
     Err(AtlasError::Conflict(format!("actor '{actor}' may not move tasks in project {}", p.name)))
@@ -747,7 +778,8 @@ mod tests {
         let repo = ProjectRepo::new(&db);
         let p = repo.upsert(&Detected { root: "/tmp/access".into(), remote: None }, None, "t").unwrap();
         assert_eq!(p.agent_access, AgentAccess::default(), "an unset column reads as all-null");
-        assert!(check_task_move("codex", &p).is_ok(), "a null list admits anyone");
+        let no_defaults = AgentAccess::default();
+        assert!(check_task_move("codex", &p, &no_defaults).is_ok(), "a null list admits anyone");
 
         let p = repo
             .set_agent_access(
@@ -757,19 +789,71 @@ mod tests {
             )
             .unwrap();
         assert!(p.agent_access.require_review);
-        assert!(matches!(check_task_move("codex", &p), Err(AtlasError::Conflict(_))));
-        assert!(check_task_move("claude-code", &p).is_ok());
-        assert!(check_task_move("claude-code/reviewer", &p).is_ok(), "a sub-agent inherits its tool's permission");
+        assert!(matches!(check_task_move("codex", &p, &no_defaults), Err(AtlasError::Conflict(_))));
+        assert!(check_task_move("claude-code", &p, &no_defaults).is_ok());
+        assert!(check_task_move("claude-code/reviewer", &p, &no_defaults).is_ok(), "a sub-agent inherits its tool's permission");
         for exempt in ["desktop", "api", "cli", "cli/anything", "scheduler"] {
-            assert!(check_task_move(exempt, &p).is_ok(), "{exempt} is the user's own hands");
+            assert!(check_task_move(exempt, &p, &no_defaults).is_ok(), "{exempt} is the user's own hands");
         }
         // The exemption is an exact set, not a prefix: `cline` is a real coding agent,
         // and `clippy` and `client-x` are not the CLI either.
         for agent in ["cline", "clippy", "client-x", "cli-bot", "desktop-agent"] {
-            assert!(matches!(check_task_move(agent, &p), Err(AtlasError::Conflict(_))), "{agent} must be checked");
+            assert!(matches!(check_task_move(agent, &p, &no_defaults), Err(AtlasError::Conflict(_))), "{agent} must be checked");
         }
-        assert!(matches!(check_memory_write("codex", &p), Err(AtlasError::Conflict(_))));
-        assert!(check_memory_write("cli", &p).is_ok());
+        assert!(matches!(check_memory_write("codex", &p, &no_defaults), Err(AtlasError::Conflict(_))));
+        assert!(check_memory_write("cli", &p, &no_defaults).is_ok());
+    }
+
+    /// `effective_access`: the project's own value wins when set, the global default
+    /// fills in an unset field, and `require_review` is a floor a project can only
+    /// raise, never lower, by ORing the two flags.
+    #[test]
+    fn effective_access_lets_the_project_win_and_the_default_fill_in() {
+        let defaults =
+            AgentAccess { memory_writers: Some(vec!["claude-code".into()]), task_movers: None, require_review: true };
+
+        // An all-null project inherits both lists from the default, and its floor.
+        let unset = AgentAccess::default();
+        let eff = effective_access(&unset, &defaults);
+        assert_eq!(eff.memory_writers, Some(vec!["claude-code".to_string()]));
+        assert_eq!(eff.task_movers, None);
+        assert!(eff.require_review);
+
+        // A project's own `Some` list wins over the default, whatever it holds.
+        let project = AgentAccess { memory_writers: Some(vec!["codex".into()]), task_movers: Some(vec!["codex".into()]), require_review: false };
+        let eff = effective_access(&project, &defaults);
+        assert_eq!(eff.memory_writers, Some(vec!["codex".to_string()]));
+        assert_eq!(eff.task_movers, Some(vec!["codex".to_string()]));
+        // `require_review` is true on either side, so the project cannot turn it off.
+        assert!(eff.require_review, "the global flag is a floor a project can only raise");
+
+        // Neither side sets it: still all-null and false.
+        let eff = effective_access(&unset, &AgentAccess::default());
+        assert_eq!(eff, AgentAccess::default());
+    }
+
+    /// `access_defaults` reads the three `access.*` settings keys, defaulting to
+    /// `AgentAccess::default()` when none are set.
+    #[test]
+    fn access_defaults_reads_the_settings_keys() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(access_defaults(&crate::settings::SettingsRepo::new(&db)).unwrap(), AgentAccess::default());
+
+        let settings = crate::settings::SettingsRepo::new(&db);
+        settings
+            .set_many(
+                &serde_json::Map::from_iter([
+                    ("access.memory_writers".to_string(), serde_json::json!(["claude-code"])),
+                    ("access.task_movers".to_string(), serde_json::Value::Null),
+                    ("access.require_review".to_string(), serde_json::Value::from(true)),
+                ]),
+                "t",
+            )
+            .unwrap();
+        let defaults = access_defaults(&settings).unwrap();
+        assert_eq!(defaults.memory_writers, Some(vec!["claude-code".to_string()]));
+        assert_eq!(defaults.task_movers, None);
+        assert!(defaults.require_review);
     }
 
     /// The override's key is masked on every read, kept when the masked value is sent
