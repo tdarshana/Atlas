@@ -25,13 +25,13 @@ describe('installShortcuts', () => {
 		teardown = installShortcuts();
 	});
 
-	it('maps Mod+1..7 to the seven main views', () => {
-		const hrefs = ['/', '/projects', '/memories', '/agents', '/practices', '/workflows', '/review'];
+	it('maps Mod+1..8 to the eight main views', () => {
+		const hrefs = ['/', '/projects', '/memories', '/agents', '/practices', '/workflows', '/review', '/mcp'];
 		hrefs.forEach((href, i) => {
 			press(String(i + 1));
 			expect(goto).toHaveBeenLastCalledWith(href);
 		});
-		expect(goto).toHaveBeenCalledTimes(7);
+		expect(goto).toHaveBeenCalledTimes(8);
 	});
 
 	it('maps Mod+, to settings', () => {
