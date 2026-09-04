@@ -81,7 +81,10 @@ function detail(): TaskDetailType {
 	};
 }
 
-function open(d: TaskDetailType | null = detail(), overrides: { onchanged?: () => Promise<void> } = {}) {
+function open(
+	d: TaskDetailType | null = detail(),
+	overrides: { onchanged?: () => Promise<void>; onclose?: () => void } = {}
+) {
 	return render(TaskDetail, {
 		props: {
 			detail: d,
@@ -174,6 +177,33 @@ describe('TaskDetail title and description edit in place', () => {
 		expect(
 			container.querySelector('[data-testid="task-description-text"]')?.textContent
 		).toContain('No description');
+	});
+
+	it('gives the description display box the textarea\'s own inner padding', () => {
+		const { container } = open();
+
+		const wrapper = container.querySelector('[data-testid="task-description-text"]');
+		expect(wrapper?.classList.contains('description-display')).toBe(true);
+
+		const body = wrapper?.querySelector('.body');
+		expect(body).not.toBeNull();
+		const style = getComputedStyle(body as Element);
+		expect(style.paddingTop).toBe('6px');
+		expect(style.paddingLeft).toBe('8px');
+	});
+
+	it('keeps the panel open when Escape cancels the title editor', async () => {
+		const onclose = vi.fn();
+		const { container } = open(detail(), { onclose });
+
+		await fireEvent.click(container.querySelector('[data-testid="task-title-edit"]')!);
+		const editor = container.querySelector<HTMLTextAreaElement>('[data-testid="task-title"]')!;
+
+		await fireEvent.keyDown(editor, { key: 'Escape' });
+
+		expect(container.querySelector('[data-testid="task-detail"]')).not.toBeNull();
+		expect(onclose).not.toHaveBeenCalled();
+		expect(container.querySelector('[data-testid="task-title"]')).toBeNull();
 	});
 
 	it('clicking the title text enters edit mode and Enter saves through the API with only { title }', async () => {
@@ -289,5 +319,60 @@ describe('TaskDetail title and description edit in place', () => {
 		expect(container.querySelector('[data-testid="task-title-text"]')?.textContent).toBe(
 			'Title of ATL-9'
 		);
+	});
+
+	it('focuses the title editor with the caret at the end when the pencil is clicked', async () => {
+		const { container } = open();
+
+		await fireEvent.click(container.querySelector('[data-testid="task-title-edit"]')!);
+		const editor = container.querySelector<HTMLTextAreaElement>('[data-testid="task-title"]')!;
+
+		expect(document.activeElement).toBe(editor);
+		expect(editor.selectionStart).toBe(editor.value.length);
+		expect(editor.selectionEnd).toBe(editor.value.length);
+	});
+
+	it('focuses the description editor with the caret at the end when the pencil is clicked', async () => {
+		const d: TaskDetailType = {
+			task: { ...task('ATL-1'), description: 'Some existing details.' },
+			children: [],
+			events: []
+		};
+		const { container } = open(d);
+
+		await fireEvent.click(container.querySelector('[data-testid="task-description-edit"]')!);
+		const editor = container.querySelector<HTMLTextAreaElement>(
+			'[data-testid="task-description"]'
+		)!;
+
+		expect(document.activeElement).toBe(editor);
+		expect(editor.selectionStart).toBe(editor.value.length);
+		expect(editor.selectionEnd).toBe(editor.value.length);
+	});
+
+	it('a link inside the description opens instead of entering edit mode', async () => {
+		const d: TaskDetailType = {
+			task: { ...task('ATL-1'), description: 'See [the docs](https://example.com/docs).' },
+			children: [],
+			events: []
+		};
+		const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
+		const { container } = open(d);
+
+		const link = container.querySelector<HTMLAnchorElement>(
+			'[data-testid="task-description-text"] a[href]'
+		);
+		expect(link).not.toBeNull();
+
+		await fireEvent.click(link!);
+
+		expect(openSpy).toHaveBeenCalledWith(
+			'https://example.com/docs',
+			'_blank',
+			'noopener,noreferrer'
+		);
+		expect(container.querySelector('[data-testid="task-description"]')).toBeNull();
+
+		openSpy.mockRestore();
 	});
 });

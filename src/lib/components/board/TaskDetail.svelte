@@ -185,6 +185,7 @@
 
 	let titleEditing = $state(false);
 	let titleDraft = $state('');
+	let titleEditorEl = $state<HTMLTextAreaElement>();
 
 	function beginTitleEdit() {
 		if (!task) return;
@@ -192,6 +193,17 @@
 		titleError = null;
 		titleEditing = true;
 	}
+
+	// Jira style: the pencil (or the text) drops straight into a focused, ready-to-type
+	// field rather than making a person click again once the editor has mounted.
+	$effect(() => {
+		if (!titleEditing) return;
+		const el = titleEditorEl;
+		if (!el) return;
+		el.focus();
+		const end = el.value.length;
+		el.setSelectionRange(end, end);
+	});
 
 	function cancelTitleEdit() {
 		titleEditing = false;
@@ -221,13 +233,17 @@
 		}
 	}
 
-	/** Enter saves; Shift+Enter is not a line break either, since a title has none. */
+	/** Enter saves; Shift+Enter is not a line break either, since a title has none.
+	    `stopPropagation` keeps Escape from also reaching `onWindowKey`, which would
+	    otherwise close the whole panel instead of just this editor. */
 	function onTitleKeydown(event: KeyboardEvent) {
 		if (event.key === 'Enter') {
 			event.preventDefault();
+			event.stopPropagation();
 			if (!event.shiftKey) void saveTitle();
 		} else if (event.key === 'Escape') {
 			event.preventDefault();
+			event.stopPropagation();
 			cancelTitleEdit();
 		}
 	}
@@ -246,12 +262,29 @@
 
 	let descriptionEditing = $state(false);
 	let descriptionDraft = $state('');
+	let descriptionEditorEl = $state<HTMLTextAreaElement>();
 
 	function beginDescriptionEdit() {
 		if (!task) return;
 		descriptionDraft = description;
 		descriptionEditing = true;
 	}
+
+	/** A link inside the rendered Markdown opens (`MarkdownView`'s own click handler)
+	    rather than also dropping the panel into edit mode. */
+	function onDescriptionDisplayClick(event: MouseEvent) {
+		if ((event.target as HTMLElement).closest('a[href]')) return;
+		beginDescriptionEdit();
+	}
+
+	$effect(() => {
+		if (!descriptionEditing) return;
+		const el = descriptionEditorEl;
+		if (!el) return;
+		el.focus();
+		const end = el.value.length;
+		el.setSelectionRange(end, end);
+	});
 
 	function cancelDescriptionEdit() {
 		descriptionEditing = false;
@@ -275,12 +308,16 @@
 		}
 	}
 
+	/** `stopPropagation` on Escape and Mod+Enter keeps them from also reaching
+	    `onWindowKey`, the same reason `onTitleKeydown` does it. */
 	function onDescriptionKeydown(event: KeyboardEvent) {
 		if (event.key === 'Escape') {
 			event.preventDefault();
+			event.stopPropagation();
 			cancelDescriptionEdit();
 		} else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
 			event.preventDefault();
+			event.stopPropagation();
 			void saveDescription();
 		}
 	}
@@ -305,6 +342,10 @@
 		if (mode === 'modal') return;
 		// The delete dialog is modal and closes itself on Escape.
 		if (event.key !== 'Escape' || confirming) return;
+		// Belt and braces alongside the inline editors' own `stopPropagation`: an
+		// Escape that started inside one of them cancels that editor, not the panel.
+		const target = event.target as HTMLElement | null;
+		if (target?.closest('[data-testid="task-title"], [data-testid="task-description"]')) return;
 		onclose();
 	}
 
@@ -529,6 +570,7 @@
 			<div class="field">
 				{#if titleEditing}
 					<textarea
+						bind:this={titleEditorEl}
 						bind:value={titleDraft}
 						use:autogrow
 						rows="1"
@@ -595,9 +637,10 @@
 				</div>
 				{#if descriptionEditing}
 					<textarea
+						bind:this={descriptionEditorEl}
 						bind:value={descriptionDraft}
 						use:autogrow
-						class="area mono-hint"
+						class="area mono-hint description-editor"
 						rows="3"
 						placeholder="No description"
 						data-testid="task-description"
@@ -627,7 +670,7 @@
 						role="button"
 						tabindex="0"
 						data-testid="task-description-text"
-						onclick={beginDescriptionEdit}
+						onclick={onDescriptionDisplayClick}
 						onkeydown={onEditableKeydown(beginDescriptionEdit)}
 					>
 						<MarkdownView source={description} showHeader={false} emptyText="No description" />
@@ -930,7 +973,6 @@
 
 	.area {
 		resize: none;
-		overflow: hidden;
 		background: var(--bg-base);
 		border: 1px solid var(--border-default);
 		border-radius: 3px;
@@ -949,6 +991,14 @@
 	.mono-hint::placeholder {
 		font-family: var(--font-mono);
 		color: var(--text-tertiary);
+	}
+
+	/* `.area` is shared with the plain comment textarea, which is not auto-growing and
+	   still wants its own scrollbar; only the description's editor grows in place and
+	   needs its scrollbar hidden, so that rule lives on its own dedicated class rather
+	   than on the shared one. */
+	.description-editor {
+		overflow: hidden;
 	}
 
 	/* Title: wrapped text in place, Jira style, switching to an auto-growing single
@@ -979,6 +1029,9 @@
 
 	.title-text {
 		margin: 0;
+		/* Lines up with the description box's own text, inset by its padding below,
+		   and with the Assignee/Labels inputs, whose text sits the same 8px in. */
+		padding-left: 8px;
 		font-size: 15px;
 		font-weight: 600;
 		line-height: 1.3;
@@ -1002,6 +1055,12 @@
 		outline-offset: 0;
 	}
 
+	/* A little extra room above the Description label, on top of the `.body`'s own
+	   10px gap between fields, so the title block does not read as glued to it. */
+	.field + .field {
+		margin-top: 4px;
+	}
+
 	/* Description: the rendered Markdown wraps in place with no cap on its height and
 	   no scrollbar of its own, so the panel as a whole scrolls instead. MarkdownView's
 	   own embedded styling caps its height for the smaller previews it is normally
@@ -1016,11 +1075,25 @@
 		outline-offset: 2px;
 	}
 
-	.description-display :global(.body) {
-		padding: 0;
+	/* `.body.embedded`, not just `.body`: MarkdownView's own `.body.embedded` rule
+	   (its 240px cap and scroll) is the same two-class specificity, so which one wins
+	   would otherwise depend on Svelte's component style-injection order rather than
+	   anything pinned down here. The extra class makes this selector strictly more
+	   specific, so it wins regardless of that order. */
+	.description-display :global(.body.embedded) {
+		/* Matches `.area`, the textarea this display replaces, so the text does not
+		   sit flush against the box's own border on every side. */
+		padding: 6px 8px;
 		flex: none;
 		max-height: none;
 		overflow: visible;
+	}
+
+	/* MarkdownView already zeroes a paragraph's bottom margin as the last child; the
+	   top margin on the first one is left alone there since embedded use elsewhere
+	   still wants it. Here it would only double the box's own top padding. */
+	.description-display :global(.body p:first-child) {
+		margin-top: 0;
 	}
 
 	.pair {
