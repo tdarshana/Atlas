@@ -19,6 +19,7 @@
 	} from '$lib/components/project/frameworks';
 	import type { FrameworkDoc, FrameworkKind, FrameworkListing, ImportWhat } from '$lib/types';
 	import ErrorState from '$lib/ui/ErrorState.svelte';
+	import MarkdownView from '$lib/ui/MarkdownView.svelte';
 	import { push } from '$lib/ui/toasts.svelte';
 
 	const id = $derived(project.current?.id ?? '');
@@ -222,22 +223,24 @@
 			</section>
 
 			<section class="card pane" data-testid="frameworks-preview">
-				<header>
-					<span class="group-heading">Preview</span>
-					<span class="spacer"></span>
-					{#if selected}<span class="mono meta">{selected.path}</span>{/if}
-				</header>
-				<div class="scroll readme">
-					{#if !selected}
-						<p class="empty-text">Select a document to preview it.</p>
-					{:else if docLoading}
-						<p class="empty-text">Loading…</p>
-					{:else if docError}
-						<p class="bad">{docError}</p>
-					{:else}
-						<pre class="mono">{docContent}</pre>
-					{/if}
-				</div>
+				{#if !selected || docLoading || docError}
+					<header>
+						<span class="group-heading">Preview</span>
+						<span class="spacer"></span>
+						{#if selected}<span class="mono meta">{selected.path}</span>{/if}
+					</header>
+					<div class="scroll readme">
+						{#if !selected}
+							<p class="empty-text">Select a document to preview it.</p>
+						{:else if docLoading}
+							<p class="empty-text">Loading…</p>
+						{:else}
+							<p class="bad">{docError}</p>
+						{/if}
+					</div>
+				{:else}
+					<MarkdownView source={docContent ?? ''} path={selected.path} />
+				{/if}
 			</section>
 		</div>
 	</div>
@@ -340,15 +343,6 @@
 
 	.readme {
 		padding: 8px 12px;
-	}
-
-	.readme pre {
-		margin: 0;
-		font-size: 12px;
-		line-height: 18px;
-		color: var(--text-secondary);
-		white-space: pre-wrap;
-		overflow-wrap: anywhere;
 	}
 
 	.empty-text,

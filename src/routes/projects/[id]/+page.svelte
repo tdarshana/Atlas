@@ -20,6 +20,7 @@
 	import { projects } from '$lib/stores/projects.svelte';
 	import type { Task } from '$lib/types';
 	import RemoveProjectDialog from '$lib/components/project/RemoveProjectDialog.svelte';
+	import MarkdownView from '$lib/ui/MarkdownView.svelte';
 	import { push } from '$lib/ui/toasts.svelte';
 
 	let tasks = $state<Task[]>([]);
@@ -184,18 +185,18 @@
 	</section>
 
 	<section class="card pane" data-testid="project-readme">
-		<header>
-			<span class="group-heading">Readme</span>
-			<span class="spacer"></span>
-			<span class="mono meta">README.md</span>
-		</header>
-		<div class="scroll readme">
-			{#if profile?.readme_head}
-				<pre class="mono">{profile.readme_head}</pre>
-			{:else}
+		{#if profile?.readme_head}
+			<MarkdownView source={profile.readme_head} path="README.md" />
+		{:else}
+			<header>
+				<span class="group-heading">Readme</span>
+				<span class="spacer"></span>
+				<span class="mono meta">README.md</span>
+			</header>
+			<div class="scroll readme">
 				<p class="empty">No readme in this root.</p>
-			{/if}
-		</div>
+			</div>
+		{/if}
 	</section>
 
 	<section class="card pane" data-testid="project-commits">
@@ -341,15 +342,6 @@
 
 	.readme {
 		padding: 8px 12px;
-	}
-
-	.readme pre {
-		margin: 0;
-		font-size: 12px;
-		line-height: 18px;
-		color: var(--text-secondary);
-		white-space: pre-wrap;
-		overflow-wrap: anywhere;
 	}
 
 	.empty {

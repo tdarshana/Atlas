@@ -8,6 +8,7 @@
 	import { nameError, parseList } from '$lib/stores/agents.svelte';
 	import type { Doc, NewDoc, Uuid } from '$lib/types';
 	import Dialog from '$lib/ui/Dialog.svelte';
+	import MarkdownView from '$lib/ui/MarkdownView.svelte';
 	import Textarea from '$lib/ui/Textarea.svelte';
 	import { push } from '$lib/ui/toasts.svelte';
 
@@ -27,6 +28,7 @@
 	let tags = $state('');
 	let saving = $state(false);
 	let error = $state<string | null>(null);
+	let previewing = $state(false);
 
 	// The dialog's own instance is reused across opens, so seed the fields whenever it is
 	// asked to open rather than once at mount.
@@ -36,6 +38,7 @@
 		body = editing?.body ?? '';
 		tags = editing?.tags.join(', ') ?? '';
 		error = null;
+		previewing = false;
 	});
 
 	const invalid = $derived(nameError(name));
@@ -85,8 +88,22 @@
 		</label>
 
 		<label class="field">
-			<span>Body (Markdown)</span>
+			<span class="field-row">
+				<span>Body (Markdown)</span>
+				<button
+					type="button"
+					class="preview-toggle"
+					aria-pressed={previewing}
+					data-testid="practice-body-preview-toggle"
+					onclick={() => (previewing = !previewing)}
+				>
+					Preview
+				</button>
+			</span>
 			<Textarea bind:value={body} mono rows={12} data-testid="practice-body" />
+			{#if previewing}
+				<MarkdownView source={body} showHeader={false} />
+			{/if}
 		</label>
 
 		<label class="field">
@@ -123,6 +140,28 @@
 	.field > span {
 		font-size: 13px;
 		color: var(--text-secondary);
+	}
+
+	.field-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+	}
+
+	.preview-toggle {
+		border: var(--border-width) solid var(--border-default);
+		border-radius: var(--radius-sm);
+		background: transparent;
+		color: var(--text-secondary);
+		font-size: 12px;
+		padding: 2px var(--space-2);
+		cursor: pointer;
+	}
+
+	.preview-toggle[aria-pressed='true'] {
+		background: var(--accent-muted);
+		color: var(--text-primary);
+		border-color: var(--accent);
 	}
 
 	.bad {

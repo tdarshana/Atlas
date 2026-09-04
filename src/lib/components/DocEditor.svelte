@@ -7,6 +7,7 @@
 	import { nameError, parseList } from '$lib/stores/agents.svelte';
 	import type { Doc, NewDoc, Project } from '$lib/types';
 	import Dialog from '$lib/ui/Dialog.svelte';
+	import MarkdownView from '$lib/ui/MarkdownView.svelte';
 	import Textarea from '$lib/ui/Textarea.svelte';
 	import { push } from '$lib/ui/toasts.svelte';
 
@@ -34,6 +35,7 @@
 	let saving = $state(false);
 	let error = $state<string | null>(null);
 	let confirming = $state(false);
+	let previewing = $state(false);
 
 	const invalid = $derived(nameError(name));
 
@@ -55,6 +57,7 @@
 		projectId = doc?.project_id ?? GLOBAL;
 		error = null;
 		confirming = false;
+		previewing = false;
 	});
 
 	function cancel(): void {
@@ -117,8 +120,22 @@
 		</label>
 
 		<label class="field">
-			<span>Body (Markdown)</span>
+			<span class="field-row">
+				<span>Body (Markdown)</span>
+				<button
+					type="button"
+					class="preview-toggle"
+					aria-pressed={previewing}
+					data-testid="doc-body-preview-toggle"
+					onclick={() => (previewing = !previewing)}
+				>
+					Preview
+				</button>
+			</span>
 			<Textarea bind:value={body} mono rows={12} data-testid="doc-body" />
+			{#if previewing}
+				<MarkdownView source={body} showHeader={false} />
+			{/if}
 		</label>
 
 		<div class="pair">
@@ -174,6 +191,28 @@
 
 	.field > span {
 		color: var(--text-secondary);
+	}
+
+	.field-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+	}
+
+	.preview-toggle {
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-sm);
+		background: transparent;
+		color: var(--text-secondary);
+		font-size: 12px;
+		padding: 2px 8px;
+		cursor: pointer;
+	}
+
+	.preview-toggle[aria-pressed='true'] {
+		background: var(--accent-muted);
+		color: var(--text-primary);
+		border-color: var(--accent);
 	}
 
 	.pair {
