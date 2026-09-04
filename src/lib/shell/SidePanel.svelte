@@ -12,6 +12,7 @@
 	import Practices from './sidepanels/Practices.svelte';
 	import Workflows from './sidepanels/Workflows.svelte';
 	import Review from './sidepanels/Review.svelte';
+	import Mcp from './sidepanels/Mcp.svelte';
 	import Settings from './sidepanels/Settings.svelte';
 
 	const failed = $derived(!!daemon.error || !!status.error);
@@ -51,6 +52,8 @@
 			<Workflows />
 		{:else if shell.view === 'review'}
 			<Review />
+		{:else if shell.view === 'mcp'}
+			<Mcp />
 		{:else if shell.view === 'settings'}
 			<Settings />
 		{/if}

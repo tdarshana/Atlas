@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { CLAUDE_SNIPPET, CODEX_SNIPPET, nextDisabledTools, toolIcon } from './mcp';
+import {
+	CLAUDE_SNIPPET,
+	CODEX_SNIPPET,
+	mcpSidepanelCounts,
+	nextDisabledTools,
+	projectConnectSnippet,
+	projectToolState,
+	toolIcon
+} from './mcp';
+import type { McpStatusReport } from './types';
 
 describe('connect snippets', () => {
 	it('the Claude snippet is the exact CLI install command', () => {
@@ -65,5 +74,72 @@ describe('toolIcon', () => {
 	it('falls back to a generic glyph for status and anything unmapped', () => {
 		expect(toolIcon('status')).toBe('terminal');
 		expect(toolIcon('made_up_tool')).toBe('terminal');
+	});
+});
+
+describe('projectToolState', () => {
+	it('is enabled when the tool is on globally and not overridden here', () => {
+		expect(projectToolState({ enabled_globally: true, enabled_here: true })).toBe('enabled');
+	});
+
+	it('is disabled_here when the tool is on globally but this project turned it off', () => {
+		expect(projectToolState({ enabled_globally: true, enabled_here: false })).toBe('disabled_here');
+	});
+
+	it('is disabled_globally when the tool is off globally, whatever this project says', () => {
+		expect(projectToolState({ enabled_globally: false, enabled_here: false })).toBe('disabled_globally');
+	});
+});
+
+describe('projectConnectSnippet', () => {
+	it('carries the project-scoped install command and the project_root hint', () => {
+		expect(projectConnectSnippet('/Users/me/repo')).toBe(
+			'claude mcp add --scope project atlas -- atlas mcp\n# project_root: /Users/me/repo'
+		);
+	});
+});
+
+describe('mcpSidepanelCounts', () => {
+	const report: McpStatusReport = {
+		transports: { stdio: { command: 'atlas mcp' }, http: { url: '', protocol_version: '' } },
+		counts: { tools: 2, resources: 1, prompts: 1, clients: 1 },
+		tools: [
+			{ name: 'a', description: '', args: '', scope: 'read', enabled: true },
+			{ name: 'b', description: '', args: '', scope: 'read', enabled: false }
+		],
+		resources: [{ uri: 'atlas://memories/recent', name: 'recent' }],
+		prompts: [{ name: 'atlas.bootstrap' }],
+		clients: [
+			{
+				id: '1',
+				transport: 'stdio',
+				client_name: 'claude',
+				client_version: null,
+				first_seen: '',
+				last_seen: '',
+				tool_calls: 0,
+				last_project_id: null
+			}
+		]
+	};
+
+	it('counts total and disabled tools, and the resource/prompt/client lists', () => {
+		expect(mcpSidepanelCounts(report)).toEqual({
+			tools: 2,
+			toolsDisabled: 1,
+			resources: 1,
+			prompts: 1,
+			clients: 1
+		});
+	});
+
+	it('reads every count as 0 before the first load', () => {
+		expect(mcpSidepanelCounts(null)).toEqual({
+			tools: 0,
+			toolsDisabled: 0,
+			resources: 0,
+			prompts: 0,
+			clients: 0
+		});
 	});
 });

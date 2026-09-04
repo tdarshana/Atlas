@@ -6,7 +6,7 @@
 	// missing key as "leave it alone".
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
-	import { Badge, Button, Checkbox, Icon, Input, KeyHint, Select, Table, type TableColumn } from '$lib/ds';
+	import { Badge, Button, Checkbox, Input, KeyHint, Select } from '$lib/ds';
 	import { api, daemon } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
 	import { NOTHING, relativeAge } from '$lib/format';
@@ -27,7 +27,6 @@
 	import { mirrorKey, vaultHintText, vaultStatus } from '$lib/shell/vault';
 	import { VIEWS } from '$lib/shell/views';
 	import { openLogFolder } from '$lib/search/commands';
-	import { CLAUDE_SNIPPET, CODEX_SNIPPET, nextDisabledTools, toolIcon } from '$lib/mcp';
 	import { scrollToSection } from '$lib/components/settings-sections';
 	import { diagnosticsText } from '$lib/components/settings/diagnostics';
 	import { updateProgressPercent } from '$lib/components/settings/update-progress';
@@ -53,14 +52,13 @@
 		settingString,
 		settings
 	} from '$lib/stores/settings.svelte';
+	import { loadMcp, mcp } from '$lib/stores/mcp.svelte';
 	import { status } from '$lib/stores/status.svelte';
 	import { UI_FONT_MONO_KEY, UI_FONT_SIZE_KEY, UI_FONT_UI_KEY, UI_THEME_PACK_KEY } from '$lib/types';
+	import { THEME_PRESETS, themePreset } from '$lib/shell/theme-presets';
 	import type {
 		AboutInfo,
 		ExtractionTestResult,
-		McpClient,
-		McpStatusReport,
-		McpToolRow,
 		Settings,
 		Stage,
 		ThemePack,
@@ -424,76 +422,13 @@
 		await desktop('app_relaunch', undefined, () => undefined);
 	}
 
-	/** The CONNECT block shows both snippets, one after the other, as frame 10 does. */
-	const connectSnippet = `${CLAUDE_SNIPPET}\n\n${CODEX_SNIPPET}`;
-
-	/** `GET /api/v1/mcp/status`: transports, counts, tools, resources, prompts, clients. */
-	let mcp = $state<McpStatusReport | null>(null);
-	let mcpError = $state<string | null>(null);
-	let restarting = $state(false);
-	let togglingTool = $state<string | null>(null);
-
-	const mcpCountsText = $derived(
-		mcp ? `${mcp.counts.tools} tools · ${mcp.counts.resources} resources · ${mcp.counts.prompts} prompts` : '…'
+	/** The two-line summary reads the same store the `/mcp` route and its side panel
+	 * do, so it never needs its own fetch or its own copy of the tools/clients tables. */
+	const mcpSummaryText = $derived(
+		mcp.report
+			? `${mcp.report.counts.tools} tools · ${mcp.report.counts.resources} resources · ${mcp.report.counts.prompts} prompts · ${mcp.report.counts.clients} clients connected`
+			: '…'
 	);
-
-	const toolColumns: TableColumn<McpToolRow>[] = [
-		{ key: 'name', label: 'Name', width: '220px', mono: true, sortable: true },
-		{ key: 'description', label: 'Description' },
-		{ key: 'args', label: 'Arguments', width: '260px', mono: true },
-		{ key: 'scope', label: 'Scope', width: '80px', sortable: true },
-		{ key: 'enabled', label: 'Enable', width: '70px' }
-	];
-
-	const clientColumns: TableColumn<McpClient>[] = [
-		{ key: 'client_name', label: 'Client', mono: true, sortable: true },
-		{ key: 'transport', label: 'Transport', width: '90px', sortable: true },
-		{ key: 'last_seen', label: 'Last seen', width: '110px', sortable: true },
-		{ key: 'tool_calls', label: 'Calls', width: '70px', align: 'right', mono: true, sortable: true }
-	];
-
-	async function loadMcp(): Promise<void> {
-		try {
-			mcp = await api().mcpStatus();
-			mcpError = null;
-		} catch (e) {
-			mcpError = errorMessage(e);
-		}
-	}
-
-	/** Flips one tool's checkbox: writes `mcp.disabled_tools` with that name added or
-	 * removed, leaving every other disabled tool untouched, then reloads the status. */
-	async function toggleTool(row: McpToolRow): Promise<void> {
-		if (!mcp) return;
-		const currentlyDisabled = mcp.tools.filter((t) => !t.enabled).map((t) => t.name);
-		const next = nextDisabledTools(currentlyDisabled, row.name, !row.enabled);
-		togglingTool = row.name;
-		try {
-			await api().setSettings({ 'mcp.disabled_tools': next });
-			await loadMcp();
-		} catch (e) {
-			push('error', errorMessage(e));
-		} finally {
-			togglingTool = null;
-		}
-	}
-
-	/** Stop and start the daemon through the Tauri `daemon_restart` command. Only
-	 * available inside the desktop app; the browser has no way to manage the process. */
-	async function restartDaemon(): Promise<void> {
-		if (!inTauri()) return;
-		restarting = true;
-		try {
-			const { invoke } = await import('@tauri-apps/api/core');
-			await invoke('daemon_restart');
-			push('success', 'MCP server restarted');
-			await loadMcp();
-		} catch (e) {
-			push('error', errorMessage(e));
-		} finally {
-			restarting = false;
-		}
-	}
 
 	/** How long the button says "Copied" before going back to its own name. */
 	const COPIED_MS = 1500;
@@ -624,7 +559,10 @@
 	const themeOptions = $derived([
 		{ value: 'dark', label: 'Dark' },
 		{ value: 'light', label: 'Light' },
-		...(draftPack ? [{ value: draftPack.name, label: draftPack.name }] : [])
+		...THEME_PRESETS.map((p) => ({ value: p.name, label: p.name })),
+		...(draftPack && !themePreset(draftPack.name)
+			? [{ value: draftPack.name, label: draftPack.name }]
+			: [])
 	]);
 	const selectedTheme = $derived(draftPack ? draftPack.name : draftTheme);
 	/** What the preview strip (and, on Save, the real window) paints: a pack's own base
@@ -634,12 +572,18 @@
 		draftPack ? Object.entries(draftPack.tokens).map(([k, v]) => `${k}:${v}`).join(';') : ''
 	);
 
-	/** Picking Dark or Light drops the imported pack; picking the pack's own name (the
-	 * only other option) is a no-op, since it is already selected. */
+	/** Picking Dark or Light drops the pack; picking a bundled preset makes it the draft
+	 * pack; picking an imported pack's own name (the only other option) is a no-op. */
 	function onThemeChange(value: string): void {
 		if (value === 'dark' || value === 'light') {
 			draftTheme = value;
 			draftPack = null;
+			return;
+		}
+		const preset = themePreset(value);
+		if (preset) {
+			draftTheme = preset.base;
+			draftPack = { ...preset, tokens: { ...preset.tokens } };
 		}
 	}
 
@@ -1021,171 +965,14 @@
 				<Badge tone={online ? 'success' : 'neutral'} icon={online ? 'circle-check' : 'circle'}>
 					{online ? 'running' : 'offline'}
 				</Badge>
-				<span class="mono count" data-testid="mcp-counts">{mcpCountsText}</span>
-				<span class="spacer"></span>
-				<Button
-					variant="ghost"
-					size="sm"
-					data-testid="mcp-copy-claude"
-					onclick={() => copy('claude', CLAUDE_SNIPPET)}
-				>
-					{copied === 'claude' ? 'Copied' : 'Copy Claude command'}
-				</Button>
-				<Button
-					variant="ghost"
-					size="sm"
-					data-testid="mcp-copy-codex"
-					onclick={() => copy('codex', CODEX_SNIPPET)}
-				>
-					{copied === 'codex' ? 'Copied' : 'Copy Codex config'}
-				</Button>
-				<Button
-					variant="ghost"
-					size="sm"
-					data-testid="mcp-restart"
-					disabled={!inTauri() || restarting}
-					title={inTauri() ? 'Stop and start the daemon' : 'Only available in the desktop app'}
-					onclick={restartDaemon}
-				>
-					{restarting ? 'Restarting…' : 'Restart'}
-				</Button>
 			</div>
-
 			<div class="card-body">
-				{#if mcpError}
-					<p class="bad" role="alert" data-testid="mcp-error">{mcpError}</p>
-				{/if}
-
-				<div class="pair">
-					<div class="group">
-						<span class="group-heading">Transports</span>
-						<div class="transport">
-							<span class="transport-name">stdio</span>
-							<span class="mono value">{mcp?.transports.stdio.command ?? 'atlas mcp'}</span>
-							<span class="spacer"></span>
-							<Badge>default</Badge>
-						</div>
-						<div class="transport">
-							<span class="transport-name">HTTP</span>
-							<span class="mono value">
-								{mcp?.transports.http.url ?? `http://127.0.0.1:${port}/mcp`}
-							</span>
-							<span class="spacer"></span>
-							<Badge>loopback only</Badge>
-						</div>
-						<div class="transport" data-testid="mcp-protocol">
-							<span class="transport-name">Protocol</span>
-							<span class="mono value">{mcp?.transports.http.protocol_version ?? '…'}</span>
-							<span class="spacer"></span>
-							<span class="hint">tools · resources · prompts</span>
-						</div>
-					</div>
-
-					<div class="group">
-						<span class="group-heading">Connect</span>
-						<pre class="mono connect-snippet">{connectSnippet}</pre>
-					</div>
-				</div>
-
-				<div class="group">
-					<span class="group-heading">Connected clients</span>
-					<div class="clients-table" data-testid="mcp-clients">
-						<Table
-							id="mcp-clients"
-							columns={clientColumns}
-							rows={mcp?.clients ?? []}
-							rowKey={(c: McpClient) => c.id}
-						>
-							{#snippet cell(clientRow: McpClient, column: TableColumn<McpClient>)}
-								{#if column.key === 'last_seen'}
-									{relativeAge(clientRow.last_seen)} ago
-								{:else if column.key === 'transport'}
-									{clientRow.transport}
-								{:else if column.key === 'tool_calls'}
-									{clientRow.tool_calls}
-								{:else}
-									{clientRow.client_name}
-								{/if}
-							{/snippet}
-							{#snippet empty()}
-								<span class="hint">No clients connected right now.</span>
-							{/snippet}
-						</Table>
-					</div>
-					<span class="hint">
-						A stdio client's call count refreshes on its 60 s heartbeat, so it can lag behind
-						the calls it has actually made.
-					</span>
-				</div>
-
-				<div class="group">
-					<span class="group-heading">Tools</span>
-					<div class="tools-table" data-testid="mcp-tools">
-						<Table
-							id="mcp-tools"
-							columns={toolColumns}
-							rows={mcp?.tools ?? []}
-							rowKey={(t: McpToolRow) => t.name}
-						>
-							{#snippet cell(toolRow: McpToolRow, column: TableColumn<McpToolRow>)}
-								{#if column.key === 'name'}
-									<span class="tool-name">
-										<Icon name={toolIcon(toolRow.name)} size={12} color="var(--text-tertiary)" />
-										<span class="mono">{toolRow.name}</span>
-									</span>
-								{:else if column.key === 'description'}
-									{toolRow.description}
-								{:else if column.key === 'args'}
-									{toolRow.args}
-								{:else if column.key === 'scope'}
-									<Badge tone={toolRow.scope === 'write' ? 'warning' : 'info'}>
-										{toolRow.scope}
-									</Badge>
-								{:else}
-									<Checkbox
-										checked={toolRow.enabled}
-										disabled={togglingTool === toolRow.name}
-										aria-label={`Enable ${toolRow.name}`}
-										data-testid={`mcp-tool-toggle-${toolRow.name}`}
-										onchange={() => toggleTool(toolRow)}
-									/>
-								{/if}
-							{/snippet}
-							{#snippet empty()}
-								<span class="hint">No tools reported yet.</span>
-							{/snippet}
-						</Table>
-					</div>
-					<span class="hint">
-						Disabled tools are absent from <span class="mono">tools/list</span> and a call to one
-						answers "method not found". Write tools still respect a project's agent access rules.
-					</span>
-				</div>
-
-				<div class="pair">
-					<div class="group">
-						<span class="group-heading">Resources</span>
-						<div class="resource-list">
-							{#each mcp?.resources ?? [] as resource (resource.uri)}
-								<div class="resource-row">
-									<span class="mono value">{resource.uri}</span>
-									<span class="hint">{resource.description ?? ''}</span>
-								</div>
-							{/each}
-						</div>
-					</div>
-					<div class="group">
-						<span class="group-heading">Prompts</span>
-						<div class="resource-list">
-							{#each mcp?.prompts ?? [] as prompt (prompt.name)}
-								<div class="resource-row">
-									<span class="mono value">{prompt.name}</span>
-									<span class="hint">{prompt.description ?? ''}</span>
-								</div>
-							{/each}
-						</div>
-					</div>
-				</div>
+				<span class="hint" data-testid="mcp-summary">{mcpSummaryText}</span>
+				<span class="hint">
+					Connect snippets, the tools table with its enable checkboxes, connected clients and a
+					<span class="mono">Restart</span> command all moved to their own view.
+				</span>
+				<a href="/mcp" data-testid="mcp-open-link">Open MCP</a>
 			</div>
 		</section>
 
@@ -1603,74 +1390,8 @@
 		color: var(--text-secondary);
 	}
 
-	.transport-name {
-		width: 70px;
-	}
-
-	/* RESOURCES and PROMPTS rows: a URI or prompt name can run much longer than a
-	   transport value, and its description can too, so each row is its own two-column
-	   grid (name/URI, then description) instead of sharing `.transport`'s fixed-height
-	   flex row, which wrapped and overlapped once either side got long. */
-	.resource-list {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-	}
-
-	.resource-row {
-		display: grid;
-		grid-template-columns: minmax(160px, 260px) 1fr;
-		gap: 12px;
-		align-items: baseline;
-		color: var(--text-secondary);
-	}
-
-	.resource-row .hint {
-		white-space: normal;
-	}
-
 	.value {
 		color: var(--text-primary);
-	}
-
-	.connect-snippet {
-		margin: 0;
-		padding: 6px 8px;
-		background: var(--bg-base);
-		border: 1px solid var(--border-default);
-		border-radius: 3px;
-		font-size: 12px;
-		line-height: 18px;
-		color: var(--text-secondary);
-		white-space: pre;
-		overflow-x: auto;
-	}
-
-	.count {
-		color: var(--text-tertiary);
-	}
-
-	.tool-name {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-	}
-
-	/* Bounds the tools table so 29 rows scroll inside the card instead of stretching it
-	   past the pane; the clients table stays natural height since it is usually short. */
-	.tools-table {
-		height: 320px;
-		display: flex;
-		flex-direction: column;
-		border: 1px solid var(--border-subtle);
-		border-radius: 3px;
-		overflow: hidden;
-	}
-
-	.clients-table {
-		border: 1px solid var(--border-subtle);
-		border-radius: 3px;
-		overflow: hidden;
 	}
 
 	.spacer {

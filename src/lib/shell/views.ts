@@ -1,4 +1,4 @@
-// The eight rail destinations. Board is not one of them: it belongs to a project, so
+// The nine rail destinations. Board is not one of them: it belongs to a project, so
 // `/board` keeps the Projects item lit.
 
 import { comboKeys, type Platform } from '$lib/ds';
@@ -12,6 +12,7 @@ export type ViewId =
 	| 'practices'
 	| 'workflows'
 	| 'review'
+	| 'mcp'
 	| 'settings';
 
 export interface ViewDef {
@@ -32,6 +33,7 @@ export const VIEWS: ViewDef[] = [
 	{ id: 'practices', label: 'Practices', icon: 'book-open', href: '/practices', combo: 'Mod+5' },
 	{ id: 'workflows', label: 'Workflows', icon: 'git-branch', href: '/workflows', combo: 'Mod+6' },
 	{ id: 'review', label: 'Review', icon: 'list-checks', href: '/review', combo: 'Mod+7' },
+	{ id: 'mcp', label: 'MCP', icon: 'plug', href: '/mcp', combo: 'Mod+8' },
 	{ id: 'settings', label: 'Settings', icon: 'settings', href: '/settings', combo: 'Mod+,' }
 ];
 
@@ -48,6 +50,7 @@ const PANEL_TITLES: Record<ViewId, string> = {
 	practices: 'Practices',
 	workflows: 'Workflows',
 	review: 'Review',
+	mcp: 'MCP',
 	settings: 'Settings'
 };
 

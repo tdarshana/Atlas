@@ -76,6 +76,14 @@ export const COMMANDS: PaletteCommand[] = [
 		run: (ctx) => ctx.goto('/workflows')
 	},
 	{
+		id: 'open-mcp',
+		label: 'Open MCP',
+		hint: '',
+		icon: 'plug',
+		combo: 'Mod+8',
+		run: (ctx) => ctx.goto('/mcp')
+	},
+	{
 		id: 'open-settings',
 		label: 'Open settings',
 		hint: '',
