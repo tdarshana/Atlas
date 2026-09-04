@@ -3,7 +3,7 @@
 	// selected run highlighted with the accent-muted fill and edge the design system
 	// uses for selection everywhere else.
 	import { Badge, Select } from '$lib/ds';
-	import { dateTime, duration } from '$lib/format';
+	import { duration, shortDateTime } from '$lib/format';
 	import {
 		filterRuns,
 		RUN_FILTER_OPTIONS,
@@ -60,7 +60,7 @@
 					data-testid={`run-row-${run.number}`}
 				>
 					<span class="mono num">{run.number}</span>
-					<span class="mono started">{dateTime(run.started_at)}</span>
+					<span class="mono started">{shortDateTime(run.started_at)}</span>
 					<span class="trigger">
 						<Badge tone={TRIGGER_TONE[run.trigger]}>{run.trigger}</Badge>
 					</span>

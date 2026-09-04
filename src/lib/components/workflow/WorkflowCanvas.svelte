@@ -43,8 +43,10 @@
 		edges={displayEdges}
 		{nodeTypes}
 		fitView
+		fitViewOptions={{ maxZoom: 1 }}
 		minZoom={0.25}
 		maxZoom={2}
+		proOptions={{ hideAttribution: true }}
 		onconnect={handleConnect}
 		onnodeclick={({ node }) => (workflow.selectedNodeId = node.id)}
 		onpaneclick={() => (workflow.selectedNodeId = null)}

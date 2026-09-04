@@ -416,11 +416,43 @@ export async function save(): Promise<Workflow> {
 	}
 }
 
-/** Queues a run for the open workflow. Throws so the caller can toast it. */
+/** Queues a run for the open workflow. Throws so the caller can toast it. Once queued,
+ * the header badge, the side panel's RUNS group and the history list are refreshed
+ * every 2 s until the run ends (bounded), so a run started from the editor is seen
+ * through without a manual reload. */
 export async function run(trigger?: 'manual' | 'schedule' | 'prompt', input?: unknown): Promise<WorkflowRun> {
 	const current = workflow.current;
 	if (!current) throw new Error('No workflow is open');
-	return api().runWorkflow(current.id, trigger, input);
+	const created = await api().runWorkflow(current.id, trigger, input);
+	void followRun(current.id, created.id);
+	return created;
+}
+
+const FOLLOW_INTERVAL_MS = 2000;
+const FOLLOW_MAX_TICKS = 150;
+const TERMINAL: ReadonlySet<string> = new Set(['success', 'failed', 'cancelled']);
+
+/** Reloads the open workflow, its recent runs and the history list until `runId`
+ * reaches a terminal status or the bound is hit; stops early if another workflow
+ * is opened in the meantime. */
+async function followRun(workflowId: string, runId: string): Promise<void> {
+	for (let tick = 0; tick < FOLLOW_MAX_TICKS; tick++) {
+		await new Promise((r) => setTimeout(r, FOLLOW_INTERVAL_MS));
+		if (workflow.current?.id !== workflowId) return;
+		try {
+			const [fresh, runs] = await Promise.all([api().getWorkflow(workflowId), api().listRuns(workflowId, 5)]);
+			if (workflow.current?.id !== workflowId) return;
+			workflow.current = { ...workflow.current, last_run_at: fresh.last_run_at, last_status: fresh.last_status };
+			const i = workflow.list.findIndex((w) => w.id === workflowId);
+			if (i >= 0) workflow.list[i] = { ...workflow.list[i], last_run_at: fresh.last_run_at, last_status: fresh.last_status };
+			workflow.runs = runs;
+			if (workflow.history.length > 0 || workflow.historyLoading) void loadRunHistory();
+			const status = runs.find((r) => r.id === runId)?.status;
+			if (status && TERMINAL.has(status)) return;
+		} catch {
+			// The daemon may be busy or restarting; the next tick tries again.
+		}
+	}
 }
 
 /** The last few runs of the open workflow, newest first, for the side panel and the

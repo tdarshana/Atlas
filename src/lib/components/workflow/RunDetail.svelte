@@ -5,6 +5,7 @@
 	// watched to completion without a manual refresh.
 	import { api } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
+	import { plural } from '$lib/format';
 	import { inTauri } from '$lib/shell';
 	import { Badge, Button } from '$lib/ds';
 	import {
@@ -135,7 +136,7 @@
 		</div>
 
 		<div class="summary">
-			<span class="mono">{stepsCount} steps</span>
+			<span class="mono">{plural(stepsCount, 'step')}</span>
 			<span class="mono">{memoriesProposed} memories proposed</span>
 			<span class="mono">{tasksFiled} tasks filed</span>
 			<span class="mono">tokens {tokens}</span>

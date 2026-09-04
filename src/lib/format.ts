@@ -37,6 +37,15 @@ export function dateTime(ts: Timestamp | null | undefined): string {
 /** Two digits, so `9:05` prints as `09:05` and the mono column stays aligned. */
 const pad = (n: number) => String(n).padStart(2, '0');
 
+/** `DD/MM HH:MM` in local time, the compact form the run history's Started column
+    uses so the row never wraps. */
+export function shortDateTime(ts: Timestamp | null | undefined): string {
+	if (!ts) return NOTHING;
+	const d = new Date(ts);
+	if (Number.isNaN(d.getTime())) return NOTHING;
+	return `${pad(d.getDate())}/${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 /** Midnight local time on the day `ms` falls in. */
 function startOfDay(ms: number): number {
 	const d = new Date(ms);
