@@ -1,0 +1,15 @@
+{
+  "id": "hello-world",
+  "name": "Hello World",
+  "version": "1.0.0",
+  "description": "A minimal plugin that adds a sidebar section.",
+  "author": "Atlas",
+  "api": ">=1.0 <2",
+  "main": "main.js",
+  "permissions": ["ui.sections"],
+  "contributes": {
+    "sections": [
+      { "id": "hello", "title": "Hello", "icon": "sparkles", "view": "hello-view" }
+    ]
+  }
+}

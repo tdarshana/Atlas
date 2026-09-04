@@ -50,14 +50,22 @@ serde_json = "1"
 # (the boot-time shortcut restore, when the daemon or the stored shortcut is unusable)
 # reaches the same log file and webview console every other log line does.
 log = "0.4"
-# The notification poller reads the daemon's HTTP API from a Rust background task.
-reqwest = { workspace = true }
+# The notification poller reads the daemon's HTTP API from a Rust background task; the
+# plugin installer's GitHub download uses the same crate's blocking client instead, since
+# that work already runs inside `spawn_blocking`.
+reqwest = { workspace = true, features = ["blocking"] }
 tokio = { workspace = true }
 chrono = { workspace = true }
 # The desktop app reaches Atlas only through the daemon, and starts it with the
 # same `daemon_ctl` the CLI uses rather than opening the DuckDB file itself.
 atlas-client = { path = "../crates/atlas-client" }
 atlas-core = { path = "../crates/atlas-core" }
+# Plugin manifest `version`/`api` fields and the compatibility check against
+# `ATLAS_API_VERSION`.
+semver = { version = "1", features = ["serde"] }
+# Extracting a downloaded plugin's `.tar.gz`.
+flate2 = "1"
+tar = "0.4"
 
 [dev-dependencies]
 # Enables `tauri::test` (mock runtime) for the command unit tests.

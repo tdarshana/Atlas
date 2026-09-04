@@ -9,6 +9,7 @@ use tauri_plugin_positioner::{Position, WindowExt};
 
 mod commands;
 mod notify_poller;
+mod plugins;
 
 use commands::platform::{
     about_info, app_exit, app_relaunch, autostart_get, autostart_set, clipboard_write,
@@ -17,6 +18,10 @@ use commands::platform::{
     update_install, vault_list, vault_lock, vault_put_key, vault_reapply, vault_set_passphrase,
     vault_status, vault_unlock, window_center, window_move, ShortcutRegistration, UpdateState,
     VaultState,
+};
+use plugins::{
+    plugin_install_folder, plugin_install_github, plugin_read_main, plugin_set_enabled,
+    plugin_uninstall, plugins_list,
 };
 
 const DEFAULT_PORT: u16 = 7433;
@@ -221,7 +226,13 @@ pub fn run() {
             vault_list,
             vault_reapply,
             update_check,
-            update_install
+            update_install,
+            plugins_list,
+            plugin_install_folder,
+            plugin_install_github,
+            plugin_set_enabled,
+            plugin_uninstall,
+            plugin_read_main
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
