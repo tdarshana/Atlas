@@ -7,10 +7,11 @@
 	// it once, on release, and that is what gets persisted.
 	import { Badge, IconButton } from '$lib/ds';
 	import type { SelectOption } from '$lib/ds';
+	import ResizeBar from '$lib/ui/ResizeBar.svelte';
 	import {
 		type BoardColumn,
-		clampLane,
 		LANE_COLLAPSED,
+		LANE_GAP,
 		LANE_MAX,
 		LANE_MIN
 	} from '$lib/stores/board.svelte';
@@ -21,24 +22,29 @@
 		width: number;
 		/** Folded to a header by the column filter, with the way back out of it. */
 		collapsed: boolean;
+		/** Folded by its own header button; `ontoggle` opens it again. */
+		folded: boolean;
 		stageOptions: SelectOption[];
 		selected: string | null;
 		onopen: (key: string) => void;
 		onmove: (key: string, stage: string) => void;
 		onresize: (stage: string, width: number) => void;
 		onexpand: () => void;
+		ontoggle: (stage: string) => void;
 	}
 
 	let {
 		column,
 		width,
 		collapsed,
+		folded,
 		stageOptions,
 		selected,
 		onopen,
 		onmove,
 		onresize,
-		onexpand
+		onexpand,
+		ontoggle
 	}: Props = $props();
 
 	const stage = $derived(column.stage.name);
@@ -46,69 +52,39 @@
 	const count = $derived(column.tasks.length - column.strayCount);
 
 	let node = $state<HTMLElement>();
-	let dragging = false;
-	let startX = 0;
-	let startWidth = 0;
-	let live = 0;
 
-	function grab(event: PointerEvent) {
-		const handle = event.currentTarget as HTMLElement;
-		handle.setPointerCapture(event.pointerId);
-		dragging = true;
-		startX = event.clientX;
-		startWidth = width;
-		live = width;
-		event.preventDefault();
-	}
-
-	function drag(event: PointerEvent) {
-		if (!dragging || !node) return;
-		live = clampLane(startWidth + (event.clientX - startX));
-		node.style.setProperty('--lane-w', `${live}px`);
-	}
-
-	function drop(event: PointerEvent) {
-		if (!dragging) return;
-		dragging = false;
-		(event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
-		onresize(stage, live);
-	}
-
-	/**
-	 * An interrupted gesture is not a decision. The lane goes back to the width it was
-	 * grabbed at rather than persisting wherever the pointer had got to.
-	 */
-	function cancel(event: PointerEvent) {
-		if (!dragging) return;
-		dragging = false;
-		(event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
-		node?.style.setProperty('--lane-w', `${startWidth}px`);
-	}
-
-	/** The keyboard gets the same range in 20px steps, since a pointer drag has none. */
-	function nudge(event: KeyboardEvent) {
-		const step = event.key === 'ArrowLeft' ? -20 : event.key === 'ArrowRight' ? 20 : 0;
-		if (step === 0) return;
-		event.preventDefault();
-		onresize(stage, width + step);
+	/** The drag paints the node's own CSS variable: one style write per move, no
+	    reactive pass. The store hears the final width on release and persists it. */
+	function paint(live: number) {
+		node?.style.setProperty('--lane-w', `${live}px`);
 	}
 </script>
 
-{#if collapsed}
+{#if collapsed || folded}
 	<section
 		class="lane collapsed"
 		style="--lane-w:{LANE_COLLAPSED}px"
 		data-testid="board-column-{stage}"
-		aria-label="{stage}, {count} tasks, folded by the column filter"
+		aria-label="{stage}, {count} tasks, {folded ? 'collapsed' : 'folded by the column filter'}"
 	>
 		<header>
-			<IconButton
-				size="sm"
-				icon="chevrons-right"
-				label="Show all columns"
-				data-testid="board-show-all"
-				onclick={onexpand}
-			/>
+			{#if folded}
+				<IconButton
+					size="sm"
+					icon="chevrons-right"
+					label="Expand {stage}"
+					data-testid="board-expand-{stage}"
+					onclick={() => ontoggle(stage)}
+				/>
+			{:else}
+				<IconButton
+					size="sm"
+					icon="chevrons-right"
+					label="Show all columns"
+					data-testid="board-show-all"
+					onclick={onexpand}
+				/>
+			{/if}
 		</header>
 		<span class="tally">{count}</span>
 		<!-- On end rather than hidden: a folded lane still has to say which one it is. -->
@@ -132,6 +108,14 @@
 			>
 				{count}
 			</Badge>
+			<span class="spacer"></span>
+			<IconButton
+				size="sm"
+				icon="chevrons-left"
+				label="Collapse {stage}"
+				data-testid="board-collapse-{stage}"
+				onclick={() => ontoggle(stage)}
+			/>
 		</header>
 
 		<div class="body">
@@ -148,24 +132,16 @@
 			{/each}
 		</div>
 
-		<!-- A focusable separator is exactly what a splitter is; the checker reads the role
-		     as decorative. -->
-		<!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_no_noninteractive_tabindex -->
-		<div
-			class="handle"
-			role="separator"
-			aria-orientation="vertical"
-			aria-label="Resize {stage}"
-			aria-valuenow={width}
-			aria-valuemin={LANE_MIN}
-			aria-valuemax={LANE_MAX}
-			tabindex="0"
-			onpointerdown={grab}
-			onpointermove={drag}
-			onpointerup={drop}
-			onpointercancel={cancel}
-			onkeydown={nudge}
-		></div>
+		<ResizeBar
+			label="Resize {stage}"
+			value={width}
+			min={LANE_MIN}
+			max={LANE_MAX}
+			gap={LANE_GAP}
+			onlive={paint}
+			onresize={(w) => onresize(stage, w)}
+			testid="board-resize-{stage}"
+		/>
 	</section>
 {/if}
 
@@ -243,21 +219,7 @@
 		text-align: center;
 	}
 
-	/* Sits over the lane's own right edge, so the pointer finds it without a gap. */
-	.handle {
-		position: absolute;
-		top: 0;
-		bottom: 0;
-		right: -3px;
-		width: 6px;
-		cursor: col-resize;
-		border-radius: 2px;
-		touch-action: none;
-	}
-
-	.handle:hover,
-	.handle:focus-visible {
-		background: var(--border-strong);
-		outline: none;
+	.spacer {
+		flex: 1;
 	}
 </style>

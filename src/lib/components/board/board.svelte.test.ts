@@ -63,6 +63,7 @@ function strip(stage: string | null = null) {
 			onmove: () => {},
 			onresize: () => {},
 			onexpand: () => {},
+			ontoggle: () => {},
 			onaddcolumn: () => {}
 		}
 	});

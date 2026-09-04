@@ -46,6 +46,8 @@ export const DETAIL_MAX = 560;
 
 /** A collapsed lane shows its header and its name on end, so it needs no more than this. */
 export const LANE_COLLAPSED = 44;
+/** The gap between lanes in the strip; the resize bar sits in its middle. */
+export const LANE_GAP = 12;
 
 const clamp = (value: number, min: number, max: number) =>
 	Number.isFinite(value) ? Math.min(max, Math.max(min, Math.round(value))) : min;
@@ -109,6 +111,29 @@ export function saveLaneWidths(projectId: Uuid | null, widths: Record<string, nu
 	void persistSet(laneKey(projectId), widths);
 }
 
+const collapsedKey = (projectId: Uuid | null) => `atlas.board.${projectId ?? 'global'}.collapsed`;
+
+/** The stages someone folded with a lane's own button, by name; unreadable storage is empty. */
+export function loadCollapsedLanes(projectId: Uuid | null): string[] {
+	try {
+		if (typeof localStorage === 'undefined') return [];
+		const parsed: unknown = JSON.parse(localStorage.getItem(collapsedKey(projectId)) ?? '[]');
+		return Array.isArray(parsed) ? parsed.filter((s): s is string => typeof s === 'string') : [];
+	} catch {
+		return [];
+	}
+}
+
+export function saveCollapsedLanes(projectId: Uuid | null, stages: string[]): void {
+	try {
+		if (typeof localStorage === 'undefined') return;
+		localStorage.setItem(collapsedKey(projectId), JSON.stringify(stages));
+	} catch {
+		/* storage is unavailable; every lane is open next time */
+	}
+	void persistSet(collapsedKey(projectId), stages);
+}
+
 export function loadDetailWidth(): number {
 	try {
 		if (typeof localStorage === 'undefined') return DETAIL_DEFAULT;
@@ -135,7 +160,10 @@ export function saveDetailWidth(width: number): void {
 /** A lane and whether the column filter has folded it away. */
 export interface LaneView {
 	column: BoardColumn;
+	/** Folded by the column filter. */
 	collapsed: boolean;
+	/** Folded by the lane's own collapse button. */
+	folded: boolean;
 }
 
 /**
@@ -144,11 +172,16 @@ export interface LaneView {
  * side panel's click has an effect on the screen without hiding what it left behind. A
  * filter naming no column at all leaves every lane open.
  */
-export function visibleLanes(columns: BoardColumn[], stage: string | null): LaneView[] {
+export function visibleLanes(
+	columns: BoardColumn[],
+	stage: string | null,
+	folded: string[] = []
+): LaneView[] {
 	const chosen = stage && columns.some((c) => c.stage.name === stage) ? stage : null;
 	return columns.map((column) => ({
 		column,
-		collapsed: chosen !== null && column.stage.name !== chosen
+		collapsed: chosen !== null && column.stage.name !== chosen,
+		folded: folded.includes(column.stage.name)
 	}));
 }
 
@@ -184,6 +217,8 @@ export const board = $state({
 	detailError: null as string | null,
 	/** Lane width by stage name for the open board, seeded from `localStorage`. */
 	laneWidths: {} as Record<string, number>,
+	/** Stage names folded with their own collapse button, for the open board. */
+	collapsedLanes: [] as string[],
 	/** The docked detail's width, shared by every board. */
 	detailWidth: DETAIL_DEFAULT
 });
@@ -191,7 +226,16 @@ export const board = $state({
 /** Reads the arrangement one board was left in. Called when the project changes. */
 export function loadLayout(projectId: Uuid | null): void {
 	board.laneWidths = loadLaneWidths(projectId);
+	board.collapsedLanes = loadCollapsedLanes(projectId);
 	board.detailWidth = loadDetailWidth();
+}
+
+/** Folds a lane to its header, or opens it again. Remembered per board. */
+export function toggleLaneCollapsed(stage: string): void {
+	board.collapsedLanes = board.collapsedLanes.includes(stage)
+		? board.collapsedLanes.filter((s) => s !== stage)
+		: [...board.collapsedLanes, stage];
+	saveCollapsedLanes(board.filters.projectId, board.collapsedLanes);
 }
 
 /** The width a lane is drawn at, which is the default until someone drags it. */

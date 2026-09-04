@@ -32,6 +32,7 @@
 		scheduleRefresh,
 		setDetailWidth,
 		setLaneWidth,
+		toggleLaneCollapsed,
 		visibleLanes
 	} from '$lib/stores/board.svelte';
 	import { setHeaderActions } from '$lib/stores/project.svelte';
@@ -54,7 +55,7 @@
 		board.filters.unassigned ? board.tasks.filter((t) => !t.assignee) : board.tasks
 	);
 	const lanes = $derived(
-		visibleLanes(deriveColumns(board.stages, shown), board.filters.stage)
+		visibleLanes(deriveColumns(board.stages, shown), board.filters.stage, board.collapsedLanes)
 	);
 	const stageOptions = $derived(board.stages.map((s) => ({ value: s.name, label: s.name })));
 
@@ -230,6 +231,7 @@
 			onmove={(key, stage) => void move(key, stage)}
 			onresize={setLaneWidth}
 			onexpand={() => (board.filters.stage = null)}
+			ontoggle={toggleLaneCollapsed}
 			onaddcolumn={() => (editingColumns = true)}
 		/>
 

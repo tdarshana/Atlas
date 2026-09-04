@@ -4,7 +4,8 @@
 	import { Icon } from '$lib/ds';
 	import { daemon } from '$lib/daemon.svelte';
 	import { status, statusLabel } from '$lib/stores/status.svelte';
-	import { shell } from './shell.svelte';
+	import { SIDEPANEL_MAX, SIDEPANEL_MIN, setSidePanelWidth, shell } from './shell.svelte';
+	import ResizeBar from '$lib/ui/ResizeBar.svelte';
 	import Projects from './sidepanels/Projects.svelte';
 	import Memories from './sidepanels/Memories.svelte';
 	import Agents from './sidepanels/Agents.svelte';
@@ -17,11 +18,17 @@
 	const footer = $derived(failed ? (daemon.error ?? status.error ?? '') : statusLabel());
 
 	// A page can lend the panel its own body, as the Board tab does with its filters.
+	let node = $state<HTMLElement>();
 	const override = $derived(shell.sidePanelOverride);
 	const title = $derived(override?.title ?? shell.sidePanelTitle);
 </script>
 
-<aside class="panel side" aria-label={title}>
+<aside
+	bind:this={node}
+	class="panel side"
+	style="--side-w:{shell.sidePanelWidth}px"
+	aria-label={title}
+>
 	<div class="head">
 		<span class="title">{title}</span>
 		<span class="spacer"></span>
@@ -57,12 +64,23 @@
 		/>
 		<span class="mono line">{footer}</span>
 	</div>
+	<ResizeBar
+		label="Resize side panel"
+		value={shell.sidePanelWidth}
+		min={SIDEPANEL_MIN}
+		max={SIDEPANEL_MAX}
+		gap={6}
+		onlive={(w) => node?.style.setProperty('--side-w', `${w}px`)}
+		onresize={setSidePanelWidth}
+		testid="sidepanel-resize"
+	/>
 </aside>
 
 <style>
 	.side {
-		width: 220px;
-		flex: 0 0 220px;
+		position: relative;
+		width: var(--side-w, 220px);
+		flex: 0 0 var(--side-w, 220px);
 	}
 
 	.head {

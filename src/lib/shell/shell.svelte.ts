@@ -36,6 +36,16 @@ export interface SidePanelOverride {
 
 export const RAIL_KEY = 'atlas.rail';
 export const SIDEPANEL_KEY = 'atlas.sidepanel';
+export const SIDEPANEL_WIDTH_KEY = 'atlas.sidepanel.width';
+/** The side panel is 220px in the design and drags between these two. */
+export const SIDEPANEL_DEFAULT = 220;
+export const SIDEPANEL_MIN = 180;
+export const SIDEPANEL_MAX = 400;
+const clampSide = (w: number) => Math.min(SIDEPANEL_MAX, Math.max(SIDEPANEL_MIN, Math.round(w)));
+function readSideWidth(): number {
+	const n = Number(readStored(SIDEPANEL_WIDTH_KEY));
+	return Number.isFinite(n) && n > 0 ? clampSide(n) : SIDEPANEL_DEFAULT;
+}
 export const THEME_KEY = 'atlas.theme';
 
 function readStored(key: string): string | null {
@@ -60,6 +70,7 @@ function writeStored(key: string, value: string): void {
 export const shell = $state({
 	railExpanded: readStored(RAIL_KEY) === 'expanded',
 	sidePanel: readStored(SIDEPANEL_KEY) !== 'hidden',
+	sidePanelWidth: readSideWidth(),
 	theme: (readStored(THEME_KEY) === 'light' ? 'light' : 'dark') as Theme,
 	/** The design is authored for mac chrome; Tauri corrects this on mount. */
 	platform: 'mac' as Platform,
@@ -79,6 +90,11 @@ export function toggleRail(): void {
 export function toggleSidePanel(): void {
 	shell.sidePanel = !shell.sidePanel;
 	writeStored(SIDEPANEL_KEY, shell.sidePanel ? 'shown' : 'hidden');
+}
+
+export function setSidePanelWidth(width: number): void {
+	shell.sidePanelWidth = clampSide(width);
+	writeStored(SIDEPANEL_WIDTH_KEY, String(shell.sidePanelWidth));
 }
 
 /** Applies the theme everywhere: the root element, localStorage and the daemon. */

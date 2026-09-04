@@ -17,6 +17,7 @@
 		onmove: (key: string, stage: string) => void;
 		onresize: (stage: string, width: number) => void;
 		onexpand: () => void;
+		ontoggle: (stage: string) => void;
 		onaddcolumn: () => void;
 	}
 
@@ -29,6 +30,7 @@
 		onmove,
 		onresize,
 		onexpand,
+		ontoggle,
 		onaddcolumn
 	}: Props = $props();
 </script>
@@ -38,6 +40,7 @@
 		<Lane
 			column={lane.column}
 			collapsed={lane.collapsed}
+			folded={lane.folded}
 			width={laneWidth(widths, lane.column.stage.name)}
 			{stageOptions}
 			{selected}
@@ -45,6 +48,7 @@
 			{onmove}
 			{onresize}
 			{onexpand}
+			{ontoggle}
 		/>
 	{/each}
 
