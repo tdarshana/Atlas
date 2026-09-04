@@ -29,8 +29,8 @@ use Located::{Folder, Native};
 enum Located {
     /// A row in `skills`.
     Native(Uuid),
-    /// A `SKILL.md` inside this folder.
-    Folder(PathBuf),
+    /// A `SKILL.md` inside this folder, which has to stay under this canonical root.
+    Folder(PathBuf, PathBuf),
 }
 
 struct Entry {
@@ -41,24 +41,18 @@ struct Entry {
 /// Every skill that applies, native and discovered, with `enabled_here` filled in when
 /// a project was given. Sorted by name, then by source, so two skills of the same name
 /// from different places keep a stable order.
-pub fn list_skills(db: &Db, project: Option<&Project>) -> Result<SkillList> {
-    list_skills_in(db, project, &discover::skills_home()?)
-}
-
-/// [`list_skills`] against an explicit home directory. The public entry point resolves
-/// the real one; tests pass a temp directory so they never read the user's own.
-pub fn list_skills_in(db: &Db, project: Option<&Project>, home: &Path) -> Result<SkillList> {
+///
+/// `home` is where the user-level and plugin roots hang off. It is always a parameter:
+/// `AtlasPaths::skills_home` resolves the real one once, from `ATLAS_SYNC_HOME` or the
+/// user's own home, and a test passes a temp directory, so nothing below this line ever
+/// consults the process environment.
+pub fn list_skills(db: &Db, project: Option<&Project>, home: &Path) -> Result<SkillList> {
     let (entries, warnings) = collect(db, project, home)?;
     Ok(SkillList { skills: entries.into_iter().map(|e| e.summary).collect(), warnings })
 }
 
 /// One skill with its text and the other files beside it.
-pub fn get_skill(db: &Db, project: Option<&Project>, id: &str) -> Result<Skill> {
-    get_skill_in(db, project, id, &discover::skills_home()?)
-}
-
-/// [`get_skill`] against an explicit home directory.
-pub fn get_skill_in(db: &Db, project: Option<&Project>, id: &str, home: &Path) -> Result<Skill> {
+pub fn get_skill(db: &Db, project: Option<&Project>, id: &str, home: &Path) -> Result<Skill> {
     let entry = find(db, project, id, home)?;
     match entry.located {
         Native(uuid) => {
@@ -66,9 +60,9 @@ pub fn get_skill_in(db: &Db, project: Option<&Project>, id: &str, home: &Path) -
             skill.summary = entry.summary;
             Ok(skill)
         }
-        Folder(dir) => Ok(Skill {
-            body: discover::read_body(&dir)?,
-            files: discover::list_files(&dir),
+        Folder(dir, root) => Ok(Skill {
+            body: discover::read_body(&dir, &root)?,
+            files: discover::list_files(&dir, &root),
             summary: entry.summary,
         }),
     }
@@ -76,14 +70,10 @@ pub fn get_skill_in(db: &Db, project: Option<&Project>, id: &str, home: &Path) -
 
 /// Replaces a skill's text in place: the stored body for a native skill, the whole
 /// `SKILL.md` for a discovered one. A skill Atlas cannot write is refused rather than
-/// half-written, and a file write goes through a temp file and a rename so a failure
-/// leaves the old text intact.
-pub fn write_skill_body(db: &Db, project: Option<&Project>, id: &str, body: String, actor: &str) -> Result<Skill> {
-    write_skill_body_in(db, project, id, body, actor, &discover::skills_home()?)
-}
-
-/// [`write_skill_body`] against an explicit home directory.
-pub fn write_skill_body_in(db: &Db, project: Option<&Project>, id: &str, body: String, actor: &str, home: &Path) -> Result<Skill> {
+/// half-written, one whose `SKILL.md` resolves outside the root it was listed under is
+/// refused rather than replaced, and a file write goes through a temp file and a rename
+/// so a failure leaves the old text intact.
+pub fn write_skill_body(db: &Db, project: Option<&Project>, id: &str, body: String, actor: &str, home: &Path) -> Result<Skill> {
     let entry = find(db, project, id, home)?;
     if !entry.summary.editable {
         return Err(AtlasError::Invalid(format!("skill '{id}' is not editable")));
@@ -92,8 +82,8 @@ pub fn write_skill_body_in(db: &Db, project: Option<&Project>, id: &str, body: S
         Native(uuid) => {
             SkillRepo::new(db).update(*uuid, &SkillUpdate { body: Some(body), ..Default::default() }, actor)?;
         }
-        Folder(dir) => {
-            discover::write_body(dir, &body)?;
+        Folder(dir, root) => {
+            discover::write_body(dir, root, &body)?;
             crate::memories::MemoryRepo::new(db).audit(
                 actor,
                 "skill_edit",
@@ -103,21 +93,16 @@ pub fn write_skill_body_in(db: &Db, project: Option<&Project>, id: &str, body: S
             )?;
         }
     }
-    get_skill_in(db, project, id, home)
+    get_skill(db, project, id, home)
 }
 
 /// Replaces the project's disabled-skill list. Every id has to name a skill that
 /// applies here right now, so a typo is refused instead of being stored as a rule that
 /// silently gates nothing.
-pub fn set_project_skills_disabled(db: &Db, project_id: Uuid, ids: Vec<String>, actor: &str) -> Result<Project> {
-    set_project_skills_disabled_in(db, project_id, ids, actor, &discover::skills_home()?)
-}
-
-/// [`set_project_skills_disabled`] against an explicit home directory.
-pub fn set_project_skills_disabled_in(db: &Db, project_id: Uuid, ids: Vec<String>, actor: &str, home: &Path) -> Result<Project> {
+pub fn set_project_skills_disabled(db: &Db, project_id: Uuid, ids: Vec<String>, actor: &str, home: &Path) -> Result<Project> {
     let projects = ProjectRepo::new(db);
     let project = projects.get(project_id)?;
-    let known = list_skills_in(db, Some(&project), home)?;
+    let known = list_skills(db, Some(&project), home)?;
     for id in &ids {
         if !known.skills.iter().any(|s| &s.id == id) {
             return Err(AtlasError::Invalid(format!("unknown skill id '{id}'")));
@@ -147,7 +132,7 @@ fn collect(db: &Db, project: Option<&Project>, home: &Path) -> Result<(Vec<Entry
         found.skills.extend(project_found.skills);
         found.warnings.extend(project_found.warnings);
     }
-    entries.extend(found.skills.into_iter().map(|d: Discovered| Entry { summary: d.summary, located: Folder(d.dir) }));
+    entries.extend(found.skills.into_iter().map(|d: Discovered| Entry { summary: d.summary, located: Folder(d.dir, d.root) }));
 
     if let Some(p) = project {
         for entry in &mut entries {
@@ -209,7 +194,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         populated_home(home.path());
         let db = Db::open_in_memory().unwrap();
-        let list = list_skills_in(&db, None, home.path()).unwrap();
+        let list = list_skills(&db, None, home.path()).unwrap();
 
         let ids: Vec<&str> = list.skills.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, vec!["plugin:acme/tools/packaged", "claude-user:user-claude", "codex-user:user-codex"], "sorted by name: {ids:?}");
@@ -230,7 +215,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         populated_home(home.path());
         let db = Db::open_in_memory().unwrap();
-        let list = list_skills_in(&db, None, home.path()).unwrap();
+        let list = list_skills(&db, None, home.path()).unwrap();
         assert!(list.skills.iter().all(|s| s.name != "cloned" && s.name != "scratch"), "{:?}", list.skills);
     }
 
@@ -246,9 +231,100 @@ mod tests {
         std::os::unix::fs::symlink(outside.path().join("escapee"), root.join("linked")).unwrap();
 
         let db = Db::open_in_memory().unwrap();
-        let list = list_skills_in(&db, None, home.path()).unwrap();
+        let list = list_skills(&db, None, home.path()).unwrap();
         let ids: Vec<&str> = list.skills.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, vec!["claude-user:real"], "{ids:?}");
+        // Said rather than skipped in silence, so a user who linked it in knows why.
+        assert_eq!(list.warnings.len(), 1, "{:?}", list.warnings);
+        assert!(list.warnings[0].contains("resolves outside"), "{:?}", list.warnings);
+    }
+
+    /// A real skill folder whose `SKILL.md` is a symlink to a file outside the root is
+    /// not read at all: without this, that file's first paragraph would become the
+    /// public description and `skill_get` would serve its whole text.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_skill_file_out_of_the_root_is_refused() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("id_rsa");
+        std::fs::write(&secret, "-----BEGIN PRIVATE KEY-----\nnot really\n").unwrap();
+        let root = home.path().join(".claude/skills");
+        skill_at(&root, "real", "---\nname: real\n---\n");
+        let sneaky = root.join("sneaky");
+        std::fs::create_dir_all(&sneaky).unwrap();
+        std::os::unix::fs::symlink(&secret, sneaky.join("SKILL.md")).unwrap();
+
+        let db = Db::open_in_memory().unwrap();
+        let list = list_skills(&db, None, home.path()).unwrap();
+        let ids: Vec<&str> = list.skills.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["claude-user:real"], "{ids:?}");
+        assert!(!format!("{list:?}").contains("PRIVATE KEY"), "the linked file's text leaked: {list:?}");
+        assert_eq!(list.warnings.len(), 1, "{:?}", list.warnings);
+        assert!(list.warnings[0].contains("resolves outside"), "{:?}", list.warnings);
+
+        // Nothing can be read or written through it either, even by id.
+        assert!(matches!(get_skill(&db, None, "claude-user:sneaky", home.path()), Err(AtlasError::NotFound(_))));
+        let refused = write_skill_body(&db, None, "claude-user:sneaky", "overwritten".into(), "t", home.path()).unwrap_err();
+        assert!(matches!(refused, AtlasError::NotFound(_)), "{refused}");
+        assert!(std::fs::read_to_string(&secret).unwrap().contains("not really"), "the linked file was written through");
+    }
+
+    /// The same check guards the write path itself: a `SKILL.md` that starts pointing
+    /// out of its root after it was listed is refused rather than replaced.
+    #[cfg(unix)]
+    #[test]
+    fn write_body_refuses_a_file_that_left_its_root() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("elsewhere.md");
+        std::fs::write(&target, "untouched\n").unwrap();
+        let root = home.path().join(".claude/skills");
+        let dir = skill_at(&root, "moved", "---\nname: moved\n---\n");
+        std::fs::remove_file(dir.join("SKILL.md")).unwrap();
+        std::os::unix::fs::symlink(&target, dir.join("SKILL.md")).unwrap();
+
+        let canonical_root = root.canonicalize().unwrap();
+        let err = discover::write_body(&dir, &canonical_root, "overwritten").unwrap_err();
+        assert!(matches!(err, AtlasError::Invalid(ref m) if m.contains("resolves outside")), "{err}");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "untouched\n");
+        assert!(discover::read_body(&dir, &canonical_root).is_err(), "nor can it be read");
+    }
+
+    /// An in-place write keeps the file's own mode rather than replacing a `0600`
+    /// skill with a world-readable one.
+    #[cfg(unix)]
+    #[test]
+    fn writing_a_file_skill_keeps_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let dir = skill_at(&home.path().join(".claude/skills"), "private", "---\nname: private\n---\n\nOld.\n");
+        std::fs::set_permissions(dir.join("SKILL.md"), std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let db = Db::open_in_memory().unwrap();
+        write_skill_body(&db, None, "claude-user:private", "---\nname: private\n---\n\nNew.\n".into(), "t", home.path()).unwrap();
+        let mode = std::fs::metadata(dir.join("SKILL.md")).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the rename dropped the file's mode");
+    }
+
+    /// A root that exists but cannot be listed is a warning, not silence: it must not
+    /// look identical to a root that is simply not there.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_root_is_a_warning() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join(".claude/skills");
+        skill_at(&root, "hidden", "---\nname: hidden\n---\n");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let db = Db::open_in_memory().unwrap();
+        let list = list_skills(&db, None, home.path()).unwrap();
+        assert!(list.skills.is_empty(), "{:?}", list.skills);
+        assert_eq!(list.warnings.len(), 1, "{:?}", list.warnings);
+        assert!(list.warnings[0].contains(".claude/skills"), "{:?}", list.warnings);
+
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     /// An unreadable `SKILL.md` is skipped and named in the warnings, and the skills
@@ -264,7 +340,7 @@ mod tests {
         std::fs::set_permissions(locked.join("SKILL.md"), std::fs::Permissions::from_mode(0o000)).unwrap();
 
         let db = Db::open_in_memory().unwrap();
-        let list = list_skills_in(&db, None, home.path()).unwrap();
+        let list = list_skills(&db, None, home.path()).unwrap();
         assert_eq!(list.skills.len(), 1, "{:?}", list.skills);
         assert_eq!(list.warnings.len(), 1, "{:?}", list.warnings);
         assert!(list.warnings[0].contains("locked"), "{:?}", list.warnings);
@@ -283,13 +359,13 @@ mod tests {
         let project = project_at(root.path(), &db);
         SkillRepo::new(&db).create(&NewSkill { project_id: None, name: "native-one".into(), description: "d".into(), body: "b".into() }, "t").unwrap();
 
-        let list = list_skills_in(&db, Some(&project), home.path()).unwrap();
+        let list = list_skills(&db, Some(&project), home.path()).unwrap();
         assert_eq!(list.skills.len(), 6, "3 global, 2 project, 1 native: {:?}", list.skills);
         assert!(list.skills.iter().all(|s| s.enabled_here == Some(true)));
 
-        let project = set_project_skills_disabled_in(&db, project.id, vec!["claude-project:proj-claude".into()], "t", home.path()).unwrap();
+        let project = set_project_skills_disabled(&db, project.id, vec!["claude-project:proj-claude".into()], "t", home.path()).unwrap();
         assert_eq!(project.skills_disabled, vec!["claude-project:proj-claude".to_string()]);
-        let list = list_skills_in(&db, Some(&project), home.path()).unwrap();
+        let list = list_skills(&db, Some(&project), home.path()).unwrap();
         let gated = list.skills.iter().find(|s| s.id == "claude-project:proj-claude").unwrap();
         assert_eq!(gated.enabled_here, Some(false), "a disabled skill still lists, switched off");
         assert_eq!(list.skills.iter().filter(|s| s.enabled_here == Some(false)).count(), 1);
@@ -301,7 +377,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let db = Db::open_in_memory().unwrap();
         let project = project_at(root.path(), &db);
-        let err = set_project_skills_disabled_in(&db, project.id, vec!["claude-user:nope".into()], "t", home.path()).unwrap_err();
+        let err = set_project_skills_disabled(&db, project.id, vec!["claude-user:nope".into()], "t", home.path()).unwrap_err();
         assert!(matches!(err, AtlasError::Invalid(ref m) if m.contains("nope")), "{err}");
         assert!(ProjectRepo::new(&db).get(project.id).unwrap().skills_disabled.is_empty(), "nothing is stored on a refusal");
     }
@@ -316,11 +392,11 @@ mod tests {
         std::fs::write(dir.join("run.sh"), "#!/bin/sh\n").unwrap();
 
         let db = Db::open_in_memory().unwrap();
-        let skill = get_skill_in(&db, None, "claude-user:user-claude", home.path()).unwrap();
+        let skill = get_skill(&db, None, "claude-user:user-claude", home.path()).unwrap();
         assert_eq!(skill.body, text, "the frontmatter comes back with the body");
         assert_eq!(skill.files, vec!["references/notes.md".to_string(), "run.sh".to_string()]);
 
-        let missing = get_skill_in(&db, None, "claude-user:nope", home.path()).unwrap_err();
+        let missing = get_skill(&db, None, "claude-user:nope", home.path()).unwrap_err();
         assert!(matches!(missing, AtlasError::NotFound(_)), "{missing}");
     }
 
@@ -333,7 +409,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
 
         let updated = "---\nname: user-claude\ndescription: Now described.\n---\n\nNew.\n";
-        let skill = write_skill_body_in(&db, None, "claude-user:user-claude", updated.into(), "t", home.path()).unwrap();
+        let skill = write_skill_body(&db, None, "claude-user:user-claude", updated.into(), "t", home.path()).unwrap();
         assert_eq!(skill.body, updated);
         assert_eq!(skill.summary.description, "Now described.", "the rewritten frontmatter is what the listing shows");
         assert_eq!(std::fs::read_to_string(dir.join("SKILL.md")).unwrap(), updated);
@@ -353,7 +429,7 @@ mod tests {
         let native = SkillRepo::new(&db)
             .create(&NewSkill { project_id: None, name: "native-one".into(), description: "d".into(), body: "old".into() }, "t")
             .unwrap();
-        let skill = write_skill_body_in(&db, None, &native.summary.id, "new".into(), "t", home.path()).unwrap();
+        let skill = write_skill_body(&db, None, &native.summary.id, "new".into(), "t", home.path()).unwrap();
         assert_eq!(skill.body, "new");
         assert_eq!(SkillRepo::new(&db).get(native.summary.id.parse().unwrap()).unwrap().body, "new");
     }
@@ -368,9 +444,9 @@ mod tests {
         std::fs::set_permissions(dir.join("SKILL.md"), std::fs::Permissions::from_mode(0o444)).unwrap();
 
         let db = Db::open_in_memory().unwrap();
-        let list = list_skills_in(&db, None, home.path()).unwrap();
+        let list = list_skills(&db, None, home.path()).unwrap();
         assert!(!list.skills[0].editable, "a read-only SKILL.md is not editable");
-        let err = write_skill_body_in(&db, None, "claude-user:locked", "new".into(), "t", home.path()).unwrap_err();
+        let err = write_skill_body(&db, None, "claude-user:locked", "new".into(), "t", home.path()).unwrap_err();
         assert!(matches!(err, AtlasError::Invalid(ref m) if m.contains("not editable")), "{err}");
         assert!(std::fs::read_to_string(dir.join("SKILL.md")).unwrap().contains("Old."), "the file is untouched");
 

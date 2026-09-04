@@ -483,6 +483,7 @@ impl Backend for LocalBackend {
         let memories = self.memories.clone();
         let db = self.db.clone();
         let workflows = self.workflows.clone();
+        let skills_home = self.paths.skills_home.clone();
         self.blocking(move || {
             let query = match &project.profile {
                 Some(p) => format!("{} {}", p.name, p.frameworks.join(" ")),
@@ -501,7 +502,7 @@ impl Backend for LocalBackend {
             // play rather than everything that exists. Discovery reads directories, so a
             // failure to read one must not cost the caller its whole context: an error
             // leaves the list empty rather than failing the call.
-            let skills = crate::skills::list_skills(&db, Some(&project))
+            let skills = crate::skills::list_skills(&db, Some(&project), &skills_home)
                 .map(|l| l.skills.into_iter().filter(|s| s.enabled_here != Some(false)).collect())
                 .unwrap_or_else(|e| {
                     tracing::warn!("skills unavailable for project context: {e}");
@@ -1045,17 +1046,19 @@ impl Backend for LocalBackend {
 
     async fn list_skills(&self, project_id: Option<Uuid>) -> Result<SkillList> {
         let db = self.db.clone();
+        let home = self.paths.skills_home.clone();
         self.blocking(move || {
             let project = project_id.map(|id| projects_repo(&db).get(id)).transpose()?;
-            crate::skills::list_skills(&db, project.as_ref())
+            crate::skills::list_skills(&db, project.as_ref(), &home)
         }).await
     }
     async fn get_skill(&self, project_id: Option<Uuid>, id: &str) -> Result<Skill> {
         let db = self.db.clone();
         let id = id.to_string();
+        let home = self.paths.skills_home.clone();
         self.blocking(move || {
             let project = project_id.map(|id| projects_repo(&db).get(id)).transpose()?;
-            crate::skills::get_skill(&db, project.as_ref(), &id)
+            crate::skills::get_skill(&db, project.as_ref(), &id, &home)
         }).await
     }
     async fn create_skill(&self, s: NewSkill, actor: &str) -> Result<Skill> {
@@ -1076,9 +1079,10 @@ impl Backend for LocalBackend {
         let db = self.db.clone();
         let id = id.to_string();
         let actor = actor.to_string();
+        let home = self.paths.skills_home.clone();
         self.blocking(move || {
             let project = project_id.map(|id| projects_repo(&db).get(id)).transpose()?;
-            crate::skills::write_skill_body(&db, project.as_ref(), &id, body, &actor)
+            crate::skills::write_skill_body(&db, project.as_ref(), &id, body, &actor, &home)
         }).await
     }
     async fn delete_skill(&self, id: &str, actor: &str) -> Result<()> {
@@ -1090,7 +1094,8 @@ impl Backend for LocalBackend {
     async fn set_project_skills_disabled(&self, project_id: Uuid, ids: Vec<String>, actor: &str) -> Result<Project> {
         let db = self.db.clone();
         let actor = actor.to_string();
-        self.blocking(move || crate::skills::set_project_skills_disabled(&db, project_id, ids, &actor)).await
+        let home = self.paths.skills_home.clone();
+        self.blocking(move || crate::skills::set_project_skills_disabled(&db, project_id, ids, &actor, &home)).await
     }
 
     async fn plugin_tools(&self) -> Result<Vec<PluginToolDecl>> {

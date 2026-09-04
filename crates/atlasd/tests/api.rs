@@ -2830,7 +2830,9 @@ async fn skills_list_edit_and_gate_per_project() {
     let sync_home = tempfile::tempdir().unwrap();
     let user_skill = sync_home.path().join(".claude/skills/greeter");
     std::fs::create_dir_all(&user_skill).unwrap();
-    std::fs::write(user_skill.join("SKILL.md"), "---\nname: greeter\ndescription: Greets a person.\n---\n\nSay hello.\n").unwrap();
+    // A block scalar description, the shape real plugin skills use: it has to arrive
+    // folded, not as a bare ">-".
+    std::fs::write(user_skill.join("SKILL.md"), "---\nname: greeter\ndescription: >-\n  Greets a person\n  by name.\n---\n\nSay hello.\n").unwrap();
     let packaged = sync_home.path().join(".claude/plugins/cache/acme/tools/aaaa1111/skills/packaged");
     std::fs::create_dir_all(&packaged).unwrap();
     std::fs::write(packaged.join("SKILL.md"), "---\nname: packaged\ndescription: From a plugin.\n---\n\nPackaged body.\n").unwrap();
@@ -2852,6 +2854,7 @@ async fn skills_list_edit_and_gate_per_project() {
     assert_eq!(ids, vec!["claude-user:greeter", "plugin:acme/tools/packaged"], "sorted by name: {global}");
     assert!(global["skills"][0]["enabled_here"].is_null(), "no project was named: {global}");
     assert_eq!(global["warnings"].as_array().unwrap().len(), 0, "{global}");
+    assert_eq!(global["skills"][0]["description"], "Greets a person by name.", "a block scalar description arrives folded: {global}");
     let plugin_row = &global["skills"][1];
     assert_eq!(plugin_row["plugin"], "acme/tools", "{plugin_row}");
     assert_eq!(plugin_row["source"], "plugin", "{plugin_row}");

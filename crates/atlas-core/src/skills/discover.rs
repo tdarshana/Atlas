@@ -3,10 +3,14 @@
 //! `~/.codex/skills`, and the skills inside every installed Claude Code plugin under
 //! `~/.claude/plugins/cache`.
 //!
-//! Read-only. Nothing here creates a directory, follows a symlink out of its root, or
-//! reads more than [`frontmatter::MAX_SKILL_BYTES`] of a file. An entry that cannot be
-//! read is skipped and reported as a warning rather than failing the whole listing.
+//! Read-only, and fenced to one root at a time. Nothing here creates a directory, and
+//! every path it reads or writes, the skill folder, its `SKILL.md` and any file listed
+//! beside it, is canonicalised and required to stay under the canonicalised root, so a
+//! symlink can never carry a read out of the root it was found in. No file is read past
+//! [`frontmatter::MAX_SKILL_BYTES`]. An entry that cannot be read is skipped and
+//! reported as a warning rather than failing the whole listing.
 
+use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -24,17 +28,27 @@ pub const SKILL_FILE: &str = "SKILL.md";
 /// At most this many other files are listed for one skill, for display only.
 pub const MAX_SKILL_FILES: usize = 200;
 
-/// How deep the file listing of one skill folder goes. Enough for the
-/// `references/`, `scripts/` and `assets/` layout skills use, shallow enough that a
-/// symlinked or accidental tree cannot be walked forever.
+/// How many directory levels below a skill folder the file listing goes: a file three
+/// levels down (`references/a/b/notes.md`) is listed, one deeper is not. Enough for the
+/// `references/`, `scripts/` and `assets/` layout skills use, shallow enough that an
+/// accidental tree cannot be walked forever.
 const MAX_FILE_DEPTH: usize = 3;
 
-/// A discovered skill: what a listing shows, plus the folder it was read from, which
-/// `get` and `write_body` need and no caller outside this module sees.
+/// How many directory entries one skill's file listing will look at before it stops.
+/// The listing is cosmetic, so a folder holding a build output directory costs a bounded
+/// walk rather than an unbounded one.
+const MAX_FILE_ENTRIES_SCANNED: usize = 10_000;
+
+/// A discovered skill: what a listing shows, plus the folder it was read from and the
+/// canonical root that folder has to stay under. Neither path leaves this crate.
 #[derive(Debug, Clone)]
 pub struct Discovered {
     pub summary: SkillSummary,
     pub dir: PathBuf,
+    /// The canonicalised source root `dir` was found under. Every later read or write
+    /// re-checks against it, so a symlink planted between the listing and the read
+    /// cannot widen what Atlas will open.
+    pub root: PathBuf,
 }
 
 /// Everything discovery found, plus what it could not read.
@@ -44,21 +58,10 @@ pub struct Found {
     pub warnings: Vec<String>,
 }
 
-/// Where a global discovery reads from: `ATLAS_SYNC_HOME` when set on the daemon
-/// process, else the daemon user's home. The same override `sync` uses, read at call
-/// time so a test can point it at a temp directory; there is no client-side override,
-/// since a request must never be able to name the directory the daemon reads.
-pub fn skills_home() -> Result<PathBuf> {
-    std::env::var_os("ATLAS_SYNC_HOME")
-        .map(PathBuf::from)
-        .or_else(|| directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf()))
-        .ok_or_else(|| AtlasError::Other("no home directory to read skills from".into()))
-}
-
 /// Every skill under `home`: `.claude/skills`, `.codex/skills`, and the newest
-/// installed version of each plugin's `skills` directory. The home is a parameter
-/// rather than read here so a test can point it at a temp directory without touching
-/// the process environment; [`skills_home`] is what resolves the real one.
+/// installed version of each plugin's `skills` directory. The home is always a
+/// parameter; `AtlasPaths::skills_home` is what resolves the real one, once, from
+/// `ATLAS_SYNC_HOME` or the user's own home.
 pub fn discover_global_in(home: &Path) -> Found {
     let mut found = Found::default();
     scan_root(&home.join(".claude/skills"), SkillSource::ClaudeUser, MemoryScope::Global, None, None, &mut found);
@@ -98,9 +101,9 @@ fn scan_plugins(cache: &Path, found: &mut Found) {
     }
 }
 
-/// Reads every skill directly under `root`. A root that does not exist is not a
-/// warning: most projects have no `.codex/skills`, and saying so on every listing would
-/// bury the warnings that matter.
+/// Reads every skill directly under `root`. A root that is not there is not a warning:
+/// most projects have no `.codex/skills`, and saying so on every listing would bury the
+/// warnings that matter. A root that exists but cannot be listed is a warning.
 fn scan_root(
     root: &Path,
     source: SkillSource,
@@ -109,24 +112,46 @@ fn scan_root(
     plugin: Option<String>,
     found: &mut Found,
 ) {
-    if !root.is_dir() {
-        return;
-    }
-    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let Some(entries) = read_dirs(root, found) else { return };
+    let canonical_root = match root.canonicalize() {
+        Ok(r) => r,
+        Err(e) => {
+            found.warnings.push(format!("{}: {e}", root.display()));
+            return;
+        }
+    };
     for dir in entries {
         // A symlink that leaves the root is not this root's skill, and following it
         // would let a link inside the user's home hand out any directory the daemon can
         // read.
-        match dir.canonicalize() {
-            Ok(real) if real.starts_with(&canonical_root) => {}
-            Ok(_) => continue,
+        match inside_root(&dir, &canonical_root) {
+            Ok(Some(_)) => {}
+            // Said rather than skipped in silence: a user who symlinked a skill folder
+            // in from elsewhere should be told why it is missing, not left guessing.
+            Ok(None) => {
+                found.warnings.push(format!("{}: resolves outside {}", dir.display(), root.display()));
+                continue;
+            }
             Err(e) => {
                 found.warnings.push(format!("{}: {e}", dir.display()));
                 continue;
             }
         }
+        // The same rule for the file itself: a real folder whose `SKILL.md` is a symlink
+        // to a private file outside the root would otherwise have that file's first
+        // paragraph published as a description and its whole text served by `skill_get`.
         let file = dir.join(SKILL_FILE);
+        let file = match inside_root(&file, &canonical_root) {
+            // Canonicalising resolves the link, so an absent `SKILL.md` lands in `Err`
+            // (not found) rather than being reported as an escape. That is the common
+            // case, a directory that is not a skill, so it is silent.
+            Ok(Some(real)) => real,
+            Ok(None) => {
+                found.warnings.push(format!("{}: SKILL.md resolves outside {}", dir.display(), root.display()));
+                continue;
+            }
+            Err(_) => continue,
+        };
         if !file.is_file() {
             continue;
         }
@@ -160,23 +185,41 @@ fn scan_root(
                 enabled_here: None,
             },
             dir,
+            root: canonical_root.clone(),
         });
     }
 }
 
+/// `path` canonicalised when it stays under `root`, `Ok(None)` when it resolves outside
+/// it, and `Err` when it cannot be resolved at all (most often because it is not there).
+fn inside_root(path: &Path, root: &Path) -> std::io::Result<Option<PathBuf>> {
+    let real = path.canonicalize()?;
+    Ok(real.starts_with(root).then_some(real))
+}
+
 /// The other files in a skill folder, relative to it, sorted, `SKILL.md` excluded and
 /// capped at [`MAX_SKILL_FILES`]. For display only, so an unreadable subdirectory is
-/// simply left out.
-pub fn list_files(dir: &Path) -> Vec<String> {
-    let mut out = Vec::new();
+/// simply left out, as is anything resolving outside `root`. The set is trimmed as the
+/// walk goes rather than after it, so a folder holding a large tree costs a bounded
+/// amount of memory.
+pub fn list_files(dir: &Path, root: &Path) -> Vec<String> {
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    let mut seen = 0usize;
     let mut stack = vec![(dir.to_path_buf(), 0usize)];
     while let Some((current, depth)) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&current) else { continue };
         for entry in entries.flatten() {
+            seen += 1;
+            if seen > MAX_FILE_ENTRIES_SCANNED {
+                return out.into_iter().collect();
+            }
             let path = entry.path();
-            let Ok(kind) = entry.file_type() else { continue };
-            if kind.is_dir() {
-                if depth + 1 < MAX_FILE_DEPTH {
+            // `read_dir`'s file type does not follow symlinks, so this is resolved
+            // rather than trusted: a link is only listed, or descended into, when it
+            // stays under the root.
+            let Ok(Some(real)) = inside_root(&path, root) else { continue };
+            if real.is_dir() {
+                if depth < MAX_FILE_DEPTH {
                     stack.push((path, depth + 1));
                 }
                 continue;
@@ -186,34 +229,60 @@ pub fn list_files(dir: &Path) -> Vec<String> {
             if rel == SKILL_FILE {
                 continue;
             }
-            out.push(rel);
+            out.insert(rel);
+            if out.len() > MAX_SKILL_FILES {
+                out.pop_last();
+            }
         }
     }
-    out.sort();
-    out.truncate(MAX_SKILL_FILES);
-    out
+    out.into_iter().collect()
 }
 
-/// A skill's `SKILL.md`, capped at [`frontmatter::MAX_SKILL_BYTES`].
-pub fn read_body(dir: &Path) -> Result<String> {
-    read_capped(&dir.join(SKILL_FILE))
+/// A skill's `SKILL.md`, capped at [`frontmatter::MAX_SKILL_BYTES`] and re-checked
+/// against the root it was found under.
+pub fn read_body(dir: &Path, root: &Path) -> Result<String> {
+    read_capped(&checked_skill_file(dir, root)?)
 }
 
-/// Writes a skill's `SKILL.md` through a temp file in the same folder and a rename, so
-/// a failed write leaves the old file intact rather than a truncated one. The temp file
-/// is removed on a failure, so no `.atlas-*` litter is left behind.
-pub fn write_body(dir: &Path, body: &str) -> Result<()> {
-    let target = dir.join(SKILL_FILE);
+/// Writes a skill's `SKILL.md` through a temp file in the same folder and a rename, so a
+/// failed write leaves the old text intact rather than a truncated one. The temp file is
+/// removed on a failure, so no `.atlas-*` litter is left behind, and it is given the
+/// target's own permissions first, so a `0600` skill does not come back world-readable.
+/// The target is re-checked against its root: a `SKILL.md` that resolves outside the
+/// root it was listed under is refused rather than replaced.
+pub fn write_body(dir: &Path, root: &Path, body: &str) -> Result<()> {
+    let target = checked_skill_file(dir, root)?;
+    let mode = std::fs::metadata(&target).map(|m| m.permissions()).ok();
     let temp = dir.join(format!(".atlas-{}.tmp", Uuid::new_v4()));
-    if let Err(e) = std::fs::write(&temp, body) {
-        let _ = std::fs::remove_file(&temp);
-        return Err(e.into());
-    }
-    if let Err(e) = std::fs::rename(&temp, &target) {
+    let write = (|| -> std::io::Result<()> {
+        std::fs::write(&temp, body)?;
+        if let Some(mode) = mode {
+            std::fs::set_permissions(&temp, mode)?;
+        }
+        std::fs::rename(&temp, &target)
+    })();
+    if let Err(e) = write {
         let _ = std::fs::remove_file(&temp);
         return Err(e.into());
     }
     Ok(())
+}
+
+/// The skill folder's `SKILL.md`, refused when either the folder or the file resolves
+/// outside `root`.
+fn checked_skill_file(dir: &Path, root: &Path) -> Result<PathBuf> {
+    let escaped = |path: &Path| AtlasError::Invalid(format!("{} resolves outside {}", path.display(), root.display()));
+    let file = dir.join(SKILL_FILE);
+    match inside_root(dir, root) {
+        Ok(Some(_)) => {}
+        Ok(None) => return Err(escaped(dir)),
+        Err(e) => return Err(e.into()),
+    }
+    match inside_root(&file, root) {
+        Ok(Some(real)) => Ok(real),
+        Ok(None) => Err(escaped(&file)),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Reads at most [`frontmatter::MAX_SKILL_BYTES`] of a file as UTF-8, lossily: a skill
@@ -225,30 +294,29 @@ fn read_capped(path: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// The subdirectories of `path`, or `None` (with a warning) when it cannot be listed.
-/// A path that simply does not exist is neither.
+/// The subdirectories of `path`, or `None` when it holds none to offer. A path that is
+/// simply not there is silent, since most roots do not exist; anything else, a directory
+/// the daemon may not traverse in particular, is a warning, so an unreadable root does
+/// not look identical to an absent one.
 fn read_dirs(path: &Path, found: &mut Found) -> Option<Vec<PathBuf>> {
-    if !path.exists() {
-        return None;
-    }
-    match std::fs::read_dir(path) {
-        Ok(entries) => {
-            let mut out: Vec<PathBuf> = Vec::new();
-            for entry in entries {
-                match entry {
-                    Ok(e) if e.path().is_dir() => out.push(e.path()),
-                    Ok(_) => {}
-                    Err(e) => found.warnings.push(format!("{}: {e}", path.display())),
-                }
-            }
-            out.sort();
-            Some(out)
-        }
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => {
             found.warnings.push(format!("{}: {e}", path.display()));
-            None
+            return None;
+        }
+    };
+    let mut out: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(e) if e.path().is_dir() => out.push(e.path()),
+            Ok(_) => {}
+            Err(e) => found.warnings.push(format!("{}: {e}", path.display())),
         }
     }
+    out.sort();
+    Some(out)
 }
 
 fn is_scratch_dir(path: &Path) -> bool {
@@ -264,8 +332,22 @@ fn modified(path: &Path) -> Option<DateTime<Utc>> {
     std::fs::metadata(path).ok().and_then(|m| m.modified().ok()).map(DateTime::<Utc>::from)
 }
 
-/// Whether the daemon user may write this file. Read from the file's own permissions
-/// rather than attempted, so listing never touches a file it is only describing.
+/// Whether the daemon user may write this file. On Unix this is the kernel's own answer
+/// (`access(2)` with `W_OK`), not the readonly bit, which is true only when no write bit
+/// is set for anyone and so calls a `0644` file owned by someone else writable. Nothing
+/// is opened or created: `editable` is computed on every listing, and a listing must not
+/// touch the files it describes.
+#[cfg(unix)]
+fn is_writable(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
+    // Safety: `c_path` is a valid, NUL-terminated C string that outlives the call, and
+    // `access` only reads it.
+    unsafe { libc::access(c_path.as_ptr(), libc::W_OK) == 0 }
+}
+
+/// Elsewhere, the readonly bit is the best answer the standard library offers.
+#[cfg(not(unix))]
 fn is_writable(path: &Path) -> bool {
     std::fs::metadata(path).map(|m| !m.permissions().readonly()).unwrap_or(false)
 }

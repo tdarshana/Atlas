@@ -2380,37 +2380,32 @@ mod tests {
         client.cancel().await.unwrap();
     }
 
-    /// The temp directory every skills test in this binary reads its global skills
-    /// from, set once as `ATLAS_SYNC_HOME`. The override is process-wide and the tests
-    /// in this file run together, so it is written a single time, before any of them
-    /// asks the backend for a skill; without it these tests would read the user's own
-    /// `~/.claude/skills` and assert on whatever happened to be installed there.
-    fn skills_test_home() -> &'static std::path::Path {
-        static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-        HOME.get_or_init(|| {
-            let dir = tempfile::tempdir().unwrap();
-            std::fs::create_dir_all(dir.path().join(".claude/skills/greeter")).unwrap();
-            std::fs::write(
-                dir.path().join(".claude/skills/greeter/SKILL.md"),
-                "---\nname: greeter\ndescription: Greets a person by name.\n---\n\nSay hello.\n",
-            )
-            .unwrap();
-            std::env::set_var("ATLAS_SYNC_HOME", dir.path());
-            dir
-        })
-        .path()
+    /// Seeds a temp home with one user skill and answers with it. The home is handed
+    /// to the backend through `AtlasPaths::with_skills_home`, never through the process
+    /// environment: `ATLAS_SYNC_HOME` is read once, by `AtlasPaths::discover`, which no
+    /// test calls, so nothing in this binary can reach the user's own `~/.claude`.
+    fn seeded_skills_home() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".claude/skills/greeter")).unwrap();
+        std::fs::write(
+            dir.path().join(".claude/skills/greeter/SKILL.md"),
+            "---\nname: greeter\ndescription: Greets a person by name.\n---\n\nSay hello.\n",
+        )
+        .unwrap();
+        dir
     }
 
     /// `skill_list` answers with the discovered skills plus Atlas's own, and leaves out
     /// the ones the project switched off; `skill_get` answers with one skill's text.
     #[tokio::test]
     async fn skill_tools_list_and_read() {
-        let _home = skills_test_home();
+        let skills_home = seeded_skills_home();
         let atlas_home = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(repo.path().join(".claude/skills/deployer")).unwrap();
         std::fs::write(repo.path().join(".claude/skills/deployer/SKILL.md"), "---\nname: deployer\ndescription: Ships it.\n---\n\nRun the deploy.\n").unwrap();
-        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(atlas_home.path()), None, false).unwrap());
+        let paths = AtlasPaths::at(atlas_home.path()).with_skills_home(skills_home.path());
+        let backend = Arc::new(LocalBackend::open(&paths, None, false).unwrap());
         let project = backend.connect_project(repo.path().to_path_buf(), "test").await.unwrap();
         backend.create_skill(NewSkill { project_id: None, name: "native-one".into(), description: "Stored in Atlas.".into(), body: "# native\n".into() }, "test").await.unwrap();
         let s = AtlasMcp::new(backend.clone()).with_env_project_root(false).with_project_root(repo.path().to_path_buf());
@@ -2438,9 +2433,10 @@ mod tests {
     /// reads one skill's text.
     #[tokio::test]
     async fn skill_resources_list_and_read() {
-        let _home = skills_test_home();
+        let skills_home = seeded_skills_home();
         let atlas_home = tempfile::tempdir().unwrap();
-        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(atlas_home.path()), None, false).unwrap());
+        let paths = AtlasPaths::at(atlas_home.path()).with_skills_home(skills_home.path());
+        let backend = Arc::new(LocalBackend::open(&paths, None, false).unwrap());
         let s = AtlasMcp::new(backend).with_env_project_root(false);
 
         let (server_io, client_io) = tokio::io::duplex(16 * 1024);

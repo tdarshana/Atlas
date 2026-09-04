@@ -37,7 +37,10 @@ fn db_open_error(paths: &AtlasPaths, e: atlas_core::AtlasError) -> anyhow::Error
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("atlasd=info".parse()?)).init();
     let args = Args::parse();
-    let paths = args.home.as_ref().map(AtlasPaths::at).unwrap_or_else(AtlasPaths::discover);
+    // `--home` moves Atlas's own data, not the user's skill folders: every daemon the
+    // CLI and the desktop start is launched with it, so `AtlasPaths::at` here would
+    // point skill discovery at `~/.atlas` and find nothing.
+    let paths = args.home.as_ref().map(AtlasPaths::discover_with_home).unwrap_or_else(AtlasPaths::discover);
     paths.ensure()?;
     // Open the database before binding the port. DuckDB's file lock is what resolves two
     // simultaneous starts: the loser fails here, with the pid of the winner, and exits

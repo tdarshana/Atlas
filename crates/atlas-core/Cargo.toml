@@ -29,6 +29,12 @@ toml_edit = "0.25"
 tokio = { workspace = true, features = ["sync"] }
 pulldown-cmark.workspace = true
 
+# Skill discovery asks the kernel whether it may write a `SKILL.md` (`access(2)` with
+# `W_OK`), rather than reading the readonly bit, which calls a file owned by someone
+# else writable whenever anyone may write it.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile.workspace = true
 tokio.workspace = true
