@@ -573,7 +573,9 @@
 		background: var(--bg-raised);
 		border: 1px solid var(--border-default);
 		border-radius: 5px;
-		overflow: hidden;
+		/* Visible, not hidden: the resize bar hangs 11px outside the left edge, in the
+		   gap, and a hidden overflow would clip it away. The body scrolls on its own. */
+		overflow: visible;
 	}
 
 	.detail:focus-visible {
@@ -785,6 +787,7 @@
 		flex: none;
 		width: min(820px, 92vw);
 		height: min(80vh, 920px);
+		overflow: hidden;
 	}
 
 	/* The dialog hands the panel focus on open; the ring that marks that in the dock is
