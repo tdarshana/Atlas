@@ -39,6 +39,11 @@
 	 * own stylesheet names one of them and a plugin will want both. */
 	const FONT_TOKENS = ['--font-ui', '--font-mono'];
 
+	/** The frame document also names `--bg-base`, which the allow list does carry, and
+	 * `--color-scheme`, which is not a token at all: it is the app's own light or dark
+	 * setting, sent so the frame's form controls and scrollbars match the app's. */
+	const EXTRA_TOKENS = ['--bg-base'];
+
 	let platform = $state<Platform | null>(null);
 	let frame = $state<HTMLIFrameElement>();
 	let reported = $state(DEFAULT_HEIGHT);
@@ -53,24 +58,31 @@
 	function themeTokens(): ThemeTokens {
 		const computed = getComputedStyle(document.documentElement);
 		const tokens: ThemeTokens = {};
-		for (const name of [...themeTokenAllowlist(), ...FONT_TOKENS]) {
+		for (const name of [...themeTokenAllowlist(), ...FONT_TOKENS, ...EXTRA_TOKENS]) {
 			const value = computed.getPropertyValue(name).trim();
 			if (value) tokens[name] = value;
 		}
+		tokens['--color-scheme'] = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
 		return tokens;
 	}
 
-	function onLoad(): void {
-		const target = frame?.contentWindow;
-		if (!target) return;
-		// A reload (or a navigation the frame made itself) means a fresh window, so the old
-		// bridge is pointed at a window that no longer exists.
+	/**
+	 * The frame speaks first. Waiting for the iframe's own `load` event raced the plugin:
+	 * the plugin's script had already run and painted by the time `load` fired, so the
+	 * first frame was drawn before any theme token arrived. The client posts `atlas:hello`
+	 * the moment it runs, and buffers its own calls until init comes back.
+	 */
+	function onHello(source: MessageEventSource): void {
+		// Only the window this iframe is showing right now. Any other window saying hello,
+		// including one from a page the frame navigated itself to, is not this plugin.
+		if (!frame || source !== frame.contentWindow) return;
 		bridge?.dispose();
 		bridge = createBridge({
 			plugin,
 			view,
 			slot,
-			target,
+			target: source as unknown as { postMessage(message: unknown, targetOrigin: string): void },
+			source,
 			api: pluginBackend(plugin.id),
 			actor: `plugin/${plugin.id}`,
 			onResize: (h) => (reported = h),
@@ -82,7 +94,14 @@
 	onMount(() => {
 		void resolvePlatform().then((p) => (platform = p));
 
-		const onMessage = (event: MessageEvent) => bridge?.handle(event);
+		const onMessage = (event: MessageEvent) => {
+			const data = event.data as { type?: unknown } | null;
+			if (data && typeof data === 'object' && data.type === 'atlas:hello') {
+				if (event.source) onHello(event.source);
+				return;
+			}
+			bridge?.handle(event);
+		};
 		window.addEventListener('message', onMessage);
 
 		// The theme lives on the root element: `data-theme` for the light/dark switch and
@@ -110,7 +129,6 @@
 		sandbox="allow-scripts"
 		style={frameStyle}
 		data-testid="plugin-frame-{plugin.id}"
-		onload={onLoad}
 	></iframe>
 {/if}
 

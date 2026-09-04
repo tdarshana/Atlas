@@ -3,9 +3,9 @@
 // the frame document loads first.
 atlas.ready.then(function (context) {
   var root = document.getElementById('root');
-  // Built node by node rather than through innerHTML: the plugin's own name comes back
-  // from the host, and a plugin that writes host text as markup is a habit worth not
-  // teaching in the example every author starts from.
+  // The static shell goes in through innerHTML because it is a literal in this file, but
+  // every value that came back from the host is written with textContent below. Writing
+  // host text as markup is a habit worth not teaching in the example authors copy from.
   root.innerHTML =
     '<h1 style="font-size:15px;margin:0 0 8px"></h1>' +
     '<p id="tasks" style="margin:0 0 8px;color:var(--text-secondary)">Counting ready tasks…</p>' +

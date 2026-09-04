@@ -5,6 +5,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import type { Task } from '$lib/types';
+import { BRIDGE_CLIENT_JS } from './bridge-client';
 import { createBridge, MAX_FRAME_HEIGHT, MIN_FRAME_HEIGHT, type PostTarget } from './bridge';
 import type { PluginBackend } from './plugin-api';
 import type { Manifest, Permission, PluginInfo } from './types';
@@ -204,5 +205,130 @@ describe('createBridge', () => {
 		h.request(10, 'memories.search', { query: 'x' });
 		await flush();
 		expect(h.sent).toHaveLength(0);
+	});
+
+	it('answers an inherited Object property name with unknown_method, not permission_denied', async () => {
+		const h = harness(['memories.read', 'tasks.read']);
+		// A plain lookup on an object literal resolves these through the prototype chain,
+		// which would walk past the guard that is supposed to catch an unknown method.
+		for (const [id, method] of [
+			[20, 'toString'],
+			[21, '__proto__'],
+			[22, 'constructor'],
+			[23, 'hasOwnProperty']
+		] as const) {
+			h.request(id, method, {});
+		}
+		await flush();
+
+		expect(h.sent.map((m) => m.error?.code)).toEqual([
+			'unknown_method',
+			'unknown_method',
+			'unknown_method',
+			'unknown_method'
+		]);
+	});
+});
+
+/**
+ * Runs the real bridge client, the same text Rust serves to the frame, against a fake
+ * window so the two halves of the handshake are tested against each other rather than
+ * against a hand-written imitation of the other side.
+ */
+function runClient() {
+	const posted: Record<string, unknown>[] = [];
+	const listeners: ((event: { data: unknown }) => void)[] = [];
+	const applied: Record<string, string> = {};
+	const win = {
+		addEventListener: (type: string, cb: (event: { data: unknown }) => void) => {
+			if (type === 'message') listeners.push(cb);
+		}
+	} as Record<string, unknown>;
+	const parent = { postMessage: (m: unknown) => void posted.push(m as Record<string, unknown>) };
+	const doc = {
+		documentElement: {
+			style: { setProperty: (name: string, value: string) => void (applied[name] = value) }
+		}
+	};
+
+	new Function('window', 'parent', 'document', BRIDGE_CLIENT_JS)(win, parent, doc);
+
+	return {
+		posted,
+		applied,
+		atlas: win.atlas as {
+			ready: Promise<{ plugin: { id: string }; theme: Record<string, string> }>;
+			request(method: string, params?: unknown): Promise<unknown>;
+			resize(height: number): void;
+		},
+		deliver: (data: unknown) => listeners.forEach((cb) => cb({ data }))
+	};
+}
+
+describe('the bridge client handshake', () => {
+	it('says hello as soon as it runs, before anything else', () => {
+		const client = runClient();
+		expect(client.posted).toEqual([{ type: 'atlas:hello' }]);
+	});
+
+	it('buffers calls made before init and sends them once it arrives', async () => {
+		const client = runClient();
+		void client.atlas.request('tasks.list', {});
+		client.atlas.resize(200);
+		// Nothing but the hello has gone out: the host has not answered yet.
+		expect(client.posted).toHaveLength(1);
+
+		client.deliver({
+			type: 'atlas:init',
+			plugin: { id: 'hello-world', view: 'hello-view', slot: null },
+			api: '1.0.0',
+			theme: { '--accent': '#f00', '--color-scheme': 'dark' }
+		});
+
+		expect(client.posted.slice(1)).toEqual([
+			{ type: 'atlas:request', id: 1, method: 'tasks.list', params: {} },
+			{ type: 'atlas:resize', height: 200 }
+		]);
+		expect(client.applied).toEqual({ '--accent': '#f00', '--color-scheme': 'dark' });
+		await expect(client.atlas.ready).resolves.toMatchObject({ plugin: { id: 'hello-world' } });
+	});
+
+	it('is answered by a host bridge bound to it on hello', async () => {
+		const client = runClient();
+		const h = harness(['tasks.read']);
+		// What `PluginFrame` does when the hello lands: point a bridge at the frame and
+		// send it the theme.
+		const hostBridge = createBridge({
+			plugin: {
+				id: 'hello-world',
+				manifest: {
+					id: 'hello-world',
+					name: 'Hello World',
+					version: '1.0.0',
+					description: 'd',
+					author: 'a',
+					api: '>=1.0 <2',
+					main: 'main.js',
+					permissions: ['tasks.read'],
+					contributes: { sections: [], themes: [], components: [], commands: [], tools: [] }
+				},
+				enabled: true,
+				compatible: true,
+				reason: null,
+				dir: '/plugins/hello-world'
+			},
+			view: 'hello-view',
+			target: { postMessage: (m) => client.deliver(m) },
+			source: 'frame-window',
+			api: h.api,
+			actor: 'plugin/hello-world'
+		});
+
+		const answer = client.atlas.request('tasks.list', {});
+		hostBridge.sendInit({ '--accent': '#0f0' });
+		// The buffered request came out on init; hand it to the host as the frame would.
+		const buffered = client.posted.at(-1);
+		hostBridge.handle({ source: 'frame-window', data: buffered });
+		await expect(answer).resolves.toEqual([{ key: 'ATL-1' }]);
 	});
 });

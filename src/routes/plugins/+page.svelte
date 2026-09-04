@@ -22,6 +22,8 @@
 
 	/** `https://github.com/<owner>/<repo>` with an optional `/tree/<ref>`. */
 	const GITHUB_URL = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+(\/tree\/[\w./-]+)?\/?$/;
+	/** A path segment of nothing but dots is traversal, not an owner, a repo or a ref. */
+	const DOT_SEGMENT = /(^|\/)\.{1,2}(\/|$)/;
 
 	let busyId = $state<string | null>(null);
 	let installing = $state(false);
@@ -31,7 +33,9 @@
 
 	const enabledCount = $derived(plugins.items.filter((p) => p.enabled).length);
 	const summary = $derived(`${plugins.items.length} installed, ${enabledCount} enabled`);
-	const githubValid = $derived(GITHUB_URL.test(githubUrl.trim()));
+	const githubValid = $derived(
+		GITHUB_URL.test(githubUrl.trim()) && !DOT_SEGMENT.test(githubUrl.trim())
+	);
 
 	const columns: TableColumn<PluginInfo>[] = [
 		{ key: 'name', label: 'Name', width: '200px' },
@@ -158,9 +162,9 @@
 							{/if}
 						</span>
 					{:else if column.key === 'version'}
-						{plugin.manifest?.version ?? '—'}
+						{plugin.manifest?.version ?? '-'}
 					{:else if column.key === 'author'}
-						{plugin.manifest?.author ?? '—'}
+						{plugin.manifest?.author ?? '-'}
 					{:else if column.key === 'permissions'}
 						<span class="chips">
 							{#each plugin.manifest?.permissions ?? [] as permission (permission)}
@@ -183,6 +187,7 @@
 						<Button
 							variant="ghost"
 							size="sm"
+							disabled={busyId !== null}
 							data-testid={`plugin-uninstall-${plugin.id}`}
 							onclick={() => (removing = plugin)}
 						>

@@ -26,11 +26,25 @@ pub const SCHEME: &str = "atlas-plugin";
 /// asserts the two are byte-identical.
 pub const BRIDGE_CLIENT_JS: &str = include_str!("bridge_client.js");
 
+/// Escapes a value going into a double-quoted HTML attribute. `Manifest::validate` already
+/// refuses an absolute or `..`-bearing `main`, but a quote or an angle bracket is a legal
+/// filename character on macOS and Linux and survives a repository tarball.
+fn escape_attribute(value: &str) -> String {
+    value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
 /// The generated frame document, `<id>/__frame`. `main` is the manifest's entry point,
 /// resolved relative to the frame's own URL, so both scripts land back on this scheme.
+///
+/// The canvas is painted rather than left transparent: WKWebView draws an opaque white
+/// behind an iframe whatever the document says, so a light-on-dark plugin was unreadable
+/// under a dark app. `--bg-base`, `--text-primary` and `--color-scheme` arrive with the
+/// theme the host sends, and each falls back to something harmless for the moment before
+/// that lands.
 fn frame_html(main: &str) -> String {
     format!(
-        "<!doctype html><meta charset=\"utf-8\"><style>html,body{{margin:0;background:transparent;color:var(--text-primary);font-family:var(--font-ui)}}</style><div id=\"root\"></div><script type=\"module\" src=\"./__bridge.js\"></script><script type=\"module\" src=\"./{main}\"></script>"
+        "<!doctype html><meta charset=\"utf-8\"><style>html{{margin:0;background:var(--bg-base, transparent);color:var(--text-primary, inherit);color-scheme:var(--color-scheme, normal);font-family:var(--font-ui, inherit)}}body{{margin:0}}</style><div id=\"root\"></div><script type=\"module\" src=\"./__bridge.js\"></script><script type=\"module\" src=\"./{}\"></script>",
+        escape_attribute(main)
     )
 }
 
@@ -125,7 +139,14 @@ fn resolve_within(dir: &Path, rel: &str) -> Result<PathBuf, (u16, String)> {
     let target = dir.join(rel);
     // `canonicalize` resolves every symlink on the way, so a link inside the folder that
     // points outside it lands outside `root` here and is refused.
-    let root = dir.canonicalize().map_err(|e| (404, e.to_string()))?;
+    //
+    // The frame reading these answers is untrusted, so what it gets back is the same fixed
+    // sentence either way; the io error, which carries an absolute path off the user's
+    // machine, goes to the log instead.
+    let root = dir.canonicalize().map_err(|e| {
+        log::warn!("could not resolve the plugin folder {}: {e}", dir.display());
+        (404, format!("'{rel}' was not found."))
+    })?;
     let resolved = target.canonicalize().map_err(|_| (404, format!("'{rel}' was not found.")))?;
     if !resolved.starts_with(&root) {
         return Err((403, format!("'{rel}' leaves the plugin's folder.")));
@@ -159,7 +180,10 @@ pub fn serve(app_data: &Path, uri: &str) -> Served {
     match resolve_within(&info.dir, &rest) {
         Ok(path) => match std::fs::read(&path) {
             Ok(body) => Served { status: 200, content_type: content_type_for(&rest), body },
-            Err(e) => Served::error(404, e.to_string()),
+            Err(e) => {
+                log::warn!("could not read {}: {e}", path.display());
+                Served::error(404, format!("'{rest}' could not be read."))
+            }
         },
         Err((status, message)) => Served::error(status, message),
     }
@@ -275,6 +299,24 @@ mod tests {
         assert!(html.contains(r#"<script type="module" src="./__bridge.js"></script>"#), "{html}");
         assert!(html.contains(r#"<script type="module" src="./main.js"></script>"#), "{html}");
         assert!(html.contains(r#"<div id="root"></div>"#), "{html}");
+    }
+
+    #[test]
+    fn the_frame_document_paints_its_own_canvas_from_the_theme() {
+        // WKWebView paints an opaque white behind an iframe, so the document has to set a
+        // background of its own or a themed foreground colour is unreadable on it.
+        let html = frame_html("main.js");
+        assert!(html.contains("background:var(--bg-base, transparent)"), "{html}");
+        assert!(html.contains("color:var(--text-primary, inherit)"), "{html}");
+        assert!(html.contains("color-scheme:var(--color-scheme, normal)"), "{html}");
+        assert!(html.contains("body{margin:0}"), "{html}");
+    }
+
+    #[test]
+    fn the_frame_document_escapes_the_manifest_main() {
+        let html = frame_html(r#"a"></script><script>alert(1)</script>x.js"#);
+        assert!(!html.contains("alert(1)</script>"), "{html}");
+        assert!(html.contains("&quot;&gt;&lt;/script&gt;"), "{html}");
     }
 
     #[test]

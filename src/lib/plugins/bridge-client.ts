@@ -18,6 +18,8 @@ export const BRIDGE_CLIENT_JS = `// The script every plugin frame loads before i
   var nextId = 0;
   var themeHandlers = [];
   var commandHandlers = [];
+  var initialized = false;
+  var outbox = [];
   var resolveReady;
   var ready = new Promise(function (resolve) {
     resolveReady = resolve;
@@ -37,8 +39,16 @@ export const BRIDGE_CLIENT_JS = `// The script every plugin frame loads before i
 
   // The frame is sandboxed into an opaque origin, so its own origin can never be named
   // as a target; the host checks the source window instead of the origin string.
-  function post(message) {
+  function send(message) {
     parent.postMessage(message, '*');
+  }
+
+  // Nothing but the hello goes out before the host has answered it. The frame runs long
+  // before the host's iframe load event would fire, so a call made from the top of the
+  // plugin's own script has nobody listening yet; it waits here instead of vanishing.
+  function post(message) {
+    if (initialized) send(message);
+    else outbox.push(message);
   }
 
   function request(method, params) {
@@ -55,6 +65,12 @@ export const BRIDGE_CLIENT_JS = `// The script every plugin frame loads before i
     if (!data || typeof data !== 'object') return;
     if (data.type === 'atlas:init') {
       applyTheme(data.theme);
+      // A second init means the host rebuilt its side; the queue is already drained.
+      if (!initialized) {
+        initialized = true;
+        for (var k = 0; k < outbox.length; k++) send(outbox[k]);
+        outbox = [];
+      }
       resolveReady({ plugin: data.plugin, api: data.api, theme: data.theme });
       return;
     }
@@ -98,5 +114,11 @@ export const BRIDGE_CLIENT_JS = `// The script every plugin frame loads before i
       return request('ui.notify', { kind: kind, text: text });
     }
   };
+
+  // The frame speaks first. The host cannot use its own load event to start the
+  // conversation: the plugin's script has already run and painted by the time that fires,
+  // so the first frame was drawn before any theme token arrived. Saying hello as soon as
+  // this script runs puts init ahead of the plugin's own code instead.
+  send({ type: 'atlas:hello' });
 })();
 `;

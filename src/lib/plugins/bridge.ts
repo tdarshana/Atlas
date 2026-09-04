@@ -134,10 +134,14 @@ export function createBridge(options: BridgeOptions): Bridge {
 	}
 
 	async function proxy(method: string, raw: unknown): Promise<unknown> {
-		const required = REQUIRED_PERMISSION[method];
-		if (required === undefined) {
+		// `Object.hasOwn`, not a plain lookup: an object literal inherits `toString`,
+		// `constructor`, `__proto__` and the rest, so `REQUIRED_PERMISSION[method]` would
+		// answer with a function for those names and walk straight past the guard that is
+		// meant to send them back as `unknown_method`.
+		if (!Object.hasOwn(REQUIRED_PERMISSION, method)) {
 			throw new BridgeError('unknown_method', `'${method}' is not a method the host offers.`);
 		}
+		const required = REQUIRED_PERMISSION[method];
 		if (required !== null) need(required);
 		const p = params(raw);
 
