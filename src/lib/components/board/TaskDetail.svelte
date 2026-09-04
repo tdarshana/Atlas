@@ -778,4 +778,10 @@
 		width: min(820px, 92vw);
 		height: min(80vh, 920px);
 	}
+
+	/* The dialog hands the panel focus on open; the ring that marks that in the dock is
+	   noise on a floating panel that is already the only thing in reach. */
+	.detail-modal .detail:focus-visible {
+		outline: none;
+	}
 </style>
