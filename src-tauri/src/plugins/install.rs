@@ -9,38 +9,12 @@ use std::time::Duration;
 
 use super::manifest::{compatible, Manifest, ATLAS_API_VERSION};
 use super::registry::{plugins_dir, record_install, PluginInfo, SourceRef};
+use crate::scratch::ScratchDir;
 
 /// A downloaded archive over this size is refused rather than extracted.
 const MAX_ARCHIVE_BYTES: u64 = 20 * 1024 * 1024;
 
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// A directory under the OS temp dir, removed on drop. Hand-rolled rather than pulling
-/// in the `tempfile` crate as a normal dependency just for this one call site: extracting
-/// a downloaded archive is production code, and `tempfile` is a dev-dependency here.
-struct ScratchDir(PathBuf);
-
-impl ScratchDir {
-    fn new(label: &str) -> Result<Self, String> {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| e.to_string())?
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("atlas-plugin-{label}-{}-{unique}", std::process::id()));
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        Ok(Self(dir))
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for ScratchDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 /// Validates the manifest at `src`, copies `src` into `<plugins_dir>/<id>` (replacing an
 /// existing install of the same id) and records `source` in the state file. Shared by
@@ -61,10 +35,12 @@ fn install_prepared(app_data: &Path, src: &Path, source: SourceRef) -> Result<Pl
     copy_dir(src, &dest)?;
 
     let is_compatible = compatible(&manifest.api);
-    // A fresh install holds everything its manifest asks for; the Permissions view is
-    // where the user takes any of it back.
+    // A fresh install is recorded disabled, whatever its compatibility: installing is not
+    // consenting, and nothing of the plugin runs until the user ticks `Enabled`. `granted`
+    // is still seeded from the manifest so the permission chips read as what the plugin
+    // asked for; the Permissions view is where any of it is taken back.
     let granted = manifest.permissions.clone();
-    record_install(app_data, &manifest.id, is_compatible, source, granted.clone())?;
+    record_install(app_data, &manifest.id, false, source, granted.clone())?;
 
     let reason = (!is_compatible).then(|| {
         format!("'{}' needs API {} but this app provides {ATLAS_API_VERSION}.", manifest.id, manifest.api)
@@ -72,7 +48,7 @@ fn install_prepared(app_data: &Path, src: &Path, source: SourceRef) -> Result<Pl
     Ok(PluginInfo {
         id: manifest.id.clone(),
         manifest: Some(manifest),
-        enabled: is_compatible,
+        enabled: false,
         compatible: is_compatible,
         reason,
         dir: dest,
@@ -121,6 +97,14 @@ fn parse_github_url(url: &str) -> Result<(String, String, String), String> {
     let (owner, repo) = owner_repo.split_once('/').ok_or_else(bad)?;
     if owner.is_empty() || repo.is_empty() {
         return Err(bad());
+    }
+    // Each part is interpolated into the codeload path, so anything that could move the
+    // fetch off that path (an extra segment, a query or fragment start, a `..`) is
+    // refused rather than escaped: the URL fetched must be the URL the user typed.
+    for part in [owner, repo, git_ref.as_str()] {
+        if part.contains('/') || part.contains('?') || part.contains('#') || part.contains("..") {
+            return Err(bad());
+        }
     }
     Ok((owner.to_string(), repo.to_string(), git_ref))
 }
@@ -188,14 +172,10 @@ mod tests {
     use std::io::Write;
     use std::net::TcpListener;
 
-    fn scratch_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "atlas-desktop-plugins-install-test-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A scratch app-data directory that removes itself when the test's binding drops, so
+    /// a run leaves nothing behind in the OS temp dir.
+    fn scratch_dir(label: &str) -> ScratchDir {
+        ScratchDir::new(&format!("atlas-desktop-plugins-install-test-{label}", )).unwrap()
     }
 
     fn fixture_dir() -> PathBuf {
@@ -203,26 +183,45 @@ mod tests {
     }
 
     #[test]
-    fn install_from_folder_copies_files_records_state_and_lists_enabled() {
+    fn install_from_folder_copies_files_and_records_state() {
         let app_data = scratch_dir("folder");
         let info = install_from_folder(&app_data, &fixture_dir()).unwrap();
         assert_eq!(info.id, "hello-world");
         assert!(info.compatible);
-        assert!(info.enabled);
         assert!(plugins_dir(&app_data).join("hello-world/atlas-plugin.json").is_file());
         assert!(plugins_dir(&app_data).join("hello-world/main.js").is_file());
 
         let infos = list(&app_data).unwrap();
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].id, "hello-world");
-        assert!(infos[0].enabled);
     }
 
-    /// Copies `fixture_dir()` into a fresh scratch directory and adds a `.git/` folder
-    /// holding a file, so a test can install from a source that actually has one to skip
-    /// rather than only asserting on the fixture, which never carries one.
-    fn source_with_git_dir(label: &str) -> PathBuf {
-        let src = scratch_dir(label).join("src");
+    /// Installing is not consenting: a fresh install is recorded disabled even though it
+    /// is compatible, and `list` reads it back the same way. The chips still show what the
+    /// manifest asked for, so the user can read them before ticking `Enabled`.
+    #[test]
+    fn install_from_folder_lands_disabled_with_the_manifest_permissions_granted() {
+        let app_data = scratch_dir("disabled");
+        let info = install_from_folder(&app_data, &fixture_dir()).unwrap();
+        assert!(info.compatible, "the fixture is compatible with this app");
+        assert!(!info.enabled, "a fresh install must not be enabled");
+        assert_eq!(
+            info.granted,
+            info.manifest.as_ref().unwrap().permissions,
+            "the chips read as the manifest's permissions until the user revokes one"
+        );
+
+        let infos = list(&app_data).unwrap();
+        assert!(!infos[0].enabled, "and the state file says so too");
+        assert_eq!(infos[0].granted, info.granted);
+    }
+
+    /// Copies `fixture_dir()` into `scratch` and adds a `.git/` folder holding a file, so a
+    /// test can install from a source that actually has one to skip rather than only
+    /// asserting on the fixture, which never carries one. `scratch` is borrowed rather than
+    /// created here so the caller keeps the guard alive for the length of the test.
+    fn source_with_git_dir(scratch: &Path) -> PathBuf {
+        let src = scratch.join("src");
         copy_dir(&fixture_dir(), &src).unwrap();
         std::fs::create_dir_all(src.join(".git")).unwrap();
         std::fs::write(src.join(".git/config"), "[core]").unwrap();
@@ -232,7 +231,8 @@ mod tests {
     #[test]
     fn install_from_folder_skips_a_git_directory_in_the_source() {
         let app_data = scratch_dir("skip-git");
-        let src = source_with_git_dir("skip-git-src");
+        let src_scratch = scratch_dir("skip-git-src");
+        let src = source_with_git_dir(&src_scratch);
 
         install_from_folder(&app_data, &src).unwrap();
         assert!(plugins_dir(&app_data).join("hello-world/main.js").is_file());
@@ -305,7 +305,7 @@ mod tests {
 
         let info = install_from_archive_url(&app_data, &url, "https://github.com/acme/hello-world").unwrap();
         assert_eq!(info.id, "hello-world");
-        assert!(info.enabled);
+        assert!(!info.enabled, "a GitHub install lands disabled like any other");
         assert!(plugins_dir(&app_data).join("hello-world/atlas-plugin.json").is_file());
         assert!(plugins_dir(&app_data).join("hello-world/main.js").is_file());
         // No leftover top-level directory name inside the installed plugin's own folder.
@@ -400,5 +400,21 @@ mod tests {
     #[test]
     fn parse_github_url_rejects_a_non_github_url() {
         assert!(parse_github_url("https://example.com/acme/hello-world").is_err());
+    }
+
+    /// Every part is interpolated into the codeload path, so a part that could move the
+    /// fetch somewhere else is refused rather than escaped. `a/b/c` used to yield
+    /// `repo = "b/c"`, and a `?` or `#` in a ref used to rewrite the query.
+    #[test]
+    fn parse_github_url_rejects_a_part_that_would_rewrite_the_codeload_path() {
+        for bad in [
+            "https://github.com/acme/hello/world",
+            "https://github.com/acme/hello-world/tree/v2?x=1",
+            "https://github.com/acme/hello-world/tree/v2#frag",
+            "https://github.com/acme/hello-world/tree/../../etc",
+            "https://github.com/acme/hello-world/tree/a/b",
+        ] {
+            assert!(parse_github_url(bad).is_err(), "accepted '{bad}'");
+        }
     }
 }

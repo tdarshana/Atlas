@@ -10,6 +10,7 @@ use tauri_plugin_positioner::{Position, WindowExt};
 mod commands;
 mod notify_poller;
 mod plugins;
+mod scratch;
 
 use commands::platform::{
     about_info, app_exit, app_relaunch, autostart_get, autostart_set, clipboard_write,

@@ -195,8 +195,23 @@ impl Manifest {
     /// relative path with no `..` segment that exists inside `plugin_dir`, and that
     /// every contribution has the permission it needs.
     pub fn validate(&self, plugin_dir: &Path) -> Result<(), String> {
+        // The three MCP-name rules first, with the daemon's own wording: `atlas-core`'s
+        // `validate_plugin_id` and `validate_plugin_tool_decls` refuse these at tool
+        // registration, so without them here a plugin installs cleanly and then takes a
+        // 400 the user cannot connect to anything they typed.
+        if self.id.contains("--") {
+            return Err(format!("plugin id {} cannot contain \"--\" because it would be ambiguous as an MCP tool name", self.id));
+        }
+        if self.id.ends_with('-') {
+            return Err(format!("plugin id {} cannot end with \"-\" because it would be ambiguous as an MCP tool name", self.id));
+        }
         if !valid_id(&self.id) {
             return Err(format!("'{}' is not a valid plugin id.", self.id));
+        }
+        for tool in &self.contributes.tools {
+            if tool.name.contains("__") {
+                return Err(format!("plugin tool name {} cannot contain \"__\" because it would be ambiguous as an MCP tool name", tool.name));
+            }
         }
 
         let main_path = Path::new(&self.main);
@@ -247,6 +262,34 @@ mod tests {
         let manifest = Manifest::parse(&json).unwrap();
         let err = manifest.validate(&fixture_dir()).unwrap_err();
         assert_eq!(err, "'Hello_World' is not a valid plugin id.");
+    }
+
+    /// The three shapes the daemon refuses at tool registration, each with the daemon's
+    /// own message. Without these the plugin installs and then takes a 400 nobody asked
+    /// for; the messages match `atlas_core::settings` word for word on purpose.
+    #[test]
+    fn rejects_an_id_with_a_double_dash() {
+        let json = HELLO_WORLD.replace("\"hello-world\"", "\"hello--world\"");
+        let manifest = Manifest::parse(&json).unwrap();
+        let err = manifest.validate(&fixture_dir()).unwrap_err();
+        assert_eq!(err, "plugin id hello--world cannot contain \"--\" because it would be ambiguous as an MCP tool name");
+    }
+
+    #[test]
+    fn rejects_an_id_ending_in_a_dash() {
+        let json = HELLO_WORLD.replace("\"hello-world\"", "\"hello-\"");
+        let manifest = Manifest::parse(&json).unwrap();
+        let err = manifest.validate(&fixture_dir()).unwrap_err();
+        assert_eq!(err, "plugin id hello- cannot end with \"-\" because it would be ambiguous as an MCP tool name");
+    }
+
+    #[test]
+    fn rejects_a_tool_name_with_a_double_underscore() {
+        let json = HELLO_WORLD.replace("\"ready_count\"", "\"ready__count\"");
+        assert_ne!(json, HELLO_WORLD, "the fixture's tool name moved; update this replacement");
+        let manifest = Manifest::parse(&json).unwrap();
+        let err = manifest.validate(&fixture_dir()).unwrap_err();
+        assert_eq!(err, "plugin tool name ready__count cannot contain \"__\" because it would be ambiguous as an MCP tool name");
     }
 
     #[test]

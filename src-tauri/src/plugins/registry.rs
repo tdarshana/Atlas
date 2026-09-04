@@ -68,8 +68,10 @@ fn now_rfc3339() -> Result<String, String> {
 }
 
 /// Adds or replaces the state entry for `id`. Called once a plugin's files are already
-/// on disk, by [`super::install`]. A fresh install is granted everything its manifest
-/// asks for; the Permissions view is where any of it is taken back.
+/// on disk, by [`super::install`], which passes `enabled: false`: nothing of a freshly
+/// installed plugin runs until the user ticks `Enabled`. `granted` is seeded with
+/// everything the manifest asks for so the permission chips read correctly before that
+/// toggle; the Permissions view is where any of it is taken back.
 pub(super) fn record_install(
     app_data: &Path,
     id: &str,
@@ -252,15 +254,12 @@ pub fn uninstall(app_data: &Path, id: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scratch::ScratchDir;
 
-    fn scratch_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "atlas-desktop-plugins-registry-test-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A scratch app-data directory that removes itself when the test's binding drops, so
+    /// a run leaves nothing behind in the OS temp dir.
+    fn scratch_dir(label: &str) -> ScratchDir {
+        ScratchDir::new(&format!("atlas-desktop-plugins-registry-test-{label}", )).unwrap()
     }
 
     fn write_manifest(plugin_dir: &Path, json: &str) {

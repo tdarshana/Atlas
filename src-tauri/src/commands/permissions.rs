@@ -21,6 +21,10 @@ pub const AUTOMATION_FINDER: &str = "automation-finder";
 pub const ACCESSIBILITY: &str = "accessibility";
 pub const FILES: &str = "files";
 
+/// How many project roots `permissions_status` will probe in one call. Well above any real
+/// connected-project count, and low enough that the command is not a bulk path scanner.
+const MAX_PROBED_ROOTS: usize = 64;
+
 /// What one permission looks like right now. `granted` is one of `granted`, `denied`,
 /// `not_determined`, `unknown` or `not_applicable`; `detail` carries the reason whenever
 /// the status alone would not explain itself (a failing path, an unmapped OS code).
@@ -267,6 +271,19 @@ fn accessibility_status(_ask: bool) -> PermissionStatus {
     PermissionStatus::new(ACCESSIBILITY, "not_applicable", None)
 }
 
+/// What `permissions_status` will accept as `roots`: absolute paths only, at most
+/// [`MAX_PROBED_ROOTS`] of them. Split out from the command so it can be tested without a
+/// mock app handle.
+fn check_roots(roots: &[String]) -> Result<(), String> {
+    if roots.len() > MAX_PROBED_ROOTS {
+        return Err(format!("permissions_status probes at most {MAX_PROBED_ROOTS} roots."));
+    }
+    if let Some(relative) = roots.iter().find(|r| !Path::new(r).is_absolute()) {
+        return Err(format!("'{relative}' is not an absolute path."));
+    }
+    Ok(())
+}
+
 fn app_data_dir<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
     app.path().app_data_dir().map_err(|e| e.to_string())
 }
@@ -274,11 +291,18 @@ fn app_data_dir<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String
 /// Every permission row, in the order the view draws them. `roots` are the connected
 /// project roots the app already holds; the files row probes those and the app data
 /// directory rather than guessing which folders matter.
+///
+/// The roots arrive from the webview rather than being read back from the daemon here,
+/// which keeps the command a pure probe with no HTTP hop of its own. What it will probe is
+/// bounded instead: absolute paths only, and no more than [`MAX_PROBED_ROOTS`] of them, so
+/// the command cannot be driven as a general relative-path prober. Only app code can call
+/// it at all; a plugin frame has no IPC access.
 #[tauri::command]
 pub async fn permissions_status<R: Runtime>(
     app: tauri::AppHandle<R>,
     roots: Vec<String>,
 ) -> Result<Vec<PermissionStatus>, String> {
+    check_roots(&roots)?;
     let app_data = app_data_dir(&app)?;
     let notifications = notifications_status(&app);
     // The filesystem probes and the Apple Event round trip both block; the notification
@@ -327,15 +351,12 @@ pub async fn permission_request<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scratch::ScratchDir;
 
-    fn scratch_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "atlas-desktop-permissions-test-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A scratch app-data directory that removes itself when the test's binding drops, so
+    /// a run leaves nothing behind in the OS temp dir.
+    fn scratch_dir(label: &str) -> ScratchDir {
+        ScratchDir::new(&format!("atlas-desktop-permissions-test-{label}", )).unwrap()
     }
 
     #[test]
@@ -388,5 +409,19 @@ mod tests {
         let status = files_status(&app_data, &[file.to_string_lossy().into_owned()]);
         assert_eq!(status.granted, "denied");
         assert!(status.detail.unwrap().contains("not-a-folder"));
+    }
+
+    #[test]
+    fn check_roots_refuses_a_relative_path_and_an_over_long_list() {
+        assert!(check_roots(&["/tmp".to_string()]).is_ok());
+        assert!(check_roots(&[]).is_ok());
+
+        let relative = check_roots(&["../../etc".to_string()]).unwrap_err();
+        assert!(relative.contains("is not an absolute path"), "{relative}");
+
+        let many: Vec<String> = (0..=MAX_PROBED_ROOTS).map(|i| format!("/tmp/root-{i}")).collect();
+        let over = check_roots(&many).unwrap_err();
+        assert!(over.contains("at most"), "{over}");
+        assert!(check_roots(&many[..MAX_PROBED_ROOTS]).is_ok(), "exactly the cap is fine");
     }
 }
