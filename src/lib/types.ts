@@ -358,6 +358,8 @@ export const UI_FONT_UI_KEY = 'ui.font_ui';
 export const UI_FONT_MONO_KEY = 'ui.font_mono';
 /** The UI size scale's base step: 11, 12 or 13. */
 export const UI_FONT_SIZE_KEY = 'ui.font_size';
+/** The whole app's zoom level, an integer percent: 80, 90, 100, 110, 125 or 150. */
+export const UI_SCALE_KEY = 'ui.scale';
 
 /**
  * `{ "name", "base": "dark"|"light", "tokens": { "--token": "value" } }`. Overrides

@@ -22,6 +22,7 @@ pub const SETTING_KEYS: &[&str] = &[
     "ui.font_ui",
     "ui.font_mono",
     "ui.font_size",
+    "ui.scale",
     "ui.autostart",
     "ui.global_shortcut",
     "ui.notify.review_pending",
@@ -341,6 +342,11 @@ fn check_type(key: &str, value: &Value) -> Result<()> {
             Some(11) | Some(12) | Some(13) => {}
             _ => return wrong("11, 12 or 13"),
         },
+        // The whole app's zoom level as an integer percent; 100 is the default.
+        "ui.scale" => match value.as_u64() {
+            Some(80) | Some(90) | Some(100) | Some(110) | Some(125) | Some(150) => {}
+            _ => return wrong("80, 90, 100, 110, 125 or 150"),
+        },
         // Mirrors of desktop-only Tauri plugin state (autostart, the notification
         // toggles), kept here so a second client opens on the same settings.
         "ui.autostart" | "ui.notify.review_pending" | "ui.notify.workflow_runs" | "ui.notify.daemon_errors" => {
@@ -584,6 +590,8 @@ mod tests {
             ("ui.font_mono", Value::String("comic-sans".into())),
             ("ui.font_size", Value::from(14)),
             ("ui.font_size", Value::String("12".into())),
+            ("ui.scale", Value::from(101)),
+            ("ui.scale", Value::String("125".into())),
             ("mcp.disabled_tools", Value::String("memory_review".into())),
             ("mcp.disabled_tools", serde_json::json!(["memory_review", "no_such_tool"])),
             ("mcp.disabled_tools", serde_json::json!([1])),
@@ -638,6 +646,7 @@ mod tests {
             ("ui.font_ui".to_string(), Value::String("inter".into())),
             ("ui.font_mono".to_string(), Value::String("system-mono".into())),
             ("ui.font_size".to_string(), Value::from(13)),
+            ("ui.scale".to_string(), Value::from(125)),
             ("mcp.disabled_tools".to_string(), serde_json::json!(["project_connect", "memory_review"])),
             ("ui.autostart".to_string(), Value::from(true)),
             ("ui.notify.review_pending".to_string(), Value::from(true)),
@@ -654,6 +663,7 @@ mod tests {
         assert_eq!(repo.get_raw("ui.font_ui").unwrap(), Some(Value::String("inter".into())));
         assert_eq!(repo.get_raw("ui.font_mono").unwrap(), Some(Value::String("system-mono".into())));
         assert_eq!(repo.get_raw("ui.font_size").unwrap(), Some(Value::from(13)));
+        assert_eq!(repo.get_raw("ui.scale").unwrap(), Some(Value::from(125)));
         assert_eq!(repo.get_raw("ui.global_shortcut").unwrap(), Some(Value::String("CmdOrCtrl+Shift+K".into())));
         assert_eq!(repo.get_raw("mcp.disabled_tools").unwrap(), Some(serde_json::json!(["project_connect", "memory_review"])));
         assert_eq!(repo.get_raw("extraction.enabled").unwrap(), Some(Value::from(true)));

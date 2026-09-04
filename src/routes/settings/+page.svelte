@@ -11,7 +11,7 @@
 	import { errorMessage } from '$lib/errors';
 	import { NOTHING, relativeAge } from '$lib/format';
 	import { copyText, inTauri, setStatusItems, type Theme } from '$lib/shell';
-	import { applyAppearance } from '$lib/shell/appearance';
+	import { applyAppearance, SCALE_OPTIONS, type UiScale } from '$lib/shell/appearance';
 	import {
 		FONT_MONO_OPTIONS,
 		FONT_SIZE_OPTIONS,
@@ -54,7 +54,7 @@
 	} from '$lib/stores/settings.svelte';
 	import { loadMcp, mcp } from '$lib/stores/mcp.svelte';
 	import { status } from '$lib/stores/status.svelte';
-	import { UI_FONT_MONO_KEY, UI_FONT_SIZE_KEY, UI_FONT_UI_KEY, UI_THEME_PACK_KEY } from '$lib/types';
+	import { UI_FONT_MONO_KEY, UI_FONT_SIZE_KEY, UI_FONT_UI_KEY, UI_SCALE_KEY, UI_THEME_PACK_KEY } from '$lib/types';
 	import { THEME_PRESETS, themePreset } from '$lib/shell/theme-presets';
 	import type {
 		AboutInfo,
@@ -547,6 +547,7 @@
 	let draftFontUi = $state<FontUi>('system');
 	let draftFontMono = $state<FontMono>('jetbrains-mono');
 	let draftFontSize = $state<FontSize>(12);
+	let draftScale = $state<UiScale>(100);
 
 	let appearanceSaving = $state(false);
 	let appearanceError = $state<string | null>(null);
@@ -607,6 +608,8 @@
 		draftFontMono = settingString(UI_FONT_MONO_KEY) === 'system-mono' ? 'system-mono' : 'jetbrains-mono';
 		const size = settingNumber(UI_FONT_SIZE_KEY, 12);
 		draftFontSize = size === 11 || size === 13 ? size : 12;
+		const scale = settingNumber(UI_SCALE_KEY, 100);
+		draftScale = scale === 80 || scale === 90 || scale === 110 || scale === 125 || scale === 150 ? scale : 100;
 	}
 
 	/** In Tauri, the native open dialog scoped to the same Downloads/Documents/Desktop
@@ -661,11 +664,12 @@
 				[UI_THEME_PACK_KEY]: draftPack ? JSON.stringify(draftPack) : null,
 				[UI_FONT_UI_KEY]: draftFontUi,
 				[UI_FONT_MONO_KEY]: draftFontMono,
-				[UI_FONT_SIZE_KEY]: draftFontSize
+				[UI_FONT_SIZE_KEY]: draftFontSize,
+				[UI_SCALE_KEY]: draftScale
 			};
 			await api().setSettings(partial);
 			await loadSettings();
-			applyAppearance(base, draftPack, draftFontUi, draftFontMono, draftFontSize);
+			applyAppearance(base, draftPack, draftFontUi, draftFontMono, draftFontSize, draftScale);
 			push('success', 'Appearance saved');
 		} catch (e) {
 			appearanceError = errorMessage(e);
@@ -904,6 +908,17 @@
 						data-testid="appearance-font-size"
 						onchange={(e) => {
 							draftFontSize = Number(e.currentTarget.value) as FontSize;
+						}}
+					/>
+				</div>
+				<div class="pair">
+					<Select
+						label="UI scale"
+						options={SCALE_OPTIONS}
+						value={String(draftScale)}
+						data-testid="appearance-scale"
+						onchange={(e) => {
+							draftScale = Number(e.currentTarget.value) as UiScale;
 						}}
 					/>
 				</div>

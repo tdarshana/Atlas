@@ -9,10 +9,10 @@
   </head>
   <body data-sveltekit-preload-data="hover">
     <script>
-      // Paint the stored theme, theme pack and fonts before anything renders, so the
-      // window never flashes the wrong ramp, colours or fonts. Dark is the default;
-      // storage can throw when site data is blocked, and any bad value here is simply
-      // skipped rather than failing the boot.
+      // Paint the stored theme, theme pack, fonts and UI scale before anything renders,
+      // so the window never flashes the wrong ramp, colours, fonts or size. Dark is the
+      // default; storage can throw when site data is blocked, and any bad value here is
+      // simply skipped rather than failing the boot.
       try {
         var pack = null;
         try {
@@ -55,6 +55,13 @@
         var fontSize = localStorage.getItem('atlas.font_size');
         if (fontSize === '11' || fontSize === '12' || fontSize === '13') {
           document.documentElement.style.setProperty('--text-sm', fontSize + 'px');
+        }
+        var scale = localStorage.getItem('atlas.scale');
+        if (
+          (scale === '80' || scale === '90' || scale === '100' || scale === '110' || scale === '125' || scale === '150') &&
+          scale !== '100'
+        ) {
+          document.documentElement.style.zoom = String(Number(scale) / 100);
         }
       } catch (e) {
         document.documentElement.dataset.theme = 'dark';
