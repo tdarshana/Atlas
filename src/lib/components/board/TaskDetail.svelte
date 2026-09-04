@@ -275,16 +275,25 @@
 	}
 
 	let modal = $state<HTMLDialogElement>();
+	/** True while the dialog is being torn down by a mode switch, so its `close` event
+	    is not read as the user dismissing the task: the task stays selected and docks. */
+	let switching = false;
 
 	// The modal opens as soon as it is in the document and closes with the mode switch.
 	$effect(() => {
 		const el = modal;
 		if (!el) return;
+		switching = false;
 		if (!el.open) el.showModal();
 		return () => {
+			switching = true;
 			if (el.open) el.close();
 		};
 	});
+
+	function onModalClose() {
+		if (!switching) onclose();
+	}
 </script>
 
 <svelte:window onkeydown={onWindowKey} />
@@ -520,7 +529,7 @@
 		bind:this={modal}
 		class="detail-modal"
 		data-testid="task-detail-modal"
-		onclose={onclose}
+		onclose={onModalClose}
 		onclick={(e) => {
 			if (e.target === modal) onclose();
 		}}
