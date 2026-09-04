@@ -56,7 +56,7 @@ Scope. The request sets the deliverable. Do not fix nearby code, do not extend b
 
 Edits. Prefer surgical edits to whole-file rewrites. Rewriting a file costs tokens and buys nothing when a targeted edit gives the same result. Match the surrounding style.
 
-Verification before claims. Run the quality gates above and quote the actual numbers. Never write "should work". If something could not be verified, say so first. Do not point the Playwright MCP at the Tauri window. Check web pieces against `bun run dev` where that helps, and ask the user to check the packaged app by hand.
+Verification before claims. Run the quality gates above and quote the actual numbers. Never write "should work". If something could not be verified, say so first. Do not point the Playwright MCP at the Tauri window. To inspect the real app, run `bun run tauri dev` and connect the Tauri MCP server (`driver_session start`, port 9223): debug builds carry `tauri-plugin-mcp-bridge` on loopback, which gives screenshots, accessibility snapshots, IPC command calls and the webview console. Release builds have no bridge, so ask the user to check the packaged app by hand.
 
 Writing. Plain sentences, sentence case, no em dashes. When a literal phrase is available, use it. Lists are for parallel items. Headings are for documents over about 500 words. Anything the system or the user produced, such as a path, a key, a host or a count, goes in inline code or a code block. Mark quoted wording as a quotation.
 
