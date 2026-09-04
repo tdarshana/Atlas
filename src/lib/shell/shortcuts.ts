@@ -1,4 +1,5 @@
-// Window-level shortcuts. Mod is ⌘ on mac and Ctrl elsewhere, matching what the rail
+// Window-level shortcuts. Mod+1..9 and Mod+0 walk the rail. Mod is ⌘ on mac and Ctrl
+// elsewhere, matching what the rail
 // prints. Typing in a field must not navigate, so every combo but Mod+K is ignored while
 // the focus is in an editable control; Mod+K reaches the palette from anywhere.
 
@@ -52,7 +53,8 @@ export function handleKeydown(e: KeyboardEvent): void {
 		return;
 	}
 
-	const n = Number(e.key);
+	// `Mod+0` is the tenth rail item: one key cannot spell 10, and 0 is the key next to 9.
+	const n = e.key === '0' ? 10 : Number(e.key);
 	if (Number.isInteger(n) && n >= 1 && n <= MAIN_VIEWS.length) {
 		e.preventDefault();
 		void goto(MAIN_VIEWS[n - 1].href);

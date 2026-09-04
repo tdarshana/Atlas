@@ -14,6 +14,7 @@
 	import Review from './sidepanels/Review.svelte';
 	import Mcp from './sidepanels/Mcp.svelte';
 	import Permissions from './sidepanels/Permissions.svelte';
+	import Skills from './sidepanels/Skills.svelte';
 	import Plugins from './sidepanels/Plugins.svelte';
 	import Settings from './sidepanels/Settings.svelte';
 
@@ -58,6 +59,8 @@
 			<Mcp />
 		{:else if shell.view === 'permissions'}
 			<Permissions />
+		{:else if shell.view === 'skills'}
+			<Skills />
 		{:else if shell.view === 'plugins'}
 			<Plugins />
 		{:else if shell.view === 'settings'}

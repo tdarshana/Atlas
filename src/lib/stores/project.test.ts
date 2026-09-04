@@ -64,6 +64,7 @@ describe('project tabs', () => {
 		expect(tabForPath('/projects/x/log')).toBe('log');
 		expect(tabForPath('/projects/x')).toBe('profile');
 		expect(tabForPath('/projects/x/board')).toBe('board');
+		expect(tabForPath('/projects/x/skills')).toBe('skills');
 		expect(tabForPath('/projects/x/settings')).toBe('settings');
 	});
 
@@ -76,13 +77,14 @@ describe('project tabs', () => {
 		expect(idForPath('/memories')).toBe('');
 	});
 
-	it('gives a project all eleven tabs, in the frame order', () => {
+	it('gives a project all twelve tabs, in the frame order', () => {
 		const tabs = tabsFor('x');
 		expect(tabs.map((t) => t.id)).toEqual([
 			'profile',
 			'board',
 			'memories',
 			'practices',
+			'skills',
 			'agents',
 			'workflows',
 			'frameworks',

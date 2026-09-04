@@ -24,6 +24,7 @@ import type {
 	NewAgent,
 	NewDoc,
 	NewMemory,
+	NewSkill,
 	NewTask,
 	NewWorkflow,
 	Project,
@@ -36,6 +37,9 @@ import type {
 	RecallQuery,
 	SearchResult,
 	Settings,
+	Skill,
+	SkillList,
+	SkillPatch,
 	Stage,
 	StageCount,
 	StageList,
@@ -364,6 +368,50 @@ export class AtlasApi {
 	/** Replaces the project's MCP tool override wholesale; an empty list clears it. */
 	setProjectMcpTools(id: Uuid, disabled: string[]): Promise<Project> {
 		return this.req('PUT', `/api/v1/projects/${encodeURIComponent(id)}/mcp/tools`, { disabled });
+	}
+
+	// ---- skills ----
+
+	/**
+	 * Every skill that applies: the Atlas-native ones plus the `SKILL.md` folders the
+	 * daemon discovers. With `projectId` the project's own roots are searched too and
+	 * each row carries `enabled_here`.
+	 */
+	listSkills(projectId?: Uuid | null): Promise<SkillList> {
+		return this.req('GET', `/api/v1/skills${query({ project_id: projectId })}`);
+	}
+
+	/** One skill with its body and the other files in its folder. */
+	getSkill(id: string, projectId?: Uuid | null): Promise<Skill> {
+		return this.req(
+			'GET',
+			`/api/v1/skills/${encodeURIComponent(id)}${query({ project_id: projectId })}`
+		);
+	}
+
+	/** Creates an Atlas-native skill, global or scoped to one project. */
+	createSkill(input: NewSkill): Promise<Skill> {
+		return this.req('POST', '/api/v1/skills', input);
+	}
+
+	/** Edit in place: rewrites a native skill's body, or the `SKILL.md` on disk. */
+	updateSkillBody(id: string, body: string): Promise<Skill> {
+		return this.req('PUT', `/api/v1/skills/${encodeURIComponent(id)}`, { body });
+	}
+
+	/** Name and description of a native skill. */
+	patchSkill(id: string, patch: SkillPatch): Promise<Skill> {
+		return this.req('PATCH', `/api/v1/skills/${encodeURIComponent(id)}`, patch);
+	}
+
+	/** Native skills only; a discovered one belongs to the folder it came from. */
+	deleteSkill(id: string): Promise<void> {
+		return this.req('DELETE', `/api/v1/skills/${encodeURIComponent(id)}`);
+	}
+
+	/** Replaces the project's disabled skill list wholesale; an empty list clears it. */
+	setProjectSkills(id: Uuid, disabled: string[]): Promise<Project> {
+		return this.req('PUT', `/api/v1/projects/${encodeURIComponent(id)}/skills`, { disabled });
 	}
 
 	// ---- extraction ----

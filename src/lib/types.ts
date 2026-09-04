@@ -839,3 +839,65 @@ export interface GlobalSearchQuery {
 	kinds?: SearchKind[];
 	limit?: number;
 }
+
+// ---- skills ----
+// `GET /api/v1/skills` and friends (crates/atlasd/src/http.rs). A skill is either a
+// discovered `SKILL.md` folder on disk or an Atlas-native row in the daemon's database;
+// both arrive in the same shape, told apart by `source`.
+
+export type SkillSource =
+	| 'native'
+	| 'claude-project'
+	| 'claude-user'
+	| 'codex-project'
+	| 'codex-user'
+	| 'plugin';
+
+export type SkillScope = 'global' | 'project';
+
+export interface SkillSummary {
+	/** `<source>:<path relative to its root>` for a discovered skill, a UUID for a native
+	 * one. Contains `:` and `/`, so it is URL-encoded wherever it goes in a path. */
+	id: string;
+	source: SkillSource;
+	name: string;
+	description: string;
+	scope: SkillScope;
+	project_id: Uuid | null;
+	/** Absolute folder path, for discovered skills only. */
+	path: string | null;
+	/** `<marketplace>/<plugin>` for a plugin skill. */
+	plugin: string | null;
+	/** False for a skill Atlas may read but not write. */
+	editable: boolean;
+	updated_at: string | null;
+	/** Only filled when the list was asked for with a `project_id`. */
+	enabled_here?: boolean;
+}
+
+export interface Skill extends SkillSummary {
+	/** The whole `SKILL.md` text, frontmatter included. */
+	body: string;
+	/** Other files in the skill folder, relative, for display only. */
+	files: string[];
+}
+
+export interface SkillList {
+	skills: SkillSummary[];
+	/** Roots that could not be read, and entries that were skipped. */
+	warnings: string[];
+}
+
+/** `POST /api/v1/skills`. Native skills only; a discovered one comes from disk. */
+export interface NewSkill {
+	project_id?: Uuid | null;
+	name: string;
+	description: string;
+	body: string;
+}
+
+/** `PATCH /api/v1/skills/{id}`, native skills only. */
+export interface SkillPatch {
+	name?: string;
+	description?: string;
+}

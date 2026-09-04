@@ -25,7 +25,7 @@ describe('installShortcuts', () => {
 		teardown = installShortcuts();
 	});
 
-	it('maps Mod+1..9 to the nine main views', () => {
+	it('maps Mod+1..9 to the first nine main views', () => {
 		const hrefs = [
 			'/',
 			'/projects',
@@ -42,6 +42,11 @@ describe('installShortcuts', () => {
 			expect(goto).toHaveBeenLastCalledWith(href);
 		});
 		expect(goto).toHaveBeenCalledTimes(9);
+	});
+
+	it('maps Mod+0 to the tenth main view', () => {
+		press('0');
+		expect(goto).toHaveBeenCalledWith('/skills');
 	});
 
 	it('maps Mod+, to settings', () => {

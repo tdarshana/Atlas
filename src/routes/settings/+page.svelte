@@ -53,6 +53,8 @@
 		settings
 	} from '$lib/stores/settings.svelte';
 	import { loadMcp, mcp } from '$lib/stores/mcp.svelte';
+	import { skillCounts } from '$lib/skills';
+	import { loadSkills, skills } from '$lib/stores/skills.svelte';
 	import { loadProjects, projects } from '$lib/stores/projects.svelte';
 	import { permissionsStatus } from '$lib/permissions/commands';
 	import { summaryText, toRows, type PermissionStatus } from '$lib/permissions/system';
@@ -444,6 +446,16 @@
 			: 'Plugins need the desktop app'
 	);
 
+	/** Counts by source off the same store the `/skills` view and its side panel read. */
+	const skillsSummaryText = $derived(
+		skills.items.length === 0
+			? 'No skills found yet'
+			: skillCounts(skills.items)
+					.bySource.filter((s) => s.count > 0)
+					.map((s) => `${s.count} ${s.label.toLowerCase()}`)
+					.join(' · ')
+	);
+
 	// -- Permissions ----------------------------------------------------------------------
 
 	/** The system permission rows, read once for the card's count. The Permissions view
@@ -757,6 +769,7 @@
 		void (projects.items.length === 0 ? loadProjects() : Promise.resolve()).then(
 			loadPermissionStatuses
 		);
+		if (skills.items.length === 0 && !skills.loading) void loadSkills(null);
 	});
 
 	// The contributed themes follow the plugin list: enabling a plugin from the Plugins
@@ -1084,6 +1097,19 @@
 					access defaults every project inherits, all on their own view.
 				</span>
 				<a href="/permissions" data-testid="permissions-open-link">Open permissions</a>
+			</div>
+		</section>
+
+		<section class="card" id="skills">
+			<div class="card-head"><span class="card-title">Skills</span></div>
+			<div class="card-body">
+				<span class="hint" data-testid="skills-settings-summary">{skillsSummaryText}</span>
+				<span class="hint">
+					The Claude Code and Codex skill folders Atlas found, the plugin skills installed
+					beside them and the skills Atlas holds itself, searchable and editable on their own
+					view. A project turns individual skills off on its own Skills tab.
+				</span>
+				<a href="/skills" data-testid="skills-open-link">Open skills</a>
 			</div>
 		</section>
 

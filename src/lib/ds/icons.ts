@@ -36,6 +36,7 @@ import Folder from '@lucide/svelte/icons/folder';
 import Gauge from '@lucide/svelte/icons/gauge';
 import GitBranch from '@lucide/svelte/icons/git-branch';
 import GitCommitHorizontal from '@lucide/svelte/icons/git-commit-horizontal';
+import GraduationCap from '@lucide/svelte/icons/graduation-cap';
 import History from '@lucide/svelte/icons/history';
 import Activity from '@lucide/svelte/icons/activity';
 import Info from '@lucide/svelte/icons/info';
@@ -78,6 +79,7 @@ export const icons = {
 	bot: Bot,
 	'book-open': BookOpen,
 	'git-branch': GitBranch,
+	'graduation-cap': GraduationCap,
 	history: History,
 	activity: Activity,
 	'list-checks': ListChecks,
