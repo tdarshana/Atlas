@@ -27,6 +27,7 @@
 	<TreeRow icon="cpu" label="Daemon" href="/settings#daemon" onclick={jump('#daemon')} />
 	<TreeRow icon="wand-sparkles" label="Extraction" href="/settings#extraction" onclick={jump('#extraction')} />
 	<TreeRow icon="columns-3" label="Board stages" href="/settings#board-stages" onclick={jump('#board-stages')} />
+	<TreeRow icon="palette" label="Appearance" href="/settings#appearance" onclick={jump('#appearance')} />
 	<TreeRow icon="plug" label="MCP server" href="/settings#mcp" onclick={jump('#mcp')} />
 	<TreeRow icon="keyboard" label="Shortcuts" href="/settings#shortcuts" onclick={jump('#shortcuts')} />
 	<TreeRow icon="bell" label="Notifications" href="/settings#notifications" onclick={jump('#notifications')} />

@@ -127,6 +127,15 @@ const SPACING_CSS: &str = include_str!("../../../src/lib/ds/tokens/spacing.css")
 /// asserted, so a rename there fails loudly instead of this list going stale.
 const RADIUS_TOKEN_NAMES: &[&str] = &["--radius-sm", "--radius-md"];
 
+/// A pack's JSON text is capped so a client cannot write an unbounded blob into the
+/// setting (the token allow list itself is finite, but `name` is a free string).
+/// Matches `MAX_THEME_PACK_BYTES` in `src/lib/shell/theme-pack.ts`.
+const MAX_THEME_PACK_BYTES: usize = 16 * 1024;
+
+/// `name`'s own cap, tighter than the whole-pack one since it is shown in the Theme
+/// select. Matches `MAX_THEME_PACK_NAME_CHARS` in `src/lib/shell/theme-pack.ts`.
+const MAX_THEME_PACK_NAME_CHARS: usize = 64;
+
 /// Strips `/* ... */` comments out of a CSS file so a colon inside a comment (e.g. an
 /// "AA fix: ..." note) is never mistaken for part of a declaration.
 fn strip_css_comments(css: &str) -> String {
@@ -190,7 +199,10 @@ fn is_css_color(value: &str) -> bool {
 }
 
 /// Whether `value` is a plain CSS length (`3px`, `0.5rem`, `0`), the shape the two
-/// radius tokens take.
+/// radius tokens take. Matches `isCssLength`'s `/^\d+(\.\d+)?(px|rem|em|%)$/` in
+/// `src/lib/shell/theme-pack.ts`: a digit must lead, and a `.` must be followed by at
+/// least one digit, so `.px` and `3.` are rejected along with everything else that
+/// is not a plain number.
 fn is_css_length(value: &str) -> bool {
     let v = value.trim();
     if v == "0" {
@@ -198,7 +210,13 @@ fn is_css_length(value: &str) -> bool {
     }
     for unit in ["px", "rem", "em", "%"] {
         if let Some(num) = v.strip_suffix(unit) {
-            if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit() || c == '.') && num.matches('.').count() <= 1 {
+            let (int_part, frac_part) = match num.split_once('.') {
+                Some((i, f)) => (i, Some(f)),
+                None => (num, None),
+            };
+            let int_ok = !int_part.is_empty() && int_part.chars().all(|c| c.is_ascii_digit());
+            let frac_ok = frac_part.is_none_or(|f| !f.is_empty() && f.chars().all(|c| c.is_ascii_digit()));
+            if int_ok && frac_ok {
                 return true;
             }
         }
@@ -211,11 +229,18 @@ fn is_css_length(value: &str) -> bool {
 /// stored: a pack that failed this can never reach `documentElement.style`.
 fn validate_theme_pack(s: &str) -> Result<()> {
     let bad = |msg: String| AtlasError::Invalid(msg);
+    if s.len() > MAX_THEME_PACK_BYTES {
+        return Err(bad(format!("ui.theme_pack must be at most {MAX_THEME_PACK_BYTES} bytes of JSON")));
+    }
     let v: Value = serde_json::from_str(s).map_err(|e| bad(format!("ui.theme_pack must be valid JSON: {e}")))?;
     let obj = v.as_object().ok_or_else(|| bad("ui.theme_pack must be a JSON object".into()))?;
     match obj.get("name").and_then(|n| n.as_str()) {
-        Some(n) if !n.trim().is_empty() => {}
-        _ => return Err(bad("ui.theme_pack.name must be a non-empty string".into())),
+        Some(n) if n.trim().is_empty() => return Err(bad("ui.theme_pack.name must be a non-empty string".into())),
+        Some(n) if n.chars().count() > MAX_THEME_PACK_NAME_CHARS => {
+            return Err(bad(format!("ui.theme_pack.name must be at most {MAX_THEME_PACK_NAME_CHARS} characters")));
+        }
+        Some(_) => {}
+        None => return Err(bad("ui.theme_pack.name must be a non-empty string".into())),
     }
     match obj.get("base").and_then(|b| b.as_str()) {
         Some("dark") | Some("light") => {}
@@ -518,6 +543,14 @@ mod tests {
             ("ui.theme_pack", Value::String(r#"{"name":"x","base":"dark"}"#.into())),
             (
                 "ui.theme_pack",
+                Value::String(format!(r#"{{"name":"{}","base":"dark","tokens":{{}}}}"#, "x".repeat(65))),
+            ),
+            (
+                "ui.theme_pack",
+                Value::String(format!(r#"{{"name":"x","base":"dark","tokens":{{}},"padding":"{}"}}"#, "x".repeat(17 * 1024))),
+            ),
+            (
+                "ui.theme_pack",
                 Value::String(r##"{"name":"x","base":"dark","tokens":{"--not-a-token":"#000"}}"##.into()),
             ),
             (
@@ -732,10 +765,11 @@ mod tests {
 
     #[test]
     fn is_css_length_accepts_plain_lengths_and_rejects_everything_else() {
+        // Same literal lists as `isCssLength`'s test in `src/lib/shell/theme-pack.test.ts`.
         for good in ["0", "3px", "0.5rem", "12em", "50%"] {
             assert!(is_css_length(good), "{good} should be a valid length");
         }
-        for bad in ["px", "3", "3xy", "-3px-", ""] {
+        for bad in ["px", "3", "3xy", "-3px-", "", ".px", ".5rem", "3."] {
             assert!(!is_css_length(bad), "{bad} should not be a valid length");
         }
     }
@@ -744,5 +778,26 @@ mod tests {
     fn validate_theme_pack_accepts_a_well_formed_pack() {
         let pack = r##"{"name":"Ocean","base":"light","tokens":{"--accent":"#2563EB","--bg-base":"rgba(0,0,0,0.1)","--radius-md":"6px"}}"##;
         assert!(validate_theme_pack(pack).is_ok());
+    }
+
+    #[test]
+    fn validate_theme_pack_accepts_a_name_at_exactly_64_characters() {
+        let name = "x".repeat(64);
+        let pack = format!(r#"{{"name":"{name}","base":"dark","tokens":{{}}}}"#);
+        assert!(validate_theme_pack(&pack).is_ok());
+    }
+
+    #[test]
+    fn validate_theme_pack_rejects_a_name_over_64_characters() {
+        let name = "x".repeat(65);
+        let pack = format!(r#"{{"name":"{name}","base":"dark","tokens":{{}}}}"#);
+        assert!(validate_theme_pack(&pack).is_err());
+    }
+
+    #[test]
+    fn validate_theme_pack_rejects_json_over_16kb() {
+        let padding = "x".repeat(17 * 1024);
+        let pack = format!(r#"{{"name":"x","base":"dark","tokens":{{}},"padding":"{padding}"}}"#);
+        assert!(validate_theme_pack(&pack).is_err());
     }
 }

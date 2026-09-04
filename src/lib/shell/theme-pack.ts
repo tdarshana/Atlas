@@ -13,6 +13,15 @@ import type { ThemePack } from '$lib/types';
 /** The only two length tokens a pack may override. */
 const RADIUS_TOKEN_NAMES = ['--radius-sm', '--radius-md'] as const;
 
+/** A pack's JSON text is capped so a client cannot write an unbounded blob into the
+ * setting (the token allow list itself is finite, but `name` is a free string).
+ * Matches `MAX_THEME_PACK_BYTES` in `crates/atlas-core/src/settings.rs`. */
+const MAX_THEME_PACK_BYTES = 16 * 1024;
+
+/** `name`'s own cap, tighter than the whole-pack one since it is shown in the Theme
+ * select. Matches `MAX_THEME_PACK_NAME_CHARS` in `crates/atlas-core/src/settings.rs`. */
+const MAX_THEME_PACK_NAME_CHARS = 64;
+
 /** Strips CSS comments so a colon inside one (an "AA fix: ..." note) is never mistaken
  * for part of a declaration. */
 function stripCssComments(css: string): string {
@@ -90,9 +99,15 @@ function isRadiusToken(name: string): boolean {
  */
 export function validateThemePack(json: unknown): ThemePack {
 	if (typeof json !== 'object' || json === null) throw new Error('Theme pack must be a JSON object.');
+	if (new TextEncoder().encode(JSON.stringify(json)).length > MAX_THEME_PACK_BYTES) {
+		throw new Error(`Theme pack must be at most ${MAX_THEME_PACK_BYTES} bytes of JSON.`);
+	}
 	const obj = json as Record<string, unknown>;
 	if (typeof obj.name !== 'string' || obj.name.trim() === '') {
 		throw new Error('Theme pack needs a non-empty "name".');
+	}
+	if (obj.name.length > MAX_THEME_PACK_NAME_CHARS) {
+		throw new Error(`Theme pack "name" must be at most ${MAX_THEME_PACK_NAME_CHARS} characters.`);
 	}
 	if (obj.base !== 'dark' && obj.base !== 'light') {
 		throw new Error('Theme pack "base" must be "dark" or "light".');
@@ -112,10 +127,28 @@ export function validateThemePack(json: unknown): ThemePack {
 	return { name: obj.name, base: obj.base, tokens };
 }
 
+/** `src/app.html`'s boot script paints pack tokens onto `documentElement` before this
+ * module (or the rest of the SvelteKit bundle) ever loads, and leaves the names it set
+ * in this dataset attribute. Reading it back here means a later `clearThemePack` (e.g.
+ * switching back to Dark or Light and saving) removes those tokens too, not just ones
+ * an `applyThemePack` call made during this page's own lifetime. */
+function readBootTokenNames(): string[] {
+	if (typeof document === 'undefined') return [];
+	const raw = document.documentElement.dataset.themePackTokens;
+	if (!raw) return [];
+	try {
+		const parsed = JSON.parse(raw);
+		return Array.isArray(parsed) ? parsed.filter((n): n is string => typeof n === 'string') : [];
+	} catch {
+		return [];
+	}
+}
+
 /** The token names the last `applyThemePack` call set, so a later call (or
  * `clearThemePack`) knows what to remove first: a token a new pack drops must not be
- * left behind from the previous one. */
-let appliedTokenNames: string[] = [];
+ * left behind from the previous one. Starts from whatever the boot script already
+ * painted, not empty, so the first clear in a session still removes it. */
+let appliedTokenNames: string[] = readBootTokenNames();
 
 /** Applies a pack's tokens as inline custom properties on `documentElement`, on top
  * of whatever `data-theme` is already set (the caller sets the base). */

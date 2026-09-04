@@ -46,7 +46,8 @@ describe('isCssLength', () => {
 	});
 
 	it('rejects non-lengths', () => {
-		for (const bad of ['px', '3', '3xy', '-3px-', '']) {
+		// Same literal list as `is_css_length`'s test in `crates/atlas-core/src/settings.rs`.
+		for (const bad of ['px', '3', '3xy', '-3px-', '', '.px', '.5rem', '3.']) {
 			expect(isCssLength(bad), bad).toBe(false);
 		}
 	});
@@ -66,6 +67,21 @@ describe('validateThemePack', () => {
 	it('rejects a missing or blank name', () => {
 		expect(() => validateThemePack({ base: 'dark', tokens: {} })).toThrow(/name/);
 		expect(() => validateThemePack({ name: '  ', base: 'dark', tokens: {} })).toThrow(/name/);
+	});
+
+	it('accepts a name at exactly 64 characters', () => {
+		const name = 'x'.repeat(64);
+		expect(() => validateThemePack({ name, base: 'dark', tokens: {} })).not.toThrow();
+	});
+
+	it('rejects a name over 64 characters', () => {
+		const name = 'x'.repeat(65);
+		expect(() => validateThemePack({ name, base: 'dark', tokens: {} })).toThrow(/64 characters/);
+	});
+
+	it('rejects a pack over 16 KB of JSON', () => {
+		const padding = 'x'.repeat(17 * 1024);
+		expect(() => validateThemePack({ name: 'x', base: 'dark', tokens: {}, padding })).toThrow(/bytes of JSON/);
 	});
 
 	it('rejects a base other than dark or light', () => {

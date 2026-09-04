@@ -45,6 +45,7 @@ import Loader from '@lucide/svelte/icons/loader';
 import Lock from '@lucide/svelte/icons/lock';
 import Maximize from '@lucide/svelte/icons/maximize';
 import Minus from '@lucide/svelte/icons/minus';
+import Palette from '@lucide/svelte/icons/palette';
 import PanelLeft from '@lucide/svelte/icons/panel-left';
 import PanelRight from '@lucide/svelte/icons/panel-right';
 import Pencil from '@lucide/svelte/icons/pencil';
@@ -124,7 +125,8 @@ export const icons = {
 	loader: Loader,
 	keyboard: Keyboard,
 	bell: Bell,
-	lock: Lock
+	lock: Lock,
+	palette: Palette
 } satisfies Record<string, LucideIcon>;
 
 export type IconName = keyof typeof icons;

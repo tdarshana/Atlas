@@ -26,11 +26,17 @@
         document.documentElement.dataset.theme = base;
 
         if (pack && pack.tokens && typeof pack.tokens === 'object') {
+          var bootTokenNames = [];
           for (var k in pack.tokens) {
             if (Object.prototype.hasOwnProperty.call(pack.tokens, k) && k.indexOf('--') === 0) {
               document.documentElement.style.setProperty(k, String(pack.tokens[k]));
+              bootTokenNames.push(k);
             }
           }
+          // Left for theme-pack.ts to read back at startup, so a later clear (switching
+          // back to Dark or Light) knows to remove what this script painted before the
+          // bundle, and its own session tracking, ever existed.
+          document.documentElement.dataset.themePackTokens = JSON.stringify(bootTokenNames);
         }
 
         var fontUiStacks = {
