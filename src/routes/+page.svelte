@@ -16,7 +16,6 @@
 	import ErrorState from '$lib/ui/ErrorState.svelte';
 
 	const RECENT = 10;
-	const OPEN_STAGES = ['Backlog', 'In progress', 'Testing'];
 
 	const report = $derived(status.report);
 	const embeddingWord = $derived(report?.embedding.split(':')[0].trim() ?? '');
@@ -34,6 +33,9 @@
 	let counts = $state({ projects: null as number | null, agents: null as number | null });
 	let recent = $state<Memory[]>([]);
 	let openTasks = $state<StageCount[]>([]);
+	/** The board's own stage names, minus the done ones: the card must match the
+	    configured spelling ("In Progress"), not a hard-coded list. */
+	let openStages = $state<string[]>([]);
 	let tasksLoading = $state(true);
 	let tasksError = $state<string | null>(null);
 	let loading = $state(true);
@@ -95,9 +97,12 @@
 	async function loadTasks() {
 		tasksLoading = true;
 		try {
-			openTasks = await api().taskCounts();
+			const [stageList, taskCounts] = await Promise.all([api().boardStages(), api().taskCounts()]);
+			openStages = stageList.stages.filter((s) => !s.done).map((s) => s.name);
+			openTasks = taskCounts;
 			tasksError = null;
 		} catch (e) {
+			openStages = [];
 			openTasks = [];
 			tasksError = errorMessage(e);
 		} finally {
@@ -148,7 +153,7 @@
 		{#if tasksError}
 			<p class="error-line" role="alert">The board could not be read. {tasksError}</p>
 		{:else if !tasksLoading}
-			{#each OPEN_STAGES as stage (stage)}
+			{#each openStages as stage (stage)}
 				<div class="stat-row">
 					<span>{stage}</span>
 					<span class="mono value">{openTaskCount(stage)}</span>
