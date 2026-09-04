@@ -38,6 +38,9 @@ tauri-plugin-notification = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-stronghold = "2"
 tauri-plugin-updater = "2"
+# Registered in debug builds only (see `mcp_bridge_plugin` in lib.rs): the bridge the
+# Tauri MCP server drives a running dev app through, on loopback port 9223.
+tauri-plugin-mcp-bridge = "0.13"
 # Formats an update's publish date the same way the updater plugin's own JS command
 # does (`well_known::Rfc3339`), for `update_check`'s reply.
 time = "0.3"

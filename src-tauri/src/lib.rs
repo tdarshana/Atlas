@@ -155,6 +155,10 @@ pub fn run() {
         // `commands::platform`'s vault commands), not registered here: the webview never
         // invokes its own commands, so it needs no managed state or capability entry.
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Debug builds only: the MCP bridge lets the Tauri MCP server inspect and drive
+        // the running app (DOM snapshots, IPC, console logs) from an agent session. It
+        // listens on loopback port 9223 and is compiled out of release builds.
+        .plugin(mcp_bridge_plugin())
         .manage(ShortcutRegistration::default())
         .manage(VaultState::default())
         .manage(UpdateState::default())
@@ -221,4 +225,17 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// The MCP bridge (`tauri-plugin-mcp-bridge`), loopback only. Debug builds carry it so
+/// the Tauri MCP server can inspect and drive a `bun run tauri dev` app; release builds
+/// get an inert placeholder so the builder chain reads the same in both profiles.
+#[cfg(debug_assertions)]
+fn mcp_bridge_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    tauri_plugin_mcp_bridge::Builder::new().bind_address("127.0.0.1").build()
+}
+
+#[cfg(not(debug_assertions))]
+fn mcp_bridge_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    tauri::plugin::Builder::new("mcp-bridge-disabled").build()
 }
