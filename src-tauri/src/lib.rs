@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use atlas_cli::daemon_ctl;
+use atlas_client::daemon_ctl;
 use atlas_core::paths::AtlasPaths;
 use tauri::Manager;
 use tauri_plugin_autostart::MacosLauncher;

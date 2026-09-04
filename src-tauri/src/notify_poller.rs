@@ -19,7 +19,7 @@
 
 use std::time::Duration;
 
-use atlas_cli::daemon_ctl;
+use atlas_client::daemon_ctl;
 use atlas_core::paths::AtlasPaths;
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_notification::NotificationExt;

@@ -581,7 +581,7 @@ name = "atlas-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
+ "atlas-client",
  "atlas-core",
  "atlas-mcp",
  "chrono",
@@ -597,6 +597,22 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "atlas-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "atlas-core",
+ "chrono",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
  "uuid",
 ]
 
@@ -631,7 +647,7 @@ dependencies = [
 name = "atlas-desktop"
 version = "0.1.0"
 dependencies = [
- "atlas-cli",
+ "atlas-client",
  "atlas-core",
  "chrono",
  "log",

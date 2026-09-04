@@ -53,7 +53,7 @@ tokio = { workspace = true }
 chrono = { workspace = true }
 # The desktop app reaches Atlas only through the daemon, and starts it with the
 # same `daemon_ctl` the CLI uses rather than opening the DuckDB file itself.
-atlas-cli = { path = "../crates/atlas-cli" }
+atlas-client = { path = "../crates/atlas-client" }
 atlas-core = { path = "../crates/atlas-core" }
 
 [dev-dependencies]

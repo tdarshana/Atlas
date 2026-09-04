@@ -1,4 +1,4 @@
 pub mod commands;
-pub mod daemon_ctl;
-pub mod remote;
 pub mod tui;
+
+pub use atlas_client::{daemon_ctl, remote};

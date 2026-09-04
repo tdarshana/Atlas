@@ -10,15 +10,14 @@ path = "src/main.rs"
 
 [dependencies]
 atlas-core = { path = "../atlas-core" }
+atlas-client = { path = "../atlas-client" }
 atlas-mcp = { path = "../atlas-mcp" }
 rmcp = { version = "3.2", features = ["server", "transport-io"] }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
-async-trait.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
-reqwest.workspace = true
 chrono.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
