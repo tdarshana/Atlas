@@ -2242,3 +2242,73 @@ async fn mcp_list_and_get_workflow_read_the_workflow_repo() {
     assert_eq!(got["name"], wname, "{got}");
     assert_eq!(got["graph"]["nodes"].as_array().unwrap().len(), 4, "{got}");
 }
+
+/// Phase 14: DuckDB (and, with an embedder loaded, ONNX) work runs on blocking
+/// threads via `LocalBackend::blocking`, so the HTTP server keeps answering while a
+/// large write runs. Fires 20 concurrent `/memories/search` requests alongside a
+/// 200-row `/memories` batch and asserts every `/status` probe taken while the batch
+/// is in flight answers within 500 ms; before this change the batch's DuckDB writes
+/// ran directly on the async runtime's worker threads and could starve `/status`.
+#[tokio::test]
+async fn status_stays_responsive_under_concurrent_load() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+
+    // Seed a few memories so the concurrent searches below have something to score.
+    for i in 0..20 {
+        let r = c.post(format!("{base}/memories"))
+            .json(&serde_json::json!({"scope":"global","kind":"fact","text": format!("seed memory {i} about bun and duckdb")}))
+            .send().await.unwrap();
+        assert_eq!(r.status(), 201);
+    }
+
+    // A large batch of writes, running in the background while the probes below run.
+    let write_base = base.clone();
+    let writer = tokio::spawn(async move {
+        let c = reqwest::Client::new();
+        for i in 0..200 {
+            let r = c.post(format!("{write_base}/memories"))
+                .json(&serde_json::json!({"scope":"global","kind":"fact","text": format!("bulk memory {i} about the atlas daemon and its duckdb file")}))
+                .send().await.unwrap();
+            assert_eq!(r.status(), 201);
+        }
+    });
+
+    // 20 concurrent searches, running alongside the batch above.
+    let mut searchers = Vec::new();
+    for _ in 0..20 {
+        let search_base = base.clone();
+        searchers.push(tokio::spawn(async move {
+            let c = reqwest::Client::new();
+            let r = c.post(format!("{search_base}/memories/search")).json(&serde_json::json!({"query":"bun duckdb"})).send().await.unwrap();
+            assert_eq!(r.status(), 200);
+        }));
+    }
+
+    // Probe /status while the batch and the searches are in flight, and record the
+    // worst latency seen. At least 5 probes run regardless of how fast the batch
+    // finishes, so the assertion below is never skipped by a vacuous loop.
+    let mut worst = Duration::from_millis(0);
+    let mut probes = 0usize;
+    loop {
+        let started = std::time::Instant::now();
+        let r = c.get(format!("{base}/status")).send().await.unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(r.status(), 200);
+        worst = worst.max(elapsed);
+        assert!(elapsed < Duration::from_millis(500), "a /status probe took {elapsed:?} while a 200-row batch and 20 concurrent searches were running");
+        probes += 1;
+        if writer.is_finished() && probes >= 5 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    writer.await.unwrap();
+    for s in searchers {
+        s.await.unwrap();
+    }
+
+    eprintln!("worst /status latency under concurrent load ({probes} probes): {worst:?}");
+}

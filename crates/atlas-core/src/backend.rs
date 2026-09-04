@@ -193,6 +193,87 @@ pub struct LocalBackend {
     pub workflows: Arc<WorkflowRepo>,
 }
 
+/// `ProjectRepo` for `db`, built fresh each call rather than stored: it only borrows
+/// `db`, so building it inside a `blocking` closure (which owns a cloned `Arc<Db>`,
+/// not a borrow of `self`) is cheaper than threading a stored repo through.
+fn projects_repo(db: &Db) -> ProjectRepo<'_> { ProjectRepo::new(db) }
+fn agents_repo(db: &Db) -> AgentRepo<'_> { AgentRepo::new(db) }
+fn docs_repo(db: &Db, kind: DocKind) -> DocRepo<'_> { DocRepo::new(db, kind) }
+fn settings_repo(db: &Db) -> crate::settings::SettingsRepo<'_> { crate::settings::SettingsRepo::new(db) }
+
+/// Refuses an agent the project has not admitted, and says whether a memory it
+/// writes has to wait for review. A project id that no longer resolves is not a
+/// refusal: there is no rule to apply. Takes `db` rather than `&LocalBackend` so it
+/// can run inside a `blocking` closure.
+fn memory_gate(db: &Db, project_id: Option<Uuid>, actor: &str) -> Result<bool> {
+    let Some(pid) = project_id.filter(|_| !crate::projects::actor_is_user(actor)) else { return Ok(false) };
+    let project = projects_repo(db).get(pid)?;
+    crate::projects::check_memory_write(actor, &project)?;
+    Ok(project.agent_access.require_review)
+}
+
+/// Refuses an agent that may not move tasks on this task's board. The task read is
+/// skipped entirely for the user's own hands, which are always exempt.
+fn task_move_gate(db: &Db, tasks: &TaskRepo, id_or_key: &str, actor: &str) -> Result<()> {
+    if crate::projects::actor_is_user(actor) {
+        return Ok(());
+    }
+    let Some(pid) = tasks.get(id_or_key)?.task.project_id else { return Ok(()) };
+    crate::projects::check_task_move(actor, &projects_repo(db).get(pid)?)
+}
+
+/// Refuses to trigger a run for an actor this project's `agent_access` would
+/// refuse a direct `remember` or task-board write from — checked once, here, at
+/// trigger time, against whichever of `memory_writers`/`task_movers` the output
+/// node could actually exercise. Without this, an actor a project has not admitted
+/// to write memories or move tasks directly could obtain the same write by routing
+/// it through a workflow: the run's own writes are stamped `workflow/<name>`, which
+/// is a different identity from the one this checks, and a `memory_writers`/
+/// `task_movers` allowlist naming `workflow` (or the specific workflow) would
+/// otherwise admit it regardless of who asked for the run. The user's own hands
+/// are exempt, the same as every other gate in this file; a global workflow (no
+/// project) is never gated, since there is no project's `agent_access` to check.
+fn workflow_trigger_gate(db: &Db, workflow: &Workflow, actor: &str) -> Result<()> {
+    let Some(pid) = workflow.project_id.filter(|_| !crate::projects::actor_is_user(actor)) else { return Ok(()) };
+    let Some(output) = workflow.graph.nodes.iter().find(|n| n.kind == NodeKind::Output) else { return Ok(()) };
+    let NodeData::Output { propose_memories, file_tasks } = &output.data else { return Ok(()) };
+    let project = projects_repo(db).get(pid)?;
+    if *propose_memories {
+        crate::projects::check_memory_write(actor, &project)?;
+    }
+    if *file_tasks {
+        crate::projects::check_task_move(actor, &project)?;
+    }
+    Ok(())
+}
+
+/// Deleting a project cascades to its tasks, blocker links and events, so it is a
+/// board write and takes the same gate every `TaskRepo` write takes, before the
+/// connection, in the order `CLAUDE.md` requires. `gate` is locked here, inside the
+/// `blocking` closure that calls this, never across an await, so the guard cannot be
+/// held across one. `ProjectRepo::delete` and `MemoryRepo::audit` take the gate
+/// nowhere themselves, so nothing under the hold can ask for it again.
+fn delete_project_gated(gate: &std::sync::Mutex<()>, db: &Db, id: Uuid, actor: &str) -> Result<()> {
+    let _gate = gate.lock().unwrap_or_else(|e| e.into_inner());
+    projects_repo(db).delete(id, actor)
+}
+
+/// Whether `extraction.enabled` is on. Read fresh on every call rather than
+/// cached, since the daemon serves every client and a setting change must take
+/// effect on the next sync or refresh, not after a restart. Shared by `sync`
+/// (whether to install the transcript hooks) and `refresh_project` (whether to
+/// enqueue a project summary).
+fn extraction_enabled(db: &Db) -> Result<bool> {
+    Ok(settings_repo(db).get_raw("extraction.enabled")?.and_then(|v| v.as_bool()) == Some(true))
+}
+
+/// Whether `board.mirror_tasks_md` is on, the same fresh-read, off-by-default
+/// pattern as `extraction_enabled`. `sync` resolves it here rather than trusting
+/// the request: `POST /sync` is unauthenticated.
+fn mirror_tasks_md_enabled(db: &Db) -> Result<bool> {
+    Ok(settings_repo(db).get_raw("board.mirror_tasks_md")?.and_then(|v| v.as_bool()) == Some(true))
+}
+
 impl LocalBackend {
     pub fn open(paths: &AtlasPaths, port: Option<u16>, load_embedder: bool) -> Result<Self> {
         paths.ensure()?;
@@ -223,207 +304,250 @@ impl LocalBackend {
         Ok(Self { jobs: Arc::new(JobRepo::new(db.clone())), queue: Arc::new(JobQueue::new()), memories, db, paths: paths.clone(), port, tasks, workflows })
     }
 
-    fn projects(&self) -> ProjectRepo<'_> { ProjectRepo::new(&self.db) }
-
-    /// Deleting a project cascades to its tasks, blocker links and events, so it is a
-    /// board write and takes the same gate every `TaskRepo` write takes, before the
-    /// connection, in the order `CLAUDE.md` requires. Kept synchronous so the guard
-    /// cannot be held across an await. `ProjectRepo::delete` and `MemoryRepo::audit`
-    /// take the gate nowhere themselves, so nothing under the hold can ask for it again.
-    fn delete_project_gated(&self, id: Uuid, actor: &str) -> Result<()> {
-        let gate = self.memories.gate_handle();
-        let _gate = gate.lock().unwrap_or_else(|e| e.into_inner());
-        self.projects().delete(id, actor)
-    }
-    /// Refuses an agent the project has not admitted, and says whether a memory it
-    /// writes has to wait for review. A project id that no longer resolves is not a
-    /// refusal: there is no rule to apply.
-    fn memory_gate(&self, project_id: Option<Uuid>, actor: &str) -> Result<bool> {
-        let Some(pid) = project_id.filter(|_| !crate::projects::actor_is_user(actor)) else { return Ok(false) };
-        let project = self.projects().get(pid)?;
-        crate::projects::check_memory_write(actor, &project)?;
-        Ok(project.agent_access.require_review)
-    }
-
-    /// Refuses an agent that may not move tasks on this task's board. The task read is
-    /// skipped entirely for the user's own hands, which are always exempt.
-    fn task_move_gate(&self, id_or_key: &str, actor: &str) -> Result<()> {
-        if crate::projects::actor_is_user(actor) {
-            return Ok(());
-        }
-        let Some(pid) = self.tasks.get(id_or_key)?.task.project_id else { return Ok(()) };
-        crate::projects::check_task_move(actor, &self.projects().get(pid)?)
-    }
-
-    /// Refuses to trigger a run for an actor this project's `agent_access` would
-    /// refuse a direct `remember` or task-board write from — checked once, here, at
-    /// trigger time, against whichever of `memory_writers`/`task_movers` the output
-    /// node could actually exercise. Without this, an actor a project has not admitted
-    /// to write memories or move tasks directly could obtain the same write by routing
-    /// it through a workflow: the run's own writes are stamped `workflow/<name>`, which
-    /// is a different identity from the one this checks, and a `memory_writers`/
-    /// `task_movers` allowlist naming `workflow` (or the specific workflow) would
-    /// otherwise admit it regardless of who asked for the run. The user's own hands
-    /// are exempt, the same as every other gate in this file; a global workflow (no
-    /// project) is never gated, since there is no project's `agent_access` to check.
-    fn workflow_trigger_gate(&self, workflow: &Workflow, actor: &str) -> Result<()> {
-        let Some(pid) = workflow.project_id.filter(|_| !crate::projects::actor_is_user(actor)) else { return Ok(()) };
-        let Some(output) = workflow.graph.nodes.iter().find(|n| n.kind == NodeKind::Output) else { return Ok(()) };
-        let NodeData::Output { propose_memories, file_tasks } = &output.data else { return Ok(()) };
-        let project = self.projects().get(pid)?;
-        if *propose_memories {
-            crate::projects::check_memory_write(actor, &project)?;
-        }
-        if *file_tasks {
-            crate::projects::check_task_move(actor, &project)?;
-        }
-        Ok(())
-    }
-
-    fn agents(&self) -> AgentRepo<'_> { AgentRepo::new(&self.db) }
-    fn docs(&self, kind: DocKind) -> DocRepo<'_> { DocRepo::new(&self.db, kind) }
-    fn settings(&self) -> crate::settings::SettingsRepo<'_> { crate::settings::SettingsRepo::new(&self.db) }
-
-    /// Whether `extraction.enabled` is on. Read fresh on every call rather than
-    /// cached, since the daemon serves every client and a setting change must take
-    /// effect on the next sync or refresh, not after a restart. Shared by `sync`
-    /// (whether to install the transcript hooks) and `refresh_project` (whether to
-    /// enqueue a project summary).
-    fn extraction_enabled(&self) -> Result<bool> {
-        Ok(self.settings().get_raw("extraction.enabled")?.and_then(|v| v.as_bool()) == Some(true))
-    }
-
-    /// Whether `board.mirror_tasks_md` is on, the same fresh-read, off-by-default
-    /// pattern as `extraction_enabled`. `sync` resolves it here rather than trusting
-    /// the request: `POST /sync` is unauthenticated.
-    fn mirror_tasks_md_enabled(&self) -> Result<bool> {
-        Ok(self.settings().get_raw("board.mirror_tasks_md")?.and_then(|v| v.as_bool()) == Some(true))
+    /// Runs a synchronous body that touches the Db, the BM25 index, the vectors or
+    /// the embedder on the blocking thread pool, so it never stalls the async
+    /// runtime: every `async fn` on `LocalBackend` that touches those runs its body
+    /// through this, and the worker and scheduler in `atlasd` (which call `jobs`,
+    /// `workflows` and `db` directly rather than through the `Backend` trait) use
+    /// the same helper rather than duplicating it. `f` clones whatever `Arc` state
+    /// it needs out of `self` before it is built, and takes the write gate, when it
+    /// needs one, inside itself — never across an await. A panic on the blocking
+    /// thread (a `tokio::task::JoinError`) becomes a plain `AtlasError::Internal`.
+    pub async fn blocking<T, F>(&self, f: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T> + Send + 'static,
+    {
+        tokio::task::spawn_blocking(f).await.map_err(|e| AtlasError::Internal(format!("blocking task failed: {e}")))?
     }
 }
 
 #[async_trait::async_trait]
 impl Backend for LocalBackend {
     async fn status(&self) -> Result<StatusReport> {
-        let mut s = self.memories.status(self.port)?;
-        s.db_path = self.paths.db_path().display().to_string();
-        Ok(s)
+        let memories = self.memories.clone();
+        let paths = self.paths.clone();
+        let port = self.port;
+        self.blocking(move || {
+            let mut s = memories.status(port)?;
+            s.db_path = paths.db_path().display().to_string();
+            Ok(s)
+        }).await
     }
     /// The project's `agent_access` is enforced here rather than in the MCP router,
     /// because MCP reaches the daemon over HTTP and the shim cannot see the rule. An
     /// actor the project has not admitted is refused, and `require_review` turns an
     /// agent's memory into a pending one.
     async fn remember(&self, mut m: NewMemory, actor: &str) -> Result<Memory> {
-        if self.memory_gate(m.project_id, actor)? {
-            m.status = MemoryStatus::Pending;
-        }
-        self.memories.remember(m, actor)
+        let db = self.db.clone();
+        let memories = self.memories.clone();
+        let actor = actor.to_string();
+        self.blocking(move || {
+            if memory_gate(&db, m.project_id, &actor)? {
+                m.status = MemoryStatus::Pending;
+            }
+            memories.remember(m, &actor)
+        }).await
     }
     async fn recall(&self, q: RecallQuery) -> Result<Vec<RecallHit>> {
         check_scope(q.project_id, q.list_scope)?;
-        self.memories.recall(&q)
+        let memories = self.memories.clone();
+        self.blocking(move || memories.recall(&q)).await
     }
-    async fn forget(&self, id: Uuid, reason: Option<String>, actor: &str) -> Result<Memory> { self.memories.forget(id, reason, actor) }
-    async fn get_memory(&self, id: Uuid) -> Result<Memory> { self.memories.get(id) }
+    async fn forget(&self, id: Uuid, reason: Option<String>, actor: &str) -> Result<Memory> {
+        let memories = self.memories.clone();
+        let actor = actor.to_string();
+        self.blocking(move || memories.forget(id, reason, &actor)).await
+    }
+    async fn get_memory(&self, id: Uuid) -> Result<Memory> {
+        let memories = self.memories.clone();
+        self.blocking(move || memories.get(id)).await
+    }
     async fn list_memories(&self, status: MemoryStatus, project_id: Option<Uuid>, scope: MemoryScopeFilter) -> Result<Vec<Memory>> {
         check_scope(project_id, scope)?;
-        self.memories.list_scoped(status, None, project_id, scope)
+        let memories = self.memories.clone();
+        self.blocking(move || memories.list_scoped(status, None, project_id, scope)).await
     }
     async fn memory_facets(&self, project_id: Option<Uuid>, scope: MemoryScopeFilter) -> Result<MemoryFacets> {
         check_scope(project_id, scope)?;
-        self.memories.facets(project_id, scope)
+        let memories = self.memories.clone();
+        self.blocking(move || memories.facets(project_id, scope)).await
     }
-    async fn set_memory_status(&self, id: Uuid, status: MemoryStatus, actor: &str) -> Result<Memory> { self.memories.set_status(id, status, actor) }
+    async fn set_memory_status(&self, id: Uuid, status: MemoryStatus, actor: &str) -> Result<Memory> {
+        let memories = self.memories.clone();
+        let actor = actor.to_string();
+        self.blocking(move || memories.set_status(id, status, &actor)).await
+    }
 
     /// Detects the project at `root` and records it, building a profile when the
     /// stored one is missing or stale. The upsert runs first, without a profile, so
     /// `needs_refresh` can consult what is already stored before doing the work.
     async fn connect_project(&self, root: PathBuf, actor: &str) -> Result<Project> {
-        let detected = detect_root(&root)?;
-        let repo = self.projects();
-        let project = repo.upsert(&detected, None, actor)?;
-        if repo.needs_refresh(&project) {
-            let profile = build_profile(&detected.root)?;
-            return repo.set_profile(project.id, &profile, actor);
-        }
-        Ok(project)
+        let db = self.db.clone();
+        let actor = actor.to_string();
+        self.blocking(move || {
+            let detected = detect_root(&root)?;
+            let repo = projects_repo(&db);
+            let project = repo.upsert(&detected, None, &actor)?;
+            if repo.needs_refresh(&project) {
+                let profile = build_profile(&detected.root)?;
+                return repo.set_profile(project.id, &profile, &actor);
+            }
+            Ok(project)
+        }).await
     }
 
     async fn project_context(&self, root: PathBuf, actor: &str) -> Result<ProjectContext> {
         let project = self.connect_project(root, actor).await?;
-        let query = match &project.profile {
-            Some(p) => format!("{} {}", p.name, p.frameworks.join(" ")),
-            None => project.name.clone(),
-        };
-        let mut memories = self.memories.recall(&RecallQuery {
-            query, limit: 20, scope: None, list_scope: MemoryScopeFilter::All, project_id: Some(project.id), kinds: vec![], tags: vec![],
-        })?;
-        // Recall is a search, so a project whose memories don't happen to match its own
-        // name would come back empty. Top it up with the newest project-scoped memories
-        // (score 0.0: they were not ranked, they were appended) so context is never bare.
-        let seen: std::collections::HashSet<Uuid> = memories.iter().map(|h| h.memory.id).collect();
-        let recent = self.memories.list(MemoryStatus::Active, Some(MemoryScope::Project), Some(project.id))?;
-        memories.extend(recent.into_iter().filter(|m| !seen.contains(&m.id)).take(10).map(|memory| RecallHit { memory, score: 0.0 }));
-        Ok(ProjectContext {
-            practices: self.docs(DocKind::Practice).list(Some(project.id))?,
-            workflows: self.workflows.list(Some(project.id))?.iter().map(WorkflowSummary::from).collect(),
-            project,
-            memories,
-        })
+        let memories = self.memories.clone();
+        let db = self.db.clone();
+        let workflows = self.workflows.clone();
+        self.blocking(move || {
+            let query = match &project.profile {
+                Some(p) => format!("{} {}", p.name, p.frameworks.join(" ")),
+                None => project.name.clone(),
+            };
+            let mut hits = memories.recall(&RecallQuery {
+                query, limit: 20, scope: None, list_scope: MemoryScopeFilter::All, project_id: Some(project.id), kinds: vec![], tags: vec![],
+            })?;
+            // Recall is a search, so a project whose memories don't happen to match its own
+            // name would come back empty. Top it up with the newest project-scoped memories
+            // (score 0.0: they were not ranked, they were appended) so context is never bare.
+            let seen: std::collections::HashSet<Uuid> = hits.iter().map(|h| h.memory.id).collect();
+            let recent = memories.list(MemoryStatus::Active, Some(MemoryScope::Project), Some(project.id))?;
+            hits.extend(recent.into_iter().filter(|m| !seen.contains(&m.id)).take(10).map(|memory| RecallHit { memory, score: 0.0 }));
+            Ok(ProjectContext {
+                practices: docs_repo(&db, DocKind::Practice).list(Some(project.id))?,
+                workflows: workflows.list(Some(project.id))?.iter().map(WorkflowSummary::from).collect(),
+                project,
+                memories: hits,
+            })
+        }).await
     }
 
-    async fn list_projects(&self) -> Result<Vec<Project>> { self.projects().list() }
-    async fn get_project(&self, id: Uuid) -> Result<Project> { self.projects().get(id) }
+    async fn list_projects(&self) -> Result<Vec<Project>> {
+        let db = self.db.clone();
+        self.blocking(move || projects_repo(&db).list()).await
+    }
+    async fn get_project(&self, id: Uuid) -> Result<Project> {
+        let db = self.db.clone();
+        self.blocking(move || projects_repo(&db).get(id)).await
+    }
     async fn refresh_project(&self, id: Uuid) -> Result<Project> {
-        let project = self.projects().get(id)?;
-        let profile = build_profile(std::path::Path::new(&project.root_path))?;
-        // Gated because the summary job also writes this profile: it reads one, asks the
-        // model, then re-reads and writes under the same gate. Without a gate shared by
-        // both writers the two interleave and one of them loses its half of the profile.
-        // The repository scan above stays outside the gate, and nothing awaits inside it.
-        let updated = {
-            let _gate = self.memories.write_gate();
-            self.projects().set_profile(id, &profile, "refresh")?
-        };
-        // A fresh profile carries no summary until the worker writes one; queue that
-        // only when extraction is on, the same gate `ingest_transcript` checks.
-        if self.extraction_enabled()? {
-            self.jobs.enqueue("project_summary", serde_json::json!({"project_id": updated.id}))?;
+        let db = self.db.clone();
+        let gate = self.memories.gate_handle();
+        let jobs = self.jobs.clone();
+        let (updated, should_enqueue) = self.blocking(move || {
+            let project = projects_repo(&db).get(id)?;
+            let profile = build_profile(std::path::Path::new(&project.root_path))?;
+            // Gated because the summary job also writes this profile: it reads one, asks
+            // the model, then re-reads and writes under the same gate. Without a gate
+            // shared by both writers the two interleave and one of them loses its half of
+            // the profile. The repository scan above stays outside the gate.
+            let updated = {
+                let _gate = gate.lock().unwrap_or_else(|e| e.into_inner());
+                projects_repo(&db).set_profile(id, &profile, "refresh")?
+            };
+            // A fresh profile carries no summary until the worker writes one; queue that
+            // only when extraction is on, the same gate `ingest_transcript` checks.
+            let should_enqueue = extraction_enabled(&db)?;
+            if should_enqueue {
+                jobs.enqueue("project_summary", serde_json::json!({"project_id": updated.id}))?;
+            }
+            Ok((updated, should_enqueue))
+        }).await?;
+        if should_enqueue {
             self.queue.notify.notify_one();
         }
         Ok(updated)
     }
-    async fn delete_project(&self, id: Uuid, actor: &str) -> Result<()> { self.delete_project_gated(id, actor) }
+    async fn delete_project(&self, id: Uuid, actor: &str) -> Result<()> {
+        let db = self.db.clone();
+        let gate = self.memories.gate_handle();
+        let actor = actor.to_string();
+        self.blocking(move || delete_project_gated(&gate, &db, id, &actor)).await
+    }
 
     /// Gated: a board key rename rewrites every `tasks.key` on the board, which is a
     /// board write and takes the same mutex in the same order as every other one.
-    /// Kept synchronous so the guard cannot be held across an await.
+    /// The guard is taken inside the closure, never across an await.
     async fn update_project(&self, id: Uuid, patch: ProjectPatch, actor: &str) -> Result<Project> {
+        let db = self.db.clone();
         let gate = self.memories.gate_handle();
-        let _gate = gate.lock().unwrap_or_else(|e| e.into_inner());
-        self.projects().update(id, &patch, actor)
+        let actor = actor.to_string();
+        self.blocking(move || {
+            let _gate = gate.lock().unwrap_or_else(|e| e.into_inner());
+            projects_repo(&db).update(id, &patch, &actor)
+        }).await
     }
     async fn set_agent_access(&self, id: Uuid, access: AgentAccess, actor: &str) -> Result<Project> {
-        self.projects().set_agent_access(id, &access, actor)
+        let db = self.db.clone();
+        let actor = actor.to_string();
+        self.blocking(move || projects_repo(&db).set_agent_access(id, &access, &actor)).await
     }
     async fn set_project_extraction(&self, id: Uuid, over: Option<ProjectExtraction>, actor: &str) -> Result<Project> {
-        self.projects().set_project_extraction(id, over, actor)
+        let db = self.db.clone();
+        let actor = actor.to_string();
+        self.blocking(move || projects_repo(&db).set_project_extraction(id, over, &actor)).await
     }
-    async fn project_log(&self, id: Uuid, f: LogFilter) -> Result<Vec<LogEntry>> { crate::projects::log::project_log(&self.db, id, &f) }
-    async fn project_log_export(&self, id: Uuid) -> Result<String> { crate::projects::log::project_log_export(&self.db, id) }
+    async fn project_log(&self, id: Uuid, f: LogFilter) -> Result<Vec<LogEntry>> {
+        let db = self.db.clone();
+        self.blocking(move || crate::projects::log::project_log(&db, id, &f)).await
+    }
+    async fn project_log_export(&self, id: Uuid) -> Result<String> {
+        let db = self.db.clone();
+        self.blocking(move || crate::projects::log::project_log_export(&db, id)).await
+    }
 
-    async fn list_agents(&self) -> Result<Vec<Agent>> { self.agents().list() }
-    async fn get_agent(&self, name: &str) -> Result<Agent> { self.agents().get(name) }
-    async fn save_agent(&self, a: NewAgent, actor: &str) -> Result<Agent> { self.agents().save(&a, actor) }
-    async fn delete_agent(&self, name: &str, actor: &str) -> Result<()> { self.agents().delete(name, actor) }
+    async fn list_agents(&self) -> Result<Vec<Agent>> {
+        let db = self.db.clone();
+        self.blocking(move || agents_repo(&db).list()).await
+    }
+    async fn get_agent(&self, name: &str) -> Result<Agent> {
+        let db = self.db.clone();
+        let name = name.to_string();
+        self.blocking(move || agents_repo(&db).get(&name)).await
+    }
+    async fn save_agent(&self, a: NewAgent, actor: &str) -> Result<Agent> {
+        let db = self.db.clone();
+        let actor = actor.to_string();
+        self.blocking(move || agents_repo(&db).save(&a, &actor)).await
+    }
+    async fn delete_agent(&self, name: &str, actor: &str) -> Result<()> {
+        let db = self.db.clone();
+        let name = name.to_string();
+        let actor = actor.to_string();
+        self.blocking(move || agents_repo(&db).delete(&name, &actor)).await
+    }
 
-    async fn list_docs(&self, kind: DocKind, project_id: Option<Uuid>) -> Result<Vec<Doc>> { self.docs(kind).list(project_id) }
-    async fn get_doc(&self, kind: DocKind, name: &str) -> Result<Doc> { self.docs(kind).get(name) }
-    async fn save_doc(&self, kind: DocKind, d: NewDoc, actor: &str) -> Result<Doc> { self.docs(kind).save(&d, actor) }
-    async fn delete_doc(&self, kind: DocKind, name: &str, actor: &str) -> Result<()> { self.docs(kind).delete(name, actor) }
+    async fn list_docs(&self, kind: DocKind, project_id: Option<Uuid>) -> Result<Vec<Doc>> {
+        let db = self.db.clone();
+        self.blocking(move || docs_repo(&db, kind).list(project_id)).await
+    }
+    async fn get_doc(&self, kind: DocKind, name: &str) -> Result<Doc> {
+        let db = self.db.clone();
+        let name = name.to_string();
+        self.blocking(move || docs_repo(&db, kind).get(&name)).await
+    }
+    async fn save_doc(&self, kind: DocKind, d: NewDoc, actor: &str) -> Result<Doc> {
+        let db = self.db.clone();
+        let actor = actor.to_string();
+        self.blocking(move || docs_repo(&db, kind).save(&d, &actor)).await
+    }
+    async fn delete_doc(&self, kind: DocKind, name: &str, actor: &str) -> Result<()> {
+        let db = self.db.clone();
+        let name = name.to_string();
+        let actor = actor.to_string();
+        self.blocking(move || docs_repo(&db, kind).delete(&name, &actor)).await
+    }
 
-    /// Plans the sync on the daemon host and, unless `check_only`, writes it.
+    /// Plans the sync on the daemon host and, unless `check_only`, writes it. Every
+    /// step that touches the Db runs through `blocking`; `detect_root`,
+    /// `check_project_root`, `sync::plan_sync` and `sync::apply` do filesystem and git
+    /// work, not Db work, so they stay off the blocking helper.
     async fn sync(&self, req: SyncRequest) -> Result<SyncReport> {
-        let agents = self.agents().list()?;
+        let db = self.db.clone();
+        let agents = self.blocking({ let db = db.clone(); move || agents_repo(&db).list() }).await?;
         let requested = if req.targets.is_empty() { DEFAULT_TARGETS.to_vec() } else { req.targets.clone() };
         let (root, targets, block, skipped, project_id) = if req.global {
             let home = sync_home()?;
@@ -459,14 +583,15 @@ impl Backend for LocalBackend {
             // project in the block instead of silently writing an anonymous one; the root
             // is either already known to `ProjectRepo` or becomes known right here.
             let project = self.connect_project(detected.root, "sync").await?;
-            let practices = self.docs(DocKind::Practice).list(Some(project.id))?;
+            let pid = project.id;
+            let practices = self.blocking({ let db = db.clone(); move || docs_repo(&db, DocKind::Practice).list(Some(pid)) }).await?;
             let block = BlockContext { mcp_command: MCP_COMMAND.into(), agents: agents.clone(), practices, project_name: Some(project.name.clone()) };
             (PathBuf::from(project.root_path), requested, block, vec![], Some(project.id))
         };
         // The hooks feed transcripts to a model, so they are installed only once the
         // user has switched extraction on. The daemon resolves that here rather than
         // trusting the request: `POST /sync` is unauthenticated.
-        let hooks = self.extraction_enabled()?;
+        let hooks = self.blocking({ let db = db.clone(); move || extraction_enabled(&db) }).await?;
         // Codex keeps one config file per user, so its hook needs the sync home even
         // when the pass writes into a project. `CodexHook` is one of the defaults, so
         // with extraction on this resolves on nearly every sync, and a machine with no
@@ -476,7 +601,8 @@ impl Backend for LocalBackend {
         // board data for it, even when the setting is on. Fetched only when the setting
         // is on, so an ordinary sync with the mirror off does not pay for two extra
         // queries it will not use.
-        let mirror_tasks_md = self.mirror_tasks_md_enabled()? && project_id.is_some();
+        let mirror_tasks_md_setting = self.blocking({ let db = db.clone(); move || mirror_tasks_md_enabled(&db) }).await?;
+        let mirror_tasks_md = mirror_tasks_md_setting && project_id.is_some();
         let (board_stages, board_tasks) = if let Some(project_id) = project_id.filter(|_| mirror_tasks_md) {
             let stages = self.board_stages(Some(project_id)).await?.stages;
             let tasks = self.list_tasks(TaskFilter { project_id: Some(project_id), include_done: true, ..Default::default() }).await?;
@@ -504,28 +630,39 @@ impl Backend for LocalBackend {
         // The project log reads this row as its `synced` entry. A check-only pass writes
         // nothing and so records nothing, and a global sync belongs to no project.
         if let Some(project_id) = project_id {
-            self.memories.audit(
-                "sync",
-                "apply",
-                "sync",
-                Some(project_id),
-                serde_json::json!({"created": report.created, "updated": report.updated, "unchanged": report.unchanged, "skipped": report.skipped}),
-            )?;
+            let memories = self.memories.clone();
+            let (created, updated, unchanged, skipped_n) = (report.created, report.updated, report.unchanged, report.skipped);
+            self.blocking(move || {
+                memories.audit(
+                    "sync",
+                    "apply",
+                    "sync",
+                    Some(project_id),
+                    serde_json::json!({"created": created, "updated": updated, "unchanged": unchanged, "skipped": skipped_n}),
+                )
+            }).await?;
         }
         Ok(report)
     }
 
-    async fn get_settings(&self) -> Result<serde_json::Map<String, serde_json::Value>> { self.settings().get_all() }
+    async fn get_settings(&self) -> Result<serde_json::Map<String, serde_json::Value>> {
+        let db = self.db.clone();
+        self.blocking(move || settings_repo(&db).get_all()).await
+    }
     async fn set_settings(&self, values: serde_json::Map<String, serde_json::Value>, actor: &str) -> Result<serde_json::Map<String, serde_json::Value>> {
-        let cleared = self.settings().set_many(&values, actor)?;
-        let mut out = self.settings().get_all()?;
-        // Not one of `SETTING_KEYS`: a one-off flag telling the caller that pointing the
-        // base url somewhere new dropped the key it was entered against, so the endpoint
-        // it just named will not receive it.
-        if cleared {
-            out.insert("extraction.api_key_cleared".into(), serde_json::Value::Bool(true));
-        }
-        Ok(out)
+        let db = self.db.clone();
+        let actor = actor.to_string();
+        self.blocking(move || {
+            let cleared = settings_repo(&db).set_many(&values, &actor)?;
+            let mut out = settings_repo(&db).get_all()?;
+            // Not one of `SETTING_KEYS`: a one-off flag telling the caller that pointing the
+            // base url somewhere new dropped the key it was entered against, so the endpoint
+            // it just named will not receive it.
+            if cleared {
+                out.insert("extraction.api_key_cleared".into(), serde_json::Value::Bool(true));
+            }
+            Ok(out)
+        }).await
     }
 
     /// Every check a transcript has to pass lives here rather than in the HTTP
@@ -535,106 +672,219 @@ impl Backend for LocalBackend {
     /// transcript, which would spend a model call on nothing; and the character cap,
     /// which bounds how much any one caller can push into a single model call.
     async fn ingest_transcript(&self, text: String, source_tool: String, project_root: Option<PathBuf>) -> Result<Uuid> {
-        // Resolved once, here, through the same `project_for` the worker used to call:
-        // a root inside a repository has to mean the same project at the gate as it does
-        // when the job runs, or the access check and the extraction override both look at
-        // the wrong scope. The answer travels in the payload so the worker never has to
-        // ask again.
-        let project_id = crate::extract::project_for(&self.db, project_root.clone())?;
-        self.memory_gate(project_id, &source_tool)?;
-        crate::extract::resolve_extraction(&self.db, project_id)?;
-        if text.trim().is_empty() {
-            return Err(AtlasError::Invalid("ingest text is empty".into()));
-        }
-        if text.chars().count() > MAX_INGEST_CHARS {
-            return Err(AtlasError::TooLarge("transcript too large".into()));
-        }
-        let id = self.jobs.enqueue("ingest", serde_json::json!({
-            "text": text, "source_tool": source_tool, "project_root": project_root, "project_id": project_id,
-        }))?;
+        let db = self.db.clone();
+        let jobs = self.jobs.clone();
+        let id = self.blocking(move || {
+            // Resolved once, here, through the same `project_for` the worker used to call:
+            // a root inside a repository has to mean the same project at the gate as it does
+            // when the job runs, or the access check and the extraction override both look at
+            // the wrong scope. The answer travels in the payload so the worker never has to
+            // ask again.
+            let project_id = crate::extract::project_for(&db, project_root.clone())?;
+            memory_gate(&db, project_id, &source_tool)?;
+            crate::extract::resolve_extraction(&db, project_id)?;
+            if text.trim().is_empty() {
+                return Err(AtlasError::Invalid("ingest text is empty".into()));
+            }
+            if text.chars().count() > MAX_INGEST_CHARS {
+                return Err(AtlasError::TooLarge("transcript too large".into()));
+            }
+            jobs.enqueue("ingest", serde_json::json!({
+                "text": text, "source_tool": source_tool, "project_root": project_root, "project_id": project_id,
+            }))
+        }).await?;
         self.queue.notify.notify_one();
         Ok(id)
     }
 
-    async fn get_job(&self, id: Uuid) -> Result<Option<Job>> { self.jobs.get(id) }
+    async fn get_job(&self, id: Uuid) -> Result<Option<Job>> {
+        let jobs = self.jobs.clone();
+        self.blocking(move || jobs.get(id)).await
+    }
 
+    /// `resolve_extraction` reads the model config from the Db and runs on the
+    /// blocking helper; `client.chat` is a real network call, so it stays a plain
+    /// await rather than moving onto a blocking thread.
     async fn test_extraction_for(&self, project_id: Option<Uuid>) -> Result<String> {
-        let cfg = crate::extract::resolve_extraction(&self.db, project_id)?;
+        let db = self.db.clone();
+        let cfg = self.blocking(move || crate::extract::resolve_extraction(&db, project_id)).await?;
         let client = crate::extract::build_client(&cfg)?;
         let reply = client.chat("You are a connectivity check.", "Reply with the single word OK").await?;
         Ok(reply.trim().to_string())
     }
 
-    async fn list_tasks(&self, f: TaskFilter) -> Result<Vec<Task>> { self.tasks.list(&f) }
-    async fn get_task(&self, id_or_key: &str) -> Result<TaskDetail> { self.tasks.get(id_or_key) }
-    async fn create_task(&self, t: NewTask, actor: &str) -> Result<Task> { self.tasks.create(&t, actor) }
-    async fn update_task(&self, id_or_key: &str, u: TaskUpdate, actor: &str) -> Result<Task> { self.tasks.update(id_or_key, &u, actor) }
-    async fn move_task(&self, id_or_key: &str, stage: &str, expected: Option<DateTime<Utc>>, actor: &str) -> Result<Task> {
-        self.task_move_gate(id_or_key, actor)?;
-        self.tasks.move_stage(id_or_key, stage, expected, actor)
+    async fn list_tasks(&self, f: TaskFilter) -> Result<Vec<Task>> {
+        let tasks = self.tasks.clone();
+        self.blocking(move || tasks.list(&f)).await
     }
-    async fn comment_task(&self, id_or_key: &str, body: &str, actor: &str) -> Result<TaskEvent> { self.tasks.comment(id_or_key, body, actor) }
+    async fn get_task(&self, id_or_key: &str) -> Result<TaskDetail> {
+        let tasks = self.tasks.clone();
+        let id_or_key = id_or_key.to_string();
+        self.blocking(move || tasks.get(&id_or_key)).await
+    }
+    async fn create_task(&self, t: NewTask, actor: &str) -> Result<Task> {
+        let tasks = self.tasks.clone();
+        let actor = actor.to_string();
+        self.blocking(move || tasks.create(&t, &actor)).await
+    }
+    async fn update_task(&self, id_or_key: &str, u: TaskUpdate, actor: &str) -> Result<Task> {
+        let tasks = self.tasks.clone();
+        let id_or_key = id_or_key.to_string();
+        let actor = actor.to_string();
+        self.blocking(move || tasks.update(&id_or_key, &u, &actor)).await
+    }
+    async fn move_task(&self, id_or_key: &str, stage: &str, expected: Option<DateTime<Utc>>, actor: &str) -> Result<Task> {
+        let db = self.db.clone();
+        let tasks = self.tasks.clone();
+        let id_or_key = id_or_key.to_string();
+        let stage = stage.to_string();
+        let actor = actor.to_string();
+        self.blocking(move || {
+            task_move_gate(&db, &tasks, &id_or_key, &actor)?;
+            tasks.move_stage(&id_or_key, &stage, expected, &actor)
+        }).await
+    }
+    async fn comment_task(&self, id_or_key: &str, body: &str, actor: &str) -> Result<TaskEvent> {
+        let tasks = self.tasks.clone();
+        let id_or_key = id_or_key.to_string();
+        let body = body.to_string();
+        let actor = actor.to_string();
+        self.blocking(move || tasks.comment(&id_or_key, &body, &actor)).await
+    }
     async fn claim_task(&self, id_or_key: &str, force: bool, actor: &str) -> Result<Task> {
         // A claim moves the task out of the first stage, so it is a move.
-        self.task_move_gate(id_or_key, actor)?;
-        self.tasks.claim(id_or_key, force, actor)
+        let db = self.db.clone();
+        let tasks = self.tasks.clone();
+        let id_or_key = id_or_key.to_string();
+        let actor = actor.to_string();
+        self.blocking(move || {
+            task_move_gate(&db, &tasks, &id_or_key, &actor)?;
+            tasks.claim(&id_or_key, force, &actor)
+        }).await
     }
     async fn set_task_blockers(&self, id_or_key: &str, blocked_by: Vec<String>, actor: &str) -> Result<Task> {
-        self.tasks.set_blockers(id_or_key, blocked_by, actor)
+        let tasks = self.tasks.clone();
+        let id_or_key = id_or_key.to_string();
+        let actor = actor.to_string();
+        self.blocking(move || tasks.set_blockers(&id_or_key, blocked_by, &actor)).await
     }
-    async fn delete_task(&self, id_or_key: &str, actor: &str) -> Result<()> { self.tasks.delete(id_or_key, actor) }
-    async fn board_stages(&self, project_id: Option<Uuid>) -> Result<StageList> { self.tasks.effective_stages(project_id) }
+    async fn delete_task(&self, id_or_key: &str, actor: &str) -> Result<()> {
+        let tasks = self.tasks.clone();
+        let id_or_key = id_or_key.to_string();
+        let actor = actor.to_string();
+        self.blocking(move || tasks.delete(&id_or_key, &actor)).await
+    }
+    async fn board_stages(&self, project_id: Option<Uuid>) -> Result<StageList> {
+        let tasks = self.tasks.clone();
+        self.blocking(move || tasks.effective_stages(project_id)).await
+    }
     async fn set_board_stages(&self, stages: Vec<Stage>, renames: HashMap<String, String>, actor: &str) -> Result<Vec<Stage>> {
-        self.tasks.set_global_stages(stages, &renames, actor)
+        let tasks = self.tasks.clone();
+        let actor = actor.to_string();
+        self.blocking(move || tasks.set_global_stages(stages, &renames, &actor)).await
     }
     async fn set_project_stages(&self, project_id: Uuid, stages: Option<Vec<Stage>>, renames: HashMap<String, String>, actor: &str) -> Result<StageList> {
-        self.tasks.set_project_stages(project_id, stages, &renames, actor)
+        let tasks = self.tasks.clone();
+        let actor = actor.to_string();
+        self.blocking(move || tasks.set_project_stages(project_id, stages, &renames, &actor)).await
     }
-    async fn task_counts(&self, project_id: Option<Uuid>) -> Result<Vec<(String, i64)>> { self.tasks.counts_by_stage(project_id) }
+    async fn task_counts(&self, project_id: Option<Uuid>) -> Result<Vec<(String, i64)>> {
+        let tasks = self.tasks.clone();
+        self.blocking(move || tasks.counts_by_stage(project_id)).await
+    }
 
-    async fn list_workflows(&self, project_id: Option<Uuid>) -> Result<Vec<Workflow>> { self.workflows.list(project_id) }
-    async fn get_workflow(&self, id_or_name: &str) -> Result<Workflow> { self.workflows.get(id_or_name) }
-    async fn create_workflow(&self, w: NewWorkflow, actor: &str) -> Result<Workflow> { self.workflows.create(&w, actor) }
-    async fn update_workflow(&self, id_or_name: &str, patch: WorkflowPatch, actor: &str) -> Result<Workflow> {
-        self.workflows.update(id_or_name, &patch, actor)
+    async fn list_workflows(&self, project_id: Option<Uuid>) -> Result<Vec<Workflow>> {
+        let workflows = self.workflows.clone();
+        self.blocking(move || workflows.list(project_id)).await
     }
-    async fn delete_workflow(&self, id_or_name: &str, actor: &str) -> Result<()> { self.workflows.delete(id_or_name, actor) }
+    async fn get_workflow(&self, id_or_name: &str) -> Result<Workflow> {
+        let workflows = self.workflows.clone();
+        let id_or_name = id_or_name.to_string();
+        self.blocking(move || workflows.get(&id_or_name)).await
+    }
+    async fn create_workflow(&self, w: NewWorkflow, actor: &str) -> Result<Workflow> {
+        let workflows = self.workflows.clone();
+        let actor = actor.to_string();
+        self.blocking(move || workflows.create(&w, &actor)).await
+    }
+    async fn update_workflow(&self, id_or_name: &str, patch: WorkflowPatch, actor: &str) -> Result<Workflow> {
+        let workflows = self.workflows.clone();
+        let id_or_name = id_or_name.to_string();
+        let actor = actor.to_string();
+        self.blocking(move || workflows.update(&id_or_name, &patch, &actor)).await
+    }
+    async fn delete_workflow(&self, id_or_name: &str, actor: &str) -> Result<()> {
+        let workflows = self.workflows.clone();
+        let id_or_name = id_or_name.to_string();
+        let actor = actor.to_string();
+        self.blocking(move || workflows.delete(&id_or_name, &actor)).await
+    }
     async fn run_workflow(&self, id_or_name: &str, trigger: TriggerKind, actor: &str, input: Option<String>) -> Result<WorkflowRun> {
-        let workflow = self.workflows.get(id_or_name)?;
-        self.workflow_trigger_gate(&workflow, actor)?;
-        if self.workflows.has_pending_run(workflow.id)? {
-            return Err(AtlasError::Conflict(format!("workflow '{}' already has a run queued or running", workflow.name)));
-        }
-        let run = self.workflows.create_run(workflow.id, trigger)?;
-        self.jobs.enqueue(
-            "workflow_run",
-            serde_json::json!({"workflow_id": workflow.id, "run_id": run.id, "trigger": trigger.as_str(), "actor": actor, "input": input}),
-        )?;
+        let db = self.db.clone();
+        let workflows = self.workflows.clone();
+        let jobs = self.jobs.clone();
+        let id_or_name = id_or_name.to_string();
+        let actor = actor.to_string();
+        let run = self.blocking(move || {
+            let workflow = workflows.get(&id_or_name)?;
+            workflow_trigger_gate(&db, &workflow, &actor)?;
+            if workflows.has_pending_run(workflow.id)? {
+                return Err(AtlasError::Conflict(format!("workflow '{}' already has a run queued or running", workflow.name)));
+            }
+            let run = workflows.create_run(workflow.id, trigger)?;
+            jobs.enqueue(
+                "workflow_run",
+                serde_json::json!({"workflow_id": workflow.id, "run_id": run.id, "trigger": trigger.as_str(), "actor": actor, "input": input}),
+            )?;
+            Ok(run)
+        }).await?;
         self.queue.notify.notify_one();
         Ok(run)
     }
     async fn list_runs(&self, id_or_name: &str, limit: usize) -> Result<Vec<WorkflowRun>> {
-        let workflow = self.workflows.get(id_or_name)?;
-        self.workflows.list_runs(workflow.id, limit)
+        let workflows = self.workflows.clone();
+        let id_or_name = id_or_name.to_string();
+        self.blocking(move || {
+            let workflow = workflows.get(&id_or_name)?;
+            workflows.list_runs(workflow.id, limit)
+        }).await
     }
-    async fn runs_since(&self, since: DateTime<Utc>, limit: usize) -> Result<Vec<WorkflowRun>> { self.workflows.runs_since(since, limit) }
-    async fn get_run(&self, run_id: Uuid) -> Result<(WorkflowRun, Vec<WorkflowStep>)> { self.workflows.get_run(run_id) }
-    async fn cancel_run(&self, run_id: Uuid, actor: &str) -> Result<WorkflowRun> { self.workflows.cancel_run(run_id, actor) }
+    async fn runs_since(&self, since: DateTime<Utc>, limit: usize) -> Result<Vec<WorkflowRun>> {
+        let workflows = self.workflows.clone();
+        self.blocking(move || workflows.runs_since(since, limit)).await
+    }
+    async fn get_run(&self, run_id: Uuid) -> Result<(WorkflowRun, Vec<WorkflowStep>)> {
+        let workflows = self.workflows.clone();
+        self.blocking(move || workflows.get_run(run_id)).await
+    }
+    async fn cancel_run(&self, run_id: Uuid, actor: &str) -> Result<WorkflowRun> {
+        let workflows = self.workflows.clone();
+        let actor = actor.to_string();
+        self.blocking(move || workflows.cancel_run(run_id, &actor)).await
+    }
     async fn export_run_log(&self, run_id: Uuid) -> Result<String> {
-        let (run, steps) = self.workflows.get_run(run_id)?;
-        let mut out = format!("workflow run {} #{} — {}\n", run.id, run.number, run.status);
-        for step in &steps {
-            for line in &step.log {
-                out.push_str(&format!("{} {} [{}] {}\n", line.ts.to_rfc3339(), line.level, step.name, line.text));
+        let workflows = self.workflows.clone();
+        self.blocking(move || {
+            let (run, steps) = workflows.get_run(run_id)?;
+            let mut out = format!("workflow run {} #{} — {}\n", run.id, run.number, run.status);
+            for step in &steps {
+                for line in &step.log {
+                    out.push_str(&format!("{} {} [{}] {}\n", line.ts.to_rfc3339(), line.level, step.name, line.text));
+                }
             }
-        }
-        Ok(out)
+            Ok(out)
+        }).await
     }
 
     async fn search(&self, q: SearchQuery) -> Result<SearchResult> {
-        let memories = crate::memories::MemoryRepo::new(&self.db);
-        let projects = self.projects();
-        crate::search::global::search(&q, &self.tasks, &memories, &projects, &self.workflows)
+        let db = self.db.clone();
+        let tasks = self.tasks.clone();
+        let workflows = self.workflows.clone();
+        self.blocking(move || {
+            let memories = crate::memories::MemoryRepo::new(&db);
+            let projects = projects_repo(&db);
+            crate::search::global::search(&q, &tasks, &memories, &projects, &workflows)
+        }).await
     }
 }
 

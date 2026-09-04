@@ -29,7 +29,8 @@ const PANIC_KIND: &str = "panic-for-tests";
 /// writer of the `jobs` table, so a `running` row found at startup was never
 /// actually in flight: the process that claimed it is gone.
 async fn requeue_stale(backend: &LocalBackend) {
-    match backend.jobs.requeue_stale() {
+    let jobs = backend.jobs.clone();
+    match backend.blocking(move || jobs.requeue_stale()).await {
         Ok(0) => {}
         Ok(n) => tracing::info!("requeued {n} stale running job(s) from a previous run"),
         Err(e) => tracing::warn!("could not requeue stale jobs at startup: {e}"),
@@ -43,26 +44,27 @@ async fn requeue_stale(backend: &LocalBackend) {
 /// startup, after `requeue_stale`, so a job it just put back on the queue is not
 /// mistaken for an orphan.
 async fn sweep_orphaned_runs(backend: &LocalBackend) {
-    let runs = match backend.workflows.active_runs() {
-        Ok(runs) => runs,
-        Err(e) => {
-            tracing::warn!("could not read workflow runs at startup: {e}");
-            return;
+    let workflows = backend.workflows.clone();
+    let jobs = backend.jobs.clone();
+    let result = backend.blocking(move || -> Result<usize> {
+        let runs = workflows.active_runs()?;
+        let mut recovered = 0usize;
+        for run in runs {
+            match jobs.workflow_run_job_active(run.id) {
+                Ok(true) => {}
+                Ok(false) => match workflows.fail_stuck_run(run.id, "atlasd", "daemon restarted during the run") {
+                    Ok(_) => recovered += 1,
+                    Err(e) => tracing::warn!(run = %run.id, "could not mark an orphaned run failed: {e}"),
+                },
+                Err(e) => tracing::warn!(run = %run.id, "could not check the run's job at startup: {e}"),
+            }
         }
-    };
-    let mut recovered = 0usize;
-    for run in runs {
-        match backend.jobs.workflow_run_job_active(run.id) {
-            Ok(true) => {}
-            Ok(false) => match backend.workflows.fail_stuck_run(run.id, "atlasd", "daemon restarted during the run") {
-                Ok(_) => recovered += 1,
-                Err(e) => tracing::warn!(run = %run.id, "could not mark an orphaned run failed: {e}"),
-            },
-            Err(e) => tracing::warn!(run = %run.id, "could not check the run's job at startup: {e}"),
-        }
-    }
-    if recovered > 0 {
-        tracing::info!("marked {recovered} orphaned workflow run(s) failed at startup");
+        Ok(recovered)
+    }).await;
+    match result {
+        Ok(recovered) if recovered > 0 => tracing::info!("marked {recovered} orphaned workflow run(s) failed at startup"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("could not read workflow runs at startup: {e}"),
     }
 }
 
@@ -98,7 +100,8 @@ where
 /// failed and the drain continues: one bad transcript must not stall the queue.
 async fn drain(backend: &Arc<LocalBackend>) {
     loop {
-        let job = match backend.jobs.next_queued() {
+        let jobs = backend.jobs.clone();
+        let job = match backend.blocking(move || jobs.next_queued()).await {
             Ok(Some(job)) => job,
             Ok(None) => return,
             Err(e) => {
@@ -146,7 +149,11 @@ async fn drain(backend: &Arc<LocalBackend>) {
         // any upstream body it quotes, and a panic is recorded as "internal error"
         // rather than as its payload.
         let recorded = match outcome {
-            Ok(result) => backend.jobs.mark_done(job.id, result),
+            Ok(result) => {
+                let jobs = backend.jobs.clone();
+                let id = job.id;
+                backend.blocking(move || jobs.mark_done(id, result)).await
+            }
             Err(e) => {
                 tracing::warn!(job = %job.id, kind = %job.kind, "job failed: {e}");
                 if job.kind == "workflow_run" {
@@ -157,13 +164,17 @@ async fn drain(backend: &Arc<LocalBackend>) {
                     // otherwise. Without it a panicking run stays `running` forever
                     // and blocks every later run of that workflow.
                     if let Some(run_id) = job.payload["run_id"].as_str().and_then(|s| Uuid::parse_str(s).ok()) {
-                        let run_actor = job.payload["actor"].as_str().unwrap_or("scheduler");
-                        if let Err(e) = backend.workflows.fail_stuck_run(run_id, run_actor, INTERNAL_ERROR) {
+                        let run_actor = job.payload["actor"].as_str().unwrap_or("scheduler").to_string();
+                        let workflows = backend.workflows.clone();
+                        if let Err(e) = backend.blocking(move || workflows.fail_stuck_run(run_id, &run_actor, INTERNAL_ERROR)).await {
                             tracing::warn!(run = %run_id, "could not mark the stuck run failed: {e}");
                         }
                     }
                 }
-                backend.jobs.mark_failed(job.id, &e.to_string())
+                let jobs = backend.jobs.clone();
+                let id = job.id;
+                let err_text = e.to_string();
+                backend.blocking(move || jobs.mark_failed(id, &err_text)).await
             }
         };
         if let Err(e) = recorded {

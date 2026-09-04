@@ -22,6 +22,10 @@ pub enum AtlasError {
     TooLarge(String),
     #[error("{0}")]
     Other(String),
+    /// A blocking-thread task panicked (a `tokio::task::JoinError`) while running
+    /// synchronous Db, index, vector or embedder work off the async runtime.
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 pub type Result<T> = std::result::Result<T, AtlasError>;

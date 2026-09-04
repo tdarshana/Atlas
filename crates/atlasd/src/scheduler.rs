@@ -46,7 +46,8 @@ pub fn tick(backend: &LocalBackend, started_at: DateTime<Utc>, now: DateTime<Utc
 pub async fn run(backend: Arc<LocalBackend>, started_at: DateTime<Utc>) {
     loop {
         tokio::time::sleep(TICK).await;
-        if let Err(e) = tick(&backend, started_at, Utc::now()) {
+        let b = backend.clone();
+        if let Err(e) = backend.blocking(move || tick(&b, started_at, Utc::now())).await {
             tracing::warn!("workflow scheduler tick failed: {e}");
         }
     }
