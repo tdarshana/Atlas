@@ -67,7 +67,7 @@
 		min-height: 0;
 		overflow-x: auto;
 		overflow-y: hidden;
-		padding-bottom: 8px;
+		padding-bottom: 2px;
 		/* The docked detail is out of flow and sits over this strip's right edge, so the
 		   scroll range has to be lengthened by its width or the last lane and the `Add
 		   column` slot end up under it with no scroll left to reach them. The dock sets

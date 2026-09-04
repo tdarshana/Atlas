@@ -11,12 +11,15 @@
 		max: number;
 		/** The gap between the two panels, so the bar sits in its middle. */
 		gap?: number;
+		/** The host's border width: absolute offsets start inside the border, so the bar
+		    is pushed out by this much to land in the true middle of the gap. */
+		border?: number;
 		onlive?: (width: number) => void;
 		onresize: (width: number) => void;
 		testid?: string;
 	}
 
-	let { label, value, min, max, gap = 6, onlive, onresize, testid }: Props = $props();
+	let { label, value, min, max, gap = 6, border = 1, onlive, onresize, testid }: Props = $props();
 
 	let dragging = $state(false);
 	let startX = 0;
@@ -76,7 +79,7 @@
 	aria-valuemin={min}
 	aria-valuemax={max}
 	tabindex="0"
-	style="--rb-gap:{gap}px"
+	style="--rb-gap:{gap}px; --rb-border:{border}px"
 	data-testid={testid}
 	onpointerdown={grab}
 	onpointermove={drag}
@@ -92,7 +95,7 @@
 		position: absolute;
 		top: 0;
 		bottom: 0;
-		right: calc(var(--rb-gap) / -2 - 5px);
+		right: calc(var(--rb-gap) / -2 - 5px - var(--rb-border));
 		width: 10px;
 		display: flex;
 		justify-content: center;
