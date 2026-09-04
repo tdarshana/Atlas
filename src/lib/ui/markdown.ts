@@ -72,7 +72,7 @@ const marked = new Marked({
 			const label = this.parser.parseInline(tokens);
 			if (!href || !isHttpUrl(href)) return label;
 			const titleAttr = title ? ` title="${escapeHtml(title)}"` : '';
-			return `<a href="${escapeHtml(href)}"${titleAttr} rel="noopener noreferrer">${label}</a>`;
+			return `<a href="${escapeHtml(href)}"${titleAttr}>${label}</a>`;
 		},
 		image({ text }) {
 			return text ? escapeHtml(text) : '';
@@ -80,8 +80,70 @@ const marked = new Marked({
 	}
 });
 
+// An explicit allowlist rather than the default profile minus a few tags: DOMPurify's default
+// profile includes `form`, `input`, `button`, `select`, `option`, `textarea`, `svg` and `image`,
+// none of which a rendered document should ever produce. Everything not listed here (forms,
+// media embeds, `iframe`, `svg`, MathML, `script`, `style`) is stripped regardless of what a
+// document's raw HTML or `marked`'s own output contains.
+const ALLOWED_TAGS = [
+	'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+	'p', 'br', 'hr', 'blockquote',
+	'ul', 'ol', 'li',
+	'pre', 'code', 'span',
+	'strong', 'em', 'del',
+	'a',
+	'table', 'thead', 'tbody', 'tr', 'th', 'td',
+	'sup', 'sub',
+	'details', 'summary',
+	'input'
+];
+
+const ALLOWED_ATTR = [
+	'href',
+	'title',
+	'class',
+	'start',
+	'align',
+	'colspan',
+	'rowspan',
+	'type',
+	'checked',
+	'disabled'
+];
+
+// `input` is allowed only for a GFM task-list checkbox (`marked`'s own output, always
+// `type="checkbox" disabled`); an `<a>` is allowed only with an http(s) `href`, the same rule
+// the custom `link()` renderer above applies to Markdown-syntax links, so a raw HTML anchor a
+// document's own markup contains cannot smuggle a `javascript:`, `data:` or relative link past
+// it. `ALLOWED_URI_REGEXP` on the `sanitize()` call already strips a disallowed `href`; this
+// hook additionally drops the anchor itself, so the two paths behave identically.
+DOMPurify.addHook('uponSanitizeElement', (node, event) => {
+	if (event.tagName === 'a') {
+		const href = (node as Element).getAttribute('href');
+		if (href && !isHttpUrl(href)) (node as Element).remove();
+		return;
+	}
+	if (event.tagName === 'input') {
+		const el = node as Element;
+		const isTaskCheckbox = el.getAttribute('type') === 'checkbox' && el.hasAttribute('disabled');
+		if (!isTaskCheckbox) el.remove();
+	}
+});
+
+// DOMPurify checks every attribute value against `ALLOWED_URI_REGEXP` unless the attribute
+// name is on its own URI-safe list (`class` and `title` already are): `type`, `checked`,
+// `disabled`, `start`, `align`, `colspan` and `rowspan` never hold a URI, so without this a
+// checkbox's `type="checkbox"` or a table cell's `colspan="2"` would fail the http(s) test and
+// be stripped as if it were an unsafe link.
+const URI_SAFE_ATTR = ['type', 'checked', 'disabled', 'start', 'align', 'colspan', 'rowspan'];
+
 function sanitize(html: string): string {
-	return DOMPurify.sanitize(html, { FORBID_TAGS: ['img'] });
+	return DOMPurify.sanitize(html, {
+		ALLOWED_TAGS,
+		ALLOWED_ATTR,
+		ADD_URI_SAFE_ATTR: URI_SAFE_ATTR,
+		ALLOWED_URI_REGEXP: /^https?:\/\//i
+	});
 }
 
 /** Markdown source to sanitised, highlighted HTML for Preview mode. */
