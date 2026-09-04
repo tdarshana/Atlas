@@ -18,9 +18,12 @@
 		/** `tools`, `resources`, `prompts` or `clients`: the section to scroll to once the
 		 * report has loaded, set by a side panel jump row. */
 		section?: string | null;
+		/** Called once the jump has been made, so the caller can forget the section.
+		 * Without it, reopening this row jumps to wherever the last click sent it. */
+		onjump?: () => void;
 	}
 
-	let { section = null }: Props = $props();
+	let { section = null, onjump }: Props = $props();
 
 	let root = $state<HTMLElement>();
 	let restarting = $state(false);
@@ -109,6 +112,7 @@
 	$effect(() => {
 		if (!section || !mcp.report || !root) return;
 		scrollDetailTo(root, section);
+		onjump?.();
 	});
 </script>
 

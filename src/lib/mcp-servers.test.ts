@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import {
 	agentCounts,
+	displayUrl,
 	enabledSummary,
 	groupByScope,
 	sourceLabel,
@@ -61,6 +62,17 @@ describe('sourceLabel', () => {
 		expect(sourceLabel('windsurf')).toBe('Windsurf');
 		expect(sourceLabel('plugin')).toBe('Plugin');
 		expect(sourceLabel('atlas')).toBe('Atlas');
+	});
+});
+
+describe('displayUrl', () => {
+	it('masks the query string, which is where some agents keep the key', () => {
+		expect(displayUrl('https://mcp.example.com/sse?key=s3cret')).toBe(
+			'https://mcp.example.com/sse?…'
+		);
+		expect(displayUrl('https://mcp.example.com/sse')).toBe('https://mcp.example.com/sse');
+		// Not a URL at all is still shown: it is what the agent's file says.
+		expect(displayUrl('not a url')).toBe('not a url');
 	});
 });
 

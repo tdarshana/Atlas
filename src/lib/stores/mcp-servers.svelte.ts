@@ -41,10 +41,15 @@ export async function loadServers(projectId: Uuid | null = null): Promise<void> 
 		const list = await api().listMcpServers(projectId);
 		servers.items = list.servers;
 		servers.warnings = list.warnings;
+		// A check belongs to the listing it was run against. Ids are stable by
+		// construction, so a server removed and added back under the same name would
+		// otherwise show the old run's tool count as if it were its own.
+		servers.checks = {};
 		servers.error = null;
 	} catch (e) {
 		servers.items = [];
 		servers.warnings = [];
+		servers.checks = {};
 		servers.error = errorMessage(e);
 	} finally {
 		servers.loading = false;
@@ -99,8 +104,17 @@ export async function setEnabled(id: string, enabled: boolean): Promise<void> {
 	}
 }
 
+/** Deletes one server from the file it came from. `busyId` is held for the round trip so
+ * a second click on the confirm cannot fire a second DELETE, whose 404 the dialog would
+ * show as an error. */
 export async function remove(id: string): Promise<void> {
-	await api().removeMcpServer(id, servers.projectId);
+	if (servers.busyId === id) return;
+	servers.busyId = id;
+	try {
+		await api().removeMcpServer(id, servers.projectId);
+	} finally {
+		servers.busyId = null;
+	}
 	if (servers.openId === id) servers.openId = null;
 	await loadServers(servers.projectId);
 }
@@ -115,6 +129,12 @@ export async function add(input: NewMcpServer): Promise<McpServerEntry> {
 export function openServer(id: string | null, section: string | null = null): void {
 	servers.openId = id;
 	servers.section = section;
+}
+
+/** Forgets the section once the detail has scrolled to it, so reopening the same server
+ * lands at the top rather than wherever a side panel row sent it last time. */
+export function clearSection(): void {
+	servers.section = null;
 }
 
 export function setDetailWidth(width: number): void {

@@ -52,7 +52,6 @@
 		settingString,
 		settings
 	} from '$lib/stores/settings.svelte';
-	import { loadMcp } from '$lib/stores/mcp.svelte';
 	import { loadServers, servers } from '$lib/stores/mcp-servers.svelte';
 	import { skillCounts } from '$lib/skills';
 	import { loadSkills, skills } from '$lib/stores/skills.svelte';
@@ -556,7 +555,6 @@
 		syncDraft();
 		syncAppearanceDraft();
 		await loadStages();
-		await loadMcp();
 		await loadServers(null);
 		await loadAutostart();
 		await loadAbout();

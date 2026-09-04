@@ -40,6 +40,21 @@ export function sourceLabel(source: McpServerSource): string {
 const COMMAND_MAX = 40;
 
 /**
+ * An HTTP server's URL as the detail panel shows it: everything up to the query string,
+ * with the query string itself replaced by `?…`.
+ *
+ * The daemon keeps `env` and `headers` values inside itself, but a URL is neither, and
+ * some agents are configured with the key in the query string. There is nothing in a
+ * query string that helps tell one server from another, so it is masked rather than
+ * shown; the value stays in the agent's own file, which is where the user set it.
+ */
+export function displayUrl(url: string): string {
+	const query = url.indexOf('?');
+	if (query === -1) return url;
+	return `${url.slice(0, query)}?…`;
+}
+
+/**
  * One line for the Transport column: `stdio <command>` for a spawned server, the URL's
  * host for an HTTP one. The full transport is in the detail panel, so this only has to
  * be enough to tell two rows apart.
@@ -179,8 +194,10 @@ export function addTargets(hasProject: boolean): AddTarget[] {
 	return [...ADD_TARGETS.filter((t) => t.needsProject), ...ADD_TARGETS.filter((t) => !t.needsProject)];
 }
 
-/** The daemon's own rule for a server name, checked here so a typo is caught before the
- * round trip. */
+/** A stricter rule than the daemon's, which allows any printable character but `:` and
+ * `/`. A name typed here is going into a file the user's agents read and into a command
+ * line they may paste, so the dialog holds it to what needs no quoting; a server already
+ * called `my server` still lists, toggles and is removed like any other. */
 export const NAME_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 
 export function nameError(name: string): string | null {

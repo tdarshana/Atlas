@@ -60,9 +60,12 @@
 		}
 	}
 
+	// The toast names the file the server landed in. The default target here is this
+	// repository's own `.mcp.json`, which the daemon creates when it is missing, so the
+	// path is the one thing a user cannot guess.
 	async function addServer(input: NewMcpServer): Promise<void> {
-		await add(input);
-		push('success', 'MCP server added');
+		const created = await add(input);
+		push('success', created.file ? `MCP server added to ${created.file}` : 'MCP server added');
 	}
 
 	async function copySnippet(): Promise<void> {

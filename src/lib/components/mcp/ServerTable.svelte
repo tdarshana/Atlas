@@ -5,7 +5,7 @@
 	// static badge carrying the reason. Status stays empty until the row has been
 	// checked, because a check starts the user's own command.
 	import { Badge, Checkbox, IconButton, Table, type TableColumn } from '$lib/ds';
-	import { sourceLabel, toggleReason, transportSummary } from '$lib/mcp-servers';
+	import { displayUrl, sourceLabel, toggleReason, transportSummary } from '$lib/mcp-servers';
 	import type { McpCheckResult, McpServerEntry } from '$lib/types';
 
 	interface Props {
@@ -23,6 +23,9 @@
 		onremove: (row: McpServerEntry) => void;
 		/** The id being checked or written right now, so its controls hold still. */
 		busyId?: string | null;
+		/** Every row holds still: `Check all` is walking the list, and a row action fired
+		 * under it would clobber the run's own busy id. */
+		busy?: boolean;
 	}
 
 	let {
@@ -37,7 +40,8 @@
 		ontoggle,
 		oncheck,
 		onremove,
-		busyId = null
+		busyId = null,
+		busy = false
 	}: Props = $props();
 
 	let menuId = $state<string | null>(null);
@@ -59,7 +63,7 @@
 	 * or the URL. */
 	function transportTitle(row: McpServerEntry): string {
 		return row.transport.kind === 'http'
-			? row.transport.url
+			? displayUrl(row.transport.url)
 			: [row.transport.command, ...row.transport.args].join(' ');
 	}
 
@@ -115,7 +119,7 @@
 				{#if row.can_toggle}
 					<Checkbox
 						checked={row.enabled}
-						disabled={busyId === row.id}
+						disabled={busy || busyId === row.id}
 						aria-label={`Enable ${row.name}`}
 						data-testid="mcp-server-toggle-{row.id}"
 						onclick={(e) => e.stopPropagation()}
@@ -158,6 +162,7 @@
 							<button
 								type="button"
 								role="menuitem"
+								disabled={busy}
 								data-testid="mcp-server-check-{row.id}"
 								onclick={() => run(row, oncheck)}
 							>
@@ -168,6 +173,7 @@
 									type="button"
 									role="menuitem"
 									class="danger"
+									disabled={busy}
 									data-testid="mcp-server-remove-{row.id}"
 									onclick={() => run(row, onremove)}
 								>
@@ -257,8 +263,13 @@
 		cursor: pointer;
 	}
 
-	.menu button:hover {
+	.menu button:hover:not(:disabled) {
 		background: var(--bg-hover);
+	}
+
+	.menu button:disabled {
+		color: var(--text-tertiary);
+		cursor: default;
 	}
 
 	.menu button.danger {

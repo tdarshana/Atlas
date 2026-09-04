@@ -11,8 +11,11 @@
 	import TreeRow from '../TreeRow.svelte';
 
 	onMount(() => {
-		// The `/mcp` route loads both; only fetch what nothing has yet.
-		if (servers.items.length === 0 && !servers.loading) void loadServers(servers.projectId);
+		// The `/mcp` route loads both; only fetch what nothing has yet. The scope is `null`
+		// rather than `servers.projectId`: this panel only ever draws the global view's
+		// filter, and coming here from a project MCP tab the store still holds that
+		// project's id, so passing it raced the page's own load for `servers.items`.
+		if (servers.items.length === 0 && !servers.loading) void loadServers(null);
 		if (!mcp.report && !mcp.loading) void loadMcp();
 	});
 

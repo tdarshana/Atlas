@@ -43,9 +43,9 @@
 				Remove <span class="mono">{server.name}</span> from
 				<span class="mono">{server.file ?? 'its config file'}</span>?
 			</p>
-			<span class="hint">
-				Atlas keeps the file's previous contents in its audit log, so the edit can be undone by
-				hand.
+			<span class="hint" data-testid="remove-server-undo">
+				Atlas copies the file into <span class="mono">~/.atlas/config-backups/</span> first, so
+				the edit can be undone by hand.
 			</span>
 			{#if error}<p class="bad" role="alert" data-testid="remove-server-error">{error}</p>{/if}
 		</div>

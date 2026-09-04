@@ -33,6 +33,7 @@ vi.mock('$lib/daemon.svelte', () => ({
 
 import { NO_PROJECT_SERVERS } from '$lib/mcp-servers';
 import AddServerDialog from './AddServerDialog.svelte';
+import RemoveServerDialog from './RemoveServerDialog.svelte';
 import ServerDetail from './ServerDetail.svelte';
 import ServerTable from './ServerTable.svelte';
 
@@ -239,6 +240,26 @@ describe('ServerDetail', () => {
 		expect(panel.textContent).toContain('••••••••');
 	});
 
+	it('masks an HTTP server’s query string, where some agents keep the key', () => {
+		render(ServerDetail, {
+			props: {
+				...base,
+				check: null,
+				server: entry('gh', 'claude', {
+					transport: {
+						kind: 'http',
+						url: 'https://api.github.com/mcp?key=s3cret',
+						header_keys: []
+					}
+				})
+			}
+		});
+
+		const panel = screen.getByTestId('mcp-server-detail');
+		expect(panel.textContent).toContain('https://api.github.com/mcp?…');
+		expect(panel.textContent).not.toContain('s3cret');
+	});
+
 	it('lists the tools the last check found', () => {
 		render(ServerDetail, {
 			props: {
@@ -328,6 +349,19 @@ describe('ServerDetail', () => {
 		expect(screen.queryByTestId('mcp-server-detail-toggle')).toBeNull();
 		expect(screen.getByTestId('mcp-server-detail-no-toggle').textContent).toContain('Atlas');
 		expect(screen.queryByTestId('mcp-server-detail-remove')).toBeNull();
+	});
+});
+
+describe('RemoveServerDialog', () => {
+	it('points the undo at the backup directory, which is where the old text is', () => {
+		render(RemoveServerDialog, {
+			props: { server: entry('fs', 'claude'), onclose: () => {}, onremove: async () => {} }
+		});
+
+		const text = screen.getByTestId('remove-server-undo').textContent ?? '';
+		expect(text).toContain('~/.atlas/config-backups/');
+		expect(text).toContain('undone by hand');
+		expect(text).not.toContain('audit log');
 	});
 });
 

@@ -7,7 +7,7 @@
 	import type { Snippet } from 'svelte';
 	import { Badge, Button, IconButton } from '$lib/ds';
 	import { errorMessage } from '$lib/errors';
-	import { DETAIL_MAX, DETAIL_MIN, sourceLabel, toggleReason } from '$lib/mcp-servers';
+	import { DETAIL_MAX, DETAIL_MIN, displayUrl, sourceLabel, toggleReason } from '$lib/mcp-servers';
 	import { copyText } from '$lib/shell';
 	import type { McpCheckResult, McpServerEntry } from '$lib/types';
 	import ResizeBar from '$lib/ui/ResizeBar.svelte';
@@ -150,7 +150,9 @@
 				{:else}
 					<div class="reading">
 						<span class="label">URL</span>
-						<span class="mono value">{server.transport.url}</span>
+						<!-- The query string is masked: some agents put the key in it, and the
+						     whole point of this panel is that it shows no secret. -->
+						<span class="mono value">{displayUrl(server.transport.url)}</span>
 					</div>
 				{/if}
 			</div>

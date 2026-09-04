@@ -102,4 +102,25 @@ describe('the MCP server store', () => {
 		expect(calls.some((c) => c.name === 'remove')).toBe(true);
 		expect(servers.openId).toBeNull();
 	});
+
+	it('sends one DELETE however many times the confirm is clicked', async () => {
+		await loadServers('p-1');
+		calls.length = 0;
+
+		await Promise.all([remove('claude:project:fs'), remove('claude:project:fs')]);
+
+		expect(calls.filter((c) => c.name === 'remove')).toHaveLength(1);
+		expect(servers.busyId).toBeNull();
+	});
+
+	it('forgets the last run’s checks when the list is reloaded', async () => {
+		await loadServers(null);
+		await check('claude:project:fs');
+		expect(servers.checks['claude:project:fs']).toBeTruthy();
+
+		// Ids are stable by construction, so a server removed and added back under the same
+		// name would otherwise wear the old run's tool count.
+		await loadServers(null);
+		expect(servers.checks).toEqual({});
+	});
 });
