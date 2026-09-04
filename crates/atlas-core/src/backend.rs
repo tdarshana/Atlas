@@ -183,6 +183,18 @@ pub trait Backend: Send + Sync + 'static {
 
     // ---- search ----
     async fn search(&self, q: SearchQuery) -> Result<SearchResult>;
+
+    // ---- frameworks (Phase 12) ----
+    /// Every framework detected in the project, each with the documents it holds.
+    async fn list_frameworks(&self, project_id: Uuid) -> Result<Vec<FrameworkListing>>;
+    /// One document's text, addressed the way `documents`/`tasks` on the adapter
+    /// itself hand its path back. `Invalid` for an unknown `kind` or a path that
+    /// does not exist, or that resolves outside the project root.
+    async fn get_framework_doc(&self, project_id: Uuid, kind: FrameworkKind, path: &str) -> Result<String>;
+    /// Imports `kind`'s tasks or decisions into the project. A write: gated the
+    /// same way a direct task move or memory write is, by the project's
+    /// `agent_access`.
+    async fn import_framework(&self, project_id: Uuid, kind: FrameworkKind, what: ImportWhat, actor: &str) -> Result<ImportReport>;
 }
 
 pub struct LocalBackend {
@@ -888,6 +900,58 @@ impl Backend for LocalBackend {
             let memories = crate::memories::MemoryRepo::new(&db);
             let projects = projects_repo(&db);
             crate::search::global::search(&q, &tasks, &memories, &projects, &workflows)
+        }).await
+    }
+
+    async fn list_frameworks(&self, project_id: Uuid) -> Result<Vec<FrameworkListing>> {
+        let db = self.db.clone();
+        self.blocking(move || {
+            let project = projects_repo(&db).get(project_id)?;
+            let root = std::path::Path::new(&project.root_path);
+            let mut out = Vec::new();
+            for adapter in crate::frameworks::adapters() {
+                if let Some(inventory) = adapter.detect(root) {
+                    let documents = adapter.documents(root);
+                    out.push(FrameworkListing { inventory, documents });
+                }
+            }
+            Ok(out)
+        }).await
+    }
+    async fn get_framework_doc(&self, project_id: Uuid, kind: FrameworkKind, path: &str) -> Result<String> {
+        let db = self.db.clone();
+        let path = path.to_string();
+        self.blocking(move || {
+            let project = projects_repo(&db).get(project_id)?;
+            let root = std::path::Path::new(&project.root_path);
+            let adapter = crate::frameworks::adapters()
+                .into_iter()
+                .find(|a| a.kind() == kind)
+                .ok_or_else(|| AtlasError::Invalid(format!("unknown framework: {kind}")))?;
+            adapter.read(root, &path)
+        }).await
+    }
+    /// Gated by the write the import actually performs: a task import needs
+    /// `task_movers` (it files board tasks), a decision import needs
+    /// `memory_writers` (it files memories). The user's own hands, and the actors
+    /// `check_task_move`/`check_memory_write` already exempt, pass either way.
+    async fn import_framework(&self, project_id: Uuid, kind: FrameworkKind, what: ImportWhat, actor: &str) -> Result<ImportReport> {
+        let db = self.db.clone();
+        let tasks = self.tasks.clone();
+        let actor = actor.to_string();
+        self.blocking(move || {
+            let project = projects_repo(&db).get(project_id)?;
+            let memories = crate::memories::MemoryRepo::new(&db);
+            match what {
+                ImportWhat::Tasks => {
+                    crate::projects::check_task_move(&actor, &project)?;
+                    crate::frameworks::import::import_tasks(&tasks, &memories, &project, kind, &actor)
+                }
+                ImportWhat::Decisions => {
+                    crate::projects::check_memory_write(&actor, &project)?;
+                    crate::frameworks::import::import_decisions(&memories, &project, kind, &actor)
+                }
+            }
         }).await
     }
 }

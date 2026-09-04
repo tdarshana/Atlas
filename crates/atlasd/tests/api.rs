@@ -235,7 +235,7 @@ async fn mcp_over_http_lists_and_calls_tools() {
 }
 
 /// `GET /api/v1/mcp/status` before any client has connected: the static parts (the
-/// transports, the 29-row tools table with the two defaults disabled, resources and
+/// transports, the 30-row tools table with the two defaults disabled, resources and
 /// prompts) are already there, and no client has registered yet. Then one HTTP
 /// `tools/call` over the same session `mcp_over_http_lists_and_calls_tools` drives
 /// registers that session and counts the call.
@@ -251,11 +251,11 @@ async fn mcp_status_reports_transports_counts_and_an_http_client_after_a_call() 
     assert!(status["transports"]["http"]["url"].as_str().unwrap().ends_with("/mcp"), "{status}");
     assert!(!status["transports"]["http"]["protocol_version"].as_str().unwrap().is_empty(), "{status}");
     let tools = status["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 29, "{tools:?}");
+    assert_eq!(tools.len(), 30, "{tools:?}");
     let disabled: Vec<&str> = tools.iter().filter(|t| t["enabled"].as_bool() == Some(false)).map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(disabled.len(), 2, "{disabled:?}");
     assert!(disabled.contains(&"project_connect") && disabled.contains(&"memory_review"), "{disabled:?}");
-    assert_eq!(status["counts"]["tools"], 29, "{status}");
+    assert_eq!(status["counts"]["tools"], 30, "{status}");
     assert_eq!(status["counts"]["resources"].as_u64().unwrap(), status["resources"].as_array().unwrap().len() as u64, "{status}");
     assert_eq!(status["counts"]["prompts"].as_u64().unwrap(), status["prompts"].as_array().unwrap().len() as u64, "{status}");
     assert!(status["clients"].as_array().unwrap().is_empty(), "{status}");
@@ -1513,6 +1513,79 @@ async fn agent_access_is_stored_and_enforced() {
     let missing = c.put(format!("{base}/projects/{}/agent-access", uuid::Uuid::new_v4())).header("X-Atlas-Actor", "desktop")
         .json(&serde_json::json!({"require_review": false})).send().await.unwrap();
     assert_eq!(missing.status(), 404);
+}
+
+/// The three frameworks routes (Phase 12): the inventory-plus-documents listing, a
+/// document's text by path, and importing tasks or decisions — including the 400 for
+/// an unknown `{kind}` and the 409 an agent not on `agent_access` gets from an import.
+#[tokio::test]
+async fn frameworks_routes_round_trip_400_and_gate_import() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    let dir = repo_free_tempdir();
+    git(dir.path(), &["init"]);
+    std::fs::create_dir_all(dir.path().join("docs/superpowers/plans")).unwrap();
+    std::fs::write(
+        dir.path().join("docs/superpowers/plans/2026-01-01-fixture.md"),
+        "# Fixture plan\n\n### Task 1: Do the thing\n\n- [ ] do it\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("CLAUDE.md"), "# Fixture rules\n\nkeep this line\n").unwrap();
+
+    let project: serde_json::Value = c.post(format!("{base}/projects/connect")).json(&serde_json::json!({"root": dir.path()})).send().await.unwrap().json().await.unwrap();
+    let id = project["id"].as_str().unwrap().to_string();
+
+    let listing = c.get(format!("{base}/projects/{id}/frameworks")).send().await.unwrap();
+    assert_eq!(listing.status(), 200);
+    let listing: serde_json::Value = listing.json().await.unwrap();
+    assert_eq!(listing[0]["inventory"]["kind"], "superpowers", "{listing}");
+    let path = listing[0]["documents"][0]["path"].as_str().unwrap().to_string();
+    assert_eq!(path, "docs/superpowers/plans/2026-01-01-fixture.md");
+
+    let doc = c.get(format!("{base}/projects/{id}/frameworks/superpowers/docs/{path}")).send().await.unwrap();
+    assert_eq!(doc.status(), 200);
+    let doc: serde_json::Value = doc.json().await.unwrap();
+    assert_eq!(doc["content"], "# Fixture plan\n\n### Task 1: Do the thing\n\n- [ ] do it\n");
+
+    let bad_kind = c.get(format!("{base}/projects/{id}/frameworks/bogus/docs/{path}")).send().await.unwrap();
+    assert_eq!(bad_kind.status(), 400, "{}", bad_kind.text().await.unwrap());
+    let bad_import = c.post(format!("{base}/projects/{id}/frameworks/bogus/import")).json(&serde_json::json!({"what": "tasks"})).send().await.unwrap();
+    assert_eq!(bad_import.status(), 400);
+
+    // Lock the project down, then an agent not on `task_movers`/`memory_writers` is
+    // refused for both kinds of import; the user's own hands (no header default `api`)
+    // are exempt regardless.
+    let locked = c.put(format!("{base}/projects/{id}/agent-access")).header("X-Atlas-Actor", "desktop")
+        .json(&serde_json::json!({"memory_writers": [], "task_movers": [], "require_review": false}))
+        .send().await.unwrap();
+    assert_eq!(locked.status(), 200);
+
+    let denied_tasks = c.post(format!("{base}/projects/{id}/frameworks/superpowers/import")).header("X-Atlas-Actor", "codex")
+        .json(&serde_json::json!({"what": "tasks"})).send().await.unwrap();
+    assert_eq!(denied_tasks.status(), 409);
+    let denied_tasks: serde_json::Value = denied_tasks.json().await.unwrap();
+    assert!(denied_tasks["error"].as_str().unwrap().contains("may not move tasks"), "{denied_tasks}");
+
+    let denied_decisions = c.post(format!("{base}/projects/{id}/frameworks/superpowers/import")).header("X-Atlas-Actor", "codex")
+        .json(&serde_json::json!({"what": "decisions"})).send().await.unwrap();
+    assert_eq!(denied_decisions.status(), 409);
+    let denied_decisions: serde_json::Value = denied_decisions.json().await.unwrap();
+    assert!(denied_decisions["error"].as_str().unwrap().contains("may not write memories"), "{denied_decisions}");
+
+    // No `X-Atlas-Actor` header defaults to `api`, one of the exempt actors, so the
+    // same locked-down project still admits the import.
+    let imported = c.post(format!("{base}/projects/{id}/frameworks/superpowers/import"))
+        .json(&serde_json::json!({"what": "tasks"})).send().await.unwrap();
+    assert_eq!(imported.status(), 200, "{}", imported.text().await.unwrap());
+    let imported: serde_json::Value = imported.json().await.unwrap();
+    assert_eq!(imported["created"], 1, "{imported}");
+
+    // Importing again is idempotent: nothing new is created.
+    let reimported: serde_json::Value = c.post(format!("{base}/projects/{id}/frameworks/superpowers/import"))
+        .json(&serde_json::json!({"what": "tasks"})).send().await.unwrap().json().await.unwrap();
+    assert_eq!(reimported["created"], 0, "{reimported}");
+    assert_eq!(reimported["skipped"], 1, "{reimported}");
 }
 
 /// `PUT /projects/{id}/extraction` masks the key on the way back, and

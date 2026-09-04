@@ -1,5 +1,6 @@
 use crate::board::render::render_board_markdown;
 use crate::export::{self, BlockContext};
+use crate::frameworks;
 use crate::models::{Agent, Stage, SyncAction, SyncKind, SyncOp, SyncReport, Task};
 use crate::{AtlasError, Result};
 use std::path::{Path, PathBuf};
@@ -124,6 +125,16 @@ pub fn plan_sync(i: &SyncInputs) -> Result<Vec<SyncOp>> {
                     ops.push(tasks_md_op(*kind, i.root.join("TASKS.md"), content)?);
                 }
             }
+            SyncKind::FrameworkInstructions => {
+                for adapter in frameworks::adapters() {
+                    if adapter.detect(i.root).is_none() {
+                        continue;
+                    }
+                    for path in adapter.instruction_targets(i.root) {
+                        ops.push(framework_block_op(*kind, path, &i.block)?);
+                    }
+                }
+            }
         }
     }
     Ok(ops)
@@ -166,6 +177,23 @@ fn block_op(kind: SyncKind, path: PathBuf, block: &BlockContext) -> Result<SyncO
     } else {
         SyncAction::Update
     };
+    Ok(SyncOp { kind, path, content, action })
+}
+
+/// A framework's own instruction file (`CLAUDE.md`, `AGENTS.md`, or whatever else an
+/// adapter's `instruction_targets` names): the same managed block `block_op` splices
+/// into `AGENTS.md`/`CLAUDE.md`, but the file itself is never created here — Atlas
+/// only edits inside one that already exists. `instruction_targets` already filters
+/// to files present on disk, so this only turns up empty if one was removed between
+/// that call and this write; treated as a skip rather than a create in that case.
+fn framework_block_op(kind: SyncKind, path: PathBuf, block: &BlockContext) -> Result<SyncOp> {
+    if !path.is_file() {
+        return Ok(SyncOp { kind, path, content: String::new(), action: SyncAction::Skip("the framework instruction file no longer exists".into()) });
+    }
+    let existing = std::fs::read_to_string(&path)?;
+    let rendered = export::render_block(block);
+    let content = export::splice_block(&existing, rendered.trim_end());
+    let action = if existing == content { SyncAction::Unchanged } else { SyncAction::Update };
     Ok(SyncOp { kind, path, content, action })
 }
 
@@ -536,6 +564,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             closed_at: None,
+            source_ref: None,
             blocked_by: vec![],
             open_blockers: 0,
             ready: true,
@@ -611,6 +640,70 @@ mod tests {
         assert_eq!(op.action, SyncAction::Skip(CODEX_NOTIFY_TAKEN.into()));
         apply(&ops).unwrap();
         assert_eq!(std::fs::read_to_string(&config).unwrap(), "notify = [\"my-notifier\"]\n");
+    }
+
+    /// `FrameworkInstructions` writes the managed block into a detected framework's
+    /// instruction files that already exist, and produces no op at all — not even a
+    /// skip — for one that doesn't: Atlas never creates a framework's own file.
+    #[test]
+    fn framework_instructions_writes_only_into_existing_instruction_files() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("docs/superpowers/plans")).unwrap();
+        std::fs::write(d.path().join("docs/superpowers/plans/x.md"), "# plan\n").unwrap();
+        // CLAUDE.md exists; AGENTS.md does not.
+        std::fs::write(d.path().join("CLAUDE.md"), "# Repo rules\n\nkeep this\n").unwrap();
+
+        let inputs = SyncInputs {
+            root: d.path(),
+            agents: &[],
+            block: BlockContext { mcp_command: "atlas mcp".into(), agents: vec![], practices: vec![], project_name: Some("p".into()) },
+            targets: &[SyncKind::FrameworkInstructions],
+            home: d.path(),
+            hooks: false,
+            global: false,
+            mirror_tasks_md: false,
+            board_stages: &[],
+            board_tasks: &[],
+        };
+        let ops = plan_sync(&inputs).unwrap();
+        assert_eq!(ops.len(), 1, "only the file that exists gets an op: {ops:?}");
+        assert!(ops[0].path.ends_with("CLAUDE.md"), "{}", ops[0].path.display());
+        // The file already exists (with no block yet), so splicing the block in is an
+        // update, never a create: this target never creates a framework's own file.
+        assert_eq!(ops[0].action, SyncAction::Update);
+
+        apply(&ops).unwrap();
+        let written = std::fs::read_to_string(d.path().join("CLAUDE.md")).unwrap();
+        assert!(written.starts_with("# Repo rules\n\nkeep this\n") && written.contains("<!-- atlas:start -->"), "{written}");
+        assert!(!d.path().join("AGENTS.md").exists(), "AGENTS.md must never be created by this target");
+
+        // A second plan against the file it wrote is unchanged.
+        let again = plan_sync(&inputs).unwrap();
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].action, SyncAction::Unchanged);
+    }
+
+    /// A directory with no detected framework plans no ops at all, even when
+    /// `CLAUDE.md`/`AGENTS.md` exist: the instruction files belong to a framework
+    /// only once one is actually detected there.
+    #[test]
+    fn framework_instructions_plans_nothing_when_no_framework_is_detected() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("CLAUDE.md"), "# Repo rules\n").unwrap();
+        std::fs::write(d.path().join("AGENTS.md"), "# Repo rules\n").unwrap();
+        let inputs = SyncInputs {
+            root: d.path(),
+            agents: &[],
+            block: BlockContext { mcp_command: "atlas mcp".into(), agents: vec![], practices: vec![], project_name: None },
+            targets: &[SyncKind::FrameworkInstructions],
+            home: d.path(),
+            hooks: false,
+            global: false,
+            mirror_tasks_md: false,
+            board_stages: &[],
+            board_tasks: &[],
+        };
+        assert!(plan_sync(&inputs).unwrap().is_empty());
     }
 
     #[test]

@@ -41,7 +41,7 @@ pub const STAGES_SETTING: &str = "board.stages";
 pub const MIRROR_SETTING: &str = "board.mirror_tasks_md";
 
 const TASK_COLS: &str = "id::text, key, project_id::text, seq, title, description, stage, kind, priority, \
-     assignee, labels::text, parent_id::text, created_by, epoch_us(created_at), epoch_us(updated_at), epoch_us(closed_at)";
+     assignee, labels::text, parent_id::text, created_by, epoch_us(created_at), epoch_us(updated_at), epoch_us(closed_at), source_ref::text";
 
 const EVENT_COLS: &str = "id::text, task_id::text, actor, kind, body, detail::text, epoch_us(created_at)";
 
@@ -82,6 +82,10 @@ fn row_to_task(r: &Row) -> duckdb::Result<Task> {
         created_at: ts(13, r.get(13)?)?,
         updated_at: ts(14, r.get(14)?)?,
         closed_at: r.get::<_, Option<i64>>(15)?.map(|v| ts(15, v)).transpose()?,
+        source_ref: r
+            .get::<_, Option<String>>(16)?
+            .map(|s| serde_json::from_str(&s).map_err(|e| conv_err(16, Type::Text, e)))
+            .transpose()?,
         // Filled in by `decorate`; never stored.
         blocked_by: Vec::new(),
         open_blockers: 0,
@@ -573,6 +577,36 @@ impl TaskRepo {
         })
     }
 
+    /// The task carrying `source_ref`, scoped to `project_id` the same way every
+    /// other board read is (`None` means the project-less board, not "any project").
+    /// Matched field by field through DuckDB's JSON functions rather than by exact
+    /// text, so a difference in how the column happened to be reformatted on write
+    /// never hides a match. Used by `frameworks::import::import_tasks` so a re-import
+    /// finds the task it already created instead of filing a duplicate.
+    pub fn find_by_source_ref(&self, project_id: Option<Uuid>, source_ref: &SourceRef) -> Result<Option<Task>> {
+        self.db.with_conn(|c| {
+            let mut sql = format!(
+                "select {TASK_COLS} from tasks where source_ref is not null \
+                 and json_extract_string(source_ref, '$.framework') = ? \
+                 and json_extract_string(source_ref, '$.path') = ? \
+                 and json_extract_string(source_ref, '$.anchor') = ?"
+            );
+            let mut args: Vec<String> = vec![source_ref.framework.as_str().to_string(), source_ref.path.clone(), source_ref.anchor.clone()];
+            if let Some(p) = project_id {
+                sql.push_str(" and project_id = ?");
+                args.push(p.to_string());
+            } else {
+                sql.push_str(" and project_id is null");
+            }
+            let mut st = c.prepare(&sql)?;
+            let mut rows = st.query(params_from_iter(args.iter()))?;
+            match rows.next()? {
+                Some(r) => Ok(Some(row_to_task(r)?)),
+                None => Ok(None),
+            }
+        })
+    }
+
     // -- writes ------------------------------------------------------------
 
     fn event(&self, c: &Connection, task_id: Uuid, actor: &str, kind: &str, body: &str, detail: Option<serde_json::Value>) -> Result<TaskEvent> {
@@ -702,11 +736,12 @@ impl TaskRepo {
             let id = Uuid::new_v4();
             self.check_no_blocker_cycle(c, id, &blockers)?;
             let labels = serde_json::to_string(new.labels.as_deref().unwrap_or(&[]))?;
+            let source_ref = new.source_ref.as_ref().map(serde_json::to_string).transpose()?;
             let closed = if stage.done { "now()" } else { "null" };
             c.execute(
                 &format!(
-                    "insert into tasks (id, key, project_id, seq, title, description, stage, kind, priority, assignee, labels, parent_id, created_by, created_at, updated_at, closed_at) \
-                     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::json, ?, ?, now(), now(), {closed})"
+                    "insert into tasks (id, key, project_id, seq, title, description, stage, kind, priority, assignee, labels, parent_id, created_by, source_ref, created_at, updated_at, closed_at) \
+                     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::json, ?, ?, ?::json, now(), now(), {closed})"
                 ),
                 params![
                     id.to_string(),
@@ -722,6 +757,7 @@ impl TaskRepo {
                     labels,
                     parent.map(|p| p.to_string()),
                     actor,
+                    source_ref,
                 ],
             )?;
             self.replace_blockers(c, id, &blockers)?;

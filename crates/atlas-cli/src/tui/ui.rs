@@ -655,6 +655,7 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             closed_at: None,
+            source_ref: None,
             blocked_by: vec!["ATL-9".into()],
             open_blockers: 1,
             ready: false,

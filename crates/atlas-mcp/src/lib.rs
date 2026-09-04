@@ -247,6 +247,19 @@ pub struct TaskBlockArgs {
     pub agent: Option<String>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct FrameworkDocsArgs {
+    /// Absolute path to the project. Defaults to the root this server was started in.
+    pub project_root: Option<PathBuf>,
+    /// Restrict to one framework: superpowers, openspec, speckit or gsd. Required
+    /// when path is given.
+    pub kind: Option<FrameworkKind>,
+    /// A document path from a prior call's listing (a `FrameworkDoc.path`). Requires
+    /// kind. Omit both kind and path to list every framework detected with its
+    /// documents.
+    pub path: Option<String>,
+}
+
 /// Whether a tool in [`TOOL_TABLE`] only reads state or can change it. Shown in the
 /// `/api/v1/mcp/status` tools table (Task 2) as a badge: read is informational, write
 /// is a warning, since a write tool run by an agent this project has not admitted is
@@ -298,6 +311,7 @@ pub const TOOL_TABLE: &[ToolMeta] = &[
     ToolMeta { name: "workflow_status", description: "Report a workflow run's status: the run's own state plus a summary of each step (name, status, duration, last log line). Call after workflow_run to follow progress.", args: "run_id*", scope: ToolScope::Read },
     ToolMeta { name: "ingest_transcript", description: "Queue a conversation transcript for opt-in LLM extraction of durable memories. Returns a job id to poll; fails if extraction is not enabled and configured on the daemon.", args: "text*, agent, project_root", scope: ToolScope::Write },
     ToolMeta { name: "status", description: "Report Atlas daemon status: version, database path, active memory count, embedding availability.", args: "none", scope: ToolScope::Read },
+    ToolMeta { name: "framework_docs", description: "List the planning frameworks detected in a project (Superpowers, OpenSpec, SpecKit, GSD) with the documents each holds, or fetch one document's text. Pass kind and path together, from a prior listing, to read a document.", args: "project_root, kind, path", scope: ToolScope::Read },
 ];
 
 /// Called on every accepted `call_tool`, so the daemon and the stdio shim can each
@@ -554,6 +568,7 @@ impl<B: Backend> AtlasMcp<B> {
             parent: a.parent,
             blocked_by: a.blocked_by,
             stage: None,
+            source_ref: None,
         };
         let actor = self.actor(&a.agent);
         json_result(&self.backend.create_task(new, &actor).await.map_err(board_err)?)
@@ -605,6 +620,24 @@ impl<B: Backend> AtlasMcp<B> {
     async fn board_stages(&self, Parameters(a): Parameters<ProjectRootArgs>) -> Result<CallToolResult, McpError> {
         let (project_id, _) = self.board_project_id(a.project_root).await?;
         json_result(&self.backend.board_stages(project_id).await.map_err(board_err)?)
+    }
+
+    #[tool(description = "List the planning frameworks detected in a project (Superpowers, OpenSpec, SpecKit, GSD) with the documents each holds, or fetch one document's text. Pass kind and path together, from a prior listing, to read a document.")]
+    async fn framework_docs(&self, Parameters(a): Parameters<FrameworkDocsArgs>) -> Result<CallToolResult, McpError> {
+        let project = self
+            .resolve_project(a.project_root)
+            .await?
+            .ok_or_else(|| McpError::invalid_params("no project is connected: pass project_root or set ATLAS_PROJECT_ROOT", None))?;
+        if let Some(path) = &a.path {
+            let kind = a.kind.ok_or_else(|| McpError::invalid_params("path requires kind", None))?;
+            let content = self.backend.get_framework_doc(project.id, kind, path).await.map_err(err)?;
+            return json_result(&serde_json::json!({"kind": kind, "path": path, "content": content}));
+        }
+        let mut listings = self.backend.list_frameworks(project.id).await.map_err(err)?;
+        if let Some(kind) = a.kind {
+            listings.retain(|l| l.inventory.kind == kind);
+        }
+        json_result(&listings)
     }
 
     /// Resolves the `{name}` segment of an `atlas://projects/{name}/...` resource URI
@@ -1624,6 +1657,50 @@ mod tests {
             .unwrap_err();
         assert_eq!(bad.code, rmcp::model::ErrorCode::INVALID_PARAMS);
         assert!(bad.message.contains("Backlog"), "{bad:?}");
+    }
+
+    /// With no `path`, `framework_docs` lists the frameworks a project has (filtered
+    /// by `kind` when one is given); with `kind` and `path` together it fetches that
+    /// document's text.
+    #[tokio::test]
+    async fn framework_docs_round_trip() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join("docs/superpowers/plans")).unwrap();
+        std::fs::write(
+            repo.path().join("docs/superpowers/plans/2026-01-01-fixture.md"),
+            "# Fixture plan\n\n### Task 1: Do the thing\n\n- [ ] do it\n",
+        )
+        .unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        backend.connect_project(repo.path().to_path_buf(), "test").await.unwrap();
+        let s = AtlasMcp::new(backend).with_env_project_root(false).with_project_root(repo.path().to_path_buf());
+
+        let listing = s.framework_docs(Parameters(FrameworkDocsArgs { project_root: None, kind: None, path: None })).await.unwrap();
+        let listings: Vec<FrameworkListing> = serde_json::from_str(&text_of(&listing)).unwrap();
+        assert_eq!(listings.len(), 1);
+        assert_eq!(listings[0].inventory.kind, FrameworkKind::Superpowers);
+        let doc = listings[0].documents.first().expect("the fixture plan should be listed");
+        assert_eq!(doc.path, "docs/superpowers/plans/2026-01-01-fixture.md");
+
+        // A kind filter that matches nothing empties the listing without erroring.
+        let filtered_out = s
+            .framework_docs(Parameters(FrameworkDocsArgs { project_root: None, kind: Some(FrameworkKind::Gsd), path: None }))
+            .await
+            .unwrap();
+        let filtered_out: Vec<FrameworkListing> = serde_json::from_str(&text_of(&filtered_out)).unwrap();
+        assert!(filtered_out.is_empty());
+
+        let read = s
+            .framework_docs(Parameters(FrameworkDocsArgs { project_root: None, kind: Some(FrameworkKind::Superpowers), path: Some(doc.path.clone()) }))
+            .await
+            .unwrap();
+        let read: serde_json::Value = serde_json::from_str(&text_of(&read)).unwrap();
+        assert_eq!(read["content"].as_str().unwrap(), "# Fixture plan\n\n### Task 1: Do the thing\n\n- [ ] do it\n");
+
+        // `path` without `kind` is a caller mistake, not an ambiguity to guess at.
+        let bad = s.framework_docs(Parameters(FrameworkDocsArgs { project_root: None, kind: None, path: Some(doc.path.clone()) })).await.unwrap_err();
+        assert_eq!(bad.code, rmcp::model::ErrorCode::INVALID_PARAMS);
     }
 
     /// A board tool needs a project to file a key under: with no root resolvable it

@@ -8,7 +8,11 @@ import type {
 	Doc,
 	DocKind,
 	ExtractionTestResult,
+	FrameworkKind,
+	FrameworkListing,
 	GlobalSearchQuery,
+	ImportReport,
+	ImportWhat,
 	Job,
 	LogEntry,
 	LogFilter,
@@ -476,6 +480,39 @@ export class AtlasApi {
 	 */
 	private boardReq<T>(method: string, path: string, body?: unknown): Promise<T> {
 		return this.req(method, path, body, { 'X-Atlas-Actor': BOARD_ACTOR });
+	}
+
+	// ---- frameworks ----
+
+	/** Every framework detected in the project, each with the documents it holds. */
+	listFrameworks(projectId: Uuid): Promise<FrameworkListing[]> {
+		return this.req('GET', `/api/v1/projects/${encodeURIComponent(projectId)}/frameworks`);
+	}
+
+	/**
+	 * One document's text, `path` as `listFrameworks` gave it back. Each `/`-separated
+	 * component is percent-encoded on its own so a slash in `path` stays a path
+	 * separator rather than becoming part of one segment.
+	 */
+	async getFrameworkDoc(projectId: Uuid, kind: FrameworkKind, path: string): Promise<string> {
+		const encodedPath = path.split('/').map(encodeURIComponent).join('/');
+		const { content } = await this.req<{ content: string }>(
+			'GET',
+			`/api/v1/projects/${encodeURIComponent(projectId)}/frameworks/${kind}/docs/${encodedPath}`
+		);
+		return content;
+	}
+
+	/**
+	 * Imports the framework's tasks onto the board, or its decisions as pending
+	 * memories. A write, recorded under this app's actor like every board request.
+	 */
+	importFramework(projectId: Uuid, kind: FrameworkKind, what: ImportWhat): Promise<ImportReport> {
+		return this.boardReq(
+			'POST',
+			`/api/v1/projects/${encodeURIComponent(projectId)}/frameworks/${kind}/import`,
+			{ what }
+		);
 	}
 
 	// ---- transport ----

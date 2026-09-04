@@ -4,6 +4,7 @@
 
 pub mod adapter;
 mod gsd;
+pub mod import;
 mod md;
 mod openspec;
 mod speckit;

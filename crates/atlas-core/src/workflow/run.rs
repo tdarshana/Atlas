@@ -224,6 +224,7 @@ async fn apply_output(backend: &LocalBackend, ctx: &OutputContext<'_>, output: &
                     parent: None,
                     blocked_by: None,
                     stage: None,
+                    source_ref: None,
                 };
                 match backend.create_task(new, workflow_actor).await {
                     Ok(_) => tasks_filed += 1,

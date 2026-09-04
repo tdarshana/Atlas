@@ -54,6 +54,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             closed_at: None,
+            source_ref: None,
             blocked_by: vec![],
             open_blockers: 0,
             ready: false,

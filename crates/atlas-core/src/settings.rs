@@ -64,6 +64,7 @@ pub const MCP_TOOL_NAMES: &[&str] = &[
     "workflow_status",
     "ingest_transcript",
     "status",
+    "framework_docs",
 ];
 
 /// `mcp.disabled_tools` default when the setting is unset: `project_connect` writes a

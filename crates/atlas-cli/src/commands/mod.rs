@@ -2,6 +2,7 @@ pub mod agent;
 pub mod board;
 pub mod doc;
 pub mod export;
+pub mod framework;
 pub mod import;
 pub mod ingest;
 pub mod project;

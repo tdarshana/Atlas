@@ -243,6 +243,10 @@ fn query_flag<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<boo
 #[derive(Deserialize)] pub struct SetProjectStagesBody { #[serde(default)] pub stages: Option<Vec<Stage>>, #[serde(default)] pub renames: HashMap<String, String> }
 #[derive(Serialize)] pub struct StageCount { pub stage: String, pub count: i64 }
 
+// ---- frameworks (Phase 12) ----
+
+#[derive(Deserialize)] pub struct FrameworkImportBody { pub what: ImportWhat }
+
 // ---- workflows (Phase 9) ----
 
 #[derive(Deserialize)] pub struct WorkflowListQ { #[serde(default)] pub project_id: Option<Uuid> }
@@ -308,6 +312,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/tasks/{id_or_key}/blockers", put(set_task_blockers))
         .route("/api/v1/board/stages", get(get_board_stages).put(put_board_stages))
         .route("/api/v1/projects/{id}/stages", put(put_project_stages))
+        .route("/api/v1/projects/{id}/frameworks", get(list_frameworks))
+        .route("/api/v1/projects/{id}/frameworks/{kind}/docs/{*path}", get(get_framework_doc))
+        .route("/api/v1/projects/{id}/frameworks/{kind}/import", post(import_framework))
         .route("/api/v1/search", get(global_search))
         .route("/api/v1/mcp/status", get(mcp_status))
         .route("/api/v1/mcp/clients", post(register_mcp_client))
@@ -554,6 +561,30 @@ async fn task_counts(State(s): State<AppState>, ApiQuery(q): ApiQuery<TaskCounts
     let global_only = task_global_only(q.scope.as_deref(), q.project_id)?;
     let counts = s.backend.task_counts(q.project_id, global_only).await?;
     Ok(Json(counts.into_iter().map(|(stage, count)| StageCount { stage, count }).collect()))
+}
+
+// ---- frameworks (Phase 12) ----
+
+async fn list_frameworks(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Result<Json<Vec<FrameworkListing>>, ApiError> {
+    Ok(Json(s.backend.list_frameworks(id).await?))
+}
+/// The document's text as `{"content": "..."}`. `path` is axum's wildcard capture
+/// (`{*path}`), already percent-decoded, so it carries the relative path exactly as
+/// `FrameworkDoc.path` (and `RemoteBackend::get_framework_doc`) built it, slashes
+/// included; `kind.parse()` answers a 400 naming the bad value for an unknown one.
+async fn get_framework_doc(State(s): State<AppState>, ApiPath((id, kind, path)): ApiPath<(Uuid, String, String)>) -> Result<Json<serde_json::Value>, ApiError> {
+    let kind: FrameworkKind = kind.parse()?;
+    let content = s.backend.get_framework_doc(id, kind, &path).await?;
+    Ok(Json(serde_json::json!({"content": content})))
+}
+async fn import_framework(
+    State(s): State<AppState>,
+    ApiPath((id, kind)): ApiPath<(Uuid, String)>,
+    Actor(actor): Actor,
+    ApiJson(b): ApiJson<FrameworkImportBody>,
+) -> Result<Json<ImportReport>, ApiError> {
+    let kind: FrameworkKind = kind.parse()?;
+    Ok(Json(s.backend.import_framework(id, kind, b.what, &actor).await?))
 }
 
 // ---- workflows (Phase 9) ----

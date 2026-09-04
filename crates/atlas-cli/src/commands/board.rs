@@ -184,6 +184,7 @@ pub async fn run_task(cmd: TaskCmd, backend: &RemoteBackend) -> anyhow::Result<(
                 parent,
                 blocked_by: (!blocked_by.is_empty()).then_some(blocked_by),
                 stage,
+                source_ref: None,
             };
             println!("{}", backend.create_task(new, &actor).await?.key);
         }

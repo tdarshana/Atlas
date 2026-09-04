@@ -35,6 +35,10 @@ pub enum Target {
     /// `board.mirror_tasks_md` is on, whether or not it is named here.
     #[value(name = "tasks_md")]
     TasksMd,
+    /// The Atlas managed block, spliced into each detected framework's own
+    /// instruction files (only ones that already exist; none is created).
+    #[value(name = "framework_instructions")]
+    FrameworkInstructions,
 }
 
 impl Target {
@@ -47,6 +51,7 @@ impl Target {
             Target::ClaudeHook => SyncKind::ClaudeHook,
             Target::CodexHook => SyncKind::CodexHook,
             Target::TasksMd => SyncKind::TasksMd,
+            Target::FrameworkInstructions => SyncKind::FrameworkInstructions,
         }
     }
 }

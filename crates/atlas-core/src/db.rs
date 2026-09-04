@@ -128,6 +128,11 @@ create table if not exists workflow_steps (
   finished_at timestamptz,
   output text,
   log json not null default '[]');
+"#), (7, r#"
+-- Phase 12 links an imported task back to the framework file it came from, the
+-- same `if not exists` shape migration 3 and 5 use for a column added to a
+-- table already carrying rows.
+alter table tasks add column if not exists source_ref json;
 "#)];
 
 /// Moves the Markdown workflow documents aside so migration 6 can give the name
@@ -190,7 +195,7 @@ mod tests {
     #[test]
     fn migrate_creates_tables_and_is_idempotent() {
         let db = Db::open_in_memory().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 6);
+        assert_eq!(db.schema_version().unwrap(), 7);
         let n: i64 = db.with_conn(|c| Ok(c.query_row(
             "select count(*) from information_schema.tables where table_name in ('memories','memory_embeddings','audit','settings','projects','agents','practices','workflow_docs','sync_targets','jobs','tasks','task_blockers','task_events','board_counters','workflows','workflow_runs','workflow_steps')",
             [], |r| r.get(0))?)).unwrap();
@@ -201,7 +206,7 @@ mod tests {
             [], |r| r.get(0))?)).unwrap();
         assert_eq!(cols, 4);
         db.migrate().unwrap(); // second run is a no-op
-        assert_eq!(db.schema_version().unwrap(), 6);
+        assert_eq!(db.schema_version().unwrap(), 7);
     }
 
     /// Migration 6 renames the Markdown doc table out of the way and puts the real
@@ -244,7 +249,7 @@ mod tests {
         .unwrap();
         assert_eq!(db.schema_version().unwrap(), 4);
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 6);
+        assert_eq!(db.schema_version().unwrap(), 7);
     }
 
     /// A database stamped 3 by the build that shipped migration 3 without
@@ -261,7 +266,7 @@ mod tests {
         assert_eq!(db.schema_version().unwrap(), 3);
 
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 6);
+        assert_eq!(db.schema_version().unwrap(), 7);
         let n: i64 = db
             .with_conn(|c| {
                 Ok(c.query_row("select count(*) from information_schema.tables where table_name = 'board_counters'", [], |r| r.get(0))?)

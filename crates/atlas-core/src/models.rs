@@ -266,6 +266,7 @@ str_enum!(SyncKind {
     ClaudeHook => "claude_hook",
     CodexHook => "codex_hook",
     TasksMd => "tasks_md",
+    FrameworkInstructions => "framework_instructions",
 });
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -356,6 +357,9 @@ pub struct Task {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub closed_at: Option<DateTime<Utc>>,
+    /// Where this task was imported from, when it was. `import::import_tasks` looks
+    /// tasks up by this field so a re-import updates rather than duplicates.
+    #[serde(default)] pub source_ref: Option<SourceRef>,
     /// Keys of the tasks this one waits on.
     pub blocked_by: Vec<String>,
     /// How many of `blocked_by` are not themselves in a done stage. The ready rule
@@ -383,6 +387,8 @@ pub struct NewTask {
     /// Blocking tasks, by id or key.
     #[serde(default)] pub blocked_by: Option<Vec<String>>,
     #[serde(default)] pub stage: Option<String>,
+    /// Set by `import::import_tasks` so a re-import finds this task again.
+    #[serde(default)] pub source_ref: Option<SourceRef>,
 }
 
 /// A patch. An absent field is left alone. `assignee` and `parent` are double
@@ -728,6 +734,29 @@ pub struct ImportedTask {
 pub struct ImportedDecision {
     pub text: String,
     pub source_ref: SourceRef,
+}
+
+// What `import_framework` (route, MCP tool and CLI) imports for one framework.
+str_enum!(ImportWhat { Tasks => "tasks", Decisions => "decisions" });
+
+/// The tally `import::import_tasks` and `import::import_decisions` answer with:
+/// how many items were newly created, how many existing ones were refreshed, and
+/// how many were left alone because nothing about them had changed (or, for a
+/// decision, because its text already exists).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct ImportReport {
+    pub created: usize,
+    pub updated: usize,
+    pub skipped: usize,
+}
+
+/// One framework's inventory plus the documents it holds, the shape
+/// `GET /api/v1/projects/{id}/frameworks` and the MCP `framework_docs` tool answer
+/// with for each framework detected in a project.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FrameworkListing {
+    pub inventory: FrameworkInventory,
+    pub documents: Vec<FrameworkDoc>,
 }
 
 #[cfg(test)]

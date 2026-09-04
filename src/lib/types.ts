@@ -130,6 +130,43 @@ export interface FrameworkInventory {
 	detected_at: Timestamp;
 }
 
+export type FrameworkDocType = 'spec' | 'plan' | 'tasks' | 'roadmap' | 'ledger' | 'proposal' | 'summary' | 'todo';
+
+/** One document a framework holds: a spec, plan, ledger and so on. `path` is what
+ * `GET /projects/{id}/frameworks/{kind}/docs/{path}` and the MCP tool `framework_docs`
+ * take to fetch its text. */
+export interface FrameworkDoc {
+	kind: FrameworkKind;
+	path: string;
+	title: string;
+	doc_type: FrameworkDocType;
+	updated_at: Timestamp;
+}
+
+/** Points an imported task or decision back at the framework file it came from.
+ * `anchor` names where inside that file (a heading, a ruling label), empty when the
+ * whole file is the source. */
+export interface SourceRef {
+	framework: FrameworkKind;
+	path: string;
+	anchor: string;
+}
+
+/** `GET /projects/{id}/frameworks`'s shape for one detected framework. */
+export interface FrameworkListing {
+	inventory: FrameworkInventory;
+	documents: FrameworkDoc[];
+}
+
+export type ImportWhat = 'tasks' | 'decisions';
+
+/** `POST /projects/{id}/frameworks/{kind}/import`'s reply. */
+export interface ImportReport {
+	created: number;
+	updated: number;
+	skipped: number;
+}
+
 export interface ProjectProfile {
 	name: string;
 	languages: string[];
@@ -275,7 +312,7 @@ export interface Doc {
 	updated_at: Timestamp;
 }
 
-export type SyncKind = 'claude' | 'codex' | 'agents_md' | 'claude_md';
+export type SyncKind = 'claude' | 'codex' | 'agents_md' | 'claude_md' | 'framework_instructions';
 
 // `SyncAction` carries no serde rename, so the unit variants serialize as their
 // Rust names and `Skip(String)` as serde's externally tagged `{ "Skip": reason }`.
@@ -391,6 +428,9 @@ export interface Task {
 	created_at: Timestamp;
 	updated_at: Timestamp;
 	closed_at: Timestamp | null;
+	/** Where this task was imported from, when it was. Absent for a task nobody
+	 * imported. */
+	source_ref?: SourceRef | null;
 	/** Keys of the tasks this one waits on. */
 	blocked_by: string[];
 	/**
@@ -417,6 +457,8 @@ export interface NewTask {
 	/** Blocking tasks, by id or key. */
 	blocked_by?: string[];
 	stage?: string;
+	/** Set by an import so a re-import finds this task again. */
+	source_ref?: SourceRef | null;
 }
 
 /**
