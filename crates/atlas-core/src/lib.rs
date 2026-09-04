@@ -4,6 +4,7 @@ pub mod db;
 pub mod error;
 pub mod export;
 pub mod extract;
+pub mod frameworks;
 pub mod jobs;
 pub mod library;
 pub mod llm;

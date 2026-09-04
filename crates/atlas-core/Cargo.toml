@@ -27,6 +27,7 @@ reqwest.workspace = true
 toml_edit = "0.25"
 # `sync` on top of the workspace features: `JobQueue` holds a `tokio::sync::Notify`.
 tokio = { workspace = true, features = ["sync"] }
+pulldown-cmark.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

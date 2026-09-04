@@ -1,0 +1,195 @@
+use std::path::{Path, PathBuf};
+
+use chrono::Utc;
+
+use super::adapter::{mtime, read_within_root, rel, FrameworkAdapter};
+use super::md::{checkboxes, first_heading, section_bullets};
+use crate::models::{FrameworkDoc, FrameworkDocType, FrameworkInventory, FrameworkKind, ImportedDecision, ImportedTask, SourceRef};
+use crate::Result;
+
+const PLANNING_DIR: &str = ".planning";
+
+pub struct GsdAdapter;
+
+impl FrameworkAdapter for GsdAdapter {
+    fn kind(&self) -> FrameworkKind {
+        FrameworkKind::Gsd
+    }
+
+    fn detect(&self, root: &Path) -> Option<FrameworkInventory> {
+        if !root.join(PLANNING_DIR).is_dir() {
+            return None;
+        }
+        let docs = self.documents(root).len();
+        let tasks = self.tasks(root).len();
+        Some(FrameworkInventory { kind: self.kind(), roots: vec![PLANNING_DIR.to_string()], docs, tasks, detected_at: Utc::now() })
+    }
+
+    fn documents(&self, root: &Path) -> Vec<FrameworkDoc> {
+        let mut out = vec![];
+        let planning = root.join(PLANNING_DIR);
+        for (file, doc_type) in [("PROJECT.md", FrameworkDocType::Summary), ("ROADMAP.md", FrameworkDocType::Roadmap)] {
+            let path = planning.join(file);
+            if path.is_file() {
+                out.push(self.doc_at(root, &path, doc_type));
+            }
+        }
+        for phase_dir in phase_dirs(root) {
+            for (file, doc_type) in [("PLAN.md", FrameworkDocType::Plan), ("SUMMARY.md", FrameworkDocType::Summary)] {
+                let path = phase_dir.join(file);
+                if path.is_file() {
+                    out.push(self.doc_at(root, &path, doc_type));
+                }
+            }
+        }
+        for path in todo_files(root) {
+            out.push(self.doc_at(root, &path, FrameworkDocType::Todo));
+        }
+        out
+    }
+
+    fn read(&self, root: &Path, path: &str) -> Result<String> {
+        read_within_root(root, path)
+    }
+
+    fn tasks(&self, root: &Path) -> Vec<ImportedTask> {
+        let mut out = vec![];
+        for phase_dir in phase_dirs(root) {
+            let path = phase_dir.join("PLAN.md");
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let path_rel = rel(root, &path);
+            for item in checkboxes(&text) {
+                out.push(ImportedTask {
+                    title: item.text,
+                    description: item.heading.clone().unwrap_or_default(),
+                    status_hint: Some(if item.checked { "done".to_string() } else { "todo".to_string() }),
+                    source_ref: SourceRef {
+                        framework: self.kind(),
+                        path: path_rel.clone(),
+                        anchor: item.heading.unwrap_or_else(|| format!("L{}", item.line)),
+                    },
+                });
+            }
+        }
+        out
+    }
+
+    fn decisions(&self, root: &Path) -> Vec<ImportedDecision> {
+        let mut out = vec![];
+        for phase_dir in phase_dirs(root) {
+            let path = phase_dir.join("SUMMARY.md");
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let path_rel = rel(root, &path);
+            for (text, _line) in section_bullets(&text, "Decisions") {
+                out.push(ImportedDecision {
+                    text,
+                    source_ref: SourceRef { framework: self.kind(), path: path_rel.clone(), anchor: "Decisions".to_string() },
+                });
+            }
+        }
+        out
+    }
+
+    /// GSD has no agent-instruction-file convention of its own: `.planning/` holds
+    /// only planning documents, so there is nowhere for `atlas sync` to target.
+    fn instruction_targets(&self, _root: &Path) -> Vec<PathBuf> {
+        vec![]
+    }
+}
+
+impl GsdAdapter {
+    fn doc_at(&self, root: &Path, path: &Path, doc_type: FrameworkDocType) -> FrameworkDoc {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        let title = first_heading(&text).unwrap_or_else(|| file_stem(path));
+        FrameworkDoc { kind: self.kind(), path: rel(root, path), title, doc_type, updated_at: mtime(path) }
+    }
+}
+
+/// `.planning/phases/*`: one listing of the `phases` directory.
+fn phase_dirs(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root.join(PLANNING_DIR).join("phases")) else { return vec![] };
+    let mut out: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    out.sort();
+    out
+}
+
+/// `.planning/todos/{pending,done}/*.md`: one listing per subdirectory.
+fn todo_files(root: &Path) -> Vec<PathBuf> {
+    let todos = root.join(PLANNING_DIR).join("todos");
+    let mut out = vec![];
+    for state in ["pending", "done"] {
+        let Ok(entries) = std::fs::read_dir(todos.join(state)) else { continue };
+        let mut files: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "md"))
+            .collect();
+        files.sort();
+        out.extend(files);
+    }
+    out
+}
+
+fn file_stem(path: &Path) -> String {
+    path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/frameworks/gsd")
+    }
+
+    #[test]
+    fn detects_root_and_counts() {
+        let a = GsdAdapter;
+        let inv = a.detect(&fixture()).expect("gsd fixture should be detected");
+        assert_eq!(inv.kind, FrameworkKind::Gsd);
+        assert_eq!(inv.roots, vec![".planning".to_string()]);
+        assert_eq!(inv.docs, 6, "project, roadmap, plan, summary, and two todos");
+        assert_eq!(inv.tasks, 2);
+    }
+
+    #[test]
+    fn documents_carry_doc_types_including_todos() {
+        let a = GsdAdapter;
+        let docs = a.documents(&fixture());
+        assert_eq!(docs.len(), 6);
+        assert!(docs.iter().any(|d| d.doc_type == FrameworkDocType::Roadmap));
+        assert!(docs.iter().any(|d| d.doc_type == FrameworkDocType::Plan));
+        assert!(docs.iter().any(|d| d.doc_type == FrameworkDocType::Summary && d.title == "Widget project"));
+        assert_eq!(docs.iter().filter(|d| d.doc_type == FrameworkDocType::Todo).count(), 2);
+    }
+
+    #[test]
+    fn tasks_come_from_plan_checkboxes() {
+        let a = GsdAdapter;
+        let tasks = a.tasks(&fixture());
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks.iter().filter(|t| t.status_hint.as_deref() == Some("done")).count(), 1);
+    }
+
+    #[test]
+    fn decisions_come_from_summary_decisions_section() {
+        let a = GsdAdapter;
+        let decisions = a.decisions(&fixture());
+        assert_eq!(decisions.len(), 2);
+        assert!(decisions.iter().all(|d| d.source_ref.framework == FrameworkKind::Gsd));
+    }
+
+    #[test]
+    fn instruction_targets_is_always_empty() {
+        let a = GsdAdapter;
+        assert!(a.instruction_targets(&fixture()).is_empty());
+    }
+
+    #[test]
+    fn read_refuses_paths_that_escape_the_root() {
+        let a = GsdAdapter;
+        assert!(a.read(&fixture(), "../CLAUDE.md").is_err());
+        assert!(a.read(&fixture(), "/etc/passwd").is_err());
+        assert!(a.read(&fixture(), ".planning/PROJECT.md").is_ok());
+    }
+}

@@ -24,3 +24,6 @@ async-trait = "0.1"
 schemars = { version = "1", features = ["uuid1", "chrono04"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 tempfile = "3"
+# Framework adapters (superpowers/openspec/speckit/gsd): parses plan, ledger and
+# task-list markdown to pull out titles, headings and checkbox items.
+pulldown-cmark = "0.13"

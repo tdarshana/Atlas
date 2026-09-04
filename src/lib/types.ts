@@ -116,6 +116,20 @@ export interface UpdateProgress {
 	total: number | null;
 }
 
+/** A planning framework (Superpowers, OpenSpec, SpecKit, GSD), distinct from the
+ * code frameworks (Svelte, Tauri, ...) in `ProjectProfile.frameworks`. */
+export type FrameworkKind = 'superpowers' | 'openspec' | 'speckit' | 'gsd';
+
+/** What detection found for one planning framework: its roots plus document and
+ * task counts. */
+export interface FrameworkInventory {
+	kind: FrameworkKind;
+	roots: string[];
+	docs: number;
+	tasks: number;
+	detected_at: Timestamp;
+}
+
 export interface ProjectProfile {
 	name: string;
 	languages: string[];
@@ -125,6 +139,8 @@ export interface ProjectProfile {
 	recent_commits: string[];
 	summary: string | null;
 	built_at: Timestamp;
+	/** Optional: absent on a profile stored before this field existed. */
+	planning_frameworks?: FrameworkInventory[];
 }
 
 export interface Project {

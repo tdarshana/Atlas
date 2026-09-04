@@ -87,6 +87,7 @@ mod tests {
             recent_commits: vec!["initial commit".into()],
             summary: None,
             built_at: chrono::Utc::now(),
+            planning_frameworks: vec![],
         }
     }
 

@@ -83,6 +83,7 @@ pub fn build_profile(root: &Path) -> Result<ProjectProfile> {
         }
     }
     p.recent_commits = recent_commits(root, 10);
+    p.planning_frameworks = crate::frameworks::detect_all(root);
     p.built_at = chrono::Utc::now();
     Ok(p)
 }

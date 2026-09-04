@@ -919,4 +919,28 @@ mod tests {
         assert!(st.embedding.starts_with("unavailable"), "expected unavailable, got {}", st.embedding);
         assert_ne!(st.embedding, "loading");
     }
+
+    /// Connecting a project whose root holds a Superpowers tree should come back
+    /// with `planning_frameworks` filled in, on a fresh (temp) `ATLAS_HOME`, the
+    /// same path `atlas` itself takes on a real connect.
+    #[tokio::test]
+    async fn connect_project_fills_planning_frameworks() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = crate::paths::AtlasPaths::at(home.path());
+        let b = LocalBackend::open(&paths, None, false).unwrap();
+
+        let project_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project_root.path().join("docs/superpowers/plans")).unwrap();
+        std::fs::write(
+            project_root.path().join("docs/superpowers/plans/2026-01-01-fixture.md"),
+            "# Fixture plan\n\n### Task 1: Do the thing\n\n- [ ] do it\n",
+        )
+        .unwrap();
+
+        let project = b.connect_project(project_root.path().to_path_buf(), "test").await.unwrap();
+        let profile = project.profile.expect("connect should have built a profile");
+        assert_eq!(profile.planning_frameworks.len(), 1);
+        assert_eq!(profile.planning_frameworks[0].kind, crate::models::FrameworkKind::Superpowers);
+        assert_eq!(profile.planning_frameworks[0].tasks, 1);
+    }
 }

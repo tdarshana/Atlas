@@ -105,6 +105,10 @@ pub struct ProjectProfile {
     #[serde(default)] pub recent_commits: Vec<String>,
     #[serde(default)] pub summary: Option<String>,
     #[serde(default = "chrono::Utc::now")] pub built_at: DateTime<Utc>,
+    /// Planning frameworks (Superpowers, OpenSpec, SpecKit, GSD) detected in the
+    /// project, distinct from the code frameworks above. `serde(default)` so a
+    /// profile stored before this field existed still deserialises.
+    #[serde(default)] pub planning_frameworks: Vec<FrameworkInventory>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -643,6 +647,82 @@ pub struct WorkflowStep {
     pub finished_at: Option<DateTime<Utc>>,
     pub output: Option<String>,
     pub log: Vec<LogLine>,
+}
+
+// ---------------------------------------------------------------------------
+// Framework adapters (Phase 12): Superpowers, OpenSpec, SpecKit, GSD
+// ---------------------------------------------------------------------------
+
+str_enum!(FrameworkKind {
+    Superpowers => "superpowers",
+    Openspec => "openspec",
+    Speckit => "speckit",
+    Gsd => "gsd",
+});
+
+str_enum!(FrameworkDocType {
+    Spec => "spec",
+    Plan => "plan",
+    Tasks => "tasks",
+    Roadmap => "roadmap",
+    Ledger => "ledger",
+    Proposal => "proposal",
+    Summary => "summary",
+    Todo => "todo",
+});
+
+/// What `FrameworkAdapter::detect` found for one framework: which of its roots
+/// exist under the project, and how many documents and tasks it holds. Stored on
+/// `ProjectProfile.planning_frameworks` on connect and refresh.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FrameworkInventory {
+    pub kind: FrameworkKind,
+    /// Existing root paths for this framework, relative to the project root.
+    pub roots: Vec<String>,
+    pub docs: usize,
+    pub tasks: usize,
+    pub detected_at: DateTime<Utc>,
+}
+
+/// One document a framework adapter found: a spec, plan, ledger and so on.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FrameworkDoc {
+    pub kind: FrameworkKind,
+    /// Path relative to the project root, as passed back to `FrameworkAdapter::read`.
+    pub path: String,
+    pub title: String,
+    pub doc_type: FrameworkDocType,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Points an imported task or decision back at the framework file it came from.
+/// `anchor` names where inside that file: a heading, a ruling label, or similarly
+/// a short human-readable locator, empty when the whole file is the source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SourceRef {
+    pub framework: FrameworkKind,
+    pub path: String,
+    #[serde(default)] pub anchor: String,
+}
+
+/// A task line found by `FrameworkAdapter::tasks`, ready to become (or update) a
+/// board task under `import::import_tasks`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ImportedTask {
+    pub title: String,
+    pub description: String,
+    /// Free-text status as the framework spelled it (for example `done`, `todo`),
+    /// left to `import::import_tasks` to map onto a board stage.
+    #[serde(default)] pub status_hint: Option<String>,
+    pub source_ref: SourceRef,
+}
+
+/// A decision line found by `FrameworkAdapter::decisions`, ready to become a
+/// pending memory under `import::import_decisions`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ImportedDecision {
+    pub text: String,
+    pub source_ref: SourceRef,
 }
 
 #[cfg(test)]
