@@ -84,6 +84,13 @@ export const COMMANDS: PaletteCommand[] = [
 		run: (ctx) => ctx.goto('/mcp')
 	},
 	{
+		id: 'open-plugins',
+		label: 'Plugins',
+		hint: 'install and enable plugins',
+		icon: 'plug',
+		run: (ctx) => ctx.goto('/plugins')
+	},
+	{
 		id: 'open-settings',
 		label: 'Open settings',
 		hint: '',

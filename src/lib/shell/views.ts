@@ -13,7 +13,10 @@ export type ViewId =
 	| 'workflows'
 	| 'review'
 	| 'mcp'
-	| 'settings';
+	| 'settings'
+	/** Not a rail item: `/plugins` is reached from Settings and the palette, but it owns
+	 * a side panel of its own, so it needs a view id. */
+	| 'plugins';
 
 export interface ViewDef {
 	id: ViewId;
@@ -51,7 +54,8 @@ const PANEL_TITLES: Record<ViewId, string> = {
 	workflows: 'Workflows',
 	review: 'Review',
 	mcp: 'MCP',
-	settings: 'Settings'
+	settings: 'Settings',
+	plugins: 'Plugins'
 };
 
 export function panelTitle(view: ViewId): string {
@@ -59,13 +63,16 @@ export function panelTitle(view: ViewId): string {
 }
 
 export function viewLabel(view: ViewId): string {
+	if (view === 'plugins') return PANEL_TITLES.plugins;
 	return VIEWS.find((v) => v.id === view)?.label ?? 'Dashboard';
 }
 
-/** The rail item a route lights up. `/board` is project work, so it lights Projects. */
+/** The rail item a route lights up. `/board` is project work, so it lights Projects.
+ * `/plugins` lights nothing: it is not a rail destination, only a side panel owner. */
 export function viewForPath(path: string): ViewId {
 	if (path === '/') return 'dashboard';
 	if (path === '/board' || path.startsWith('/board/')) return 'projects';
+	if (path === '/plugins' || path.startsWith('/plugins/')) return 'plugins';
 	const hit = VIEWS.find(
 		(v) => v.href !== '/' && (path === v.href || path.startsWith(`${v.href}/`))
 	);

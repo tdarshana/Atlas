@@ -280,7 +280,11 @@ mod tests {
 
     #[test]
     fn rejects_a_contribution_without_its_permission() {
-        let json = HELLO_WORLD.replace("\"permissions\": [\"ui.sections\"]", "\"permissions\": []");
+        let json = HELLO_WORLD.replace(
+            "\"permissions\": [\"ui.sections\", \"tasks.read\"]",
+            "\"permissions\": []",
+        );
+        assert_ne!(json, HELLO_WORLD, "the fixture's permissions line moved; update this replacement");
         let manifest = Manifest::parse(&json).unwrap();
         let err = manifest.validate(&fixture_dir()).unwrap_err();
         assert_eq!(err, "`contributes.sections` needs the `ui.sections` permission.");

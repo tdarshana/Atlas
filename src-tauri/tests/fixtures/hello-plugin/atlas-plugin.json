@@ -6,7 +6,7 @@
   "author": "Atlas",
   "api": ">=1.0 <2",
   "main": "main.js",
-  "permissions": ["ui.sections"],
+  "permissions": ["ui.sections", "tasks.read"],
   "contributes": {
     "sections": [
       { "id": "hello", "title": "Hello", "icon": "sparkles", "view": "hello-view" }

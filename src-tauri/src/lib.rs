@@ -20,8 +20,8 @@ use commands::platform::{
     VaultState,
 };
 use plugins::{
-    plugin_install_folder, plugin_install_github, plugin_read_main, plugin_set_enabled,
-    plugin_uninstall, plugins_list,
+    plugin_install_folder, plugin_install_github, plugin_read_file, plugin_read_main,
+    plugin_set_enabled, plugin_uninstall, plugins_list,
 };
 
 const DEFAULT_PORT: u16 = 7433;
@@ -164,6 +164,10 @@ pub fn run() {
         // the running app (DOM snapshots, IPC, console logs) from an agent session. It
         // listens on loopback port 9223 and is compiled out of release builds.
         .plugin(mcp_bridge_plugin())
+        // A plugin's own files, served to the sandboxed iframe that runs it. The document
+        // needs an origin of its own: a `srcdoc` or a `blob:` inherits the app's CSP,
+        // which blocks the plugin's script.
+        .register_uri_scheme_protocol(plugins::protocol::SCHEME, plugins::protocol::handle)
         .manage(ShortcutRegistration::default())
         .manage(VaultState::default())
         .manage(UpdateState::default())
@@ -232,7 +236,8 @@ pub fn run() {
             plugin_install_github,
             plugin_set_enabled,
             plugin_uninstall,
-            plugin_read_main
+            plugin_read_main,
+            plugin_read_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

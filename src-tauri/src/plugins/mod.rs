@@ -6,6 +6,7 @@
 
 pub mod install;
 pub mod manifest;
+pub mod protocol;
 pub mod registry;
 
 use std::path::{Path, PathBuf};
@@ -87,6 +88,25 @@ pub async fn plugin_read_main<R: Runtime>(app: tauri::AppHandle<R>, id: String) 
         // `Some` by the time the two checks above let execution reach here.
         let manifest = info.manifest.ok_or_else(|| format!("'{id}' has no manifest."))?;
         std::fs::read_to_string(info.dir.join(&manifest.main)).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The contents of one file inside `id`'s folder, under the same path rules the
+/// `atlas-plugin` protocol enforces (no traversal, no encoded separators, no symlink that
+/// leaves the folder) and the same refusal of a disabled or incompatible plugin. Used for
+/// a contributed theme's CSS file, which the app reads rather than the frame.
+#[tauri::command]
+pub async fn plugin_read_file<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    id: String,
+    path: String,
+) -> Result<String, String> {
+    let app_data = app_data_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let resolved = protocol::resolve_file(&app_data, &id, &path).map_err(|(_, message)| message)?;
+        std::fs::read_to_string(resolved).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?

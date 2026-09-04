@@ -13,6 +13,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
 	{ id: 'board-stages', label: 'Board stages' },
 	{ id: 'appearance', label: 'Appearance' },
 	{ id: 'mcp', label: 'MCP server' },
+	{ id: 'plugins', label: 'Plugins' },
 	{ id: 'shortcuts', label: 'Shortcuts' },
 	{ id: 'notifications', label: 'Notifications' },
 	{ id: 'security', label: 'Security' },

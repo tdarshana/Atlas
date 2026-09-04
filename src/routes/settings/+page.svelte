@@ -53,6 +53,7 @@
 		settings
 	} from '$lib/stores/settings.svelte';
 	import { loadMcp, mcp } from '$lib/stores/mcp.svelte';
+	import { loadPlugins, plugins } from '$lib/plugins/host.svelte';
 	import { status } from '$lib/stores/status.svelte';
 	import { UI_FONT_MONO_KEY, UI_FONT_SIZE_KEY, UI_FONT_UI_KEY, UI_SCALE_KEY, UI_THEME_PACK_KEY } from '$lib/types';
 	import { THEME_PRESETS, themePreset } from '$lib/shell/theme-presets';
@@ -430,6 +431,14 @@
 			: '…'
 	);
 
+	/** The same store the `/plugins` view and its side panel read, so the count here is
+	 * whatever those last saw rather than a fetch of its own. */
+	const pluginsSummaryText = $derived(
+		plugins.available
+			? `${plugins.items.length} installed, ${plugins.items.filter((p) => p.enabled).length} enabled`
+			: 'Plugins need the desktop app'
+	);
+
 	/** How long the button says "Copied" before going back to its own name. */
 	const COPIED_MS = 1500;
 	let copiedTimer: ReturnType<typeof setTimeout> | null = null;
@@ -702,6 +711,7 @@
 
 	onMount(() => {
 		void reload();
+		if (!plugins.loaded) void loadPlugins();
 	});
 
 	// `/settings#<section>` (the side panel's Sections rows) scrolls to that card once its
@@ -988,6 +998,18 @@
 					<span class="mono">Restart</span> command all moved to their own view.
 				</span>
 				<a href="/mcp" data-testid="mcp-open-link">Open MCP</a>
+			</div>
+		</section>
+
+		<section class="card" id="plugins">
+			<div class="card-head"><span class="card-title">Plugins</span></div>
+			<div class="card-body">
+				<span class="hint" data-testid="plugins-settings-summary">{pluginsSummaryText}</span>
+				<span class="hint">
+					A plugin runs in a sandboxed frame and reaches Atlas only through the permissions its
+					manifest asks for. Install, enable and remove them on their own view.
+				</span>
+				<a href="/plugins" data-testid="plugins-open-link">Open plugins</a>
 			</div>
 		</section>
 

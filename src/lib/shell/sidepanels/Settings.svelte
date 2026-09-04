@@ -29,6 +29,7 @@
 	<TreeRow icon="columns-3" label="Board stages" href="/settings#board-stages" onclick={jump('#board-stages')} />
 	<TreeRow icon="palette" label="Appearance" href="/settings#appearance" onclick={jump('#appearance')} />
 	<TreeRow icon="plug" label="MCP server" href="/settings#mcp" onclick={jump('#mcp')} />
+	<TreeRow icon="layers" label="Plugins" href="/settings#plugins" onclick={jump('#plugins')} />
 	<TreeRow icon="keyboard" label="Shortcuts" href="/settings#shortcuts" onclick={jump('#shortcuts')} />
 	<TreeRow icon="bell" label="Notifications" href="/settings#notifications" onclick={jump('#notifications')} />
 	<TreeRow icon="lock" label="Security" href="/settings#security" onclick={jump('#security')} />
