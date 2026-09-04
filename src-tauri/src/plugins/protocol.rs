@@ -53,8 +53,9 @@ fn escape_attribute(value: &str) -> String {
 /// whatever the plugin had already read. That is one-way: the page it lands on cannot take
 /// the bridge over, because `PluginFrame.svelte` binds one bridge per frame and refuses a
 /// second `atlas:hello` from an already-bound window. A same-frame navigation keeps the
-/// same `Window`, so only the host can reset a binding, by recreating the iframe through
-/// the frame's `reload()`. A hostile or compromised plugin is still the threat the
+/// same `Window`, so only the host can reset a binding, by changing which document the
+/// frame shows, which recreates the iframe element. A hostile or compromised plugin is
+/// still the threat the
 /// install-time permission list exists for, not one this policy is meant to answer. See
 /// Task 3a's concern 9.
 ///

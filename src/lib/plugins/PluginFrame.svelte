@@ -55,13 +55,24 @@
 	let frame = $state<HTMLIFrameElement>();
 	let reported = $state(DEFAULT_HEIGHT);
 	let bridge: Bridge | null = null;
-	/** Bumped by `reload()` to recreate the iframe element, and with it the frame's window. */
-	let generation = $state(0);
 	/** The context as last sent, so a parent that hands over a fresh object holding the
 	 * same values does not make the frame re-render for nothing. */
 	let sentContext = '';
 
 	const src = $derived(platform ? frameUrl(plugin.id, platform) : undefined);
+	/**
+	 * Which document this frame is showing, as the host asked for it. Any change recreates
+	 * the iframe element, and with it the `Window` a bridge binds to.
+	 *
+	 * `view` is in the key as well as `src`, for two different reasons. `src` covers a
+	 * change of plugin. `view` does not appear in the URL at all, since one document serves
+	 * every view and the view travels in `atlas:init`, but `createBridge` fixes it at
+	 * binding time, so a view change needs a new binding too.
+	 *
+	 * A page the plugin navigated itself to changes neither, which is exactly why keying on
+	 * this keeps the rebind guard's security property: only the host moves this key.
+	 */
+	const frameKey = $derived(`${src ?? ''}|${view}`);
 	const title = $derived(plugin.manifest?.name ?? plugin.id);
 	const shownHeight = $derived(Math.min(height ?? reported, maxHeight ?? Number.POSITIVE_INFINITY));
 	const frameStyle = $derived(fill ? 'height:100%' : `height:${shownHeight}px`);
@@ -93,7 +104,8 @@
 		// not exclude a page the frame navigated itself to. Once a bridge is live, a second
 		// hello is refused: rebinding would hand the plugin's grants (`memories.remember`,
 		// `tasks.move`, `settings.get`, all as `plugin/<id>`) to whatever page the frame
-		// walked off to. Only the host resets a binding, through `reload()` below.
+		// walked off to. Only the host resets a binding, by moving `frameKey`, which throws
+		// the whole iframe element away and drops the bridge with it.
 		if (bridge) {
 			console.warn(
 				`plugin ${plugin.id}: refused a second atlas:hello from an already-bound frame`
@@ -126,16 +138,26 @@
 		bridge = null;
 	}
 
+	/** The key the live bridge was bound under. Plain, not `$state`: it is a record of what
+	 * has happened, never something the template reads. */
+	let boundKey = '';
+
 	/**
-	 * Reloads the plugin's document from a fresh iframe element, disposing the bridge
-	 * first. The guard in `onHello` refuses a rebind, so this is the host's way, and the
-	 * only way, to bind a new one: the frame is recreated rather than re-navigated, so the
-	 * new document gets a new `Window` and the old one cannot speak again.
+	 * The host changed which document this frame shows. Drop the bridge in the same flush
+	 * the keyed block destroys the iframe in, before the new document exists: `atlas:hello`
+	 * arrives on a later task, so the new binding is never the one torn down here.
+	 *
+	 * Without this the frame is the one host-driven reload the app actually performs, and
+	 * it would meet a live bridge: the new document's hello would be refused, nothing would
+	 * be themed or initialised, and the previous plugin's bridge would stay attached to the
+	 * next plugin's document, which accepts a message on window identity alone.
 	 */
-	export function reload(): void {
+	$effect.pre(() => {
+		const key = frameKey;
+		if (key === boundKey) return;
+		boundKey = key;
 		detachBridge();
-		generation += 1;
-	}
+	});
 
 	onMount(() => {
 		void resolvePlatform().then((p) => (platform = p));
@@ -176,7 +198,7 @@
 </script>
 
 {#if src}
-	{#key generation}
+	{#key frameKey}
 		<iframe
 			bind:this={frame}
 			{title}
