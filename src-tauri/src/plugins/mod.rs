@@ -83,7 +83,10 @@ pub async fn plugin_read_main<R: Runtime>(app: tauri::AppHandle<R>, id: String) 
         if !info.enabled {
             return Err(format!("'{id}' is disabled."));
         }
-        std::fs::read_to_string(info.dir.join(&info.manifest.main)).map_err(|e| e.to_string())
+        // `compatible` is only ever true once `manifest` parsed, so this is always
+        // `Some` by the time the two checks above let execution reach here.
+        let manifest = info.manifest.ok_or_else(|| format!("'{id}' has no manifest."))?;
+        std::fs::read_to_string(info.dir.join(&manifest.main)).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?

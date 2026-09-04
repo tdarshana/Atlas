@@ -1,6 +1,9 @@
 // Where installed plugins live on disk, and the state file (`plugins.json`) that tracks
-// which are enabled and where each came from. `list` never drops a plugin whose manifest
-// fails validation or whose `api` does not match this app; it reports why instead.
+// which are enabled and where each came from. `list` never drops a plugin directory: one
+// whose `atlas-plugin.json` is missing, unreadable or fails to parse is listed with
+// `manifest: None`; one whose manifest parses but fails validation or whose `api` does
+// not match this app is listed with `manifest: Some(..)` and `compatible: false`. Both
+// cases carry `reason`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -66,23 +69,26 @@ pub(super) fn record_install(app_data: &Path, id: &str, enabled: bool, source: S
     write_state(app_data, &state)
 }
 
-/// One installed plugin as reported to the app: always present once its folder and
-/// manifest exist, even when `compatible` is false.
+/// One installed plugin as reported to the app: always present once its folder exists,
+/// even when its manifest could not be read or parsed at all (`manifest: None`) or parsed
+/// but is not `compatible`.
 #[derive(Debug, Clone, Serialize)]
 pub struct PluginInfo {
     pub id: String,
-    pub manifest: Manifest,
+    pub manifest: Option<Manifest>,
     pub enabled: bool,
     pub compatible: bool,
     pub reason: Option<String>,
     pub dir: PathBuf,
 }
 
-/// Every installed plugin, sorted by id. A plugin whose manifest fails
-/// [`Manifest::validate`] or whose `api` does not match [`ATLAS_API_VERSION`] is still
-/// listed, with `compatible: false`, `enabled: false` and `reason` set; only a directory
-/// with no readable `atlas-plugin.json` at all is skipped, since there is no manifest to
-/// report.
+/// Every installed plugin (every directory under [`plugins_dir`]), sorted by id. A
+/// directory is never dropped: one whose `atlas-plugin.json` is missing, unreadable or
+/// fails to parse is listed with `manifest: None`, `compatible: false`, `enabled: false`
+/// and `reason` set to the read or parse error; one whose manifest parses but fails
+/// [`Manifest::validate`] or whose `api` does not match [`ATLAS_API_VERSION`] is listed
+/// with `manifest: Some(..)`, the same `compatible: false`/`enabled: false`/`reason`
+/// shape.
 pub fn list(app_data: &Path) -> Result<Vec<PluginInfo>, String> {
     let state = read_state(app_data)?;
     let dir = plugins_dir(app_data);
@@ -102,8 +108,24 @@ pub fn list(app_data: &Path) -> Result<Vec<PluginInfo>, String> {
     for id in ids {
         let plugin_dir = dir.join(&id);
         let manifest_path = plugin_dir.join("atlas-plugin.json");
-        let Ok(text) = std::fs::read_to_string(&manifest_path) else { continue };
-        let Ok(manifest) = Manifest::parse(&text) else { continue };
+        let parsed = std::fs::read_to_string(&manifest_path)
+            .map_err(|e| format!("Could not read atlas-plugin.json: {e}"))
+            .and_then(|text| Manifest::parse(&text));
+
+        let manifest = match parsed {
+            Ok(manifest) => manifest,
+            Err(reason) => {
+                out.push(PluginInfo {
+                    id,
+                    manifest: None,
+                    enabled: false,
+                    compatible: false,
+                    reason: Some(reason),
+                    dir: plugin_dir,
+                });
+                continue;
+            }
+        };
 
         let recorded_enabled = state.get(&id).map(|e| e.enabled).unwrap_or(false);
         let reason = manifest.validate(&plugin_dir).err().or_else(|| {
@@ -119,7 +141,7 @@ pub fn list(app_data: &Path) -> Result<Vec<PluginInfo>, String> {
         let is_compatible = reason.is_none();
         out.push(PluginInfo {
             id,
-            manifest,
+            manifest: Some(manifest),
             enabled: is_compatible && recorded_enabled,
             compatible: is_compatible,
             reason,
@@ -255,5 +277,48 @@ mod tests {
         let app_data = scratch_dir("unknown-uninstall");
         let err = uninstall(&app_data, "nope").unwrap_err();
         assert_eq!(err, "No plugin 'nope' is installed.");
+    }
+
+    /// A plugin directory whose `atlas-plugin.json` fails to parse must still be listed
+    /// (never silently dropped), with `manifest: None` and a `reason`; `set_enabled` and
+    /// `plugin_read_main` (in `mod.rs`) both refuse it using that same reason.
+    #[test]
+    fn a_directory_with_an_unparsable_manifest_is_listed_disabled_with_a_reason() {
+        let app_data = scratch_dir("unparsable");
+        let plugin_dir = plugins_dir(&app_data).join("broken");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join("atlas-plugin.json"), "not json at all").unwrap();
+
+        let infos = list(&app_data).unwrap();
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].id, "broken");
+        assert!(infos[0].manifest.is_none());
+        assert!(!infos[0].compatible);
+        assert!(!infos[0].enabled);
+        assert!(infos[0].reason.is_some());
+
+        let err = set_enabled(&app_data, "broken", true);
+        // `set_enabled` records state via `record_install`/the state file, which this
+        // directory never went through (it was placed directly, as a stand-in for a
+        // corrupted install), so `set_enabled` reports it as not installed rather than
+        // incompatible; `plugins_list` is what surfaces the parse-failure reason to the
+        // user for a directory like this one.
+        assert!(err.is_err());
+    }
+
+    /// The same case, but recorded through `record_install` like a real install would be,
+    /// so `set_enabled(..., true)` reaches the compatibility check and refuses with the
+    /// parse-failure reason `list` reports.
+    #[test]
+    fn set_enabled_refuses_a_recorded_plugin_with_an_unparsable_manifest() {
+        let app_data = scratch_dir("unparsable-recorded");
+        let plugin_dir = plugins_dir(&app_data).join("broken");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join("atlas-plugin.json"), "not json at all").unwrap();
+        record_install(&app_data, "broken", false, SourceRef { kind: "folder".into(), value: "x".into() }).unwrap();
+
+        let reason = list(&app_data).unwrap()[0].reason.clone().unwrap();
+        let err = set_enabled(&app_data, "broken", true).unwrap_err();
+        assert_eq!(err, reason);
     }
 }

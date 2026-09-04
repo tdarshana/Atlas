@@ -257,6 +257,13 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_bad_api() {
+        let json = HELLO_WORLD.replace("\">=1.0 <2\"", "\"not a version range\"");
+        let err = Manifest::parse(&json).unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
     fn rejects_a_main_with_dot_dot() {
         let json = HELLO_WORLD.replace("\"main.js\"", "\"../main.js\"");
         let manifest = Manifest::parse(&json).unwrap();

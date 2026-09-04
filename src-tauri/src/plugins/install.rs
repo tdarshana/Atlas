@@ -49,7 +49,7 @@ impl Drop for ScratchDir {
 fn install_prepared(app_data: &Path, src: &Path, source: SourceRef) -> Result<PluginInfo, String> {
     let manifest_path = src.join("atlas-plugin.json");
     let text = std::fs::read_to_string(&manifest_path)
-        .map_err(|e| format!("could not read atlas-plugin.json: {e}"))?;
+        .map_err(|e| format!("Could not read atlas-plugin.json: {e}"))?;
     let manifest = Manifest::parse(&text)?;
     manifest.validate(src)?;
 
@@ -68,7 +68,7 @@ fn install_prepared(app_data: &Path, src: &Path, source: SourceRef) -> Result<Pl
     });
     Ok(PluginInfo {
         id: manifest.id.clone(),
-        manifest,
+        manifest: Some(manifest),
         enabled: is_compatible,
         compatible: is_compatible,
         reason,
@@ -155,7 +155,7 @@ fn download_capped(url: &str) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
     limited.read_to_end(&mut buf).map_err(|e| e.to_string())?;
     if buf.len() as u64 > MAX_ARCHIVE_BYTES {
-        return Err(format!("the archive is larger than the {} MiB limit.", MAX_ARCHIVE_BYTES / (1024 * 1024)));
+        return Err(format!("The archive is larger than the {} MiB limit.", MAX_ARCHIVE_BYTES / (1024 * 1024)));
     }
     Ok(buf)
 }
@@ -173,7 +173,7 @@ fn single_top_level_dir(dir: &Path) -> Result<PathBuf, String> {
         std::fs::read_dir(dir).map_err(|e| e.to_string())?.filter_map(|e| e.ok()).map(|e| e.path()).collect();
     match entries.as_slice() {
         [only] if only.is_dir() => Ok(only.clone()),
-        _ => Err("the archive did not contain a single top-level directory.".to_string()),
+        _ => Err("The archive did not contain a single top-level directory.".to_string()),
     }
 }
 
@@ -212,6 +212,27 @@ mod tests {
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].id, "hello-world");
         assert!(infos[0].enabled);
+    }
+
+    /// Copies `fixture_dir()` into a fresh scratch directory and adds a `.git/` folder
+    /// holding a file, so a test can install from a source that actually has one to skip
+    /// rather than only asserting on the fixture, which never carries one.
+    fn source_with_git_dir(label: &str) -> PathBuf {
+        let src = scratch_dir(label).join("src");
+        copy_dir(&fixture_dir(), &src).unwrap();
+        std::fs::create_dir_all(src.join(".git")).unwrap();
+        std::fs::write(src.join(".git/config"), "[core]").unwrap();
+        src
+    }
+
+    #[test]
+    fn install_from_folder_skips_a_git_directory_in_the_source() {
+        let app_data = scratch_dir("skip-git");
+        let src = source_with_git_dir("skip-git-src");
+
+        install_from_folder(&app_data, &src).unwrap();
+        assert!(plugins_dir(&app_data).join("hello-world/main.js").is_file());
+        assert!(!plugins_dir(&app_data).join("hello-world/.git").exists());
     }
 
     #[test]
@@ -285,6 +306,79 @@ mod tests {
         assert!(plugins_dir(&app_data).join("hello-world/main.js").is_file());
         // No leftover top-level directory name inside the installed plugin's own folder.
         assert!(!plugins_dir(&app_data).join("hello-world/hello-world-main").exists());
+    }
+
+    /// Writes a raw tar header directly (bypassing `Builder::append_data`'s own path
+    /// validation, which refuses a `..` or absolute path outright) so the archive can
+    /// carry an entry a well-behaved builder would never produce, the way a hostile
+    /// archive could.
+    fn append_raw_entry<W: Write>(builder: &mut tar::Builder<W>, name: &[u8], entry_type: tar::EntryType, contents: &[u8]) {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o644);
+        header.set_entry_type(entry_type);
+        if entry_type == tar::EntryType::Symlink {
+            if let Some(gnu) = header.as_gnu_mut() {
+                gnu.linkname[..contents.len()].copy_from_slice(contents);
+            }
+        }
+        if let Some(gnu) = header.as_gnu_mut() {
+            gnu.name[..name.len()].copy_from_slice(name);
+        }
+        header.set_cksum();
+        builder.append(&header, contents).unwrap();
+    }
+
+    /// An archive shaped like `build_fixture_archive`'s, plus a `..`-traversal entry and a
+    /// symlink entry whose target escapes the extraction directory, both nested under the
+    /// legitimate top-level `hello-world-main/` so the single-top-level-directory
+    /// invariant `single_top_level_dir` checks still holds.
+    fn build_hostile_archive() -> Vec<u8> {
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            builder
+                .append_path_with_name(fixture_dir().join("atlas-plugin.json"), "hello-world-main/atlas-plugin.json")
+                .unwrap();
+            builder.append_path_with_name(fixture_dir().join("main.js"), "hello-world-main/main.js").unwrap();
+            append_raw_entry(
+                &mut builder,
+                b"hello-world-main/../../../escaped.txt",
+                tar::EntryType::Regular,
+                b"evil",
+            );
+            append_raw_entry(&mut builder, b"hello-world-main/escaped-link", tar::EntryType::Symlink, b"../../../etc");
+            builder.finish().unwrap();
+        }
+        let mut gz_bytes = Vec::new();
+        {
+            let mut encoder = flate2::write::GzEncoder::new(&mut gz_bytes, flate2::Compression::default());
+            encoder.write_all(&tar_bytes).unwrap();
+            encoder.finish().unwrap();
+        }
+        gz_bytes
+    }
+
+    /// A `..`-traversal entry and an escaping symlink target inside the downloaded archive
+    /// must not land anywhere outside the extraction scratch dir, and must not survive
+    /// into the installed plugin folder either way (`tar`'s own `unpack` refuses a `..`
+    /// path component, and `copy_dir` never follows a symlink since it checks
+    /// `DirEntry::file_type()` for `is_dir()`/`is_file()`).
+    #[test]
+    fn archive_traversal_and_symlink_entries_do_not_escape_or_survive_install() {
+        let app_data = scratch_dir("hostile-archive");
+        let url = serve_once(build_hostile_archive());
+
+        let info = install_from_archive_url(&app_data, &url, "https://github.com/acme/hello-world").unwrap();
+        assert_eq!(info.id, "hello-world");
+        assert!(plugins_dir(&app_data).join("hello-world/main.js").is_file());
+
+        // Nothing escaped above the OS temp dir the extraction scratch dir lives under.
+        assert!(!std::env::temp_dir().join("escaped.txt").exists());
+        // Nothing from either hostile entry survived into the installed plugin folder.
+        assert!(!plugins_dir(&app_data).join("hello-world/escaped.txt").exists());
+        assert!(!plugins_dir(&app_data).join("hello-world/escaped-link").exists());
+        assert!(!plugins_dir(&app_data).join("escaped.txt").exists());
     }
 
     #[test]
