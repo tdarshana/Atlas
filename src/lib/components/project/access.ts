@@ -69,16 +69,23 @@ export function accessText(list: string[] | null): string {
 	return list.join(', ');
 }
 
-/** The line under a list rule: whether the project sets it, and what is in force. */
+/**
+ * The line under a list rule: whether the project sets it, and what value that means.
+ *
+ * The inherited half names `defaults`, not the resolved effective value. The two agree
+ * whenever the project sets nothing, but this is read against the form as it is being
+ * edited, and the moment a set rule is put back on the global default the effective value
+ * still carries the project's own list. Naming the default is right in both cases.
+ */
 export function ruleNote(
 	access: AgentAccess,
-	effective: AgentAccess,
+	defaults: AgentAccess,
 	rule: ListRule
 ): { inherited: boolean; text: string } {
 	const own = rule === 'memory_writers' ? access.memory_writers : access.task_movers;
-	const live = rule === 'memory_writers' ? effective.memory_writers : effective.task_movers;
+	const fallback = rule === 'memory_writers' ? defaults.memory_writers : defaults.task_movers;
 	return own === null
-		? { inherited: true, text: `Inherited from the global default: ${accessText(live)}` }
+		? { inherited: true, text: `Inherited from the global default: ${accessText(fallback)}` }
 		: { inherited: false, text: `Set on this project: ${accessText(own)}` };
 }
 

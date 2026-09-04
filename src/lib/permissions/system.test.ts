@@ -74,19 +74,45 @@ describe('toRows', () => {
 		expect(rows[3].detail).toBe('/Users/x/code: denied');
 	});
 
-	it('offers Request only where the app can prompt and the answer is still open', () => {
+	it('offers Request where the app can prompt and the answer is still open', () => {
 		const open = toRows([
 			{ id: 'notifications', granted: 'not_determined' },
 			{ id: 'automation-finder', granted: 'unknown' },
-			{ id: 'accessibility', granted: 'denied' },
+			{ id: 'accessibility', granted: 'not_determined' },
 			{ id: 'files', granted: 'not_determined' }
 		]);
-		// Notifications and Automation can still be asked for; a denied Accessibility is
-		// changed in System Settings, and the files row has no prompt to raise at all.
-		expect(open.map((r) => r.canRequest)).toEqual([true, true, false, false]);
+		// The files row has no prompt Atlas can raise at all, whatever its state.
+		expect(open.map((r) => r.canRequest)).toEqual([true, true, true, false]);
 
 		const settled = toRows(ALL_GRANTED);
 		expect(settled.every((r) => !r.canRequest)).toBe(true);
+	});
+
+	/**
+	 * `AXIsProcessTrustedWithOptions` raises its "open System Settings" sheet whenever the
+	 * process is untrusted, and macOS reports an untrusted process as denied rather than as
+	 * undecided, so a denied Accessibility row is exactly where the prompt is useful. The
+	 * Apple Event and notification grants answer a second ask with the stored decision, so
+	 * asking again there would do nothing.
+	 */
+	it('keeps Request on a denied Accessibility row, and only that one', () => {
+		const denied = toRows([
+			{ id: 'notifications', granted: 'denied' },
+			{ id: 'automation-finder', granted: 'denied' },
+			{ id: 'accessibility', granted: 'denied' },
+			{ id: 'files', granted: 'denied' }
+		]);
+		expect(denied.map((r) => r.canRequest)).toEqual([false, false, true, false]);
+	});
+
+	it('never offers Request for a permission this platform does not have', () => {
+		const na = toRows([
+			{ id: 'notifications', granted: 'granted' },
+			{ id: 'automation-finder', granted: 'not_applicable' },
+			{ id: 'accessibility', granted: 'not_applicable' },
+			{ id: 'files', granted: 'granted' }
+		]);
+		expect(na.map((r) => r.canRequest)).toEqual([false, false, false, false]);
 	});
 
 	it('names why each permission is needed, and warns about the terminal for Finder', () => {

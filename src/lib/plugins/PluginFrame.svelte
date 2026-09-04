@@ -15,7 +15,7 @@
 	import { push } from '$lib/ui/toasts.svelte';
 	import { createBridge, type Bridge, type FrameContext, type ThemeTokens } from './bridge';
 	import { frameUrl } from './frame-url';
-	import { registerFrame, unregisterFrame } from './host.svelte';
+	import { pluginById, registerFrame, unregisterFrame } from './host.svelte';
 	import { pluginBackend } from './plugin-api';
 	import type { FrameSlot, PluginInfo } from './types';
 
@@ -95,6 +95,9 @@
 			target: source as unknown as { postMessage(message: unknown, targetOrigin: string): void },
 			source,
 			api: pluginBackend(plugin.id),
+			// The live grants, so revoking one on the Permissions view reaches a frame that
+			// is already mounted rather than waiting for it to be recreated.
+			grants: () => pluginById(plugin.id)?.granted ?? plugin.granted ?? [],
 			actor: `plugin/${plugin.id}`,
 			onResize: (h) => (reported = h),
 			onNotify: (kind, text) => push(kind, `${title}: ${text}`)

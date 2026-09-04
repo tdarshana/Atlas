@@ -4,7 +4,7 @@
 	// the global default, and each able to go back to that default.
 	import { Badge, Button, Checkbox, Input } from '$lib/ds';
 	import { alwaysAllowed } from './settings/settings';
-	import { ruleNote, reviewNote, type AccessForm, type ListRule } from './access';
+	import { ruleNote, reviewNote, toAccess, type AccessForm, type ListRule } from './access';
 	import type { ProjectAccessReport } from '$lib/types';
 
 	interface Props {
@@ -20,9 +20,16 @@
 
 	const trimmed = $derived(draft.trim());
 	const canAdd = $derived(!!trimmed && !form.actors.includes(trimmed));
-	const writers = $derived(report ? ruleNote(report.access, report.effective, 'memory_writers') : null);
-	const movers = $derived(report ? ruleNote(report.access, report.effective, 'task_movers') : null);
-	const review = $derived(report ? reviewNote(report.access, report.defaults) : null);
+
+	// The badge and the note describe the rule as it stands in the form, not as the daemon
+	// last stored it. They sit right beside the controls that change it, so deriving them
+	// from the saved report would leave `Use global default` clearing the ticks while the
+	// line above still read `Set on this project: ...`. The defaults still come from the
+	// report: those are the daemon's answer, not the user's.
+	const edited = $derived(toAccess(form));
+	const writers = $derived(report ? ruleNote(edited, report.defaults, 'memory_writers') : null);
+	const movers = $derived(report ? ruleNote(edited, report.defaults, 'task_movers') : null);
+	const review = $derived(report ? reviewNote(edited, report.defaults) : null);
 
 	function tick(rule: ListRule, actor: string, on: boolean) {
 		if (rule === 'memory_writers') form.memoryWriters = { ...form.memoryWriters, [actor]: on };

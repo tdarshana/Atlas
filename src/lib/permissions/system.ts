@@ -41,6 +41,14 @@ export interface PermissionDef {
 	settingsUrl: string;
 	/** True when the app can raise the system's own consent prompt for this one. */
 	canPrompt: boolean;
+	/**
+	 * True when that prompt still works after a refusal. `AXIsProcessTrustedWithOptions`
+	 * raises its "open System Settings" sheet whenever the process is untrusted, which is
+	 * exactly the state Accessibility reports as `denied`; the Apple Event and notification
+	 * grants instead answer a second ask with the decision already stored, so asking again
+	 * would do nothing and the row sends the user to System Settings.
+	 */
+	promptWhenDenied?: boolean;
 }
 
 /**
@@ -69,7 +77,8 @@ export const PERMISSIONS: PermissionDef[] = [
 		name: 'Accessibility',
 		why: 'The global shortcut while Atlas is in the background.',
 		settingsUrl: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
-		canPrompt: true
+		canPrompt: true,
+		promptWhenDenied: true
 	},
 	{
 		id: 'files',
@@ -108,9 +117,10 @@ export interface PermissionRow extends PermissionDef {
 	badge: string;
 	tone: Tone;
 	detail: string | null;
-	/** Whether the `Request` button is offered: only where the app can prompt and the
-	 * answer is still open. A denied permission is changed in System Settings, not by
-	 * asking again, and macOS answers a second ask with the old decision. */
+	/** Whether the `Request` button is offered: where the app can prompt and the answer is
+	 * still open, plus the rows whose system prompt keeps working after a refusal. A denied
+	 * Apple Event or notification grant is changed in System Settings, not by asking again,
+	 * since macOS answers a second ask with the old decision. */
 	canRequest: boolean;
 }
 
@@ -135,7 +145,11 @@ export function toRows(statuses: PermissionStatus[]): PermissionRow[] {
 			badge: BADGES[state],
 			tone: TONES[state],
 			detail: status?.detail ?? null,
-			canRequest: def.canPrompt && (state === 'not_determined' || state === 'unknown')
+			canRequest:
+				def.canPrompt &&
+				(state === 'not_determined' ||
+					state === 'unknown' ||
+					(state === 'denied' && def.promptWhenDenied === true))
 		};
 	});
 }

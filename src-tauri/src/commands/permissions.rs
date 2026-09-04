@@ -75,12 +75,14 @@ fn files_status(app_data: &Path, roots: &[String]) -> PermissionStatus {
     if let Err(e) = std::fs::create_dir_all(app_data) {
         return PermissionStatus::new(FILES, "denied", Some(format!("{}: {e}", app_data.display())));
     }
+    // Opening for append is the whole test: it needs the same permission a real write does
+    // and puts no bytes on disk. The page re-reads every five seconds, so a probe that
+    // wrote and deleted a file each time would churn the directory for no extra certainty;
+    // this creates one empty dotfile once and only opens it thereafter.
     let probe = app_data.join(".atlas-permission-probe");
-    if let Err(e) = std::fs::write(&probe, b"atlas") {
+    if let Err(e) = std::fs::OpenOptions::new().create(true).append(true).open(&probe) {
         return PermissionStatus::new(FILES, "denied", Some(format!("{}: {e}", probe.display())));
     }
-    // The probe has served its purpose; a leftover dotfile in the app data directory has not.
-    let _ = std::fs::remove_file(&probe);
     PermissionStatus::new(FILES, "granted", None)
 }
 
@@ -359,8 +361,14 @@ mod tests {
         let status = files_status(&app_data, &[root.to_string_lossy().into_owned()]);
         assert_eq!(status.granted, "granted");
         assert_eq!(status.id, FILES);
-        // The probe file does not outlive the check.
-        assert!(!app_data.join(".atlas-permission-probe").exists());
+
+        // The probe is one empty file, created once. A second read reuses it and still
+        // writes nothing, which is what makes the five second poll cheap.
+        let probe = app_data.join(".atlas-permission-probe");
+        assert!(probe.exists());
+        assert_eq!(std::fs::metadata(&probe).unwrap().len(), 0);
+        assert_eq!(files_status(&app_data, &[]).granted, "granted");
+        assert_eq!(std::fs::metadata(&probe).unwrap().len(), 0);
     }
 
     #[test]

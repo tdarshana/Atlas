@@ -3,16 +3,14 @@
 	// row per permission with a status dot, so the panel says what is granted without the
 	// page being scrolled to it.
 	import { onMount } from 'svelte';
-	import { permissionsStatus } from '$lib/permissions/commands';
-	import { toRows, type PermissionStatus } from '$lib/permissions/system';
+	import { checkPermissions, systemPermissions } from '$lib/permissions/store.svelte';
+	import { toRows } from '$lib/permissions/system';
 	import { plugins, loadPlugins } from '$lib/plugins/host.svelte';
 	import { loadProjects, projects } from '$lib/stores/projects.svelte';
 	import TreeGroup from '../TreeGroup.svelte';
 	import TreeRow from '../TreeRow.svelte';
 
-	let statuses = $state<PermissionStatus[]>([]);
-
-	const rows = $derived(toRows(statuses));
+	const rows = $derived(toRows(systemPermissions.statuses));
 	const grantCount = $derived(
 		plugins.items.filter((p) => (p.manifest?.permissions.length ?? 0) > 0).length
 	);
@@ -27,15 +25,19 @@
 
 	onMount(() => {
 		// The `/permissions` route reads the same three sources; only fetch what has not
-		// been fetched yet, and read the statuses here so the dots are right on first paint.
-		if (projects.items.length === 0) void loadProjects();
+		// been fetched yet. The statuses come from the shared store, which coalesces a read
+		// already in flight, so mounting beside the page costs one call rather than two, and
+		// the page's poll keeps these dots current for as long as the panel is open.
 		if (!plugins.loaded) void loadPlugins();
-		void permissionsStatus(projects.items.map((p) => p.root_path).filter(Boolean))
-			.then((s) => (statuses = s))
-			.catch(() => {
-				// A status read that fails leaves every dot on `unknown`, which is the truth.
-			});
+		void (projects.items.length === 0 ? loadProjects() : Promise.resolve()).then(() => {
+			if (!systemPermissions.loaded) void checkPermissions(roots());
+		});
 	});
+
+	/** The connected project roots, which the files row probes. */
+	function roots(): string[] {
+		return projects.items.map((p) => p.root_path).filter(Boolean);
+	}
 
 	const jump = (hash: string) => () =>
 		document.getElementById(hash)?.scrollIntoView({ behavior: 'instant', block: 'start' });

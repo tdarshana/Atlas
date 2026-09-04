@@ -90,12 +90,27 @@ describe('accessText', () => {
 });
 
 describe('ruleNote', () => {
-	it('says a rule is inherited and names what is in force', () => {
-		const effective: AgentAccess = { ...OPEN, memory_writers: ['claude-code'] };
-		const note = ruleNote(OPEN, effective, 'memory_writers');
+	it('says a rule is inherited and names the global default', () => {
+		const defaults: AgentAccess = { ...OPEN, memory_writers: ['claude-code'] };
+		const note = ruleNote(OPEN, defaults, 'memory_writers');
 
 		expect(note.inherited).toBe(true);
 		expect(note.text).toBe('Inherited from the global default: claude-code');
+	});
+
+	/**
+	 * The note is read against the form as it is edited, so the moment a set rule goes back
+	 * on the default it has to name the default rather than the value the project was
+	 * setting a click ago.
+	 */
+	it('names the default, not the project value, once a set rule is cleared', () => {
+		const defaults: AgentAccess = { ...OPEN, memory_writers: ['claude-code'] };
+		const set: AgentAccess = { ...OPEN, memory_writers: ['codex'] };
+
+		expect(ruleNote(set, defaults, 'memory_writers').text).toBe('Set on this project: codex');
+		expect(ruleNote(OPEN, defaults, 'memory_writers').text).toBe(
+			'Inherited from the global default: claude-code'
+		);
 	});
 
 	it('says a rule is set here and names the project value', () => {

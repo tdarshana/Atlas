@@ -7,14 +7,9 @@
 	import { page } from '$app/state';
 	import { Badge, Button, Checkbox, Input } from '$lib/ds';
 	import { errorMessage } from '$lib/errors';
-	import { openSettingsPane, permissionRequest, permissionsStatus } from '$lib/permissions/commands';
-	import {
-		grantedCount,
-		toRows,
-		type PermissionId,
-		type PermissionRow,
-		type PermissionStatus
-	} from '$lib/permissions/system';
+	import { openSettingsPane, permissionRequest } from '$lib/permissions/commands';
+	import { checkPermissions, putStatus, systemPermissions } from '$lib/permissions/store.svelte';
+	import { grantedCount, toRows, type PermissionId, type PermissionRow } from '$lib/permissions/system';
 	import { loadPlugins, plugins, setPermissions } from '$lib/plugins/host.svelte';
 	import type { Permission, PluginInfo } from '$lib/plugins/types';
 	import { alwaysAllowed, knownActors } from '$lib/components/project/settings/settings';
@@ -30,32 +25,25 @@
 
 	// -- system ----------------------------------------------------------------------------
 
-	let statuses = $state<PermissionStatus[]>([]);
-	let checking = $state(false);
 	let requesting = $state<PermissionId | null>(null);
 
-	const rows = $derived(toRows(statuses));
+	const rows = $derived(toRows(systemPermissions.statuses));
 	const counts = $derived(grantedCount(rows));
+	const checking = $derived(systemPermissions.checking);
 
 	/** The connected project roots, which the files row probes. */
 	const roots = $derived(projects.items.map((p) => p.root_path).filter(Boolean));
 
 	async function check(): Promise<void> {
-		checking = true;
-		try {
-			statuses = await permissionsStatus(untrack(() => roots));
-		} catch (e) {
-			push('error', errorMessage(e));
-		} finally {
-			checking = false;
-		}
+		await checkPermissions(untrack(() => roots));
+		if (systemPermissions.error) push('error', systemPermissions.error);
 	}
 
 	async function request(row: PermissionRow): Promise<void> {
 		requesting = row.id;
 		try {
 			const answer = await permissionRequest(row.id);
-			if (answer) statuses = [...statuses.filter((s) => s.id !== answer.id), answer];
+			if (answer) putStatus(answer);
 		} catch (e) {
 			push('error', errorMessage(e));
 		} finally {
@@ -192,10 +180,12 @@
 	// -- boot ------------------------------------------------------------------------------
 
 	onMount(() => {
-		void loadProjects();
 		void loadPlugins();
 		void loadSettings().then(() => buildDefaults());
-		void check();
+		// The files row probes the connected roots, so the first read waits for the project
+		// list; asking in the same tick would report on no roots at all and then quietly
+		// correct itself five seconds later.
+		void loadProjects().then(check);
 
 		// While the page is on screen a grant made in System Settings has to show up on its
 		// own; a hidden window has nothing to update, so the timer stands down with it.

@@ -25,7 +25,7 @@ interface Sent {
 	[key: string]: unknown;
 }
 
-function harness(permissions: Permission[], granted?: Permission[]) {
+function harness(permissions: Permission[], granted?: Permission[], grants?: () => Permission[]) {
 	const sent: Sent[] = [];
 	const target: PostTarget = { postMessage: (m) => void sent.push(m as Sent) };
 	const manifest: Manifest = {
@@ -64,6 +64,7 @@ function harness(permissions: Permission[], granted?: Permission[]) {
 		view: 'hello-view',
 		target,
 		api,
+		grants,
 		actor: 'plugin/hello-world',
 		onResize,
 		onNotify
@@ -100,6 +101,24 @@ describe('createBridge', () => {
 
 		expect(h.sent[0]).toMatchObject({ id: 1, ok: false, error: { code: 'permission_denied' } });
 		expect(h.api.listTasks).not.toHaveBeenCalled();
+	});
+
+	/** A grant can be taken back while the frame is running, and the host store replaces the
+	 * `PluginInfo` rather than mutating it, so the bridge reads the grants per call through
+	 * the `grants` reader instead of capturing them at creation. */
+	it('honours a grant revoked after the frame was created', async () => {
+		let held: Permission[] = ['tasks.read'];
+		const h = harness(['tasks.read'], ['tasks.read'], () => held);
+
+		h.request(1, 'tasks.list', {});
+		await flush();
+		expect(h.sent[0]).toMatchObject({ id: 1, ok: true });
+
+		held = [];
+		h.request(2, 'tasks.list', {});
+		await flush();
+		expect(h.sent[1]).toMatchObject({ id: 2, ok: false, error: { code: 'permission_denied' } });
+		expect(h.api.listTasks).toHaveBeenCalledTimes(1);
 	});
 
 	it('proxies a method the manifest does hold', async () => {

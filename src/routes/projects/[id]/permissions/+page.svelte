@@ -98,7 +98,9 @@
 		const actors = [...f.actors, ...added].sort((a, b) => a.localeCompare(b));
 		const fresh = accessForm(r.access, r.effective, added);
 		for (const target of [f, l]) {
-			target.actors = actors;
+			// A copy each: the form and its loaded snapshot are meant to be independent, and
+			// one array shared between them is the one place they would not be.
+			target.actors = [...actors];
 			target.memoryWriters = { ...target.memoryWriters, ...fresh.memoryWriters };
 			target.taskMovers = { ...target.taskMovers, ...fresh.taskMovers };
 		}

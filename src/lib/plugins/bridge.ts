@@ -76,6 +76,14 @@ export interface BridgeOptions {
 	 */
 	source?: unknown;
 	api: PluginBackend;
+	/**
+	 * What the plugin holds right now. A grant can be revoked while a frame is running, and
+	 * the host store replaces the `PluginInfo` object rather than mutating it, so a bridge
+	 * that captured `plugin.granted` once would keep answering against the old set until
+	 * something recreated the frame. Callers that can see the live store pass a reader;
+	 * without one this falls back to the `plugin` it was handed.
+	 */
+	grants?: () => Permission[];
 	/** `plugin/<id>`; recorded here so the frame can be told who it is acting as. */
 	actor: string;
 	onResize?: (height: number) => void;
@@ -138,8 +146,10 @@ export function createBridge(options: BridgeOptions): Bridge {
 	const { plugin, view, slot = null, target, api, actor, onResize, onNotify } = options;
 	const source = options.source ?? target;
 	// The grants, not the manifest: a permission the user revoked on the Permissions view
-	// has to stop working here, or revoking would only change what the row says.
-	const granted = new Set<Permission>(plugin.granted ?? []);
+	// has to stop working here, or revoking would only change what the row says. Read per
+	// call rather than captured, so a revocation lands mid-session on a frame that is
+	// already running.
+	const grants = options.grants ?? (() => plugin.granted ?? []);
 	let disposed = false;
 
 	/** Tool calls waiting on the frame, by the id this side minted. */
@@ -157,7 +167,7 @@ export function createBridge(options: BridgeOptions): Bridge {
 	}
 
 	function need(permission: Permission): void {
-		if (!granted.has(permission)) {
+		if (!grants().includes(permission)) {
 			throw new BridgeError('permission_denied', `This plugin does not hold '${permission}'.`);
 		}
 	}

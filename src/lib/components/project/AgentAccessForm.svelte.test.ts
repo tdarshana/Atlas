@@ -67,6 +67,63 @@ describe('AgentAccessForm', () => {
 		expect(form.inheritWriters).toBe(true);
 	});
 
+	/**
+	 * The badge and the note sit right beside the control that changes the rule, so they
+	 * have to describe the edit rather than what the daemon last stored. Reading the saved
+	 * report would leave `Use global default` clearing the ticks while the line above still
+	 * said the project sets it.
+	 */
+	it('flips the badge and the note to inherited as soon as Use global default is clicked', async () => {
+		const access: AgentAccess = { ...OPEN, memory_writers: ['codex'] };
+		const { getByTestId, findByTestId } = mount(access, {
+			memory_writers: ['claude-code'],
+			task_movers: null,
+			require_review: false
+		});
+
+		expect(getByTestId('note-memory_writers').textContent).toContain('Set on this project: codex');
+
+		getByTestId('use-default-memory_writers').click();
+
+		const note = await findByTestId('note-memory_writers');
+		expect(note.textContent).toContain('Inherited from the global default: claude-code');
+		expect(getByTestId('rule-memory_writers').textContent).toContain('Inherited');
+		// And the action that did it is gone: there is nothing left to clear.
+		expect(() => getByTestId('use-default-memory_writers')).toThrow();
+	});
+
+	it('flips the badge and the note to set here as soon as the rule is set on the project', async () => {
+		const { getByTestId, findByTestId } = mount(OPEN, {
+			memory_writers: null,
+			task_movers: ['claude-code'],
+			require_review: false
+		});
+
+		expect(getByTestId('note-task_movers').textContent).toContain(
+			'Inherited from the global default: claude-code'
+		);
+
+		getByTestId('set-here-task_movers').click();
+
+		const note = await findByTestId('note-task_movers');
+		// The ticks were seeded from the effective value, so that is what it now sets.
+		expect(note.textContent).toContain('Set on this project: claude-code');
+		expect(getByTestId('rule-task_movers').textContent).toContain('Set here');
+	});
+
+	it('flips the review note the moment the box is ticked', async () => {
+		const { getByTestId, findByTestId } = mount(OPEN, { ...OPEN, require_review: true });
+
+		expect(getByTestId('note-require_review').textContent).toContain(
+			'Inherited from the global default'
+		);
+
+		getByTestId('rule-require_review').querySelector('input')?.click();
+
+		const note = await findByTestId('note-require_review');
+		expect(note.textContent).toBe('Set on this project: review is required.');
+	});
+
 	it('says review is inherited when the global default requires it', () => {
 		const { getByTestId } = mount(OPEN, { ...OPEN, require_review: true });
 		expect(getByTestId('note-require_review').textContent).toContain(
