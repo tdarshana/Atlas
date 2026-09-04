@@ -61,6 +61,23 @@ pub async fn plugin_set_enabled<R: Runtime>(
     .map_err(|e| e.to_string())?
 }
 
+/// Replaces the permissions `id` is granted, returning its updated [`PluginInfo`].
+/// Refuses anything the manifest does not declare; see [`registry::set_permissions`].
+#[tauri::command]
+pub async fn plugin_set_permissions<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    id: String,
+    granted: Vec<manifest::Permission>,
+) -> Result<PluginInfo, String> {
+    let app_data = app_data_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        registry::set_permissions(&app_data, &id, &granted)?;
+        registry::list(&app_data)?.into_iter().find(|p| p.id == id).ok_or_else(|| format!("No plugin '{id}' is installed."))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Removes `id` and its files. See [`registry::uninstall`].
 #[tauri::command]
 pub async fn plugin_uninstall<R: Runtime>(app: tauri::AppHandle<R>, id: String) -> Result<(), String> {

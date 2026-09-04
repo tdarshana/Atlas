@@ -1,4 +1,4 @@
-// The nine rail destinations. Board is not one of them: it belongs to a project, so
+// The ten rail destinations. Board is not one of them: it belongs to a project, so
 // `/board` keeps the Projects item lit.
 
 import { comboKeys, type Platform } from '$lib/ds';
@@ -13,6 +13,7 @@ export type ViewId =
 	| 'workflows'
 	| 'review'
 	| 'mcp'
+	| 'permissions'
 	| 'settings'
 	/** Not a rail item: `/plugins` is reached from Settings and the palette, but it owns
 	 * a side panel of its own, so it needs a view id. */
@@ -37,10 +38,11 @@ export const VIEWS: ViewDef[] = [
 	{ id: 'workflows', label: 'Workflows', icon: 'git-branch', href: '/workflows', combo: 'Mod+6' },
 	{ id: 'review', label: 'Review', icon: 'list-checks', href: '/review', combo: 'Mod+7' },
 	{ id: 'mcp', label: 'MCP', icon: 'plug', href: '/mcp', combo: 'Mod+8' },
+	{ id: 'permissions', label: 'Permissions', icon: 'shield-check', href: '/permissions', combo: 'Mod+9' },
 	{ id: 'settings', label: 'Settings', icon: 'settings', href: '/settings', combo: 'Mod+,' }
 ];
 
-/** The seven the rail stacks at the top; Settings is drawn separately at the bottom. */
+/** The nine the rail stacks at the top; Settings is drawn separately at the bottom. */
 export const MAIN_VIEWS = VIEWS.filter((v) => v.id !== 'settings');
 export const SETTINGS_VIEW = VIEWS[VIEWS.length - 1];
 
@@ -54,6 +56,7 @@ const PANEL_TITLES: Record<ViewId, string> = {
 	workflows: 'Workflows',
 	review: 'Review',
 	mcp: 'MCP',
+	permissions: 'Permissions',
 	settings: 'Settings',
 	plugins: 'Plugins'
 };

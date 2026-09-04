@@ -213,6 +213,18 @@ export interface AgentAccess {
 }
 
 /**
+ * `GET /api/v1/projects/{id}/access`: the project's own rules, the global defaults from
+ * the `access.*` settings, and what the two resolve to. A project field left null takes
+ * the default; `require_review` is a floor the global flag sets and a project can only
+ * raise.
+ */
+export interface ProjectAccessReport {
+	access: AgentAccess;
+	defaults: AgentAccess;
+	effective: AgentAccess;
+}
+
+/**
  * A project's extraction override. Every field is optional and an absent one falls back
  * to the matching global `extraction.*` setting, field by field. Sending
  * `api_key: "***"` back means "leave the stored key alone".

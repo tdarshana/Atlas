@@ -1,7 +1,9 @@
 <script lang="ts">
-	// The Project settings tab, frame 02.7: four stacked cards and a Save/Reload row. The
-	// page owns the form; the cards own their layout. Save sends the three writes in the
-	// order the daemon reads them, project first, so a rename that fails stops there.
+	// The Project settings tab, frame 02.7: the project card, extraction, the danger zone
+	// and a Save/Reload row. The page owns the form; the cards own their layout. Save sends
+	// both writes in the order the daemon reads them, project first, so a rename that fails
+	// stops there. Agent access moved to the Permissions tab, which is where the global
+	// defaults a rule can inherit are visible.
 	import { untrack } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
@@ -11,24 +13,19 @@
 	import { setStatusItems } from '$lib/shell';
 	import { mirrorKey, vaultStatus } from '$lib/shell/vault';
 	import { openProject, project, remove, setHeaderActions } from '$lib/stores/project.svelte';
-	import AgentAccessCard from '$lib/components/project/settings/AgentAccessCard.svelte';
 	import RemoveProjectDialog from '$lib/components/project/RemoveProjectDialog.svelte';
 	import DangerCard from '$lib/components/project/settings/DangerCard.svelte';
 	import ExtractionCard from '$lib/components/project/settings/ExtractionCard.svelte';
 	import ProjectCard from '$lib/components/project/settings/ProjectCard.svelte';
 	import {
-		accessChecked,
-		accessIsSplit,
 		boardKeyBase,
 		extractionForm,
 		type ExtractionForm,
 		KEY_PREFIX_RE,
 		keyPrefixConfirm,
-		knownActors,
-		toAgentAccess,
 		toProjectExtraction
 	} from '$lib/components/project/settings/settings';
-	import type { AgentAccess, Project, ProjectPatch, VaultStatus } from '$lib/types';
+	import type { Project, ProjectPatch, VaultStatus } from '$lib/types';
 	import Dialog from '$lib/ui/Dialog.svelte';
 	import { push } from '$lib/ui/toasts.svelte';
 
@@ -36,24 +33,14 @@
 		name: string;
 		boardKey: string;
 		remote: string;
-		actors: string[];
-		memoryWriters: Record<string, boolean>;
-		taskMovers: Record<string, boolean>;
-		requireReview: boolean;
-		/** Set once a label was added by hand, so the save writes the lists out in full. */
-		manual: boolean;
 		extraction: ExtractionForm;
 	}
 
-	/** Actor labels seen in this project's log. A vocabulary, never a rebuild trigger. */
-	let sources = $state<string[]>([]);
 	let form = $state<Form | null>(null);
 	/** The form as it was loaded. Dirty is a comparison against this, not a flag. */
 	let loaded = $state<Form | null>(null);
 	/** The project the form was built for, so a re-read of the same project leaves it alone. */
 	let builtFor = $state('');
-	/** True while the loaded rules differ, which is what makes the card draw two columns. */
-	let split = $state(false);
 	let saving = $state(false);
 	let savedAt = $state<string | null>(null);
 	let testing = $state(false);
@@ -68,49 +55,21 @@
 	const name = $derived(current?.name ?? 'Project');
 	const dirty = $derived(!!form && JSON.stringify(form) !== JSON.stringify(loaded));
 
-	function formFrom(p: Project, seen: string[]): Form {
-		const actors = knownActors(seen, p.agent_access);
+	function formFrom(p: Project): Form {
 		return {
 			name: p.name,
 			boardKey: p.board_key ?? '',
 			remote: p.git_remote ?? '',
-			actors,
-			memoryWriters: accessChecked(actors, p.agent_access.memory_writers),
-			taskMovers: accessChecked(actors, p.agent_access.task_movers),
-			requireReview: p.agent_access.require_review,
-			manual: false,
 			extraction: extractionForm(p.extraction)
 		};
 	}
 
 	/** Builds the form from the project as it stands and calls that the loaded state. */
 	function build(p: Project): void {
-		form = formFrom(p, sources);
-		loaded = formFrom(p, sources);
-		split = accessIsSplit(p.agent_access);
+		form = formFrom(p);
+		loaded = formFrom(p);
 		builtFor = p.id;
 		testResult = null;
-	}
-
-	/**
-	 * Adds labels the form does not offer yet, to the form and to the loaded snapshot
-	 * alike. A label arriving late must not make the form look edited, and must not undo an
-	 * edit the user has already made, so this extends rather than replaces.
-	 */
-	function addLabels(labels: string[], access: AgentAccess): void {
-		const f = form;
-		const l = loaded;
-		if (!f || !l) return;
-		const added = labels.filter((a) => a && !f.actors.includes(a));
-		if (added.length === 0) return;
-		const actors = [...f.actors, ...added].sort((a, b) => a.localeCompare(b));
-		const writers = accessChecked(added, access.memory_writers);
-		const movers = accessChecked(added, access.task_movers);
-		for (const target of [f, l]) {
-			target.actors = actors;
-			target.memoryWriters = { ...target.memoryWriters, ...writers };
-			target.taskMovers = { ...target.taskMovers, ...movers };
-		}
 	}
 
 	/** Re-reads the project from the daemon, then rebuilds the form from what came back. */
@@ -124,31 +83,6 @@
 		const p = project.current;
 		if (p) build(p);
 	}
-
-	// The tick list is the project's own actors, so the log is read for the labels that have
-	// written to it. One page is plenty: this is a vocabulary, not a history. The answer only
-	// ever adds labels; it never rebuilds the form, which would throw away what was typed
-	// while it was in flight.
-	$effect(() => {
-		const pid = id;
-		if (!pid) return;
-		let live = true;
-		void api()
-			.projectLog(pid, { limit: 200 })
-			.then((rows) => {
-				const seen = [...new Set(rows.map((r) => r.source).filter(Boolean))];
-				const access = untrack(() => project.current?.agent_access);
-				if (!live) return;
-				sources = seen;
-				if (access) untrack(() => addLabels(seen, access));
-			})
-			.catch(() => {
-				// A log that will not load costs the extra labels, not the card.
-			});
-		return () => {
-			live = false;
-		};
-	});
 
 	// Build the form once per project. A later read of the same project, from the layout or
 	// from Retry, leaves whatever the user has typed alone; `reload` and a save rebuild it
@@ -227,8 +161,8 @@
 	}
 
 	/**
-	 * The three writes, each reported by name. They run in sequence because the daemon reads
-	 * them that way, but a failure in one no longer hides the ones after it, and anything
+	 * The two writes, each reported by name. They run in sequence because the daemon reads
+	 * them that way, but a failure in one no longer hides the one after it, and anything
 	 * that did land is read back so the next Save does not send it again.
 	 */
 	async function commit() {
@@ -238,7 +172,7 @@
 		renaming = null;
 		saving = true;
 		let sent = 0;
-		const landed = { project: false, access: false, extraction: false };
+		const landed = { project: false, extraction: false };
 		const failed: string[] = [];
 
 		const write = async (what: string, part: keyof typeof landed, fn: () => Promise<unknown>) => {
@@ -254,13 +188,6 @@
 		const patch = patchOf(f, p);
 		if (Object.keys(patch).length > 0) {
 			await write('Project', 'project', () => api().patchProject(p.id, patch));
-		}
-
-		// A label added by hand is only stored if the lists are written out in full: a pair
-		// of nulls says "any actor" and forgets the label the moment the save lands.
-		const access = toAgentAccess(f.actors, f.memoryWriters, f.taskMovers, f.requireReview, f.manual);
-		if (JSON.stringify(access) !== JSON.stringify(p.agent_access)) {
-			await write('Agent access', 'access', () => api().setAgentAccess(p.id, access));
 		}
 
 		if (JSON.stringify(f.extraction) !== JSON.stringify(extractionForm(p.extraction))) {
@@ -294,11 +221,7 @@
 	 * landed, leaving the ones that failed exactly as the user typed them. `loaded` always
 	 * becomes the stored truth, so the failed card alone stays dirty and Save can retry it.
 	 */
-	async function reloadKeeping(landed: {
-		project: boolean;
-		access: boolean;
-		extraction: boolean;
-	}): Promise<void> {
+	async function reloadKeeping(landed: { project: boolean; extraction: boolean }): Promise<void> {
 		const before = form;
 		try {
 			await openProject(id, true);
@@ -307,23 +230,13 @@
 		}
 		const p = project.current;
 		if (!p || !before) return;
-		const stored = formFrom(p, sources);
+		const stored = formFrom(p);
 		form = {
 			...stored,
 			...(landed.project ? {} : { name: before.name, boardKey: before.boardKey, remote: before.remote }),
-			...(landed.access
-				? {}
-				: {
-						actors: before.actors,
-						memoryWriters: before.memoryWriters,
-						taskMovers: before.taskMovers,
-						requireReview: before.requireReview,
-						manual: before.manual
-					}),
 			...(landed.extraction ? {} : { extraction: before.extraction })
 		};
-		loaded = formFrom(p, sources);
-		split = accessIsSplit(p.agent_access);
+		loaded = formFrom(p);
 		builtFor = p.id;
 		testResult = null;
 	}
@@ -347,7 +260,7 @@
 				return;
 			}
 			saving = false;
-			await reloadKeeping({ project: false, access: false, extraction: true });
+			await reloadKeeping({ project: false, extraction: true });
 		}
 		testing = true;
 		testResult = null;
@@ -401,14 +314,18 @@
 			bind:remote={form.remote}
 			root={current.root_path}
 		/>
-		<AgentAccessCard
-			bind:actors={form.actors}
-			bind:memoryWriters={form.memoryWriters}
-			bind:taskMovers={form.taskMovers}
-			bind:requireReview={form.requireReview}
-			bind:manual={form.manual}
-			{split}
-		/>
+		<section class="card" data-testid="settings-access-moved">
+			<header><span class="card-title">Agent access</span></header>
+			<div class="card-body">
+				<span class="hint">
+					Agent access rules moved to the Permissions tab, which also shows the global
+					defaults a rule inherits.
+				</span>
+				<a href="/projects/{current.id}/permissions" data-testid="settings-access-link">
+					Open the Permissions tab
+				</a>
+			</div>
+		</section>
 		<ExtractionCard
 			bind:form={form.extraction}
 			{testing}
@@ -451,6 +368,38 @@
 
 	.prose {
 		margin: 0;
+		max-width: 80ch;
+	}
+
+	/* The pointer card, styled like the ones the settings components draw. */
+	.card {
+		display: flex;
+		flex-direction: column;
+		flex: 0 0 auto;
+	}
+
+	.card header {
+		display: flex;
+		align-items: center;
+		height: 32px;
+		flex: 0 0 32px;
+		padding: 0 12px;
+		border-bottom: 1px solid var(--border-subtle);
+	}
+
+	.card-title {
+		font-weight: 600;
+	}
+
+	.card-body {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		padding: 12px;
+	}
+
+	.hint {
+		color: var(--text-secondary);
 		max-width: 80ch;
 	}
 </style>

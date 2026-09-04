@@ -137,7 +137,9 @@ export function clampHeight(value: unknown): number | null {
 export function createBridge(options: BridgeOptions): Bridge {
 	const { plugin, view, slot = null, target, api, actor, onResize, onNotify } = options;
 	const source = options.source ?? target;
-	const granted = new Set<Permission>(plugin.manifest?.permissions ?? []);
+	// The grants, not the manifest: a permission the user revoked on the Permissions view
+	// has to stop working here, or revoking would only change what the row says.
+	const granted = new Set<Permission>(plugin.granted ?? []);
 	let disposed = false;
 
 	/** Tool calls waiting on the frame, by the id this side minted. */

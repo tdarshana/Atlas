@@ -9,12 +9,13 @@ import {
 	pluginInstallFolder,
 	pluginInstallGithub,
 	pluginSetEnabled,
+	pluginSetPermissions,
 	pluginUninstall,
 	pluginsList
 } from './commands';
 import type { Bridge } from './bridge';
 import { collectContributions, type Contributions } from './contributions';
-import type { PluginInfo } from './types';
+import type { Permission, PluginInfo } from './types';
 
 export const plugins = $state({
 	items: [] as PluginInfo[],
@@ -133,6 +134,13 @@ export async function installGithub(url: string): Promise<PluginInfo> {
 
 export async function setEnabled(id: string, on: boolean): Promise<PluginInfo> {
 	const info = await pluginSetEnabled(id, on);
+	upsert(info);
+	return info;
+}
+
+/** Narrows or widens what one plugin may do, within what its manifest asks for. */
+export async function setPermissions(id: string, granted: Permission[]): Promise<PluginInfo> {
+	const info = await pluginSetPermissions(id, granted);
 	upsert(info);
 	return info;
 }

@@ -65,55 +65,6 @@ export function boardKeyBase(name: string): string {
 	return letters.padEnd(3, 'X');
 }
 
-/**
- * True when the project's two rules are not the same list. The frame draws one column of
- * ticks, which can only speak for one rule; when the daemon holds two different rules the
- * card has to draw both rather than quietly flatten the one it is not showing.
- */
-export function accessIsSplit(access: AgentAccess | null): boolean {
-	const writers = access?.memory_writers ?? null;
-	const movers = access?.task_movers ?? null;
-	if (writers === null || movers === null) return writers !== movers;
-	return writers.length !== movers.length || writers.some((a) => !movers.includes(a));
-}
-
-/**
- * The ticked state per actor for one rule. A null list means any actor may act, so every
- * box is ticked; a list ticks the labels it holds.
- */
-export function accessChecked(
-	actors: string[],
-	allowed: string[] | null
-): Record<string, boolean> {
-	const out: Record<string, boolean> = {};
-	for (const actor of actors) out[actor] = allowed === null || allowed.includes(actor);
-	return out;
-}
-
-/**
- * The rules the ticks describe. Everything ticked is "no restriction", which is a pair of
- * nulls rather than a list of every actor, so an agent the user has not met yet is still
- * allowed. `explicit` overrides that and writes the lists out in full, which is how a
- * label the user added by hand survives a save.
- */
-export function toAgentAccess(
-	actors: string[],
-	memoryWriters: Record<string, boolean>,
-	taskMovers: Record<string, boolean>,
-	requireReview: boolean,
-	explicit = false
-): AgentAccess {
-	const list = (checked: Record<string, boolean>) => {
-		const on = actors.filter((a) => checked[a]);
-		return !explicit && on.length === actors.length ? null : on;
-	};
-	return {
-		memory_writers: list(memoryWriters),
-		task_movers: list(taskMovers),
-		require_review: requireReview
-	};
-}
-
 /** The Extraction card's fields, all strings because they come from inputs. */
 export interface ExtractionForm {
 	/** Ticked means the project has no override at all. */

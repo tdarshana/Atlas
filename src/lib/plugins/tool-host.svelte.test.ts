@@ -45,7 +45,15 @@ function plugin(id: string, contributes: Partial<Contributes>, permissions: Perm
 		permissions,
 		contributes: { sections: [], themes: [], components: [], commands: [], tools: [], ...contributes }
 	};
-	return { id, manifest, enabled: true, compatible: true, reason: null, dir: `/p/${id}` };
+	return {
+		id,
+		manifest,
+		enabled: true,
+		compatible: true,
+		reason: null,
+		dir: `/p/${id}`,
+		granted: [...permissions]
+	};
 }
 
 const READY_COUNT = {

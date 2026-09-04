@@ -57,6 +57,7 @@ import Plus from '@lucide/svelte/icons/plus';
 import RefreshCw from '@lucide/svelte/icons/refresh-cw';
 import Search from '@lucide/svelte/icons/search';
 import Settings from '@lucide/svelte/icons/settings';
+import ShieldCheck from '@lucide/svelte/icons/shield-check';
 import Square from '@lucide/svelte/icons/square';
 import Tag from '@lucide/svelte/icons/tag';
 import Terminal from '@lucide/svelte/icons/terminal';
@@ -130,7 +131,8 @@ export const icons = {
 	keyboard: Keyboard,
 	bell: Bell,
 	lock: Lock,
-	palette: Palette
+	palette: Palette,
+	'shield-check': ShieldCheck
 } satisfies Record<string, LucideIcon>;
 
 export type IconName = keyof typeof icons;

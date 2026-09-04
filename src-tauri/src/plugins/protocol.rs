@@ -264,7 +264,7 @@ mod tests {
         .unwrap();
         std::fs::write(plugin_dir.join("main.js"), "// entry").unwrap();
         std::fs::write(plugin_dir.join("style.css"), ":root{}").unwrap();
-        record_install(app_data, id, enabled, SourceRef { kind: "folder".into(), value: "x".into() }).unwrap();
+        record_install(app_data, id, enabled, SourceRef { kind: "folder".into(), value: "x".into() }, Vec::new()).unwrap();
     }
 
     #[test]

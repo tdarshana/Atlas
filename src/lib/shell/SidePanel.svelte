@@ -13,6 +13,7 @@
 	import Workflows from './sidepanels/Workflows.svelte';
 	import Review from './sidepanels/Review.svelte';
 	import Mcp from './sidepanels/Mcp.svelte';
+	import Permissions from './sidepanels/Permissions.svelte';
 	import Plugins from './sidepanels/Plugins.svelte';
 	import Settings from './sidepanels/Settings.svelte';
 
@@ -55,6 +56,8 @@
 			<Review />
 		{:else if shell.view === 'mcp'}
 			<Mcp />
+		{:else if shell.view === 'permissions'}
+			<Permissions />
 		{:else if shell.view === 'plugins'}
 			<Plugins />
 		{:else if shell.view === 'settings'}

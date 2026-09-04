@@ -14,6 +14,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
 	{ id: 'appearance', label: 'Appearance' },
 	{ id: 'mcp', label: 'MCP server' },
 	{ id: 'plugins', label: 'Plugins' },
+	{ id: 'permissions', label: 'Permissions' },
 	{ id: 'shortcuts', label: 'Shortcuts' },
 	{ id: 'notifications', label: 'Notifications' },
 	{ id: 'security', label: 'Security' },

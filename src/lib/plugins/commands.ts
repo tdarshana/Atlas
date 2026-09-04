@@ -3,7 +3,7 @@
 // browser gets an empty list and a plain refusal rather than a crash.
 
 import { desktop } from '$lib/shell/platform';
-import type { PluginInfo } from './types';
+import type { Permission, PluginInfo } from './types';
 
 /** What every write command falls back to outside Tauri, where there is no plugin store. */
 function noDesktop<T>(): T {
@@ -24,6 +24,12 @@ export function pluginInstallGithub(url: string): Promise<PluginInfo> {
 
 export function pluginSetEnabled(id: string, enabled: boolean): Promise<PluginInfo> {
 	return desktop<PluginInfo>('plugin_set_enabled', { id, enabled }, noDesktop);
+}
+
+/** Replaces what `id` is allowed to do. The Rust side refuses anything its manifest does
+ * not declare, so a grant can only ever be narrowed. */
+export function pluginSetPermissions(id: string, granted: Permission[]): Promise<PluginInfo> {
+	return desktop<PluginInfo>('plugin_set_permissions', { id, granted }, noDesktop);
 }
 
 export function pluginUninstall(id: string): Promise<void> {

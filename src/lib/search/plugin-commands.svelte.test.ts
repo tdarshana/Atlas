@@ -18,10 +18,20 @@ function plugin(id: string, name: string, contributes: Partial<Contributes>): Pl
 		author: 'a',
 		api: '>=1.0 <2',
 		main: 'main.js',
-		permissions: [],
+		// The manifest validator refuses a section, a component or a tool without its
+		// permission, so a fixture that contributes any of them has to ask for all three.
+		permissions: ['ui.sections', 'ui.components', 'mcp.tools'],
 		contributes: { sections: [], themes: [], components: [], commands: [], tools: [], ...contributes }
 	};
-	return { id, manifest, enabled: true, compatible: true, reason: null, dir: `/plugins/${id}` };
+	return {
+		id,
+		manifest,
+		enabled: true,
+		compatible: true,
+		reason: null,
+		dir: `/plugins/${id}`,
+		granted: [...manifest.permissions]
+	};
 }
 
 const withSection = collectContributions([

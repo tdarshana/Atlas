@@ -19,9 +19,10 @@ use commands::platform::{
     vault_status, vault_unlock, window_center, window_move, ShortcutRegistration, UpdateState,
     VaultState,
 };
+use commands::permissions::{permission_request, permissions_status};
 use plugins::{
     plugin_install_folder, plugin_install_github, plugin_read_file, plugin_read_main,
-    plugin_set_enabled, plugin_uninstall, plugins_list,
+    plugin_set_enabled, plugin_set_permissions, plugin_uninstall, plugins_list,
 };
 
 const DEFAULT_PORT: u16 = 7433;
@@ -237,7 +238,10 @@ pub fn run() {
             plugin_set_enabled,
             plugin_uninstall,
             plugin_read_main,
-            plugin_read_file
+            plugin_read_file,
+            plugin_set_permissions,
+            permissions_status,
+            permission_request
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

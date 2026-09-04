@@ -53,6 +53,9 @@
 		settings
 	} from '$lib/stores/settings.svelte';
 	import { loadMcp, mcp } from '$lib/stores/mcp.svelte';
+	import { loadProjects, projects } from '$lib/stores/projects.svelte';
+	import { permissionsStatus } from '$lib/permissions/commands';
+	import { summaryText, toRows, type PermissionStatus } from '$lib/permissions/system';
 	import { contributions, loadPlugins, plugins } from '$lib/plugins/host.svelte';
 	import { loadPluginThemes } from '$lib/plugins/themes';
 	import ToolChannelWarning from '$lib/plugins/ToolChannelWarning.svelte';
@@ -441,6 +444,30 @@
 			: 'Plugins need the desktop app'
 	);
 
+	// -- Permissions ----------------------------------------------------------------------
+
+	/** The system permission rows, read once for the card's count. The Permissions view
+	 * itself polls; a summary line does not need to. */
+	let permissionStatuses = $state<PermissionStatus[]>([]);
+
+	const permissionsSummaryText = $derived(
+		summaryText(
+			toRows(permissionStatuses),
+			plugins.items.filter((p) => (p.manifest?.permissions.length ?? 0) > 0).length
+		)
+	);
+
+	async function loadPermissionStatuses(): Promise<void> {
+		try {
+			permissionStatuses = await permissionsStatus(
+				projects.items.map((p) => p.root_path).filter(Boolean)
+			);
+		} catch {
+			// A status read that fails leaves the card counting nothing granted, which is
+			// what an app that cannot ask the OS actually knows.
+		}
+	}
+
 	/** How long the button says "Copied" before going back to its own name. */
 	const COPIED_MS = 1500;
 	let copiedTimer: ReturnType<typeof setTimeout> | null = null;
@@ -725,6 +752,11 @@
 	onMount(() => {
 		void reload();
 		if (!plugins.loaded) void loadPlugins();
+		// The files row probes the connected roots, so the project list has to be in hand
+		// before the status read means anything.
+		void (projects.items.length === 0 ? loadProjects() : Promise.resolve()).then(
+			loadPermissionStatuses
+		);
 	});
 
 	// The contributed themes follow the plugin list: enabling a plugin from the Plugins
@@ -1040,6 +1072,18 @@
 					manifest asks for. Install, enable and remove them on their own view.
 				</span>
 				<a href="/plugins" data-testid="plugins-open-link">Open plugins</a>
+			</div>
+		</section>
+
+		<section class="card" id="permissions">
+			<div class="card-head"><span class="card-title">Permissions</span></div>
+			<div class="card-body">
+				<span class="hint" data-testid="permissions-settings-summary">{permissionsSummaryText}</span>
+				<span class="hint">
+					The macOS permissions Atlas needs, what each installed plugin may do, and the agent
+					access defaults every project inherits, all on their own view.
+				</span>
+				<a href="/permissions" data-testid="permissions-open-link">Open permissions</a>
 			</div>
 		</section>
 

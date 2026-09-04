@@ -6,6 +6,7 @@
 import type {
 	CommandContribution,
 	Component,
+	Permission,
 	PluginInfo,
 	Section,
 	Slot,
@@ -47,14 +48,25 @@ export function collectContributions(items: PluginInfo[]): Contributions {
 		if (!contributes) continue;
 		const pluginName = plugin.manifest?.name ?? pluginId;
 		const from = { pluginId, pluginName };
+		// Three of the five contribution kinds need a permission the manifest declares, and
+		// the user can take any of those back on the Permissions view. Revoking `ui.sections`
+		// has to hide the section, not just uncheck a box, so the grants gate the collector
+		// the same way they gate the bridge.
+		const holds = (permission: Permission) => (plugin.granted ?? []).includes(permission);
 
-		for (const section of contributes.sections ?? []) out.sections.push({ ...section, ...from });
+		if (holds('ui.sections')) {
+			for (const section of contributes.sections ?? []) out.sections.push({ ...section, ...from });
+		}
 		for (const command of contributes.commands ?? []) out.commands.push({ ...command, ...from });
 		for (const theme of contributes.themes ?? []) out.themes.push({ ...theme, ...from });
-		for (const tool of contributes.tools ?? []) out.tools.push({ ...tool, ...from });
-		for (const component of contributes.components ?? []) {
-			const bucket = (out.components[component.slot] ??= []);
-			bucket.push({ ...component, ...from });
+		if (holds('mcp.tools')) {
+			for (const tool of contributes.tools ?? []) out.tools.push({ ...tool, ...from });
+		}
+		if (holds('ui.components')) {
+			for (const component of contributes.components ?? []) {
+				const bucket = (out.components[component.slot] ??= []);
+				bucket.push({ ...component, ...from });
+			}
 		}
 	}
 

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::manifest::{compatible, Manifest, ATLAS_API_VERSION};
+use super::manifest::{compatible, Manifest, Permission, ATLAS_API_VERSION};
 
 /// `<app data>/plugins`. Each plugin lives at `<plugins_dir>/<id>/`.
 pub fn plugins_dir(app_data: &Path) -> PathBuf {
@@ -34,6 +34,12 @@ struct StateEntry {
     enabled: bool,
     installed_at: String,
     source: SourceRef,
+    /// The permissions the user still allows this plugin, a subset of what its manifest
+    /// asks for. `None` is a state file written before grants existed, and reads as "the
+    /// whole manifest": a plugin installed under the old shape must not lose access the
+    /// user never revoked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    granted: Option<Vec<Permission>>,
 }
 
 type State = HashMap<String, StateEntry>;
@@ -62,10 +68,20 @@ fn now_rfc3339() -> Result<String, String> {
 }
 
 /// Adds or replaces the state entry for `id`. Called once a plugin's files are already
-/// on disk, by [`super::install`].
-pub(super) fn record_install(app_data: &Path, id: &str, enabled: bool, source: SourceRef) -> Result<(), String> {
+/// on disk, by [`super::install`]. A fresh install is granted everything its manifest
+/// asks for; the Permissions view is where any of it is taken back.
+pub(super) fn record_install(
+    app_data: &Path,
+    id: &str,
+    enabled: bool,
+    source: SourceRef,
+    granted: Vec<Permission>,
+) -> Result<(), String> {
     let mut state = read_state(app_data)?;
-    state.insert(id.to_string(), StateEntry { enabled, installed_at: now_rfc3339()?, source });
+    state.insert(
+        id.to_string(),
+        StateEntry { enabled, installed_at: now_rfc3339()?, source, granted: Some(granted) },
+    );
     write_state(app_data, &state)
 }
 
@@ -80,6 +96,10 @@ pub struct PluginInfo {
     pub compatible: bool,
     pub reason: Option<String>,
     pub dir: PathBuf,
+    /// What the plugin may actually do right now: the manifest's permissions minus
+    /// anything the user has revoked. Always a subset of the manifest, so a manifest that
+    /// drops a permission on an update takes the grant with it.
+    pub granted: Vec<Permission>,
 }
 
 /// Every installed plugin (every directory under [`plugins_dir`]), sorted by id. A
@@ -122,12 +142,16 @@ pub fn list(app_data: &Path) -> Result<Vec<PluginInfo>, String> {
                     compatible: false,
                     reason: Some(reason),
                     dir: plugin_dir,
+                    // No manifest to prune against, so nothing is granted; such a plugin
+                    // never runs anyway.
+                    granted: Vec::new(),
                 });
                 continue;
             }
         };
 
         let recorded_enabled = state.get(&id).map(|e| e.enabled).unwrap_or(false);
+        let granted = prune(state.get(&id).and_then(|e| e.granted.as_deref()), &manifest.permissions);
         let reason = manifest.validate(&plugin_dir).err().or_else(|| {
             if compatible(&manifest.api) {
                 None
@@ -146,9 +170,50 @@ pub fn list(app_data: &Path) -> Result<Vec<PluginInfo>, String> {
             compatible: is_compatible,
             reason,
             dir: plugin_dir,
+            granted,
         });
     }
     Ok(out)
+}
+
+/// The grants that still hold: whatever was recorded, kept in the manifest's own order
+/// and dropped where the manifest no longer asks for it. An unrecorded grant list (a
+/// state file written before grants existed) means the whole manifest.
+fn prune(recorded: Option<&[Permission]>, manifest: &[Permission]) -> Vec<Permission> {
+    match recorded {
+        None => manifest.to_vec(),
+        Some(held) => manifest.iter().filter(|p| held.contains(p)).copied().collect(),
+    }
+}
+
+/// The dotted wire name of a permission (`tasks.read`), which is what a manifest and the
+/// web side both spell, taken from the same `serde` rename the wire format uses so the
+/// two cannot drift apart.
+fn permission_name(permission: Permission) -> String {
+    serde_json::to_value(permission)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{permission:?}"))
+}
+
+/// Replaces `id`'s grants. Refuses a permission the manifest does not declare: a grant is
+/// only ever a subset of what the plugin asked for, never a way to widen it.
+pub fn set_permissions(app_data: &Path, id: &str, granted: &[Permission]) -> Result<(), String> {
+    let info = list(app_data)?
+        .into_iter()
+        .find(|p| p.id == id)
+        .ok_or_else(|| format!("No plugin '{id}' is installed."))?;
+    let declared = info.manifest.map(|m| m.permissions).unwrap_or_default();
+    for permission in granted {
+        if !declared.contains(permission) {
+            return Err(format!("'{id}' does not ask for '{}'.", permission_name(*permission)));
+        }
+    }
+
+    let mut state = read_state(app_data)?;
+    let entry = state.get_mut(id).ok_or_else(|| format!("No plugin '{id}' is installed."))?;
+    entry.granted = Some(declared.into_iter().filter(|p| granted.contains(p)).collect());
+    write_state(app_data, &state)
 }
 
 /// Enables or disables `id`. Refuses to enable a plugin `list` reports as incompatible,
@@ -210,6 +275,13 @@ mod tests {
         )
     }
 
+    /// A compatible manifest asking for two permissions, for the grant tests.
+    fn manifest_with_permissions(id: &str, permissions: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","name":"Test","version":"1.0.0","description":"d","author":"a","api":">=1.0 <2","main":"main.js","permissions":{permissions},"contributes":{{}}}}"#
+        )
+    }
+
     fn incompatible_manifest(id: &str) -> String {
         format!(
             r#"{{"id":"{id}","name":"Test","version":"1.0.0","description":"d","author":"a","api":">=2","main":"main.js","permissions":[],"contributes":{{}}}}"#
@@ -227,7 +299,7 @@ mod tests {
         let app_data = scratch_dir("incompatible");
         let plugin_dir = plugins_dir(&app_data).join("too-new");
         write_manifest(&plugin_dir, &incompatible_manifest("too-new"));
-        record_install(&app_data, "too-new", true, SourceRef { kind: "folder".into(), value: "x".into() }).unwrap();
+        record_install(&app_data, "too-new", true, SourceRef { kind: "folder".into(), value: "x".into() }, Vec::new()).unwrap();
 
         let infos = list(&app_data).unwrap();
         assert_eq!(infos.len(), 1);
@@ -244,12 +316,125 @@ mod tests {
         let app_data = scratch_dir("toggle");
         let plugin_dir = plugins_dir(&app_data).join("ok");
         write_manifest(&plugin_dir, &compatible_manifest("ok"));
-        record_install(&app_data, "ok", true, SourceRef { kind: "folder".into(), value: "x".into() }).unwrap();
+        record_install(&app_data, "ok", true, SourceRef { kind: "folder".into(), value: "x".into() }, Vec::new()).unwrap();
 
         set_enabled(&app_data, "ok", false).unwrap();
         assert!(!list(&app_data).unwrap()[0].enabled);
         set_enabled(&app_data, "ok", true).unwrap();
         assert!(list(&app_data).unwrap()[0].enabled);
+    }
+
+    #[test]
+    fn a_fresh_install_is_granted_everything_its_manifest_asks_for() {
+        let app_data = scratch_dir("granted-default");
+        let plugin_dir = plugins_dir(&app_data).join("asks");
+        write_manifest(&plugin_dir, &manifest_with_permissions("asks", r#"["tasks.read","ui.sections"]"#));
+        record_install(
+            &app_data,
+            "asks",
+            true,
+            SourceRef { kind: "folder".into(), value: "x".into() },
+            vec![Permission::TasksRead, Permission::UiSections],
+        )
+        .unwrap();
+
+        let info = &list(&app_data).unwrap()[0];
+        assert_eq!(info.granted, vec![Permission::TasksRead, Permission::UiSections]);
+    }
+
+    /// A state file written before grants existed has no `granted` field at all. Reading
+    /// it as "nothing granted" would silently disable every installed plugin's access, so
+    /// the absent field means the whole manifest.
+    #[test]
+    fn an_unrecorded_grant_list_reads_as_the_whole_manifest() {
+        let app_data = scratch_dir("granted-legacy");
+        let plugin_dir = plugins_dir(&app_data).join("old");
+        write_manifest(&plugin_dir, &manifest_with_permissions("old", r#"["memories.read"]"#));
+        std::fs::write(
+            state_path(&app_data),
+            r#"{"old":{"enabled":true,"installed_at":"2026-01-01T00:00:00Z","source":{"kind":"folder","value":"x"}}}"#,
+        )
+        .unwrap();
+
+        let info = &list(&app_data).unwrap()[0];
+        assert_eq!(info.granted, vec![Permission::MemoriesRead]);
+    }
+
+    /// An update that drops a permission from the manifest drops the grant with it: a
+    /// grant is never wider than what the plugin currently asks for.
+    #[test]
+    fn a_grant_the_manifest_no_longer_asks_for_is_pruned_on_list() {
+        let app_data = scratch_dir("granted-prune");
+        let plugin_dir = plugins_dir(&app_data).join("shrunk");
+        write_manifest(&plugin_dir, &manifest_with_permissions("shrunk", r#"["tasks.read","ui.sections"]"#));
+        record_install(
+            &app_data,
+            "shrunk",
+            true,
+            SourceRef { kind: "folder".into(), value: "x".into() },
+            vec![Permission::TasksRead, Permission::UiSections, Permission::MemoriesWrite],
+        )
+        .unwrap();
+
+        let info = &list(&app_data).unwrap()[0];
+        assert_eq!(info.granted, vec![Permission::TasksRead, Permission::UiSections]);
+    }
+
+    #[test]
+    fn set_permissions_revokes_one_and_keeps_the_rest() {
+        let app_data = scratch_dir("granted-revoke");
+        let plugin_dir = plugins_dir(&app_data).join("revoke-me");
+        write_manifest(
+            &plugin_dir,
+            &manifest_with_permissions("revoke-me", r#"["tasks.read","ui.sections"]"#),
+        );
+        record_install(
+            &app_data,
+            "revoke-me",
+            true,
+            SourceRef { kind: "folder".into(), value: "x".into() },
+            vec![Permission::TasksRead, Permission::UiSections],
+        )
+        .unwrap();
+
+        set_permissions(&app_data, "revoke-me", &[Permission::UiSections]).unwrap();
+        assert_eq!(list(&app_data).unwrap()[0].granted, vec![Permission::UiSections]);
+
+        // And back again: revoking is not a one-way door.
+        set_permissions(&app_data, "revoke-me", &[Permission::TasksRead, Permission::UiSections])
+            .unwrap();
+        assert_eq!(
+            list(&app_data).unwrap()[0].granted,
+            vec![Permission::TasksRead, Permission::UiSections]
+        );
+    }
+
+    #[test]
+    fn set_permissions_refuses_a_permission_the_manifest_does_not_declare() {
+        let app_data = scratch_dir("granted-refuse");
+        let plugin_dir = plugins_dir(&app_data).join("narrow");
+        write_manifest(&plugin_dir, &manifest_with_permissions("narrow", r#"["tasks.read"]"#));
+        record_install(
+            &app_data,
+            "narrow",
+            true,
+            SourceRef { kind: "folder".into(), value: "x".into() },
+            vec![Permission::TasksRead],
+        )
+        .unwrap();
+
+        let err = set_permissions(&app_data, "narrow", &[Permission::TasksRead, Permission::MemoriesWrite])
+            .unwrap_err();
+        assert_eq!(err, "'narrow' does not ask for 'memories.write'.");
+        // The refusal changed nothing.
+        assert_eq!(list(&app_data).unwrap()[0].granted, vec![Permission::TasksRead]);
+    }
+
+    #[test]
+    fn set_permissions_on_an_unknown_id_is_an_error() {
+        let app_data = scratch_dir("granted-unknown");
+        let err = set_permissions(&app_data, "nope", &[]).unwrap_err();
+        assert_eq!(err, "No plugin 'nope' is installed.");
     }
 
     #[test]
@@ -264,7 +449,7 @@ mod tests {
         let app_data = scratch_dir("uninstall");
         let plugin_dir = plugins_dir(&app_data).join("gone-soon");
         write_manifest(&plugin_dir, &compatible_manifest("gone-soon"));
-        record_install(&app_data, "gone-soon", true, SourceRef { kind: "folder".into(), value: "x".into() }).unwrap();
+        record_install(&app_data, "gone-soon", true, SourceRef { kind: "folder".into(), value: "x".into() }, Vec::new()).unwrap();
         assert_eq!(list(&app_data).unwrap().len(), 1);
 
         uninstall(&app_data, "gone-soon").unwrap();
@@ -315,7 +500,7 @@ mod tests {
         let plugin_dir = plugins_dir(&app_data).join("broken");
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(plugin_dir.join("atlas-plugin.json"), "not json at all").unwrap();
-        record_install(&app_data, "broken", false, SourceRef { kind: "folder".into(), value: "x".into() }).unwrap();
+        record_install(&app_data, "broken", false, SourceRef { kind: "folder".into(), value: "x".into() }, Vec::new()).unwrap();
 
         let reason = list(&app_data).unwrap()[0].reason.clone().unwrap();
         let err = set_enabled(&app_data, "broken", true).unwrap_err();

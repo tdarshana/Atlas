@@ -27,6 +27,7 @@ import type {
 	NewTask,
 	NewWorkflow,
 	Project,
+	ProjectAccessReport,
 	ProjectExtraction,
 	ProjectMcpReport,
 	ProjectPatch,
@@ -200,6 +201,11 @@ export class AtlasApi {
 	/** Replaces the project's access rules wholesale; a null list means any actor. */
 	setAgentAccess(id: Uuid, access: AgentAccess): Promise<Project> {
 		return this.req('PUT', `/api/v1/projects/${encodeURIComponent(id)}/agent-access`, access);
+	}
+
+	/** The project's rules, the global defaults and what they resolve to. */
+	projectAccess(id: Uuid): Promise<ProjectAccessReport> {
+		return this.req('GET', `/api/v1/projects/${encodeURIComponent(id)}/access`);
 	}
 
 	/** `null` drops the override and puts the project back on the global settings. */

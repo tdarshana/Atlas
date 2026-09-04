@@ -61,7 +61,10 @@ fn install_prepared(app_data: &Path, src: &Path, source: SourceRef) -> Result<Pl
     copy_dir(src, &dest)?;
 
     let is_compatible = compatible(&manifest.api);
-    record_install(app_data, &manifest.id, is_compatible, source)?;
+    // A fresh install holds everything its manifest asks for; the Permissions view is
+    // where the user takes any of it back.
+    let granted = manifest.permissions.clone();
+    record_install(app_data, &manifest.id, is_compatible, source, granted.clone())?;
 
     let reason = (!is_compatible).then(|| {
         format!("'{}' needs API {} but this app provides {ATLAS_API_VERSION}.", manifest.id, manifest.api)
@@ -73,6 +76,7 @@ fn install_prepared(app_data: &Path, src: &Path, source: SourceRef) -> Result<Pl
         compatible: is_compatible,
         reason,
         dir: dest,
+        granted,
     })
 }
 

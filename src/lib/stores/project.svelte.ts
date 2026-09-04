@@ -21,6 +21,7 @@ export type ProjectTabId =
 	| 'workflows'
 	| 'frameworks'
 	| 'mcp'
+	| 'permissions'
 	| 'log'
 	| 'settings';
 
@@ -42,6 +43,7 @@ export const PROJECT_TABS: TabDef[] = [
 	{ id: 'workflows', label: 'Workflows', icon: 'git-branch', segment: 'workflows' },
 	{ id: 'frameworks', label: 'Frameworks', icon: 'list-checks', segment: 'frameworks' },
 	{ id: 'mcp', label: 'MCP', icon: 'plug', segment: 'mcp' },
+	{ id: 'permissions', label: 'Permissions', icon: 'shield-check', segment: 'permissions' },
 	{ id: 'log', label: 'Log', icon: 'history', segment: 'log' },
 	{ id: 'settings', label: 'Project settings', icon: 'settings', segment: 'settings' }
 ];

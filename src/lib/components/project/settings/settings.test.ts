@@ -2,8 +2,6 @@ import { describe, expect, it } from 'vitest';
 
 import type { AgentAccess } from '$lib/types';
 import {
-	accessChecked,
-	accessIsSplit,
 	alwaysAllowed,
 	boardKeyBase,
 	DEFAULT_ACTORS,
@@ -14,7 +12,6 @@ import {
 	knownActors,
 	MASKED_KEY,
 	SYSTEM_ACTORS,
-	toAgentAccess,
 	toProjectExtraction
 } from './settings';
 
@@ -52,99 +49,6 @@ describe('knownActors', () => {
 			require_review: false
 		};
 		expect(knownActors([], access)).toContain('codex/fixer');
-	});
-});
-
-describe('accessIsSplit', () => {
-	it('is false when both rules are open', () => {
-		expect(accessIsSplit(OPEN)).toBe(false);
-	});
-
-	it('is false when both rules hold the same labels in any order', () => {
-		expect(
-			accessIsSplit({
-				memory_writers: ['a', 'b'],
-				task_movers: ['b', 'a'],
-				require_review: false
-			})
-		).toBe(false);
-	});
-
-	it('is true when one rule is open and the other is a list', () => {
-		expect(
-			accessIsSplit({ memory_writers: null, task_movers: ['cli/codex'], require_review: false })
-		).toBe(true);
-	});
-
-	it('is true when the two lists differ', () => {
-		expect(
-			accessIsSplit({ memory_writers: ['a'], task_movers: ['b'], require_review: false })
-		).toBe(true);
-	});
-});
-
-describe('agent access model', () => {
-	const actors = ['cli/claude-code', 'cli/codex', 'desktop'];
-	const all = { 'cli/claude-code': true, 'cli/codex': true, desktop: true };
-
-	it('ticks everything for a null rule', () => {
-		expect(accessChecked(actors, null)).toEqual(all);
-	});
-
-	it('ticks only the listed actors', () => {
-		expect(accessChecked(actors, ['cli/codex'])).toEqual({
-			'cli/claude-code': false,
-			'cli/codex': true,
-			desktop: false
-		});
-	});
-
-	it('writes back nulls when everything is ticked', () => {
-		expect(toAgentAccess(actors, all, all, false)).toEqual(OPEN);
-	});
-
-	it('writes each column to its own rule', () => {
-		const memories = { 'cli/claude-code': false, 'cli/codex': true, desktop: true };
-		expect(toAgentAccess(actors, memories, all, true)).toEqual({
-			memory_writers: ['cli/codex', 'desktop'],
-			task_movers: null,
-			require_review: true
-		});
-	});
-
-	it('leaves a divergent pair of rules divergent', () => {
-		const access: AgentAccess = {
-			memory_writers: null,
-			task_movers: ['cli/codex'],
-			require_review: false
-		};
-		const memories = accessChecked(actors, access.memory_writers);
-		const tasks = accessChecked(actors, access.task_movers);
-		expect(toAgentAccess(actors, memories, tasks, false)).toEqual(access);
-	});
-
-	it('round-trips a list', () => {
-		const access: AgentAccess = {
-			memory_writers: ['desktop'],
-			task_movers: ['desktop'],
-			require_review: false
-		};
-		const ticks = accessChecked(actors, access.memory_writers);
-		expect(toAgentAccess(actors, ticks, ticks, false)).toEqual(access);
-	});
-
-	it('writes the lists out in full once a label was added by hand', () => {
-		const withNew = [...actors, 'workflow'];
-		const ticks = { ...all, workflow: true };
-		expect(toAgentAccess(withNew, ticks, ticks, false, true)).toEqual({
-			memory_writers: withNew,
-			task_movers: withNew,
-			require_review: false
-		});
-	});
-
-	it('carries the review rule either way', () => {
-		expect(toAgentAccess(actors, all, all, true).require_review).toBe(true);
 	});
 });
 

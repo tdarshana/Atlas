@@ -25,7 +25,7 @@ interface Sent {
 	[key: string]: unknown;
 }
 
-function harness(permissions: Permission[]) {
+function harness(permissions: Permission[], granted?: Permission[]) {
 	const sent: Sent[] = [];
 	const target: PostTarget = { postMessage: (m) => void sent.push(m as Sent) };
 	const manifest: Manifest = {
@@ -45,7 +45,9 @@ function harness(permissions: Permission[]) {
 		enabled: true,
 		compatible: true,
 		reason: null,
-		dir: '/plugins/hello-world'
+		dir: '/plugins/hello-world',
+		// The bridge gates on the grants, so an unrevoked fixture grants the whole manifest.
+		granted: granted ?? [...permissions]
 	};
 	const api = {
 		searchMemories: vi.fn(async () => [{ id: 'm1' }]),
@@ -87,6 +89,17 @@ describe('createBridge', () => {
 			error: { code: 'permission_denied' }
 		});
 		expect(h.api.searchMemories).not.toHaveBeenCalled();
+	});
+
+	/** Revoking a permission on the Permissions view has to stop the call, not just change
+	 * what the row says: the manifest still asks for `tasks.read`, but the grant is gone. */
+	it('refuses a method whose permission the user revoked, even though the manifest asks for it', async () => {
+		const h = harness(['tasks.read'], []);
+		h.request(1, 'tasks.list', {});
+		await flush();
+
+		expect(h.sent[0]).toMatchObject({ id: 1, ok: false, error: { code: 'permission_denied' } });
+		expect(h.api.listTasks).not.toHaveBeenCalled();
 	});
 
 	it('proxies a method the manifest does hold', async () => {
@@ -327,7 +340,8 @@ describe('the bridge client handshake', () => {
 				enabled: true,
 				compatible: true,
 				reason: null,
-				dir: '/plugins/hello-world'
+				dir: '/plugins/hello-world',
+				granted: ['tasks.read']
 			},
 			view: 'hello-view',
 			target: { postMessage: (m) => client.deliver(m) },

@@ -14,7 +14,9 @@ function plugin(id: string, enabled: boolean, contributes: Partial<Contributes>)
 		author: 'a',
 		api: '>=1.0 <2',
 		main: 'main.js',
-		permissions: [],
+		// The manifest validator refuses a section, a component or a tool without its
+		// permission, so a fixture that contributes any of them has to ask for all three.
+		permissions: ['ui.sections', 'ui.components', 'mcp.tools'],
 		contributes: {
 			sections: [],
 			themes: [],
@@ -24,7 +26,15 @@ function plugin(id: string, enabled: boolean, contributes: Partial<Contributes>)
 			...contributes
 		}
 	};
-	return { id, manifest, enabled, compatible: true, reason: null, dir: `/plugins/${id}` };
+	return {
+		id,
+		manifest,
+		enabled,
+		compatible: true,
+		reason: null,
+		dir: `/plugins/${id}`,
+		granted: [...manifest.permissions]
+	};
 }
 
 const everything = plugin('everything', true, {
@@ -72,6 +82,25 @@ describe('collectContributions', () => {
 		expect(out.components).toEqual({});
 	});
 
+	/** Revoking a grant on the Permissions view hides what it paid for. Themes and palette
+	 * commands need no permission, so they survive a plugin stripped of everything else. */
+	it('drops the sections, components and tools whose permission was revoked', () => {
+		const stripped: PluginInfo = { ...everything, granted: [] };
+		const out = collectContributions([stripped]);
+
+		expect(out.sections).toEqual([]);
+		expect(out.components).toEqual({});
+		expect(out.tools).toEqual([]);
+		expect(out.themes.length).toBeGreaterThan(0);
+
+		// Revoking only `ui.sections` leaves the components alone.
+		const sectionsOnly = collectContributions([
+			{ ...everything, granted: ['ui.components', 'mcp.tools'] }
+		]);
+		expect(sectionsOnly.sections).toEqual([]);
+		expect(sectionsOnly.components['dashboard.card']?.length).toBeGreaterThan(0);
+	});
+
 	it('contributes nothing from an incompatible plugin or one with no manifest', () => {
 		const broken: PluginInfo = {
 			id: 'broken',
@@ -79,7 +108,8 @@ describe('collectContributions', () => {
 			enabled: false,
 			compatible: false,
 			reason: 'Could not read atlas-plugin.json',
-			dir: '/plugins/broken'
+			dir: '/plugins/broken',
+			granted: []
 		};
 		const tooNew = { ...everything, id: 'too-new', compatible: false };
 

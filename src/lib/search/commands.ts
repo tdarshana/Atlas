@@ -87,6 +87,14 @@ export const COMMANDS: PaletteCommand[] = [
 		run: (ctx) => ctx.goto('/mcp')
 	},
 	{
+		id: 'open-permissions',
+		label: 'Open permissions',
+		hint: 'system access, plugin grants and agent defaults',
+		icon: 'shield-check',
+		combo: 'Mod+9',
+		run: (ctx) => ctx.goto('/permissions')
+	},
+	{
 		id: 'open-plugins',
 		label: 'Plugins',
 		hint: 'install and enable plugins',

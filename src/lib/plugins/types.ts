@@ -89,4 +89,10 @@ export interface PluginInfo {
 	compatible: boolean;
 	reason: string | null;
 	dir: string;
+	/**
+	 * What the plugin may actually do right now: the manifest's permissions minus anything
+	 * the user revoked on the Permissions view. Always a subset of the manifest, so the
+	 * bridge and the contribution collector read this rather than `manifest.permissions`.
+	 */
+	granted: Permission[];
 }
