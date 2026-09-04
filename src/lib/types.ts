@@ -832,6 +832,96 @@ export interface ProjectMcpReport {
 	};
 }
 
+// ---- MCP servers (Phase 16) ----
+// `GET /api/v1/mcp/servers` and friends (crates/atlas-core/src/mcp_servers). One entry
+// per MCP server the daemon found in an agent's own config, plus one synthesised entry
+// for Atlas itself. Secrets never cross the wire: a transport carries the key names of
+// its `env` or `headers`, never their values.
+
+export type McpServerSource =
+	| 'claude'
+	| 'codex'
+	| 'cursor'
+	| 'gemini'
+	| 'windsurf'
+	| 'plugin'
+	| 'atlas';
+
+/** `local` is Claude Code's per-project entries kept in `~/.claude.json`. */
+export type McpServerScope = 'user' | 'project' | 'local' | 'plugin';
+
+export interface McpStdioTransport {
+	kind: 'stdio';
+	command: string;
+	args: string[];
+	env_keys: string[];
+}
+
+export interface McpHttpTransport {
+	kind: 'http';
+	url: string;
+	header_keys: string[];
+}
+
+export type McpServerTransport = McpStdioTransport | McpHttpTransport;
+
+export interface McpServerEntry {
+	/** `<source>:<scope>:<name>`, `plugin:<marketplace>/<plugin>:<name>`, or `atlas`.
+	 * Contains `:` and `/`, so it is URL-encoded wherever it goes in a path. */
+	id: string;
+	name: string;
+	source: McpServerSource;
+	scope: McpServerScope;
+	transport: McpServerTransport;
+	/** Absolute path of the config file the entry came from; null for Atlas. */
+	file: string | null;
+	/** `<marketplace>/<plugin>` for a plugin server. */
+	plugin: string | null;
+	enabled: boolean;
+	/** False where the agent has no native enable switch, or the entry is not editable. */
+	can_toggle: boolean;
+	can_remove: boolean;
+	is_atlas: boolean;
+	project_id: Uuid | null;
+}
+
+export interface McpServerList {
+	servers: McpServerEntry[];
+	/** Config files that could not be read or parsed. */
+	warnings: string[];
+}
+
+export interface McpCheckTool {
+	name: string;
+	description: string;
+}
+
+/** `POST /api/v1/mcp/servers/{id}/check`: the daemon started the server and asked it
+ * for its tools. `ok: false` carries the reason in `error`. */
+export interface McpCheckResult {
+	ok: boolean;
+	server_name: string | null;
+	server_version: string | null;
+	protocol_version: string | null;
+	tools: McpCheckTool[];
+	error: string | null;
+	elapsed_ms: number;
+}
+
+/** `POST /api/v1/mcp/servers`. Unlike an entry's transport, this one carries the secret
+ * values, which the daemon writes into the agent's config and never sends back. */
+export type NewMcpTransport =
+	| { kind: 'stdio'; command: string; args: string[]; env: Record<string, string> }
+	| { kind: 'http'; url: string; headers: Record<string, string> };
+
+export interface NewMcpServer {
+	source: McpServerSource;
+	scope: McpServerScope;
+	project_id?: Uuid | null;
+	name: string;
+	transport: NewMcpTransport;
+}
+
 /** Query string for `GET /api/v1/search`. `project_id` takes one project, not a list. */
 export interface GlobalSearchQuery {
 	q: string;

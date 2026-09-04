@@ -16,6 +16,9 @@ import type {
 	Job,
 	LogEntry,
 	LogFilter,
+	McpCheckResult,
+	McpServerEntry,
+	McpServerList,
 	McpStatusReport,
 	Memory,
 	MemoryFacets,
@@ -23,6 +26,7 @@ import type {
 	MemoryStatus,
 	NewAgent,
 	NewDoc,
+	NewMcpServer,
 	NewMemory,
 	NewSkill,
 	NewTask,
@@ -368,6 +372,47 @@ export class AtlasApi {
 	/** Replaces the project's MCP tool override wholesale; an empty list clears it. */
 	setProjectMcpTools(id: Uuid, disabled: string[]): Promise<Project> {
 		return this.req('PUT', `/api/v1/projects/${encodeURIComponent(id)}/mcp/tools`, { disabled });
+	}
+
+	// ---- MCP servers ----
+
+	/**
+	 * Every MCP server the user's agents are wired to. With no project that is the
+	 * user-scope entries of each agent; with one it is that project's own scopes plus
+	 * the plugin servers and Atlas, which apply everywhere.
+	 */
+	listMcpServers(projectId?: Uuid | null): Promise<McpServerList> {
+		return this.req('GET', `/api/v1/mcp/servers${query({ project_id: projectId })}`);
+	}
+
+	/** Starts the server the way its agent would and asks it for its tools. */
+	checkMcpServer(id: string, projectId?: Uuid | null): Promise<McpCheckResult> {
+		return this.req(
+			'POST',
+			`/api/v1/mcp/servers/${encodeURIComponent(id)}/check${query({ project_id: projectId })}`
+		);
+	}
+
+	/** Flips the agent's own switch for one server; only offered where it has one. */
+	setMcpServerEnabled(id: string, enabled: boolean, projectId?: Uuid | null): Promise<void> {
+		return this.req(
+			'PUT',
+			`/api/v1/mcp/servers/${encodeURIComponent(id)}/enabled${query({ project_id: projectId })}`,
+			{ enabled }
+		);
+	}
+
+	/** Writes a new entry into the agent's own config file. */
+	addMcpServer(input: NewMcpServer): Promise<McpServerEntry> {
+		return this.req('POST', '/api/v1/mcp/servers', input);
+	}
+
+	/** Deletes the entry from the config file it came from. */
+	removeMcpServer(id: string, projectId?: Uuid | null): Promise<void> {
+		return this.req(
+			'DELETE',
+			`/api/v1/mcp/servers/${encodeURIComponent(id)}${query({ project_id: projectId })}`
+		);
 	}
 
 	// ---- skills ----

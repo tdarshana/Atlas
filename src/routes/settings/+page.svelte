@@ -52,7 +52,8 @@
 		settingString,
 		settings
 	} from '$lib/stores/settings.svelte';
-	import { loadMcp, mcp } from '$lib/stores/mcp.svelte';
+	import { loadMcp } from '$lib/stores/mcp.svelte';
+	import { loadServers, servers } from '$lib/stores/mcp-servers.svelte';
 	import { skillCounts } from '$lib/skills';
 	import { loadSkills, skills } from '$lib/stores/skills.svelte';
 	import { loadProjects, projects } from '$lib/stores/projects.svelte';
@@ -432,11 +433,9 @@
 	}
 
 	/** The two-line summary reads the same store the `/mcp` route and its side panel
-	 * do, so it never needs its own fetch or its own copy of the tools/clients tables. */
+	 * do, so it never needs its own fetch or its own copy of the servers table. */
 	const mcpSummaryText = $derived(
-		mcp.report
-			? `${mcp.report.counts.tools} tools · ${mcp.report.counts.resources} resources · ${mcp.report.counts.prompts} prompts · ${mcp.report.counts.clients} clients connected`
-			: '…'
+		`${servers.items.length} ${servers.items.length === 1 ? 'server' : 'servers'}, ${servers.items.filter((s) => s.enabled).length} enabled`
 	);
 
 	/** The same store the `/plugins` view and its side panel read, so the count here is
@@ -558,6 +557,7 @@
 		syncAppearanceDraft();
 		await loadStages();
 		await loadMcp();
+		await loadServers(null);
 		await loadAutostart();
 		await loadAbout();
 		await loadVault();
@@ -1069,8 +1069,9 @@
 			<div class="card-body">
 				<span class="hint" data-testid="mcp-summary">{mcpSummaryText}</span>
 				<span class="hint">
-					Connect snippets, the tools table with its enable checkboxes, connected clients and a
-					<span class="mono">Restart</span> command all moved to their own view.
+					Every MCP server your agents are wired to, Atlas among them. Its connect snippets, the
+					tools table with its enable checkboxes, connected clients and a
+					<span class="mono">Restart</span> command are behind the Atlas row.
 				</span>
 				<a href="/mcp" data-testid="mcp-open-link">Open MCP</a>
 			</div>

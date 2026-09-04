@@ -1,93 +1,66 @@
 <script lang="ts">
-	// The project MCP tab: this project's own view of the server, per Task MCP-A's
-	// `GET /api/v1/projects/{id}/mcp` — the connect snippet scoped to this project, an
-	// AGENT ACCESS summary, only this project's `atlas://` resources, a tools table with
-	// a per-tool `Enabled here` override, and the clients whose last call resolved here.
-	import { Badge, Button, Checkbox, Table, type TableColumn } from '$lib/ds';
-	import { api } from '$lib/daemon.svelte';
-	import { agentAccessSummary } from '$lib/components/project/mcp';
-	import { errorLogPath, errorMessage } from '$lib/errors';
-	import { relativeAge } from '$lib/format';
-	import { nextDisabledTools, projectConnectSnippet, projectToolState, toolPluginId } from '$lib/mcp';
+	// The project MCP tab: every MCP server configured for this project — Claude Code's
+	// project and local entries, Codex's and Cursor's project files, the plugin servers
+	// and Atlas — grouped by where they came from. A row opens the detail panel; the
+	// Atlas row's detail is what this tab used to be in full (the project connect
+	// snippet, agent access, resources, the tools table and the clients).
+	import { Button } from '$lib/ds';
+	import AddServerDialog from '$lib/components/mcp/AddServerDialog.svelte';
+	import AtlasProjectDetail from '$lib/components/mcp/AtlasProjectDetail.svelte';
+	import RemoveServerDialog from '$lib/components/mcp/RemoveServerDialog.svelte';
+	import ServerDetail from '$lib/components/mcp/ServerDetail.svelte';
+	import ServerTable from '$lib/components/mcp/ServerTable.svelte';
+	import { errorMessage } from '$lib/errors';
+	import { projectConnectSnippet } from '$lib/mcp';
+	import { groupByScope } from '$lib/mcp-servers';
 	import { copyText } from '$lib/shell';
-	import { loadProject } from '$lib/stores/projects.svelte';
 	import { project, setHeaderActions } from '$lib/stores/project.svelte';
-	import type { McpClient, ProjectMcpReport, ProjectMcpToolRow } from '$lib/types';
-	import ErrorState from '$lib/ui/ErrorState.svelte';
+	import {
+		add,
+		check,
+		loadServers,
+		openServer,
+		remove,
+		servers,
+		setDetailWidth,
+		setEnabled
+	} from '$lib/stores/mcp-servers.svelte';
+	import type { McpServerEntry, NewMcpServer } from '$lib/types';
 	import { push } from '$lib/ui/toasts.svelte';
 
 	const id = $derived(project.current?.id ?? '');
 	const rootPath = $derived(project.current?.root_path ?? '');
 
-	let report = $state<ProjectMcpReport | null>(null);
-	let loading = $state(false);
-	let error = $state<string | null>(null);
-	let logPath = $state<string | null>(null);
-	let togglingTool = $state<string | null>(null);
+	let adding = $state(false);
+	let removing = $state<McpServerEntry | null>(null);
 	let copied = $state(false);
 	let copyTimer: ReturnType<typeof setTimeout> | null = null;
 
-	const toolColumns: TableColumn<ProjectMcpToolRow>[] = [
-		{ key: 'name', label: 'Name', width: '200px', mono: true, sortable: true },
-		{ key: 'description', label: 'Description' },
-		{ key: 'args', label: 'Arguments', width: '220px', mono: true },
-		{ key: 'scope', label: 'Scope', width: '80px', sortable: true },
-		{ key: 'enabled_here', label: 'Enabled here', width: '110px' }
-	];
+	const groups = $derived(groupByScope(servers.items));
+	const open = $derived(servers.items.find((s) => s.id === servers.openId) ?? null);
+	const connectSnippet = $derived(projectConnectSnippet(rootPath));
 
-	const clientColumns: TableColumn<McpClient>[] = [
-		{ key: 'client_name', label: 'Client', mono: true, sortable: true },
-		{ key: 'transport', label: 'Transport', width: '90px', sortable: true },
-		{ key: 'last_seen', label: 'Last seen', width: '110px', sortable: true },
-		{ key: 'tool_calls', label: 'Calls', width: '70px', align: 'right', mono: true, sortable: true }
-	];
-
-	const access = $derived(project.current ? agentAccessSummary(project.current.agent_access) : null);
-	const connectSnippet = $derived(projectConnectSnippet(report?.connect.project_root ?? rootPath));
-
-	async function load(): Promise<void> {
-		if (!id) return;
-		loading = true;
+	async function runCheck(row: McpServerEntry): Promise<void> {
 		try {
-			report = await api().projectMcp(id);
-			error = null;
-			logPath = null;
-		} catch (e) {
-			report = null;
-			error = errorMessage(e);
-			logPath = errorLogPath(e);
-		} finally {
-			loading = false;
-		}
-	}
-
-	/** Writes the project's own `mcp_disabled_tools` with this tool's name added or
-	 * removed, off `project.current`'s own list so a redundant globally-disabled entry
-	 * is never dropped by accident. A globally disabled row is not editable here. */
-	async function toggle(row: ProjectMcpToolRow): Promise<void> {
-		if (!id || projectToolState(row) === 'disabled_globally') return;
-		const current = project.current?.mcp_disabled_tools ?? [];
-		const next = nextDisabledTools(current, row.name, !row.enabled_here);
-		togglingTool = row.name;
-		try {
-			await api().setProjectMcpTools(id, next);
-			await Promise.all([load(), loadProject(id)]);
-		} catch (e) {
-			push('error', errorMessage(e));
-		} finally {
-			togglingTool = null;
-		}
-	}
-
-	async function resetToGlobal(): Promise<void> {
-		if (!id) return;
-		try {
-			await api().setProjectMcpTools(id, []);
-			await Promise.all([load(), loadProject(id)]);
-			push('success', 'Reset to the global tool list');
+			const result = await check(row.id);
+			if (!result.ok) push('error', result.error ?? `${row.name} did not answer`);
 		} catch (e) {
 			push('error', errorMessage(e));
 		}
+	}
+
+	async function toggle(row: McpServerEntry, enabled: boolean): Promise<void> {
+		try {
+			await setEnabled(row.id, enabled);
+		} catch (e) {
+			push('error', errorMessage(e));
+			await loadServers(servers.projectId);
+		}
+	}
+
+	async function addServer(input: NewMcpServer): Promise<void> {
+		await add(input);
+		push('success', 'MCP server added');
 	}
 
 	async function copySnippet(): Promise<void> {
@@ -110,7 +83,7 @@
 
 	$effect(() => {
 		if (!id) return;
-		void load();
+		void loadServers(id);
 	});
 
 	$effect(() => {
@@ -123,137 +96,99 @@
 	<Button variant="ghost" size="sm" data-testid="project-mcp-copy-connect" onclick={copySnippet}>
 		{copied ? 'Copied' : 'Copy connect snippet'}
 	</Button>
-	<Button variant="ghost" size="sm" data-testid="project-mcp-reset" onclick={resetToGlobal}>
-		Reset to global
+	<Button size="sm" data-testid="project-mcp-add-server" onclick={() => (adding = true)}>
+		Add server…
 	</Button>
 {/snippet}
 
-{#if error}
-	<ErrorState message={error} logPath={logPath ?? undefined}>
-		<Button variant="primary" onclick={() => load()}>Retry</Button>
-	</ErrorState>
-{:else}
-	<div class="pane" data-testid="project-mcp-page">
-		<div class="group">
-			<span class="group-heading">Connect</span>
-			<pre class="mono connect-snippet">{connectSnippet}</pre>
+<div class="pane" data-testid="project-mcp-page">
+	{#if servers.error}
+		<p class="bad" role="alert" data-testid="mcp-servers-error">{servers.error}</p>
+	{/if}
+
+	{#if servers.warnings.length > 0}
+		<span class="hint" data-testid="mcp-servers-warnings">{servers.warnings.join(' · ')}</span>
+	{/if}
+
+	<div class="split">
+		<div class="groups">
+			{#each groups as group (group.label)}
+				<div class="group">
+					<span class="group-heading" data-testid="project-mcp-group">{group.label}</span>
+					<ServerTable
+						id="project-mcp-servers-{group.label.toLowerCase()}"
+						rows={group.servers}
+						checks={servers.checks}
+						loading={servers.loading}
+						selectedId={servers.openId}
+						busyId={servers.busyId}
+						enabledLabel="Enabled here"
+						onopen={(row) => openServer(row.id)}
+						oncheck={runCheck}
+						ontoggle={toggle}
+						onremove={(row) => (removing = row)}
+					/>
+				</div>
+			{/each}
+			{#if groups.length === 0}
+				<span class="hint" data-testid="project-mcp-empty">
+					{servers.loading
+						? 'Loading…'
+						: "No MCP server is configured for this project. Atlas looked in .mcp.json, .codex/config.toml, .cursor/mcp.json and Claude Code's own project entries."}
+				</span>
+			{/if}
 		</div>
 
-		{#if access}
-			<div class="group">
-				<span class="group-heading">Agent access</span>
-				<div class="reading">
-					<span class="label">Memory writers</span>
-					<span class="value">{access.memoryWriters}</span>
-				</div>
-				<div class="reading">
-					<span class="label">Task movers</span>
-					<span class="value">{access.taskMovers}</span>
-				</div>
-				<div class="reading">
-					<span class="label">Require review</span>
-					<span class="value">{access.requireReview ? 'Yes' : 'No'}</span>
-				</div>
-				<a href="/projects/{id}/settings" data-testid="project-mcp-agent-access-link">
-					Project settings
-				</a>
-			</div>
+		{#if open}
+			<ServerDetail
+				server={open}
+				check={servers.checks[open.id] ?? null}
+				width={servers.detailWidth}
+				busy={servers.busyId === open.id}
+				onclose={() => openServer(null)}
+				onresize={setDetailWidth}
+				oncheck={runCheck}
+				ontoggle={toggle}
+				onremove={(row) => (removing = row)}
+			>
+				{#snippet atlas()}
+					{#if open?.is_atlas && id}
+						<AtlasProjectDetail {id} />
+					{/if}
+				{/snippet}
+			</ServerDetail>
 		{/if}
-
-		<div class="group" id="resources">
-			<span class="group-heading">Resources</span>
-			<div class="resource-list">
-				{#each report?.resources ?? [] as resource (resource.uri)}
-					<div class="resource-row">
-						<span class="mono value">{resource.uri}</span>
-						<span class="hint">{resource.description ?? ''}</span>
-					</div>
-				{/each}
-			</div>
-		</div>
-
-		<div class="group" id="tools">
-			<span class="group-heading">Tools</span>
-			<div class="tools-table" data-testid="project-mcp-tools">
-				<Table
-					id="project-mcp-tools"
-					columns={toolColumns}
-					rows={report?.tools ?? []}
-					rowKey={(t: ProjectMcpToolRow) => t.name}
-				>
-					{#snippet cell(row: ProjectMcpToolRow, column: TableColumn<ProjectMcpToolRow>)}
-						{#if column.key === 'description'}
-							{row.description}
-						{:else if column.key === 'args'}
-							{row.args}
-						{:else if column.key === 'scope'}
-							<Badge tone={row.scope === 'write' ? 'warning' : 'info'}>{row.scope}</Badge>
-						{:else if column.key === 'enabled_here'}
-							{#if projectToolState(row) === 'disabled_globally'}
-								<Checkbox
-									checked={false}
-									disabled
-									title="disabled for every project in Settings"
-									aria-label={`${row.name} is disabled for every project in Settings`}
-									data-testid={`project-mcp-tool-toggle-${row.name}`}
-								/>
-							{:else}
-								<Checkbox
-									checked={row.enabled_here}
-									disabled={togglingTool === row.name}
-									aria-label={`Enable ${row.name} here`}
-									data-testid={`project-mcp-tool-toggle-${row.name}`}
-									onchange={() => toggle(row)}
-								/>
-							{/if}
-						{:else}
-							{row.name}
-							{#if toolPluginId(row.source)}
-								<Badge variant="outline" data-testid="project-mcp-tool-source-{row.name}">
-									Plugin {toolPluginId(row.source)}
-								</Badge>
-							{/if}
-						{/if}
-					{/snippet}
-					{#snippet empty()}
-						<span class="hint">{loading ? 'Loading…' : 'No tools reported yet.'}</span>
-					{/snippet}
-				</Table>
-			</div>
-		</div>
-
-		<div class="group" id="clients">
-			<span class="group-heading">Connected clients (HTTP sessions)</span>
-			<div class="clients-table" data-testid="project-mcp-clients">
-				<Table
-					id="project-mcp-clients"
-					columns={clientColumns}
-					rows={report?.clients ?? []}
-					rowKey={(c: McpClient) => c.id}
-				>
-					{#snippet cell(clientRow: McpClient, column: TableColumn<McpClient>)}
-						{#if column.key === 'last_seen'}
-							{relativeAge(clientRow.last_seen)} ago
-						{:else if column.key === 'transport'}
-							{clientRow.transport}
-						{:else if column.key === 'tool_calls'}
-							{clientRow.tool_calls}
-						{:else}
-							{clientRow.client_name}
-						{/if}
-					{/snippet}
-					{#snippet empty()}
-						<span class="hint">No HTTP client has called into this project yet.</span>
-					{/snippet}
-				</Table>
-			</div>
-		</div>
 	</div>
-{/if}
+</div>
+
+<AddServerDialog
+	open={adding}
+	projectId={id || null}
+	onclose={() => (adding = false)}
+	onadd={addServer}
+/>
+
+<RemoveServerDialog server={removing} onclose={() => (removing = null)} onremove={remove} />
 
 <style>
 	.pane {
 		flex: 1;
+		min-height: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.split {
+		flex: 1;
+		min-height: 0;
+		display: flex;
+		gap: 12px;
+	}
+
+	.groups {
+		flex: 1;
+		min-width: 0;
 		min-height: 0;
 		overflow-y: auto;
 		display: flex;
@@ -267,76 +202,14 @@
 		gap: 4px;
 	}
 
-	.connect-snippet {
-		margin: 0;
-		padding: 6px 8px;
-		background: var(--bg-raised);
-		border: 1px solid var(--border-default);
-		border-radius: 3px;
-		font-size: 12px;
-		line-height: 18px;
-		color: var(--text-secondary);
-		white-space: pre;
-		overflow-x: auto;
-	}
-
-	.reading {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		height: 22px;
-		flex: 0 0 22px;
-		color: var(--text-secondary);
-	}
-
-	.label {
-		width: 120px;
-		flex: 0 0 120px;
-	}
-
-	.value {
-		color: var(--text-primary);
-	}
-
-	.resource-list {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-	}
-
-	.resource-row {
-		display: grid;
-		grid-template-columns: minmax(160px, 260px) 1fr;
-		gap: 12px;
-		align-items: baseline;
-		color: var(--text-secondary);
-	}
-
-	.resource-row .hint {
-		white-space: normal;
-	}
-
-	.tools-table {
-		height: 280px;
-		display: flex;
-		flex-direction: column;
-		border: 1px solid var(--border-subtle);
-		border-radius: 3px;
-		overflow: hidden;
-	}
-
-	.clients-table {
-		border: 1px solid var(--border-subtle);
-		border-radius: 3px;
-		overflow: hidden;
-	}
-
-	.mono {
-		font-family: var(--font-mono);
-	}
-
 	.hint {
 		font-size: 11px;
 		color: var(--text-tertiary);
+	}
+
+	.bad {
+		margin: 0;
+		color: var(--danger-text);
+		font-size: 13px;
 	}
 </style>

@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
-// The tools table tells a plugin's tool apart from a built-in, which matters because a
-// plugin tool is only answerable while the app is running.
+// The Atlas row's detail is what the `/mcp` page used to be in full, so the checks that
+// used to run against the page run against this component instead: the tools table tells
+// a plugin's tool apart from a built-in, which matters because a plugin tool is only
+// answerable while the app is running, and it carries the same global enable toggle.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, waitFor } from '@testing-library/svelte';
@@ -42,7 +44,7 @@ vi.mock('$lib/daemon.svelte', () => ({
 	boot: async () => {}
 }));
 
-import McpPage from './+page.svelte';
+import AtlasServerDetail from './AtlasServerDetail.svelte';
 import { mcp } from '$lib/stores/mcp.svelte';
 
 beforeEach(() => {
@@ -56,9 +58,9 @@ afterEach(() => {
 	mcp.report = null;
 });
 
-describe('the MCP tools table', () => {
+describe('the Atlas server detail', () => {
 	it('badges a plugin tool with the plugin it came from, and leaves a built-in bare', async () => {
-		const { getByTestId, queryByTestId } = render(McpPage);
+		const { getByTestId, queryByTestId } = render(AtlasServerDetail);
 
 		await waitFor(() => getByTestId('mcp-tool-source-plugin__hello_world__ready_count'));
 		expect(getByTestId('mcp-tool-source-plugin__hello_world__ready_count').textContent).toContain(
@@ -68,8 +70,19 @@ describe('the MCP tools table', () => {
 	});
 
 	it('gives a plugin tool the same global enable toggle as a built-in', () => {
-		const { getByTestId } = render(McpPage);
+		const { getByTestId } = render(AtlasServerDetail);
 
 		expect(getByTestId('mcp-tool-toggle-plugin__hello_world__ready_count')).toBeTruthy();
+	});
+
+	it('still carries the transports, the counts, the clients table and Restart', () => {
+		const { getByTestId } = render(AtlasServerDetail);
+
+		expect(getByTestId('mcp-counts').textContent).toContain('2 tools');
+		expect(getByTestId('mcp-protocol').textContent).toContain('2025-06-18');
+		expect(getByTestId('mcp-clients')).toBeTruthy();
+		expect(getByTestId('mcp-restart')).toBeTruthy();
+		expect(getByTestId('mcp-copy-claude')).toBeTruthy();
+		expect(getByTestId('mcp-copy-codex')).toBeTruthy();
 	});
 });
