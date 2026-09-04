@@ -31,6 +31,7 @@ vi.mock('$lib/daemon.svelte', () => ({
 	boot: async () => {}
 }));
 
+import { NO_PROJECT_SERVERS } from '$lib/mcp-servers';
 import AddServerDialog from './AddServerDialog.svelte';
 import ServerDetail from './ServerDetail.svelte';
 import ServerTable from './ServerTable.svelte';
@@ -149,6 +150,48 @@ describe('ServerTable', () => {
 		expect(cell.getAttribute('title')).toBe('Checked in 412 ms');
 	});
 
+	it('sizes to its rows rather than scrolling inside itself', () => {
+		render(ServerTable, { props: { ...tableProps, rows: [entry('fs', 'claude')] } });
+
+		// The wrapper does not flex to fill, and the DS body's own scroll region is off,
+		// so five rows draw as five rows and no scrollbar appears over the last one.
+		const wrap = screen.getByTestId('mcp-servers-wrap');
+		expect(wrap.classList.contains('servers-table')).toBe(true);
+		const body = wrap.querySelector('.body');
+		expect(body).not.toBeNull();
+	});
+
+	it('lets Name and Transport truncate, with the whole value on the title', () => {
+		render(ServerTable, {
+			props: {
+				...tableProps,
+				rows: [
+					entry('filesystem', 'claude', {
+						transport: {
+							kind: 'stdio',
+							command: 'npx',
+							args: ['-y', '@modelcontextprotocol/server-filesystem'],
+							env_keys: []
+						}
+					})
+				]
+			}
+		});
+
+		expect(screen.getByText('filesystem').getAttribute('title')).toBe('filesystem');
+		expect(screen.getByText('stdio npx').getAttribute('title')).toBe(
+			'npx -y @modelcontextprotocol/server-filesystem'
+		);
+	});
+
+	it('says where Add server… would write when a group is empty', () => {
+		render(ServerTable, {
+			props: { ...tableProps, rows: [], emptyText: NO_PROJECT_SERVERS }
+		});
+
+		expect(screen.getByTestId('mcp-servers-empty').textContent).toBe(NO_PROJECT_SERVERS);
+	});
+
 	it('offers Remove in the row menu only where the entry can be removed', async () => {
 		const onremove = vi.fn();
 		render(ServerTable, {
@@ -217,6 +260,28 @@ describe('ServerDetail', () => {
 		expect(result.textContent).toContain('filesystem 1.0.0');
 		expect(result.textContent).toContain('2025-06-18');
 		expect(result.textContent).toContain('read_file');
+	});
+
+	it('lists a tool the server described with nothing at all', () => {
+		render(ServerDetail, {
+			props: {
+				...base,
+				server: entry('fs', 'claude'),
+				check: {
+					ok: true,
+					server_name: 'filesystem',
+					server_version: null,
+					protocol_version: null,
+					tools: [{ name: 'read_file', description: null }],
+					error: null,
+					elapsed_ms: 12
+				}
+			}
+		});
+
+		const result = screen.getByTestId('mcp-server-detail-check-result');
+		expect(result.textContent).toContain('read_file');
+		expect(result.querySelectorAll('.hint').length).toBe(1);
 	});
 
 	it('says why a failed check failed', () => {

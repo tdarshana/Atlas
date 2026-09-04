@@ -20,6 +20,13 @@ export const servers = $state({
 	projectId: null as Uuid | null,
 	/** The row open in the detail panel. */
 	openId: null as string | null,
+	/**
+	 * The section a side panel jump row asked the open detail to scroll to (`tools`,
+	 * `resources`, `prompts`, `clients`). It travels through the store rather than the
+	 * URL hash on purpose: a hash makes the browser scroll every scrollable ancestor,
+	 * which dragged the table's own region out of its frame.
+	 */
+	section: null as string | null,
 	/** The id being checked or written right now, so its controls hold still. */
 	busyId: null as string | null,
 	/** The Agent filter the side panel sets; null means every agent. */
@@ -104,8 +111,10 @@ export async function add(input: NewMcpServer): Promise<McpServerEntry> {
 	return created;
 }
 
-export function openServer(id: string | null): void {
+/** Opens one row in the detail panel, optionally asking it for a section. */
+export function openServer(id: string | null, section: string | null = null): void {
 	servers.openId = id;
+	servers.section = section;
 }
 
 export function setDetailWidth(width: number): void {

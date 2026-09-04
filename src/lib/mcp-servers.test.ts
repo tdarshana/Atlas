@@ -114,6 +114,16 @@ describe('groupByScope', () => {
 		);
 	});
 
+	it('keeps an empty Project group when the project tab asks for it', () => {
+		const groups = groupByScope([atlas], true);
+		expect(groups.map((g) => g.label)).toEqual(['Project', 'Atlas']);
+		expect(groups[0].servers).toEqual([]);
+	});
+
+	it('still leaves out the other empty groups when Project is kept', () => {
+		expect(groupByScope([], true).map((g) => g.label)).toEqual(['Project']);
+	});
+
 	it('keeps a user-scope row rather than dropping it', () => {
 		const groups = groupByScope([entry('global', 'codex')]);
 		expect(groups.map((g) => g.label)).toEqual(['User']);

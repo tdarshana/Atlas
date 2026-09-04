@@ -893,7 +893,8 @@ export interface McpServerList {
 
 export interface McpCheckTool {
 	name: string;
-	description: string;
+	/** Nullable: a server may list a tool with no description at all. */
+	description: string | null;
 }
 
 /** `POST /api/v1/mcp/servers/{id}/check`: the daemon started the server and asked it

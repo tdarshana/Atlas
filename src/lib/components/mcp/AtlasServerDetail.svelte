@@ -1,6 +1,6 @@
 <script lang="ts">
 	// What the `/mcp` view used to be in full: Atlas's own MCP server, now the body of the
-	// Atlas row's detail panel. Same data (`GET /api/v1/mcp/status`), same actions — copy
+	// Atlas row's detail panel. Same data (`GET /api/v1/mcp/status`), same actions: copy
 	// both connect snippets, restart the daemon, toggle a tool globally.
 	import { onMount } from 'svelte';
 	import { Badge, Button, Checkbox, Icon, Table, type TableColumn } from '$lib/ds';
@@ -12,6 +12,7 @@
 	import { loadMcp, mcp, toggleTool } from '$lib/stores/mcp.svelte';
 	import type { McpClient, McpToolRow } from '$lib/types';
 	import { push } from '$lib/ui/toasts.svelte';
+	import { scrollDetailTo } from './scroll';
 
 	interface Props {
 		/** `tools`, `resources`, `prompts` or `clients`: the section to scroll to once the
@@ -21,6 +22,7 @@
 
 	let { section = null }: Props = $props();
 
+	let root = $state<HTMLElement>();
 	let restarting = $state(false);
 	let togglingTool = $state<string | null>(null);
 	let copied = $state<string | null>(null);
@@ -98,15 +100,19 @@
 		if (!mcp.report && !mcp.loading) void loadMcp();
 	});
 
-	// A side panel row's jump names a section; scroll to it once the report has loaded
-	// and the section exists to scroll to.
+	// A side panel row's jump names a section; scroll to it once the report has loaded and
+	// the section exists to scroll to. `scrollIntoView` is deliberately not used: it
+	// scrolls every scrollable ancestor, which dragged the table's own region, the page
+	// title and the table header out of the frame. This moves the detail's own scroll
+	// container and nothing else, and it looks the section up inside this component rather
+	// than by document id, so the project tab's identically named sections cannot match.
 	$effect(() => {
-		if (!section || !mcp.report) return;
-		document.getElementById(section)?.scrollIntoView({ behavior: 'instant', block: 'start' });
+		if (!section || !mcp.report || !root) return;
+		scrollDetailTo(root, section);
 	});
 </script>
 
-<div class="atlas" data-testid="mcp-atlas-detail">
+<div bind:this={root} class="atlas" data-testid="mcp-atlas-detail">
 	{#if mcp.error}
 		<p class="bad" role="alert" data-testid="mcp-error">{mcp.error}</p>
 	{/if}

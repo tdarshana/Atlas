@@ -1,7 +1,7 @@
 <script lang="ts">
-	// The project MCP tab: every MCP server configured for this project — Claude Code's
+	// The project MCP tab: every MCP server configured for this project (Claude Code's
 	// project and local entries, Codex's and Cursor's project files, the plugin servers
-	// and Atlas — grouped by where they came from. A row opens the detail panel; the
+	// and Atlas), grouped by where they came from. A row opens the detail panel; the
 	// Atlas row's detail is what this tab used to be in full (the project connect
 	// snippet, agent access, resources, the tools table and the clients).
 	import { Button } from '$lib/ds';
@@ -12,7 +12,7 @@
 	import ServerTable from '$lib/components/mcp/ServerTable.svelte';
 	import { errorMessage } from '$lib/errors';
 	import { projectConnectSnippet } from '$lib/mcp';
-	import { groupByScope } from '$lib/mcp-servers';
+	import { groupByScope, NO_PROJECT_SERVERS } from '$lib/mcp-servers';
 	import { copyText } from '$lib/shell';
 	import { project, setHeaderActions } from '$lib/stores/project.svelte';
 	import {
@@ -36,7 +36,9 @@
 	let copied = $state(false);
 	let copyTimer: ReturnType<typeof setTimeout> | null = null;
 
-	const groups = $derived(groupByScope(servers.items));
+	// `Project` is kept even when it is empty: a repo with no project-level server should
+	// still be told where `Add server…` would write.
+	const groups = $derived(groupByScope(servers.items, true));
 	const open = $derived(servers.items.find((s) => s.id === servers.openId) ?? null);
 	const connectSnippet = $derived(projectConnectSnippet(rootPath));
 
@@ -123,6 +125,7 @@
 						selectedId={servers.openId}
 						busyId={servers.busyId}
 						enabledLabel="Enabled here"
+						emptyText={group.label === 'Project' ? NO_PROJECT_SERVERS : 'No servers here.'}
 						onopen={(row) => openServer(row.id)}
 						oncheck={runCheck}
 						ontoggle={toggle}
@@ -130,13 +133,6 @@
 					/>
 				</div>
 			{/each}
-			{#if groups.length === 0}
-				<span class="hint" data-testid="project-mcp-empty">
-					{servers.loading
-						? 'Loading…'
-						: "No MCP server is configured for this project. Atlas looked in .mcp.json, .codex/config.toml, .cursor/mcp.json and Claude Code's own project entries."}
-				</span>
-			{/if}
 		</div>
 
 		{#if open}
@@ -186,11 +182,15 @@
 		gap: 12px;
 	}
 
+	/* See the global view: `overflow-x` is pinned so the vertical scroll does not bring a
+	   horizontal scrollbar with it, and this region is never re-anchored by the detail. */
 	.groups {
 		flex: 1;
 		min-width: 0;
 		min-height: 0;
 		overflow-y: auto;
+		overflow-x: hidden;
+		overflow-anchor: none;
 		display: flex;
 		flex-direction: column;
 		gap: 12px;

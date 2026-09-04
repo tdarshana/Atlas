@@ -4,7 +4,6 @@
 	// the detail panel on the right; the Atlas row's detail is what this page used to be
 	// in full (its transports, tools, resources, prompts and connected clients).
 	import { onMount } from 'svelte';
-	import { page } from '$app/state';
 	import { Button } from '$lib/ds';
 	import AddServerDialog from '$lib/components/mcp/AddServerDialog.svelte';
 	import AtlasServerDetail from '$lib/components/mcp/AtlasServerDetail.svelte';
@@ -41,24 +40,14 @@
 	const summary = $derived(enabledSummary(servers.items));
 	const open = $derived(servers.items.find((s) => s.id === servers.openId) ?? null);
 
-	// A side panel ATLAS row's jump lands here as a hash; it opens the Atlas row's detail
-	// at that section rather than scrolling this page.
-	const section = $derived(page.url.hash.replace(/^#/, '') || null);
+	// A side panel ATLAS row opens the Atlas detail at one of its sections through the
+	// store. It carries no URL hash on purpose: the browser scrolls every scrollable
+	// ancestor of a hash target, which dragged this page's title, summary and table
+	// header out of the frame.
+	const section = $derived(servers.section);
 
 	onMount(() => {
 		void loadServers(null);
-	});
-
-	// Once per hash, not once per list reload: a toggle's reload must not drag the panel
-	// back to the Atlas row the user has since navigated away from.
-	let openedForHash: string | null = null;
-
-	$effect(() => {
-		if (!section || openedForHash === section) return;
-		const atlas = servers.items.find((s) => s.is_atlas);
-		if (!atlas) return;
-		openedForHash = section;
-		openServer(atlas.id);
 	});
 
 	async function runCheck(row: McpServerEntry): Promise<void> {
@@ -120,28 +109,32 @@
 	</div>
 
 	<div class="split">
-		{#if !servers.loading && servers.items.length === 0 && !servers.error}
-			<EmptyState
-				title="No MCP servers found"
-				hint="Atlas looked in the Claude Code, Codex, Cursor, Gemini CLI and Windsurf configs and the installed plugin caches."
-			>
-				<Button size="sm" onclick={() => (adding = true)}>Add server…</Button>
-			</EmptyState>
-		{:else}
-			<ServerTable
-				id="mcp-servers"
-				{rows}
-				checks={servers.checks}
-				loading={servers.loading}
-				selectedId={servers.openId}
-				busyId={servers.busyId}
-				emptyText="No server from this agent."
-				onopen={(row) => openServer(row.id)}
-				oncheck={runCheck}
-				ontoggle={toggle}
-				onremove={(row) => (removing = row)}
-			/>
-		{/if}
+		<!-- The table sizes to its rows, so this column is what scrolls; the detail panel
+		     beside it keeps its own. -->
+		<div class="list">
+			{#if !servers.loading && servers.items.length === 0 && !servers.error}
+				<EmptyState
+					title="No MCP servers found"
+					hint="Atlas looked in the Claude Code, Codex, Cursor, Gemini CLI and Windsurf configs and the installed plugin caches."
+				>
+					<Button size="sm" onclick={() => (adding = true)}>Add server…</Button>
+				</EmptyState>
+			{:else}
+				<ServerTable
+					id="mcp-servers"
+					{rows}
+					checks={servers.checks}
+					loading={servers.loading}
+					selectedId={servers.openId}
+					busyId={servers.busyId}
+					emptyText="No server from this agent."
+					onopen={(row) => openServer(row.id)}
+					oncheck={runCheck}
+					ontoggle={toggle}
+					onremove={(row) => (removing = row)}
+				/>
+			{/if}
+		</div>
 
 		{#if open}
 			<ServerDetail
@@ -211,6 +204,18 @@
 		min-height: 0;
 		display: flex;
 		gap: 12px;
+	}
+
+	/* `overflow-x: hidden` because a scroll container with `overflow-y: auto` computes its
+	   `overflow-x` to `auto` too, which is where the stray horizontal scrollbar came from.
+	   `overflow-anchor: none` so nothing the detail panel does re-anchors this region. */
+	.list {
+		flex: 1;
+		min-width: 0;
+		min-height: 0;
+		overflow-y: auto;
+		overflow-x: hidden;
+		overflow-anchor: none;
 	}
 
 	.hint {

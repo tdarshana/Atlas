@@ -1,7 +1,7 @@
 <script lang="ts">
 	// What the project MCP tab used to be in full: this project's own view of Atlas's
 	// server, now the body of the Atlas row's detail panel. Same data
-	// (`GET /api/v1/projects/{id}/mcp`) — the project-scoped connect snippet, the agent
+	// (`GET /api/v1/projects/{id}/mcp`): the project-scoped connect snippet, the agent
 	// access summary, this project's `atlas://` resources, the tools table with its
 	// per-tool `Enabled here` override, and the clients whose last call resolved here.
 	import { Badge, Button, Checkbox, Table, type TableColumn } from '$lib/ds';
@@ -14,6 +14,7 @@
 	import { project } from '$lib/stores/project.svelte';
 	import type { McpClient, ProjectMcpReport, ProjectMcpToolRow, Uuid } from '$lib/types';
 	import { push } from '$lib/ui/toasts.svelte';
+	import { scrollDetailTo } from './scroll';
 
 	interface Props {
 		id: Uuid;
@@ -23,6 +24,7 @@
 
 	let { id, section = null }: Props = $props();
 
+	let root = $state<HTMLElement>();
 	let report = $state<ProjectMcpReport | null>(null);
 	let loading = $state(false);
 	let error = $state<string | null>(null);
@@ -96,13 +98,15 @@
 		void load();
 	});
 
+	// Moves the detail's own scroll container only; see `scroll.ts` for why
+	// `scrollIntoView` is not used here.
 	$effect(() => {
-		if (!section || !report) return;
-		document.getElementById(section)?.scrollIntoView({ behavior: 'instant', block: 'start' });
+		if (!section || !report || !root) return;
+		scrollDetailTo(root, section);
 	});
 </script>
 
-<div class="atlas" data-testid="project-mcp-atlas-detail">
+<div bind:this={root} class="atlas" data-testid="project-mcp-atlas-detail">
 	{#if error}
 		<p class="bad" role="alert" data-testid="project-mcp-error">{error}</p>
 	{/if}

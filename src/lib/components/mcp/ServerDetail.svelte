@@ -200,7 +200,9 @@
 						{#each check.tools as tool (tool.name)}
 							<div class="tool-row">
 								<span class="mono value">{tool.name}</span>
-								<span class="hint">{tool.description}</span>
+								<!-- A server may list a tool with no description; the row is then just
+								     the name, rather than an empty line under it. -->
+								{#if tool.description}<span class="hint">{tool.description}</span>{/if}
 							</div>
 						{/each}
 					</div>

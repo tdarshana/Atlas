@@ -42,15 +42,26 @@
 
 	let menuId = $state<string | null>(null);
 
+	// Name, Transport and Status take whatever is left over and truncate, so the row fits
+	// the width it is given rather than pushing a horizontal scrollbar under the table
+	// when the detail panel is open. Everything else is a fixed, narrow track.
 	const columns = $derived<TableColumn<McpServerEntry>[]>([
-		{ key: 'name', label: 'Name', width: '170px', mono: true, sortable: true },
-		{ key: 'source', label: 'Agent', width: '120px', sortable: true },
-		{ key: 'scope', label: 'Scope', width: '80px', sortable: true },
-		{ key: 'transport', label: 'Transport', width: '220px', mono: true },
-		{ key: 'enabled', label: enabledLabel, width: '110px' },
-		{ key: 'status', label: 'Status', width: '160px' },
-		{ key: 'actions', label: '', width: '40px' }
+		{ key: 'name', label: 'Name', width: 'minmax(0, 2fr)', mono: true, sortable: true },
+		{ key: 'source', label: 'Agent', width: '104px', sortable: true },
+		{ key: 'scope', label: 'Scope', width: '68px', sortable: true },
+		{ key: 'transport', label: 'Transport', width: 'minmax(0, 3fr)', mono: true },
+		{ key: 'enabled', label: enabledLabel, width: '96px' },
+		{ key: 'status', label: 'Status', width: 'minmax(0, 2fr)' },
+		{ key: 'actions', label: '', width: '32px' }
 	]);
+
+	/** The whole transport, for the Transport cell's title: the command with its arguments,
+	 * or the URL. */
+	function transportTitle(row: McpServerEntry): string {
+		return row.transport.kind === 'http'
+			? row.transport.url
+			: [row.transport.command, ...row.transport.args].join(' ');
+	}
 
 	/** What the Status cell says once a check has run: the tool count, or the reason it
 	 * failed. Empty before the first check, because nothing has been started yet. */
@@ -85,7 +96,7 @@
 	>
 		{#snippet cell(row: McpServerEntry, column: TableColumn<McpServerEntry>)}
 			{#if column.key === 'name'}
-				<span class="name" class:off={!row.enabled}>{row.name}</span>
+				<span class="name" class:off={!row.enabled} title={row.name}>{row.name}</span>
 			{:else if column.key === 'source'}
 				<Badge
 					variant="outline"
@@ -97,9 +108,9 @@
 			{:else if column.key === 'scope'}
 				{row.scope}
 			{:else if column.key === 'transport'}
-				<span class="transport" title={row.transport.kind === 'http' ? row.transport.url : undefined}>
-					{transportSummary(row.transport)}
-				</span>
+				<!-- The title is the whole transport, since the cell shows a summary that
+				     elides both the command and, when the column is narrow, itself. -->
+				<span class="transport" title={transportTitle(row)}>{transportSummary(row.transport)}</span>
 			{:else if column.key === 'enabled'}
 				{#if row.can_toggle}
 					<Checkbox
@@ -169,20 +180,28 @@
 			{/if}
 		{/snippet}
 		{#snippet empty()}
-			<span class="hint">{loading ? 'Loading…' : emptyText}</span>
+			<span class="hint" data-testid="{id}-empty">{loading ? 'Loading…' : emptyText}</span>
 		{/snippet}
 	</Table>
 </div>
 
 <style>
+	/* The table sizes to its rows: no height of its own and no inner scroll region, so a
+	   five-row group is five rows tall rather than a short box with the last row behind a
+	   scrollbar. The list around it is what scrolls. The DS table body sets `overflow-y:
+	   auto`, which also computes `overflow-x` to `auto` and is where the stray horizontal
+	   scrollbar came from, so both are turned off here. */
 	.servers-table {
-		flex: 1;
-		min-height: 0;
+		flex: 0 0 auto;
 		display: flex;
 		flex-direction: column;
 		border: 1px solid var(--border-subtle);
 		border-radius: 3px;
 		overflow: hidden;
+	}
+
+	.servers-table :global(.body) {
+		overflow: visible;
 	}
 
 	/* A server the agent has turned off is still listed, just visibly not in play. */

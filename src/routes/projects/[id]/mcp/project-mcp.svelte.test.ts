@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-// The project MCP tab groups this project's servers by where they came from — the
-// project's own files first, then the plugins, then Atlas — and its `Enabled here`
+// The project MCP tab groups this project's servers by where they came from: the
+// project's own files first, then the plugins, then Atlas. Its `Enabled here`
 // checkbox writes through with the project the list was loaded for.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -29,7 +29,7 @@ function entry(
 	};
 }
 
-const list: McpServerList = {
+const full: McpServerList = {
 	servers: [
 		entry('atlas', 'atlas', { id: 'atlas', scope: 'user', is_atlas: true, can_toggle: false }),
 		entry('docs', 'plugin', { scope: 'plugin', plugin: 'anthropics/docs', can_toggle: false }),
@@ -37,6 +37,9 @@ const list: McpServerList = {
 	],
 	warnings: []
 };
+
+/** What the mocked daemon answers; a test swaps it to stand in for a different repo. */
+let list: McpServerList = full;
 
 const calls: { name: string; args: unknown[] }[] = [];
 
@@ -63,10 +66,12 @@ vi.mock('$lib/stores/project.svelte', () => ({
 }));
 
 import ProjectMcpPage from './+page.svelte';
+import { NO_PROJECT_SERVERS } from '$lib/mcp-servers';
 import { servers } from '$lib/stores/mcp-servers.svelte';
 
 beforeEach(() => {
 	calls.length = 0;
+	list = full;
 	servers.items = [];
 	servers.openId = null;
 	servers.sourceFilter = null;
@@ -100,6 +105,23 @@ describe('the project MCP tab', () => {
 			false,
 			'p-1'
 		]);
+	});
+
+	it('keeps the Project group when the repo has no project-level server, and says where Add server… writes', async () => {
+		list = {
+			servers: full.servers.filter((s) => s.source !== 'claude'),
+			warnings: []
+		};
+		render(ProjectMcpPage);
+
+		// Wait for the loaded list, not for the empty group: an empty `Project` group is
+		// also what the very first render draws, before the fetch lands.
+		await waitFor(() => screen.getByTestId('mcp-server-source-atlas'));
+		const headings = screen.getAllByTestId('project-mcp-group').map((h) => h.textContent);
+		expect(headings).toEqual(['Project', 'Plugins', 'Atlas']);
+		expect(screen.getByTestId('project-mcp-servers-project-empty').textContent).toBe(
+			NO_PROJECT_SERVERS
+		);
 	});
 
 	it('offers no Enabled checkbox for the Atlas or plugin rows', async () => {

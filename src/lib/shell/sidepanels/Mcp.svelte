@@ -24,11 +24,15 @@
 		servers.sourceFilter = servers.sourceFilter === source ? null : source;
 	}
 
-	/** The ATLAS rows open the Atlas server's detail rather than scrolling the page; the
-	 * hash the link carries tells that detail which section to scroll to. */
-	function openAtlas(): void {
+	/**
+	 * The ATLAS rows open the Atlas server's detail at one of its sections. The section
+	 * travels through the store and the links carry no hash: a hash makes the browser
+	 * scroll every scrollable ancestor of the target, which dragged the table's own
+	 * region, title and header out of the frame.
+	 */
+	function openAtlas(section: string): void {
 		const atlas = servers.items.find((s) => s.is_atlas);
-		if (atlas) openServer(atlas.id);
+		if (atlas) openServer(atlas.id, section);
 	}
 </script>
 
@@ -49,16 +53,16 @@
 		icon="terminal"
 		label="Tools"
 		meta="{counts.tools} · {counts.toolsDisabled} off"
-		href="/mcp#tools"
-		onclick={openAtlas}
+		href="/mcp"
+		onclick={() => openAtlas('tools')}
 	/>
 	{#if counts.resources > 0}
 		<TreeRow
 			icon="file"
 			label="Resources"
 			meta={counts.resources}
-			href="/mcp#resources"
-			onclick={openAtlas}
+			href="/mcp"
+			onclick={() => openAtlas('resources')}
 		/>
 	{/if}
 	{#if counts.prompts > 0}
@@ -66,15 +70,15 @@
 			icon="braces"
 			label="Prompts"
 			meta={counts.prompts}
-			href="/mcp#prompts"
-			onclick={openAtlas}
+			href="/mcp"
+			onclick={() => openAtlas('prompts')}
 		/>
 	{/if}
 	<TreeRow
 		icon="plug"
 		label="Clients"
 		meta={counts.clients}
-		href="/mcp#clients"
-		onclick={openAtlas}
+		href="/mcp"
+		onclick={() => openAtlas('clients')}
 	/>
 </TreeGroup>

@@ -64,13 +64,21 @@ export interface ScopeGroup {
 	servers: McpServerEntry[];
 }
 
+/** What an empty `Project` group says: where `Add server…` would write if it were used. */
+export const NO_PROJECT_SERVERS =
+	"No project-level servers yet. Add server… writes to this repo's .mcp.json by default.";
+
 /**
  * The project tab's headings, in the order it draws them: the servers configured for
  * this project (Claude Code's project and local entries, Codex's and Cursor's project
  * files), then the plugin servers, then Atlas. A user-scope row keeps its own group
  * rather than being dropped, so a daemon that widens the list is still shown whole.
+ *
+ * `keepProject` holds the `Project` group even when it is empty, which is what the
+ * project tab wants: a repo with no project-level server should still be told where
+ * `Add server…` would write, rather than shown nothing.
  */
-export function groupByScope(servers: McpServerEntry[]): ScopeGroup[] {
+export function groupByScope(servers: McpServerEntry[], keepProject = false): ScopeGroup[] {
 	const groups: ScopeGroup[] = [
 		{ label: 'Project', servers: [] },
 		{ label: 'Plugins', servers: [] },
@@ -86,7 +94,7 @@ export function groupByScope(servers: McpServerEntry[]): ScopeGroup[] {
 		else user.servers.push(server);
 	}
 
-	return groups.filter((g) => g.servers.length > 0);
+	return groups.filter((g) => g.servers.length > 0 || (keepProject && g === project));
 }
 
 export interface AgentCount {

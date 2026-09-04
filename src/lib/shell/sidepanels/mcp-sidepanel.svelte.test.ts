@@ -4,7 +4,7 @@
 // again.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import type { McpServerEntry, McpServerList, McpStatusReport } from '$lib/types';
 
 function entry(name: string, source: McpServerEntry['source']): McpServerEntry {
@@ -51,18 +51,27 @@ vi.mock('$lib/daemon.svelte', () => ({
 }));
 
 import McpPanel from './Mcp.svelte';
+import McpPage from '../../../routes/mcp/+page.svelte';
 import { mcp } from '$lib/stores/mcp.svelte';
 import { servers } from '$lib/stores/mcp-servers.svelte';
 
+// The jump rows are real links. jsdom cannot navigate and logs a stack trace for every
+// click, so the default action is dropped here; the rows' own handlers still run.
+const stopNavigation = (event: Event) => event.preventDefault();
+
 beforeEach(() => {
+	document.addEventListener('click', stopNavigation, true);
 	servers.items = list.servers;
 	servers.loading = false;
 	servers.sourceFilter = null;
+	servers.openId = null;
+	servers.section = null;
 	mcp.report = report;
 	mcp.loading = false;
 });
 
 afterEach(() => {
+	document.removeEventListener('click', stopNavigation, true);
 	cleanup();
 	servers.items = [];
 	mcp.report = null;
@@ -92,5 +101,37 @@ describe('the MCP side panel', () => {
 
 		expect(screen.getByText('Tools').closest('.row')?.textContent).toContain('1 · 1 off');
 		expect(screen.getByText('Clients')).toBeTruthy();
+	});
+
+	it('carries the section through the store, with no hash for the browser to jump to', async () => {
+		render(McpPanel);
+
+		const tools = screen.getByText('Tools').closest('a') as HTMLAnchorElement;
+		expect(tools.getAttribute('href')).toBe('/mcp');
+
+		await fireEvent.click(tools);
+		expect(servers.openId).toBe('atlas:user:atlas');
+		expect(servers.section).toBe('tools');
+	});
+
+	it('leaves the table region where it was when Tools is clicked', async () => {
+		render(McpPage);
+		const panel = render(McpPanel);
+
+		await waitFor(() => screen.getByTestId('mcp-servers-wrap'));
+		const region = document.querySelector('.list') as HTMLElement;
+		region.scrollTop = 120;
+
+		// Scoped to the panel: the Atlas detail this click opens has a Tools heading of
+		// its own.
+		await fireEvent.click(within(panel.container).getByText('Tools').closest('a')!);
+		await waitFor(() => screen.getByTestId('mcp-server-detail'));
+
+		// Nothing in the detail's jump may move the table's own scroll region, and the
+		// title, the summary line and the table header stay on screen.
+		expect(region.scrollTop).toBe(120);
+		expect(screen.getByText('MCP servers')).toBeTruthy();
+		expect(screen.getByTestId('mcp-servers-summary')).toBeTruthy();
+		expect(screen.getByTestId('mcp-servers-wrap').textContent).toContain('Transport');
 	});
 });
