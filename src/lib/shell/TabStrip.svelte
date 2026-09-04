@@ -14,9 +14,11 @@
 		items: Tab[];
 		active: string;
 		onselect?: (id: string) => void;
+		/** Set to stamp `data-testid="<testid>-<tab.id>"` on each tab button. */
+		testid?: string;
 	}
 
-	let { items, active, onselect }: Props = $props();
+	let { items, active, onselect, testid }: Props = $props();
 </script>
 
 <div class="tab-strip" role="tablist">
@@ -39,6 +41,7 @@
 				type="button"
 				role="tab"
 				aria-selected={selected}
+				data-testid={testid ? `${testid}-${tab.id}` : undefined}
 				onclick={() => onselect?.(tab.id)}
 			>
 				{#if tab.icon}

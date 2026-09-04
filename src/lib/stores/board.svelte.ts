@@ -294,6 +294,44 @@ export function toggleDetailMode(): void {
 	saveDetailMode(board.detailMode);
 }
 
+/** The task detail's lower half: which of its three tabs is showing. */
+export type DetailTab = 'subtasks' | 'activity' | 'comments';
+
+export const DETAIL_TAB_KEY = 'atlas.board.detail.tab';
+
+function isDetailTab(value: string | null): value is DetailTab {
+	return value === 'subtasks' || value === 'activity' || value === 'comments';
+}
+
+function loadDetailTab(): DetailTab {
+	try {
+		if (typeof localStorage === 'undefined') return 'subtasks';
+		const raw = localStorage.getItem(DETAIL_TAB_KEY);
+		return isDetailTab(raw) ? raw : 'subtasks';
+	} catch {
+		return 'subtasks';
+	}
+}
+
+/** Shared across every task, so opening another one keeps the tab that was showing. Svelte
+ *  refuses to export a reassigned `$state` binding directly, so this is read through the
+ *  getter below rather than as a plain export. */
+let currentDetailTab = $state<DetailTab>(loadDetailTab());
+
+export function detailTab(): DetailTab {
+	return currentDetailTab;
+}
+
+export function setDetailTab(tab: DetailTab): void {
+	currentDetailTab = tab;
+	try {
+		if (typeof localStorage !== 'undefined') localStorage.setItem(DETAIL_TAB_KEY, tab);
+	} catch {
+		/* storage is unavailable; the tab resets next time */
+	}
+	void persistSet(DETAIL_TAB_KEY, tab);
+}
+
 /**
  * Every task under its stage, in stage order. A task whose stage is not in the list
  * would otherwise vanish from the board, so it lands in the first column and that

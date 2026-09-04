@@ -242,6 +242,7 @@
 				onchanged={reload}
 				onmove={(key, stage) => void move(key, stage)}
 				onresize={setDetailWidth}
+				onopen={openTask}
 				ondeleted={() => {
 					closeTask();
 					return refresh();

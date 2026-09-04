@@ -12,15 +12,18 @@
 	import { Badge, Button, IconButton, Input, Select } from '$lib/ds';
 	import { errorMessage } from '$lib/errors';
 	import { relativeAge } from '$lib/format';
-	import { copyText } from '$lib/shell';
+	import { copyText, TabStrip, type Tab } from '$lib/shell';
 	import {
 		type DetailMode,
+		type DetailTab,
 		CONFLICT_MESSAGE,
 		DETAIL_MAX,
-		DETAIL_MIN
+		DETAIL_MIN,
+		detailTab,
+		setDetailTab
 	} from '$lib/stores/board.svelte';
 	import { FRAMEWORK_LABEL, reportText } from '$lib/components/project/frameworks';
-	import type { Stage, TaskDetail, TaskKind, TaskPriority } from '$lib/types';
+	import type { Stage, TaskDetail, TaskEvent, TaskKind, TaskPriority } from '$lib/types';
 	import Dialog from '$lib/ui/Dialog.svelte';
 	import ResizeBar from '$lib/ui/ResizeBar.svelte';
 	import { push } from '$lib/ui/toasts.svelte';
@@ -41,6 +44,8 @@
 		onmove: (key: string, stage: string) => void;
 		ondeleted: () => void | Promise<void>;
 		onresize: (width: number) => void;
+		/** Opens a subtask in this same detail. Absent in tests that don't need it. */
+		onopen?: (key: string) => void;
 	}
 
 	let {
@@ -55,7 +60,8 @@
 		onchanged,
 		onmove,
 		ondeleted,
-		onresize
+		onresize,
+		onopen
 	}: Props = $props();
 
 	const KINDS: TaskKind[] = ['task', 'bug', 'feature', 'chore'];
@@ -66,6 +72,17 @@
 	const stageOptions = $derived(stages.map((s) => ({ value: s.name, label: s.name })));
 
 	const task = $derived(detail?.task ?? null);
+
+	// The lower half's three tabs. `activity` and `message-square` are not in the icon
+	// vocabulary (`src/lib/ds/icons.ts`), so the closest existing names stand in.
+	const activityEvents = $derived(detail?.events.filter((e) => e.kind !== 'commented') ?? []);
+	const commentEvents = $derived(detail?.events.filter((e) => e.kind === 'commented') ?? []);
+	const tabLabel = (label: string, count: number) => (count > 0 ? `${label} ${count}` : label);
+	const tabs = $derived([
+		{ id: 'subtasks', label: tabLabel('Subtasks', detail?.children.length ?? 0), icon: 'list-checks' },
+		{ id: 'activity', label: tabLabel('Activity', activityEvents.length), icon: 'history' },
+		{ id: 'comments', label: tabLabel('Comments', commentEvents.length), icon: 'pencil' }
+	] satisfies Tab[]);
 
 	let title = $state('');
 	let description = $state('');
@@ -301,6 +318,18 @@
 
 <svelte:window onkeydown={onWindowKey} />
 
+{#snippet eventRow(event: TaskEvent)}
+	<li>
+		<div class="who">
+			<span class="actor">{event.actor}</span>
+			<Badge variant="outline">{event.kind}</Badge>
+			<span class="spacer"></span>
+			<span class="when">{relativeAge(event.created_at)}</span>
+		</div>
+		<span class="what">{event.body}</span>
+	</li>
+{/snippet}
+
 {#snippet body()}
 <aside
 	bind:this={panel}
@@ -474,51 +503,68 @@
 				</div>
 			</section>
 
-			<section>
-				<h3>Subtasks</h3>
-				{#if detail && detail.children.length > 0}
-					<ul class="list" data-testid="task-children">
-						{#each detail.children as child (child.id)}
-							<li><code>{child.key}</code> <span>{child.title}</span></li>
-						{/each}
-					</ul>
-				{:else}
-					<p class="muted">No subtasks.</p>
-				{/if}
-			</section>
+			<section class="tabs" data-testid="task-tabs">
+				<TabStrip
+					items={tabs}
+					active={detailTab()}
+					onselect={(id) => setDetailTab(id as DetailTab)}
+					testid="task-tab"
+				/>
 
-			<section>
-				<h3>Activity</h3>
-				{#if detail && detail.events.length > 0}
-					<ul class="events" data-testid="task-events">
-						{#each detail.events as event (event.id)}
-							<li>
-								<div class="who">
-									<span class="actor">{event.actor}</span>
-									<Badge variant="outline">{event.kind}</Badge>
-									<span class="spacer"></span>
-									<span class="when">{relativeAge(event.created_at)}</span>
-								</div>
-								<span class="what">{event.body}</span>
-							</li>
-						{/each}
-					</ul>
+				{#if detailTab() === 'subtasks'}
+					{#if detail && detail.children.length > 0}
+						<ul class="list" data-testid="task-children">
+							{#each detail.children as child (child.id)}
+								<li>
+									<button
+										type="button"
+										class="child-row"
+										onclick={() => onopen?.(child.key)}
+									>
+										<code>{child.key}</code>
+										<span>{child.title}</span>
+										<Badge variant="outline">{child.stage}</Badge>
+									</button>
+								</li>
+							{/each}
+						</ul>
+					{:else}
+						<p class="muted">No subtasks.</p>
+					{/if}
+				{:else if detailTab() === 'activity'}
+					{#if activityEvents.length > 0}
+						<ul class="events" data-testid="task-events">
+							{#each activityEvents as event (event.id)}
+								{@render eventRow(event)}
+							{/each}
+						</ul>
+					{:else}
+						<p class="muted">Nothing has happened yet.</p>
+					{/if}
 				{:else}
-					<p class="muted">Nothing has happened yet.</p>
+					{#if commentEvents.length > 0}
+						<ul class="events" data-testid="task-events">
+							{#each commentEvents as event (event.id)}
+								{@render eventRow(event)}
+							{/each}
+						</ul>
+					{:else}
+						<p class="muted">No comments yet.</p>
+					{/if}
+					<textarea
+						bind:value={comment}
+						class="area"
+						rows="2"
+						aria-label="Comment"
+						placeholder="Add a comment"
+						data-testid="task-comment"
+					></textarea>
+					<div class="row">
+						<Button size="sm" data-testid="task-comment-send" disabled={busy} onclick={sendComment}>
+							Comment
+						</Button>
+					</div>
 				{/if}
-				<textarea
-					bind:value={comment}
-					class="area"
-					rows="2"
-					aria-label="Comment"
-					placeholder="Add a comment"
-					data-testid="task-comment"
-				></textarea>
-				<div class="row">
-					<Button size="sm" data-testid="task-comment-send" disabled={busy} onclick={sendComment}>
-						Comment
-					</Button>
-				</div>
 			</section>
 		{/if}
 	</div>
@@ -720,6 +766,20 @@
 		padding: 0;
 		list-style: none;
 		font-size: 12px;
+	}
+
+	.child-row {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		width: 100%;
+		padding: 0;
+		background: none;
+		border: 0;
+		font: inherit;
+		color: inherit;
+		text-align: left;
+		cursor: pointer;
 	}
 
 	.events li {
