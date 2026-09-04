@@ -93,29 +93,23 @@ function open(d: TaskDetailType | null = detail()) {
 }
 
 describe('TaskDetail tabs', () => {
-	it('shows three tabs with the subtasks, non-comment and comment counts', () => {
+	it('shows three tabs with the subtasks, non-comment and comment counts in a badge', () => {
 		const { container } = open();
 
 		const strip = container.querySelector('[data-testid="task-tabs"]');
 		expect(strip).not.toBeNull();
-		expect(container.querySelector('[data-testid="task-tab-subtasks"]')?.textContent).toContain(
-			'Subtasks'
-		);
-		expect(container.querySelector('[data-testid="task-tab-subtasks"]')?.textContent).toContain(
-			'2'
-		);
-		expect(container.querySelector('[data-testid="task-tab-activity"]')?.textContent).toContain(
-			'Activity'
-		);
-		expect(container.querySelector('[data-testid="task-tab-activity"]')?.textContent).toContain(
-			'2'
-		);
-		expect(container.querySelector('[data-testid="task-tab-comments"]')?.textContent).toContain(
-			'Comments'
-		);
-		expect(container.querySelector('[data-testid="task-tab-comments"]')?.textContent).toContain(
-			'1'
-		);
+
+		const subtasksTab = container.querySelector('[data-testid="task-tab-subtasks"]');
+		expect(subtasksTab?.textContent).toContain('Subtasks');
+		expect(subtasksTab?.querySelector('.dbm-badge')?.textContent?.trim()).toBe('2');
+
+		const activityTab = container.querySelector('[data-testid="task-tab-activity"]');
+		expect(activityTab?.textContent).toContain('Activity');
+		expect(activityTab?.querySelector('.dbm-badge')?.textContent?.trim()).toBe('2');
+
+		const commentsTab = container.querySelector('[data-testid="task-tab-comments"]');
+		expect(commentsTab?.textContent).toContain('Comments');
+		expect(commentsTab?.querySelector('.dbm-badge')?.textContent?.trim()).toBe('1');
 	});
 
 	it('shows the children and not the events with Subtasks selected by default', () => {

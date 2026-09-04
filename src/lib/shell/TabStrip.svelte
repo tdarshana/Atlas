@@ -1,13 +1,15 @@
 <script lang="ts">
 	// The 34px view tab strip. Items carry an href when the tabs are routes and fall back to
 	// `onselect` when they only switch a pane.
-	import { Icon, type IconName } from '$lib/ds';
+	import { Badge, Icon, type IconName } from '$lib/ds';
 
 	export interface Tab {
 		id: string;
 		label: string;
 		icon?: IconName;
 		href?: string;
+		/** Shown as a small outline badge after the label when greater than zero. */
+		count?: number;
 	}
 
 	interface Props {
@@ -34,6 +36,9 @@
 					/>
 				{/if}
 				{tab.label}
+				{#if typeof tab.count === 'number' && tab.count > 0}
+					<Badge variant="outline">{tab.count}</Badge>
+				{/if}
 			</a>
 		{:else}
 			<button
@@ -52,6 +57,9 @@
 					/>
 				{/if}
 				{tab.label}
+				{#if typeof tab.count === 'number' && tab.count > 0}
+					<Badge variant="outline">{tab.count}</Badge>
+				{/if}
 			</button>
 		{/if}
 	{/each}

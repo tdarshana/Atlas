@@ -37,6 +37,7 @@ import Gauge from '@lucide/svelte/icons/gauge';
 import GitBranch from '@lucide/svelte/icons/git-branch';
 import GitCommitHorizontal from '@lucide/svelte/icons/git-commit-horizontal';
 import History from '@lucide/svelte/icons/history';
+import Activity from '@lucide/svelte/icons/activity';
 import Info from '@lucide/svelte/icons/info';
 import Keyboard from '@lucide/svelte/icons/keyboard';
 import Layers from '@lucide/svelte/icons/layers';
@@ -49,6 +50,7 @@ import Palette from '@lucide/svelte/icons/palette';
 import PanelLeft from '@lucide/svelte/icons/panel-left';
 import PanelRight from '@lucide/svelte/icons/panel-right';
 import Pencil from '@lucide/svelte/icons/pencil';
+import MessageSquare from '@lucide/svelte/icons/message-square';
 import Play from '@lucide/svelte/icons/play';
 import Plug from '@lucide/svelte/icons/plug';
 import Plus from '@lucide/svelte/icons/plus';
@@ -76,6 +78,7 @@ export const icons = {
 	'book-open': BookOpen,
 	'git-branch': GitBranch,
 	history: History,
+	activity: Activity,
 	'list-checks': ListChecks,
 	settings: Settings,
 	search: Search,
@@ -119,6 +122,7 @@ export const icons = {
 	'refresh-cw': RefreshCw,
 	'trash-2': Trash2,
 	pencil: Pencil,
+	'message-square': MessageSquare,
 	'external-link': ExternalLink,
 	filter: Filter,
 	'alert-triangle': AlertTriangle,

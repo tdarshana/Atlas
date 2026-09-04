@@ -73,15 +73,13 @@
 
 	const task = $derived(detail?.task ?? null);
 
-	// The lower half's three tabs. `activity` and `message-square` are not in the icon
-	// vocabulary (`src/lib/ds/icons.ts`), so the closest existing names stand in.
+	// The lower half's three tabs.
 	const activityEvents = $derived(detail?.events.filter((e) => e.kind !== 'commented') ?? []);
 	const commentEvents = $derived(detail?.events.filter((e) => e.kind === 'commented') ?? []);
-	const tabLabel = (label: string, count: number) => (count > 0 ? `${label} ${count}` : label);
 	const tabs = $derived([
-		{ id: 'subtasks', label: tabLabel('Subtasks', detail?.children.length ?? 0), icon: 'list-checks' },
-		{ id: 'activity', label: tabLabel('Activity', activityEvents.length), icon: 'history' },
-		{ id: 'comments', label: tabLabel('Comments', commentEvents.length), icon: 'pencil' }
+		{ id: 'subtasks', label: 'Subtasks', icon: 'list-checks', count: detail?.children.length ?? 0 },
+		{ id: 'activity', label: 'Activity', icon: 'activity', count: activityEvents.length },
+		{ id: 'comments', label: 'Comments', icon: 'message-square', count: commentEvents.length }
 	] satisfies Tab[]);
 
 	let title = $state('');
