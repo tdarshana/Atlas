@@ -184,15 +184,15 @@ mod tests {
         let inv = a.detect(&fixture()).expect("superpowers fixture should be detected");
         assert_eq!(inv.kind, FrameworkKind::Superpowers);
         assert_eq!(inv.roots.len(), 3);
-        assert_eq!(inv.docs, 4, "one spec, two plan-directory files (one a ledger), one sdd ledger");
-        assert_eq!(inv.tasks, 2, "detect counts every plan-directory file, not checkbox items");
+        assert_eq!(inv.docs, 5, "one spec, three plan-directory files (one a ledger), one sdd ledger");
+        assert_eq!(inv.tasks, 3, "detect counts every plan-directory file, not checkbox items");
     }
 
     #[test]
     fn documents_carry_doc_types_and_titles() {
         let a = SuperpowersAdapter;
         let docs = a.documents(&fixture());
-        assert_eq!(docs.len(), 4);
+        assert_eq!(docs.len(), 5);
         let spec = docs.iter().find(|d| d.doc_type == FrameworkDocType::Spec).unwrap();
         assert_eq!(spec.title, "Example fixture spec");
         let plan = docs.iter().find(|d| d.doc_type == FrameworkDocType::Plan).unwrap();
@@ -217,21 +217,47 @@ mod tests {
     fn tasks_come_from_checkboxes_under_task_headings_with_unique_anchors() {
         let a = SuperpowersAdapter;
         let tasks = a.tasks(&fixture());
-        // Two "### Task N" headings, each a parent, plus three checkboxes total
-        // (two under Task 1, one under Task 2) as their children.
-        assert_eq!(tasks.len(), 5);
+        // The first plan file: two "### Task N" headings, each a parent, plus three
+        // checkboxes total (two under Task 1, one under Task 2) as their children.
+        // Plus the second plan file's own "Task 1" heading and its one checkbox.
+        assert_eq!(tasks.len(), 7);
         assert!(tasks.iter().all(|t| t.source_ref.framework == FrameworkKind::Superpowers));
 
-        // Task 1's checkboxes are cleaned of the fixture's bold markup and keep
-        // distinct, stable anchors so a re-import can tell them apart.
-        let under_task_1: Vec<_> =
-            tasks.iter().filter(|t| t.parent_anchor.as_deref() == Some("Task 1: Set up the widget")).collect();
+        // Task 1's checkboxes, scoped to the first plan file (the second file has
+        // its own "Task 1: Set up the widget" heading, covered separately below),
+        // are cleaned of the fixture's bold markup and keep distinct, stable
+        // anchors so a re-import can tell them apart.
+        let under_task_1: Vec<_> = tasks
+            .iter()
+            .filter(|t| t.parent_anchor.as_deref() == Some("Task 1: Set up the widget") && t.source_ref.path.ends_with("2026-01-01-example.md"))
+            .collect();
         assert_eq!(under_task_1.len(), 2);
         assert_ne!(under_task_1[0].source_ref.anchor, under_task_1[1].source_ref.anchor);
         assert_eq!(under_task_1[0].source_ref.anchor, "Task 1: Set up the widget#1");
         assert_eq!(under_task_1[1].source_ref.anchor, "Task 1: Set up the widget#2");
         assert!(under_task_1.iter().any(|t| t.title == "Step 1: Write the widget module"));
         assert!(under_task_1.iter().all(|t| t.description == "Task 1: Set up the widget"));
+    }
+
+    /// Two plan files can share a heading's exact text (a generic step title reused
+    /// across phase plans, a real shape the fixture now covers). Each still gets its
+    /// own parent, distinguished by `source_ref.path` even though the title, the
+    /// anchor and `parent_anchor` text are identical.
+    #[test]
+    fn two_plan_files_sharing_a_heading_get_their_own_parents() {
+        let a = SuperpowersAdapter;
+        let tasks = a.tasks(&fixture());
+
+        let parents: Vec<_> = tasks.iter().filter(|t| t.title == "Task 1: Set up the widget" && t.parent_anchor.is_none()).collect();
+        assert_eq!(parents.len(), 2, "{parents:?}");
+        assert_ne!(parents[0].source_ref.path, parents[1].source_ref.path);
+        assert!(parents.iter().all(|p| p.source_ref.anchor == "Task 1: Set up the widget"));
+
+        let second_file_child = tasks
+            .iter()
+            .find(|t| t.parent_anchor.as_deref() == Some("Task 1: Set up the widget") && t.source_ref.path.ends_with("2026-01-03-example-two.md"))
+            .expect("the second file's checkbox is present");
+        assert_eq!(second_file_child.title, "Step 1: Write the other widget module");
     }
 
     #[test]

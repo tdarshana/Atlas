@@ -60,19 +60,24 @@ pub fn import_tasks(tasks: &TaskRepo, memories: &MemoryRepo, project: &Project, 
     let import_actor = format!("import/{}", kind.as_str());
 
     let mut report = ImportReport::default();
-    // `source_ref.anchor` to task id, filled in as each item's task is created or
-    // matched below. A child's `parent_anchor` looks itself up here first.
-    let mut anchor_ids: HashMap<String, Uuid> = HashMap::new();
+    // `(source_ref.path, source_ref.anchor)` to task id, filled in as each item's
+    // task is created or matched below. A child's `parent_anchor` looks itself up
+    // here first, scoped to its own file: two different plan files can otherwise
+    // share a heading's exact text (a generic step title reused across phase
+    // plans), and without the path a second file's children would resolve against
+    // the first file's parent instead of falling through to the path-scoped
+    // `find_by_source_ref` below.
+    let mut anchor_ids: HashMap<(String, String), Uuid> = HashMap::new();
 
     for item in items {
         let parent_id: Option<Uuid> = match &item.parent_anchor {
             None => None,
-            Some(anchor) => match anchor_ids.get(anchor) {
+            Some(anchor) => match anchor_ids.get(&(item.source_ref.path.clone(), anchor.clone())) {
                 Some(id) => Some(*id),
                 // The parent wasn't created earlier in *this* run (an import of just
-                // the children, say, or a run order the adapter doesn't guarantee) —
-                // fall back to the parent's own SourceRef, the same lookup a child
-                // uses for itself.
+                // the children, say, or a run order the adapter doesn't guarantee),
+                // so fall back to the parent's own SourceRef, the same lookup a
+                // child uses for itself.
                 None => {
                     let parent_ref = SourceRef { framework: kind, path: item.source_ref.path.clone(), anchor: anchor.clone() };
                     tasks.find_by_source_ref(Some(project.id), &parent_ref)?.map(|t| t.id)
@@ -121,7 +126,7 @@ pub fn import_tasks(tasks: &TaskRepo, memories: &MemoryRepo, project: &Project, 
                 created.id
             }
         };
-        anchor_ids.insert(item.source_ref.anchor.clone(), task_id);
+        anchor_ids.insert((item.source_ref.path.clone(), item.source_ref.anchor.clone()), task_id);
     }
     memories.audit(
         actor,
@@ -272,11 +277,19 @@ mod tests {
         let (project, _dir) = project_for_fixture(&db, "superpowers");
 
         let report = import_tasks(&tasks, &memories, &project, FrameworkKind::Superpowers, "test").unwrap();
-        assert_eq!(report.created, 5, "two parents, two children under Task 1, one under Task 2: {report:?}");
+        // The first plan file: two parents, two children under Task 1, one under
+        // Task 2 (five items). Plus the second plan file's own parent and child.
+        assert_eq!(report.created, 7, "{report:?}");
         assert_eq!(report.reparented, 0);
 
         let all = tasks.list(&TaskFilter { project_id: Some(project.id), include_done: true, ..Default::default() }).unwrap();
-        let parent = all.iter().find(|t| t.title == "Task 1: Set up the widget").expect("parent task created");
+        // The second plan file has its own "Task 1: Set up the widget" heading too
+        // (see `children_across_two_plan_files_attach_to_their_own_files_parent`);
+        // scope to the first file's parent here.
+        let parent = all
+            .iter()
+            .find(|t| t.title == "Task 1: Set up the widget" && t.source_ref.as_ref().is_some_and(|s| s.path.ends_with("2026-01-01-example.md")))
+            .expect("parent task created");
         assert!(parent.parent_id.is_none(), "a parent task has no parent of its own");
 
         let children: Vec<_> = all.iter().filter(|t| t.parent_id == Some(parent.id)).collect();
@@ -287,6 +300,38 @@ mod tests {
         let task_2 = all.iter().find(|t| t.title == "Task 2: Wire the widget in").unwrap();
         let stages = tasks.effective_stages(Some(project.id)).unwrap().stages;
         assert!(stages.iter().find(|s| s.name == task_2.stage).unwrap().done, "{task_2:?}");
+    }
+
+    /// The fixture's second plan file repeats the first file's "Task 1: Set up the
+    /// widget" heading verbatim, so this is the regression test for the anchor map
+    /// being scoped by `(path, anchor)`: without that scoping, the second file's
+    /// checkbox would resolve its parent from the first file's map entry and land
+    /// as a subtask of the wrong plan's task.
+    #[test]
+    fn children_across_two_plan_files_attach_to_their_own_files_parent() {
+        let (db, tasks) = setup();
+        let memories = MemoryRepo::new(&db);
+        let (project, _dir) = project_for_fixture(&db, "superpowers");
+
+        import_tasks(&tasks, &memories, &project, FrameworkKind::Superpowers, "test").unwrap();
+
+        let all = tasks.list(&TaskFilter { project_id: Some(project.id), include_done: true, ..Default::default() }).unwrap();
+        let parents: Vec<_> = all.iter().filter(|t| t.title == "Task 1: Set up the widget").collect();
+        assert_eq!(parents.len(), 2, "each plan file gets its own parent task: {all:?}");
+        let (path_of, path_of_first) = (
+            |t: &Task| t.source_ref.as_ref().map(|s| s.path.clone()).unwrap(),
+            parents[0].source_ref.as_ref().map(|s| s.path.clone()).unwrap(),
+        );
+        assert_ne!(path_of_first, path_of(parents[1]), "the two parents come from different files: {parents:?}");
+
+        for parent in &parents {
+            let parent_path = path_of(parent);
+            let children: Vec<_> = all.iter().filter(|t| t.parent_id == Some(parent.id)).collect();
+            assert!(!children.is_empty(), "{parent:?}");
+            for child in &children {
+                assert_eq!(path_of(child), parent_path, "a child must attach to its own file's parent, not the other file's: {child:?}");
+            }
+        }
     }
 
     /// A task an earlier, parent-less importer created for a checkbox, titled with
@@ -315,7 +360,7 @@ mod tests {
         let report = import_tasks(&tasks, &memories, &project, FrameworkKind::Superpowers, "test").unwrap();
         assert_eq!(report.reparented, 1, "{report:?}");
         assert_eq!(report.updated, 1, "the title changed too: {report:?}");
-        assert_eq!(report.created, 4, "everything but the pre-existing child: {report:?}");
+        assert_eq!(report.created, 6, "everything but the pre-existing child: {report:?}");
 
         let again = tasks.get(&created.key).unwrap().task;
         assert_eq!(again.title, "Step 1: Write the widget module");
@@ -323,7 +368,7 @@ mod tests {
             .list(&TaskFilter { project_id: Some(project.id), include_done: true, ..Default::default() })
             .unwrap()
             .into_iter()
-            .find(|t| t.title == "Task 1: Set up the widget")
+            .find(|t| t.title == "Task 1: Set up the widget" && t.source_ref.as_ref().is_some_and(|s| s.path.ends_with("2026-01-01-example.md")))
             .expect("parent created");
         assert_eq!(again.parent_id, Some(parent.id));
     }
