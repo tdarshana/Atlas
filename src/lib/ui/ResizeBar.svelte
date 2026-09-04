@@ -14,12 +14,16 @@
 		/** The host's border width: absolute offsets start inside the border, so the bar
 		    is pushed out by this much to land in the true middle of the gap. */
 		border?: number;
+		/** Which edge of the host the bar sits on. On the left, dragging left grows the host. */
+		side?: 'right' | 'left';
 		onlive?: (width: number) => void;
 		onresize: (width: number) => void;
 		testid?: string;
 	}
 
-	let { label, value, min, max, gap = 6, border = 1, onlive, onresize, testid }: Props = $props();
+	let { label, value, min, max, gap = 6, border = 1, side = 'right', onlive, onresize, testid }: Props = $props();
+
+	const sign = $derived(side === 'left' ? -1 : 1);
 
 	let dragging = $state(false);
 	let startX = 0;
@@ -39,7 +43,7 @@
 
 	function drag(event: PointerEvent) {
 		if (!dragging) return;
-		live = clampWidth(startWidth + (event.clientX - startX));
+		live = clampWidth(startWidth + sign * (event.clientX - startX));
 		onlive?.(live);
 	}
 
@@ -62,7 +66,7 @@
 		const step = event.key === 'ArrowLeft' ? -20 : event.key === 'ArrowRight' ? 20 : 0;
 		if (step === 0) return;
 		event.preventDefault();
-		onresize(clampWidth(value + step));
+		onresize(clampWidth(value + sign * step));
 	}
 </script>
 
@@ -72,6 +76,7 @@
 <div
 	class="bar"
 	class:dragging
+	class:left={side === 'left'}
 	role="separator"
 	aria-orientation="vertical"
 	aria-label={label}
@@ -102,6 +107,11 @@
 		cursor: col-resize;
 		touch-action: none;
 		z-index: 1;
+	}
+
+	.bar.left {
+		right: auto;
+		left: calc(var(--rb-gap) / -2 - 5px - var(--rb-border));
 	}
 
 	.bar:focus-visible {

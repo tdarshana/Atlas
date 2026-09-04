@@ -32,6 +32,7 @@
 		scheduleRefresh,
 		setDetailWidth,
 		setLaneWidth,
+		toggleDetailMode,
 		toggleLaneCollapsed,
 		visibleLanes
 	} from '$lib/stores/board.svelte';
@@ -242,6 +243,8 @@
 				loading={board.detailLoading}
 				error={board.detailError}
 				width={board.detailWidth}
+				mode={board.detailMode}
+				ontogglemode={toggleDetailMode}
 				onclose={dismiss}
 				onchanged={reload}
 				onmove={(key, stage) => void move(key, stage)}
@@ -272,18 +275,15 @@
 </Dialog>
 
 <style>
+	/* The docked detail is a flex sibling of the strip, so the strip shrinks to make
+	   room instead of being drawn over. */
 	.dock {
 		position: relative;
 		display: flex;
+		gap: 12px;
 		flex: 1;
 		min-height: 0;
 		--strip-reserve: 0px;
-	}
-
-	/* The strip reads this, so its scroll range runs past the docked panel and the last
-	   lane and the `Add column` slot stay reachable. */
-	.dock.docked {
-		--strip-reserve: calc(var(--detail-w) + 12px);
 	}
 
 	/* Full-height DS inputs: the toolbar row under the tab strip has room for them. */

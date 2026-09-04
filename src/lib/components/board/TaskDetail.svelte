@@ -14,7 +14,7 @@
 	import { relativeAge } from '$lib/format';
 	import { copyText } from '$lib/shell';
 	import {
-		clampDetail,
+		type DetailMode,
 		CONFLICT_MESSAGE,
 		DETAIL_MAX,
 		DETAIL_MIN
@@ -22,6 +22,7 @@
 	import { FRAMEWORK_LABEL, reportText } from '$lib/components/project/frameworks';
 	import type { Stage, TaskDetail, TaskKind, TaskPriority } from '$lib/types';
 	import Dialog from '$lib/ui/Dialog.svelte';
+	import ResizeBar from '$lib/ui/ResizeBar.svelte';
 	import { push } from '$lib/ui/toasts.svelte';
 
 	interface Props {
@@ -31,6 +32,9 @@
 		error: string | null;
 		width: number;
 		onclose: () => void;
+		/** Docked beside the lanes or floating as a dialog, with the switch between them. */
+		mode: DetailMode;
+		ontogglemode: () => void;
 		/** Called after any write, so the board and this panel both reload. */
 		onchanged: () => void | Promise<void>;
 		/** Moves go through the board so the card moves at the same moment. */
@@ -46,6 +50,8 @@
 		error,
 		width,
 		onclose,
+		mode,
+		ontogglemode,
 		onchanged,
 		onmove,
 		ondeleted,
@@ -263,63 +269,15 @@
 		}
 	}
 
-	// The left edge drags the panel wider. As with the lanes, the pointer writes to the
-	// node's own CSS variable and the store hears about it once, on release.
-	let dragging = false;
-	let startX = 0;
-	let startWidth = 0;
-	let live = 0;
-
-	function grab(event: PointerEvent) {
-		(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
-		dragging = true;
-		startX = event.clientX;
-		startWidth = width;
-		live = width;
-		event.preventDefault();
-	}
-
-	/**
-	 * The dock above this panel reads the same variable to reserve room on the lane strip,
-	 * so the live width has to reach it too; otherwise the strip's tail would only catch up
-	 * when the drag ended.
-	 */
-	function setLive(width: number) {
-		panel?.style.setProperty('--detail-w', `${width}px`);
-		panel?.parentElement?.style.setProperty('--detail-w', `${width}px`);
-	}
-
-	function drag(event: PointerEvent) {
-		if (!dragging) return;
-		live = clampDetail(startWidth - (event.clientX - startX));
-		setLive(live);
-	}
-
-	function drop(event: PointerEvent) {
-		if (!dragging) return;
-		dragging = false;
-		(event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
-		onresize(live);
-	}
-
-	/** An interrupted gesture is not a decision; the panel goes back where it started. */
-	function cancel(event: PointerEvent) {
-		if (!dragging) return;
-		dragging = false;
-		(event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
-		setLive(startWidth);
-	}
-
-	function nudge(event: KeyboardEvent) {
-		const step = event.key === 'ArrowLeft' ? 20 : event.key === 'ArrowRight' ? -20 : 0;
-		if (step === 0) return;
-		event.preventDefault();
-		onresize(width + step);
+	/** The drag paints the node's own CSS variable; the store hears the final width on release. */
+	function paint(live: number) {
+		panel?.style.setProperty('--detail-w', `${live}px`);
 	}
 </script>
 
 <svelte:window onkeydown={onWindowKey} />
 
+{#snippet body()}
 <aside
 	bind:this={panel}
 	class="detail"
@@ -328,23 +286,19 @@
 	aria-label="Task detail"
 	tabindex="-1"
 >
-	<!-- As in the lane: a splitter is focusable, and the checker reads the role as not. -->
-	<!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_no_noninteractive_tabindex -->
-	<div
-		class="handle"
-		role="separator"
-		aria-orientation="vertical"
-		aria-label="Resize task detail"
-		aria-valuenow={width}
-		aria-valuemin={DETAIL_MIN}
-		aria-valuemax={DETAIL_MAX}
-		tabindex="0"
-		onpointerdown={grab}
-		onpointermove={drag}
-		onpointerup={drop}
-		onpointercancel={cancel}
-		onkeydown={nudge}
-	></div>
+	{#if mode === 'docked'}
+		<ResizeBar
+			side="left"
+			label="Resize task detail"
+			value={width}
+			min={DETAIL_MIN}
+			max={DETAIL_MAX}
+			gap={12}
+			onlive={paint}
+			{onresize}
+			testid="task-detail-resize"
+		/>
+	{/if}
 
 	<header>
 		<span class="key">{task?.key ?? ''}</span>
@@ -360,6 +314,13 @@
 			<Badge tone="danger" title={task.blocked_reason ?? 'Not ready'}>blocked</Badge>
 		{/if}
 		<span class="spacer"></span>
+		<IconButton
+			size="sm"
+			icon={mode === 'docked' ? 'external-link' : 'panel-right'}
+			label={mode === 'docked' ? 'Open as a dialog' : 'Dock beside the board'}
+			data-testid="task-detail-mode"
+			onclick={ontogglemode}
+		/>
 		<IconButton size="sm" icon="x" label="Close task" onclick={onclose} />
 	</header>
 
@@ -538,6 +499,15 @@
 		{/if}
 	</div>
 </aside>
+{/snippet}
+
+{#if mode === 'modal'}
+	<Dialog open onclose={onclose} class="detail-dialog">
+		{@render body()}
+	</Dialog>
+{:else}
+	{@render body()}
+{/if}
 
 <Dialog open={confirming} title="Delete this task?" onclose={() => (confirming = false)}>
 	<p class="prose">
@@ -559,12 +529,14 @@
 
 <style>
 	/* Docked over the strip rather than beside it, so the lanes keep scrolling beneath. */
+	/* Docked: a flex sibling of the lane strip, so the strip gives up the room rather
+	   than being drawn over. */
 	.detail {
-		position: absolute;
-		top: 0;
-		right: 0;
-		bottom: 0;
+		position: relative;
+		flex: 0 0 var(--detail-w);
 		width: var(--detail-w);
+		min-height: 0;
+		align-self: stretch;
 		display: flex;
 		flex-direction: column;
 		background: var(--bg-raised);
@@ -579,23 +551,6 @@
 		outline-offset: -2px;
 	}
 
-	.handle {
-		position: absolute;
-		top: 0;
-		bottom: 0;
-		left: -3px;
-		width: 6px;
-		cursor: col-resize;
-		border-radius: 2px;
-		touch-action: none;
-		z-index: 1;
-	}
-
-	.handle:hover,
-	.handle:focus-visible {
-		background: var(--border-strong);
-		outline: none;
-	}
 
 	header {
 		display: flex;
@@ -780,5 +735,15 @@
 	.prose {
 		margin: 0;
 		max-width: 60ch;
+	}
+
+	/* As a dialog the same panel floats over the board at a comfortable reading width. */
+	:global(.detail-dialog) .detail {
+		position: static;
+		flex: none;
+		width: min(760px, 92vw);
+		height: min(84vh, 960px);
+		border: 0;
+		box-shadow: none;
 	}
 </style>

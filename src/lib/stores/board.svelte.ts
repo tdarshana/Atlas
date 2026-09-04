@@ -61,6 +61,29 @@ export function laneKey(projectId: Uuid | null): string {
 }
 
 export const DETAIL_KEY = 'atlas.board.detail';
+export const DETAIL_MODE_KEY = 'atlas.board.detail.mode';
+
+/** The docked panel sits beside the lanes; the dialog floats over them. */
+export type DetailMode = 'docked' | 'modal';
+
+export function loadDetailMode(): DetailMode {
+	try {
+		if (typeof localStorage === 'undefined') return 'docked';
+		return localStorage.getItem(DETAIL_MODE_KEY) === 'modal' ? 'modal' : 'docked';
+	} catch {
+		return 'docked';
+	}
+}
+
+export function saveDetailMode(mode: DetailMode): void {
+	try {
+		if (typeof localStorage === 'undefined') return;
+		localStorage.setItem(DETAIL_MODE_KEY, mode);
+	} catch {
+		/* storage is unavailable; the panel docks next time */
+	}
+	void persistSet(DETAIL_MODE_KEY, mode);
+}
 
 /**
  * The widths this board was left at, by stage name. Anything unreadable, of the wrong
@@ -231,7 +254,9 @@ export const board = $state({
 	/** Stage names folded with their own collapse button, for the open board. */
 	collapsedLanes: [] as string[],
 	/** The docked detail's width, shared by every board. */
-	detailWidth: DETAIL_DEFAULT
+	detailWidth: DETAIL_DEFAULT,
+	/** Docked beside the lanes or floating as a dialog, shared by every board. */
+	detailMode: loadDetailMode() as DetailMode
 });
 
 /** Reads the arrangement one board was left in. Called when the project changes. */
@@ -262,6 +287,11 @@ export function setLaneWidth(stage: string, width: number): void {
 export function setDetailWidth(width: number): void {
 	board.detailWidth = clampDetail(width);
 	saveDetailWidth(board.detailWidth);
+}
+
+export function toggleDetailMode(): void {
+	board.detailMode = board.detailMode === 'docked' ? 'modal' : 'docked';
+	saveDetailMode(board.detailMode);
 }
 
 /**
