@@ -6,10 +6,15 @@ import type { Component } from 'svelte';
 import { resolvePlatform } from './platform';
 import {
 	RAIL_KEY,
+	SIDEPANEL_DEFAULT,
 	SIDEPANEL_KEY,
+	SIDEPANEL_MAX,
+	SIDEPANEL_MIN,
+	SIDEPANEL_WIDTH_KEY,
 	THEME_KEY,
 	clearSidePanelOverride,
 	setSidePanelOverride,
+	setSidePanelWidth,
 	setTheme,
 	setView,
 	shell,
@@ -64,6 +69,36 @@ describe('shell state', () => {
 		expect(() => toggleRail()).not.toThrow();
 		expect(shell.railExpanded).toBe(true);
 		setItem.mockRestore();
+	});
+});
+
+describe('side panel width', () => {
+	it('clamps and persists a dragged or nudged width', () => {
+		setSidePanelWidth(9000);
+		expect(shell.sidePanelWidth).toBe(SIDEPANEL_MAX);
+		expect(localStorage.getItem(SIDEPANEL_WIDTH_KEY)).toBe(String(SIDEPANEL_MAX));
+
+		setSidePanelWidth(10);
+		expect(shell.sidePanelWidth).toBe(SIDEPANEL_MIN);
+		expect(localStorage.getItem(SIDEPANEL_WIDTH_KEY)).toBe(String(SIDEPANEL_MIN));
+
+		setSidePanelWidth(260);
+		expect(shell.sidePanelWidth).toBe(260);
+		expect(localStorage.getItem(SIDEPANEL_WIDTH_KEY)).toBe('260');
+	});
+
+	it('clamps an out-of-range width already in storage when the module loads', async () => {
+		localStorage.setItem(SIDEPANEL_WIDTH_KEY, '9000');
+		vi.resetModules();
+		const fresh = await import('./shell.svelte');
+		expect(fresh.shell.sidePanelWidth).toBe(SIDEPANEL_MAX);
+	});
+
+	it('defaults on load when nothing is stored', async () => {
+		localStorage.removeItem(SIDEPANEL_WIDTH_KEY);
+		vi.resetModules();
+		const fresh = await import('./shell.svelte');
+		expect(fresh.shell.sidePanelWidth).toBe(SIDEPANEL_DEFAULT);
 	});
 });
 

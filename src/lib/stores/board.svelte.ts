@@ -101,6 +101,17 @@ export function pruneLaneWidths(
 	return out;
 }
 
+/**
+ * The collapsed stage names still on the board, the same pruning `pruneLaneWidths`
+ * does for widths and for the same reason: a rename or a removed column would
+ * otherwise leave the name folded for good, and a stage later renamed back to that
+ * old name would silently reappear collapsed.
+ */
+export function pruneCollapsedLanes(collapsed: string[], stages: Stage[]): string[] {
+	const live = new Set(stages.map((s) => s.name));
+	return collapsed.filter((stage) => live.has(stage));
+}
+
 export function saveLaneWidths(projectId: Uuid | null, widths: Record<string, number>): void {
 	try {
 		if (typeof localStorage === 'undefined') return;
@@ -342,14 +353,20 @@ export async function refresh(): Promise<void> {
 		board.stages = list.stages;
 		board.overridden = list.overridden;
 		board.tasks = tasks;
-		// The stage list is only known once it lands, so this is where a width belonging
-		// to a renamed or removed column is dropped. Guarded on a non-empty list, or a
-		// board that failed to answer would take every width with it.
+		// The stage list is only known once it lands, so this is where a width or a
+		// collapsed lane belonging to a renamed or removed column is dropped. Guarded
+		// on a non-empty list, or a board that failed to answer would take every width
+		// and every collapsed lane with it.
 		if (list.stages.length > 0) {
 			const kept = pruneLaneWidths(board.laneWidths, list.stages);
 			if (Object.keys(kept).length !== Object.keys(board.laneWidths).length) {
 				board.laneWidths = kept;
 				saveLaneWidths(projectId, kept);
+			}
+			const keptCollapsed = pruneCollapsedLanes(board.collapsedLanes, list.stages);
+			if (keptCollapsed.length !== board.collapsedLanes.length) {
+				board.collapsedLanes = keptCollapsed;
+				saveCollapsedLanes(projectId, keptCollapsed);
 			}
 		}
 		board.error = null;

@@ -26,14 +26,18 @@ import {
 	LANE_MIN,
 	laneKey,
 	laneWidth,
+	loadCollapsedLanes,
 	loadDetailWidth,
 	loadLaneWidths,
 	loadLayout,
+	pruneCollapsedLanes,
 	pruneLaneWidths,
+	saveCollapsedLanes,
 	saveDetailWidth,
 	saveLaneWidths,
 	setDetailWidth,
 	setLaneWidth,
+	toggleLaneCollapsed,
 	visibleLanes
 } from './board.svelte';
 
@@ -72,6 +76,7 @@ beforeEach(() => {
 	localStorage.clear();
 	board.filters.projectId = null;
 	board.laneWidths = {};
+	board.collapsedLanes = [];
 	board.detailWidth = DETAIL_DEFAULT;
 });
 
@@ -150,6 +155,57 @@ describe('pruneLaneWidths', () => {
 	});
 });
 
+describe('collapsed lane persistence', () => {
+	it('folds a lane with its own button and remembers it per board', () => {
+		board.filters.projectId = 'p1';
+
+		toggleLaneCollapsed('Testing');
+		expect(board.collapsedLanes).toEqual(['Testing']);
+		expect(loadCollapsedLanes('p1')).toEqual(['Testing']);
+
+		toggleLaneCollapsed('Backlog');
+		expect(board.collapsedLanes).toEqual(['Testing', 'Backlog']);
+		expect(loadCollapsedLanes('p1')).toEqual(['Testing', 'Backlog']);
+	});
+
+	it('opens a folded lane again on a second toggle', () => {
+		board.filters.projectId = 'p1';
+		toggleLaneCollapsed('Testing');
+		toggleLaneCollapsed('Testing');
+
+		expect(board.collapsedLanes).toEqual([]);
+		expect(loadCollapsedLanes('p1')).toEqual([]);
+	});
+
+	it('keeps two boards separate, the same way lane widths do', () => {
+		saveCollapsedLanes('p1', ['Testing']);
+		saveCollapsedLanes('p2', ['Backlog']);
+
+		expect(loadCollapsedLanes('p1')).toEqual(['Testing']);
+		expect(loadCollapsedLanes('p2')).toEqual(['Backlog']);
+	});
+
+	it('reads nothing from a missing, unparseable or wrongly shaped entry', () => {
+		expect(loadCollapsedLanes('p1')).toEqual([]);
+		localStorage.setItem('atlas.board.p1.collapsed', 'not json');
+		expect(loadCollapsedLanes('p1')).toEqual([]);
+		localStorage.setItem('atlas.board.p1.collapsed', JSON.stringify({ not: 'an array' }));
+		expect(loadCollapsedLanes('p1')).toEqual([]);
+		localStorage.setItem('atlas.board.p1.collapsed', JSON.stringify(['Testing', 42]));
+		expect(loadCollapsedLanes('p1')).toEqual(['Testing']);
+	});
+});
+
+describe('pruneCollapsedLanes', () => {
+	it('drops a folded stage the board no longer has', () => {
+		expect(pruneCollapsedLanes(['Backlog', 'Retired'], STAGES)).toEqual(['Backlog']);
+	});
+
+	it('keeps every live stage folded, so nothing reopens on a reload', () => {
+		expect(pruneCollapsedLanes(['Backlog', 'Testing'], STAGES)).toEqual(['Backlog', 'Testing']);
+	});
+});
+
 describe('detail width persistence', () => {
 	it('round-trips a width through one shared key', () => {
 		saveDetailWidth(500);
@@ -200,5 +256,23 @@ describe('visibleLanes', () => {
 
 	it('ignores a filter naming a column this board does not have', () => {
 		expect(visibleLanes(columns, 'Retired').every((l) => !l.collapsed)).toBe(true);
+	});
+
+	it('marks a lane folded when its stage is in the folded set', () => {
+		const lanes = visibleLanes(columns, null, ['Testing']);
+		expect(lanes.map((l) => l.folded)).toEqual([false, true, false]);
+	});
+
+	it('leaves every lane unfolded when the folded set is empty', () => {
+		expect(visibleLanes(columns, null, []).every((l) => !l.folded)).toBe(true);
+	});
+
+	it('keeps folded and collapsed independent: a filtered-away lane can also be folded', () => {
+		const lanes = visibleLanes(columns, 'Testing', ['Backlog']);
+		expect(lanes.map((l) => ({ collapsed: l.collapsed, folded: l.folded }))).toEqual([
+			{ collapsed: true, folded: true },
+			{ collapsed: false, folded: false },
+			{ collapsed: true, folded: false }
+		]);
 	});
 });
