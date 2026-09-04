@@ -16,6 +16,7 @@ pub mod projects;
 pub mod search;
 pub mod service;
 pub mod settings;
+pub mod skills;
 pub mod sync;
 pub mod workflow;
 pub use error::{AtlasError, Result};

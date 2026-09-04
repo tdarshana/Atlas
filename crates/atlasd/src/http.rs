@@ -294,6 +294,12 @@ fn query_flag_opt<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result
 
 #[derive(Deserialize)] pub struct FrameworkImportBody { pub what: ImportWhat }
 
+// ---- skills (Phase 15) ----
+
+#[derive(Deserialize)] pub struct SkillsQ { #[serde(default)] pub project_id: Option<Uuid> }
+#[derive(Deserialize)] pub struct SkillBodyBody { pub body: String }
+#[derive(Deserialize)] pub struct SkillsDisabledBody { pub disabled: Vec<String> }
+
 // ---- workflows (Phase 9) ----
 
 #[derive(Deserialize)] pub struct WorkflowListQ { #[serde(default)] pub project_id: Option<Uuid> }
@@ -363,6 +369,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/projects/{id}/frameworks", get(list_frameworks))
         .route("/api/v1/projects/{id}/frameworks/{kind}/docs/{*path}", get(get_framework_doc))
         .route("/api/v1/projects/{id}/frameworks/{kind}/import", post(import_framework))
+        .route("/api/v1/skills", get(list_skills).post(create_skill))
+        .route("/api/v1/skills/{*id}", get(get_skill).put(put_skill_body).patch(patch_skill).delete(delete_skill))
+        .route("/api/v1/projects/{id}/skills", put(put_project_skills))
         .route("/api/v1/search", get(global_search))
         .route("/api/v1/mcp/status", get(mcp_status))
         .route("/api/v1/mcp/clients", post(register_mcp_client))
@@ -644,6 +653,49 @@ async fn import_framework(
 ) -> Result<Json<ImportReport>, ApiError> {
     let kind: FrameworkKind = kind.parse()?;
     Ok(Json(s.backend.import_framework(id, kind, b.what, &actor).await?))
+}
+
+// ---- skills (Phase 15) ----
+
+/// Every skill in scope, plus whatever discovery could not read. `project_id` widens
+/// the listing to that project's own roots and fills each summary's `enabled_here`.
+async fn list_skills(State(s): State<AppState>, ApiQuery(q): ApiQuery<SkillsQ>) -> Result<Json<SkillList>, ApiError> {
+    Ok(Json(s.backend.list_skills(q.project_id).await?))
+}
+async fn create_skill(State(s): State<AppState>, Actor(actor): Actor, ApiJson(b): ApiJson<NewSkill>) -> Result<(StatusCode, Json<Skill>), ApiError> {
+    Ok((StatusCode::CREATED, Json(s.backend.create_skill(b, &actor).await?)))
+}
+/// A skill id carries a `:` and, for a plugin skill, slashes, so it arrives through
+/// axum's wildcard capture (`{*id}`) the same way a framework document path does:
+/// already percent-decoded, with the slashes between its parts intact.
+async fn get_skill(State(s): State<AppState>, ApiPath(id): ApiPath<String>, ApiQuery(q): ApiQuery<SkillsQ>) -> Result<Json<Skill>, ApiError> {
+    Ok(Json(s.backend.get_skill(q.project_id, &id).await?))
+}
+/// Edits a skill in place: the stored body for a native skill, the whole `SKILL.md`
+/// for a discovered one.
+async fn put_skill_body(
+    State(s): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    ApiQuery(q): ApiQuery<SkillsQ>,
+    Actor(actor): Actor,
+    ApiJson(b): ApiJson<SkillBodyBody>,
+) -> Result<Json<Skill>, ApiError> {
+    Ok(Json(s.backend.write_skill_body(q.project_id, &id, b.body, &actor).await?))
+}
+/// A native skill's name and description. A discovered skill has neither of its own,
+/// so this answers 400 for one rather than pretending to store them.
+async fn patch_skill(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor): Actor, ApiJson(p): ApiJson<SkillUpdate>) -> Result<Json<Skill>, ApiError> {
+    Ok(Json(s.backend.update_skill(&id, p, &actor).await?))
+}
+async fn delete_skill(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor): Actor) -> Result<StatusCode, ApiError> {
+    s.backend.delete_skill(&id, &actor).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+/// Replaces this project's disabled-skill list wholesale; `disabled: []` clears it.
+/// Every id has to name a skill that applies here right now, the same shape
+/// `PUT /projects/{id}/mcp/tools` takes for tool names.
+async fn put_project_skills(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor): Actor, ApiJson(b): ApiJson<SkillsDisabledBody>) -> Result<Json<Project>, ApiError> {
+    Ok(Json(s.backend.set_project_skills_disabled(id, b.disabled, &actor).await?))
 }
 
 // ---- workflows (Phase 9) ----

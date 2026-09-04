@@ -46,6 +46,8 @@ enum Cmd {
     Workflow { #[command(subcommand)] action: commands::workflow::WorkflowCmd },
     /// List, read and import a project's detected planning frameworks
     Framework { #[command(subcommand)] action: commands::framework::FrameworkCmd },
+    /// List, read and gate the skills agents can use
+    Skill { #[command(subcommand)] action: commands::skill::SkillCmd },
     /// Write agent files and managed instruction blocks into a project or the home directory
     Sync(commands::sync::SyncArgs),
     /// Write the whole library to DIR as JSONL and Markdown
@@ -199,6 +201,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Practice { action } => commands::doc::run(DocKind::Practice, action, &backend(&paths, cli.port).await?).await?,
         Cmd::Workflow { action } => commands::workflow::run(action, &backend(&paths, cli.port).await?).await?,
         Cmd::Framework { action } => commands::framework::run(action, &backend(&paths, cli.port).await?).await?,
+        Cmd::Skill { action } => commands::skill::run(action, &backend(&paths, cli.port).await?).await?,
         Cmd::Sync(args) => commands::sync::run(args, &backend(&paths, cli.port).await?).await?,
         Cmd::Export { dir, force } => commands::export::run(dir, force, &backend(&paths, cli.port).await?).await?,
         Cmd::Import { dir } => commands::import::run(dir, &backend(&paths, cli.port).await?).await?,

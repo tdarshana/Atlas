@@ -260,6 +260,22 @@ pub struct FrameworkDocsArgs {
     pub path: Option<String>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SkillListArgs {
+    /// Absolute path to the project whose skills to list. Defaults to the root this
+    /// server was started in; without any project, only the global skills are listed.
+    pub project_root: Option<PathBuf>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SkillGetArgs {
+    /// A skill id from a prior `skill_list` call.
+    pub id: String,
+    /// Absolute path to the project the id was listed under. Defaults to the root this
+    /// server was started in.
+    pub project_root: Option<PathBuf>,
+}
+
 /// Whether a tool in [`TOOL_TABLE`] only reads state or can change it. Shown in the
 /// `/api/v1/mcp/status` tools table (Task 2) as a badge: read is informational, write
 /// is a warning, since a write tool run by an agent this project has not admitted is
@@ -356,6 +372,8 @@ pub const TOOL_TABLE: &[ToolMeta] = &[
     ToolMeta { name: "ingest_transcript", description: "Queue a conversation transcript for opt-in LLM extraction of durable memories. Returns a job id to poll; fails if extraction is not enabled and configured on the daemon.", args: "text*, agent, project_root", scope: ToolScope::Write },
     ToolMeta { name: "status", description: "Report Atlas daemon status: version, database path, active memory count, embedding availability.", args: "none", scope: ToolScope::Read },
     ToolMeta { name: "framework_docs", description: "List the planning frameworks detected in a project (Superpowers, OpenSpec, SpecKit, GSD) with the documents each holds, or fetch one document's text. Pass kind and path together, from a prior listing, to read a document.", args: "project_root, kind, path", scope: ToolScope::Read },
+    ToolMeta { name: "skill_list", description: "List the skills that apply here: the SKILL.md folders Claude Code and Codex read, the ones installed plugins carry, and Atlas's own. A project's switched-off skills are left out. Call before starting work to see which skills are in play.", args: "project_root", scope: ToolScope::Read },
+    ToolMeta { name: "skill_get", description: "Fetch one skill's full text by id, from a prior skill_list. Call when a listed skill looks relevant to the task.", args: "id*, project_root", scope: ToolScope::Read },
 ];
 
 /// Called on every accepted `call_tool`, so the daemon and the stdio shim can each
@@ -714,6 +732,24 @@ impl<B: Backend> AtlasMcp<B> {
         json_result(&listings)
     }
 
+    #[tool(description = "List the skills that apply here: the SKILL.md folders Claude Code and Codex read, the ones installed plugins carry, and Atlas's own. A project's switched-off skills are left out. Call before starting work to see which skills are in play.")]
+    async fn skill_list(&self, Parameters(a): Parameters<SkillListArgs>) -> Result<CallToolResult, McpError> {
+        let project_id = self.resolve_project(a.project_root).await?.map(|p| p.id);
+        let list = self.backend.list_skills(project_id).await.map_err(err)?;
+        json_result(&SkillList {
+            // A skill this project switched off is not one an agent should reach for,
+            // so the tool answers with the enabled set rather than the whole list.
+            skills: list.skills.into_iter().filter(|s| s.enabled_here != Some(false)).collect(),
+            warnings: list.warnings,
+        })
+    }
+
+    #[tool(description = "Fetch one skill's full text by id, from a prior skill_list. Call when a listed skill looks relevant to the task.")]
+    async fn skill_get(&self, Parameters(a): Parameters<SkillGetArgs>) -> Result<CallToolResult, McpError> {
+        let project_id = self.resolve_project(a.project_root).await?.map(|p| p.id);
+        json_result(&self.backend.get_skill(project_id, &a.id).await.map_err(err)?)
+    }
+
     /// Resolves the `{name}` segment of an `atlas://projects/{name}/...` resource URI
     /// to a project scope: "global" names the project-less scope, otherwise `raw` is
     /// tried, in order, as a project id, a project name (case-insensitive), a board key
@@ -768,9 +804,15 @@ impl<B: Backend> AtlasMcp<B> {
         let seen: std::collections::HashSet<Uuid> = memories.iter().map(|h| h.memory.id).collect();
         let recent = self.backend.list_memories(MemoryStatus::Active, Some(project.id), MemoryScopeFilter::ProjectOnly).await?;
         memories.extend(recent.into_iter().filter(|m| !seen.contains(&m.id)).take(10).map(|memory| RecallHit { memory, score: 0.0 }));
+        // The skills that actually apply here, the same filter `LocalBackend::project_context`
+        // uses, so both readings of a project's context agree.
+        let skills = self.backend.list_skills(Some(project.id)).await
+            .map(|l| l.skills.into_iter().filter(|s| s.enabled_here != Some(false)).collect())
+            .unwrap_or_default();
         Ok(ProjectContext {
             practices: self.backend.list_docs(DocKind::Practice, Some(project.id)).await?,
             workflows: self.backend.list_workflows(Some(project.id)).await?.iter().map(WorkflowSummary::from).collect(),
+            skills,
             project,
             memories,
         })
@@ -965,6 +1007,7 @@ const AGENTS: &str = "atlas://agents/";
 const PRACTICES: &str = "atlas://practices/";
 const WORKFLOWS: &str = "atlas://workflows/";
 const PROJECTS: &str = "atlas://projects/";
+const SKILLS: &str = "atlas://skills/";
 const MEMORIES_RECENT: &str = "atlas://memories/recent";
 
 /// How many memories `atlas://memories/recent` renders.
@@ -1118,6 +1161,12 @@ pub async fn resources_for<B: Backend>(backend: &B) -> atlas_core::Result<Vec<Re
     out.push(Resource::new(MEMORIES_RECENT, "Recent memories".to_string())
         .with_description(format!("The last {MEMORIES_RECENT_LIMIT} active memories, as Markdown"))
         .with_mime_type(MARKDOWN));
+    // One listing rather than one entry per skill: a machine can carry hundreds of
+    // them, and `atlas://skills/{id}` reads any one of them by the id this listing
+    // gives.
+    out.push(Resource::new(SKILLS, "Skills".to_string())
+        .with_description("Every global skill: the SKILL.md folders Claude Code and Codex read, the ones installed plugins carry, and Atlas's own. Read atlas://skills/{id} for one skill's text.")
+        .with_mime_type(JSON));
     Ok(out)
 }
 
@@ -1253,6 +1302,17 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
             (self.backend.get_doc(DocKind::Practice, name).await.map_err(|e| resource_err(&uri, e))?.body, MARKDOWN)
         } else if let Some(name) = uri.strip_prefix(WORKFLOWS) {
             (workflow_markdown(&self.backend.get_workflow(name).await.map_err(|e| resource_err(&uri, e))?), MARKDOWN)
+        } else if uri == SKILLS {
+            let list = self.backend.list_skills(None).await.map_err(|e| resource_err(&uri, e))?;
+            (serde_json::to_string_pretty(&list).map_err(|e| McpError::internal_error(e.to_string(), None))?, JSON)
+        } else if let Some(rest) = uri.strip_prefix(SKILLS) {
+            // A skill id carries a `:` and, for a plugin skill, slashes; a client that
+            // percent-encoded either still reaches the same skill.
+            let id = percent_decode_str(rest)
+                .decode_utf8()
+                .map_err(|e| McpError::invalid_params(format!("{uri}: skill id is not valid UTF-8: {e}"), None))?
+                .into_owned();
+            (self.backend.get_skill(None, &id).await.map_err(|e| resource_err(&uri, e))?.body, MARKDOWN)
         } else if uri == MEMORIES_RECENT {
             let mut memories = self.backend.list_memories(MemoryStatus::Active, None, MemoryScopeFilter::All).await.map_err(err)?;
             memories.truncate(MEMORIES_RECENT_LIMIT);
@@ -2316,6 +2376,94 @@ mod tests {
         let resource = client.read_resource(ReadResourceRequestParams::new(MEMORIES_RECENT)).await.unwrap();
         let text: String = resource.contents.iter().filter_map(|c| match c { ResourceContents::TextResourceContents { text, .. } => Some(text.clone()), _ => None }).collect();
         assert!(text.contains("a recent fact"), "{text}");
+
+        client.cancel().await.unwrap();
+    }
+
+    /// The temp directory every skills test in this binary reads its global skills
+    /// from, set once as `ATLAS_SYNC_HOME`. The override is process-wide and the tests
+    /// in this file run together, so it is written a single time, before any of them
+    /// asks the backend for a skill; without it these tests would read the user's own
+    /// `~/.claude/skills` and assert on whatever happened to be installed there.
+    fn skills_test_home() -> &'static std::path::Path {
+        static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        HOME.get_or_init(|| {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(dir.path().join(".claude/skills/greeter")).unwrap();
+            std::fs::write(
+                dir.path().join(".claude/skills/greeter/SKILL.md"),
+                "---\nname: greeter\ndescription: Greets a person by name.\n---\n\nSay hello.\n",
+            )
+            .unwrap();
+            std::env::set_var("ATLAS_SYNC_HOME", dir.path());
+            dir
+        })
+        .path()
+    }
+
+    /// `skill_list` answers with the discovered skills plus Atlas's own, and leaves out
+    /// the ones the project switched off; `skill_get` answers with one skill's text.
+    #[tokio::test]
+    async fn skill_tools_list_and_read() {
+        let _home = skills_test_home();
+        let atlas_home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join(".claude/skills/deployer")).unwrap();
+        std::fs::write(repo.path().join(".claude/skills/deployer/SKILL.md"), "---\nname: deployer\ndescription: Ships it.\n---\n\nRun the deploy.\n").unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(atlas_home.path()), None, false).unwrap());
+        let project = backend.connect_project(repo.path().to_path_buf(), "test").await.unwrap();
+        backend.create_skill(NewSkill { project_id: None, name: "native-one".into(), description: "Stored in Atlas.".into(), body: "# native\n".into() }, "test").await.unwrap();
+        let s = AtlasMcp::new(backend.clone()).with_env_project_root(false).with_project_root(repo.path().to_path_buf());
+
+        let listed = text_of(&s.skill_list(Parameters(SkillListArgs { project_root: None })).await.unwrap());
+        let list: SkillList = serde_json::from_str(&listed).unwrap();
+        let ids: Vec<&str> = list.skills.iter().map(|s| s.id.as_str()).collect();
+        assert!(ids.contains(&"claude-project:deployer"), "{ids:?}");
+        assert!(ids.contains(&"claude-user:greeter"), "{ids:?}");
+        assert_eq!(ids.iter().filter(|id| id.starts_with("claude-")).count(), 2, "only the two seeded folders: {ids:?}");
+        assert!(list.skills.iter().any(|s| s.source == SkillSource::Native && s.name == "native-one"), "{ids:?}");
+
+        let got = text_of(&s.skill_get(Parameters(SkillGetArgs { id: "claude-project:deployer".into(), project_root: None })).await.unwrap());
+        assert!(got.contains("Run the deploy."), "{got}");
+
+        // A skill this project switched off drops out of the tool's answer.
+        backend.set_project_skills_disabled(project.id, vec!["claude-project:deployer".into()], "test").await.unwrap();
+        let listed = text_of(&s.skill_list(Parameters(SkillListArgs { project_root: None })).await.unwrap());
+        let list: SkillList = serde_json::from_str(&listed).unwrap();
+        assert!(!list.skills.iter().any(|s| s.id == "claude-project:deployer"), "{listed}");
+        assert!(list.skills.iter().any(|s| s.id == "claude-user:greeter"), "{listed}");
+    }
+
+    /// `atlas://skills/` lists the global skills as JSON and `atlas://skills/{id}`
+    /// reads one skill's text.
+    #[tokio::test]
+    async fn skill_resources_list_and_read() {
+        let _home = skills_test_home();
+        let atlas_home = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(atlas_home.path()), None, false).unwrap());
+        let s = AtlasMcp::new(backend).with_env_project_root(false);
+
+        let (server_io, client_io) = tokio::io::duplex(16 * 1024);
+        tokio::spawn(async move {
+            let running = s.serve(server_io).await.unwrap();
+            running.waiting().await.unwrap();
+        });
+        let client: rmcp::service::RunningService<rmcp::RoleClient, ()> = ().serve(client_io).await.unwrap();
+
+        let listed = client.list_resources(None).await.unwrap();
+        assert!(listed.resources.iter().any(|r| r.uri == SKILLS), "{:?}", listed.resources);
+
+        let resource = client.read_resource(ReadResourceRequestParams::new(SKILLS)).await.unwrap();
+        let text: String = resource.contents.iter().filter_map(|c| match c { ResourceContents::TextResourceContents { text, .. } => Some(text.clone()), _ => None }).collect();
+        let list: SkillList = serde_json::from_str(&text).unwrap();
+        assert!(list.skills.iter().any(|s| s.id == "claude-user:greeter"), "{text}");
+
+        let resource = client.read_resource(ReadResourceRequestParams::new(format!("{SKILLS}claude-user:greeter"))).await.unwrap();
+        let text: String = resource.contents.iter().filter_map(|c| match c { ResourceContents::TextResourceContents { text, .. } => Some(text.clone()), _ => None }).collect();
+        assert!(text.contains("Say hello."), "{text}");
+
+        let missing = client.read_resource(ReadResourceRequestParams::new(format!("{SKILLS}claude-user:nope"))).await;
+        assert!(missing.is_err(), "an unknown skill id is not a resource");
 
         client.cancel().await.unwrap();
     }

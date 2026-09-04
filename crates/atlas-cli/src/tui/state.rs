@@ -650,6 +650,7 @@ mod tests {
             agent_access: Default::default(),
             extraction: None,
             mcp_disabled_tools: vec![],
+            skills_disabled: vec![],
         }
     }
 

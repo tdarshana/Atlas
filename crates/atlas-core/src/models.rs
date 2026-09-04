@@ -133,6 +133,10 @@ pub struct Project {
     /// MCP tool names disabled for this project on top of the global
     /// `mcp.disabled_tools` list. Empty means no project override.
     #[serde(default)] pub mcp_disabled_tools: Vec<String>,
+    /// Skill ids switched off for this project. Empty means every skill that applies
+    /// here is on. The ids are [`SkillSummary::id`] values, so a discovered skill keeps
+    /// its meaning across restarts.
+    #[serde(default)] pub skills_disabled: Vec<String>,
 }
 
 /// Who may write to a project, by actor label. `None` means any actor; a list is an
@@ -262,6 +266,89 @@ pub struct Doc {
     pub updated_at: DateTime<Utc>,
 }
 
+// ---------------------------------------------------------------------------
+// Skills (Phase 15)
+// ---------------------------------------------------------------------------
+
+// Where a skill comes from. `native` is stored in Atlas's own database; the rest are
+// `SKILL.md` folders discovered on disk, at the project level (`claude-project`,
+// `codex-project`), at the user level (`claude-user`, `codex-user`), or inside an
+// installed Claude Code plugin (`plugin`).
+str_enum!(SkillSource {
+    Native => "native",
+    ClaudeProject => "claude-project",
+    ClaudeUser => "claude-user",
+    CodexProject => "codex-project",
+    CodexUser => "codex-user",
+    Plugin => "plugin",
+});
+
+/// One skill as a listing shows it, without its body.
+///
+/// `id` is `"<source>:<path of the skill folder relative to its source root>"` for a
+/// discovered skill (a plugin skill's root is the plugin's `skills` directory, so its id
+/// is `plugin:<marketplace>/<plugin>/<skill>` and survives the plugin being updated into
+/// a new version directory), and the UUID for a native one. Ids are stable across
+/// restarts, so a project's disabled list keeps its meaning.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SkillSummary {
+    pub id: String,
+    pub source: SkillSource,
+    pub name: String,
+    pub description: String,
+    /// `global` for a user, plugin or project-less native skill; `project` for one that
+    /// belongs to a single project. The same two words `MemoryScope` uses.
+    pub scope: MemoryScope,
+    pub project_id: Option<Uuid>,
+    /// Absolute path of the skill folder, for a discovered skill. `None` for a native one.
+    pub path: Option<String>,
+    /// `"<marketplace>/<plugin>"` for a plugin skill, `None` otherwise.
+    pub plugin: Option<String>,
+    /// Whether Atlas can write this skill's body: every native skill, and every
+    /// discovered one whose `SKILL.md` the daemon user may write.
+    pub editable: bool,
+    pub updated_at: Option<DateTime<Utc>>,
+    /// Whether the skill is on for the project a listing was asked about. `None` when
+    /// no project was given.
+    #[serde(default)] pub enabled_here: Option<bool>,
+}
+
+/// One skill with its text: the whole `SKILL.md` (frontmatter included) for a
+/// discovered skill, the stored body for a native one.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Skill {
+    #[serde(flatten)] pub summary: SkillSummary,
+    pub body: String,
+    /// The other files in the skill folder, relative to it, at most 200, for display
+    /// only: nothing reads or writes them.
+    #[serde(default)] pub files: Vec<String>,
+}
+
+/// A skill listing plus whatever discovery could not read. A warning never fails the
+/// listing: one unreadable folder must not hide every other skill.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SkillList {
+    pub skills: Vec<SkillSummary>,
+    #[serde(default)] pub warnings: Vec<String>,
+}
+
+/// A new Atlas-native skill. `project_id` scopes it to one project; `None` is global.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct NewSkill {
+    #[serde(default)] pub project_id: Option<Uuid>,
+    pub name: String,
+    #[serde(default)] pub description: String,
+    #[serde(default)] pub body: String,
+}
+
+/// A patch to a native skill. An absent field is left alone.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SkillUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub body: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RecallQuery {
     pub query: String,
@@ -305,13 +392,16 @@ pub struct SyncOp {
 }
 
 /// Everything an agent needs to start work in a project: the project itself,
-/// the memories worth reading first, and the practices and workflows in scope.
+/// the memories worth reading first, and the practices, workflows and skills in scope.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProjectContext {
     pub project: Project,
     pub memories: Vec<RecallHit>,
     pub practices: Vec<Doc>,
     pub workflows: Vec<WorkflowSummary>,
+    /// The skills that apply here, minus the ones this project switched off, so an
+    /// agent reading its context knows which skills are actually in play.
+    #[serde(default)] pub skills: Vec<SkillSummary>,
 }
 
 /// One sync request. `root` is required unless `global` is set, in which case

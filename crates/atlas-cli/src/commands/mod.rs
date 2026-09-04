@@ -6,6 +6,7 @@ pub mod framework;
 pub mod import;
 pub mod ingest;
 pub mod project;
+pub mod skill;
 pub mod sync;
 pub mod workflow;
 

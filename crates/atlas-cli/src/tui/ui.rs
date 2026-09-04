@@ -502,6 +502,7 @@ mod tests {
             agent_access: Default::default(),
             extraction: None,
             mcp_disabled_tools: vec![],
+            skills_disabled: vec![],
         }
     }
 
@@ -577,6 +578,7 @@ mod tests {
                 memories: vec![hit("uses duckdb")],
                 practices: vec![],
                 workflows: vec![],
+                skills: vec![],
             }),
             ..Default::default()
         };

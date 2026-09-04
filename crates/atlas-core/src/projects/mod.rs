@@ -17,7 +17,7 @@ pub struct ProjectRepo<'a> {
 }
 
 const SEL: &str = "id::text, name, root_path, git_remote, profile::text, created_at::text, last_seen_at::text, board_key, board_stages::text, \
-     agent_access::text, extraction::text, mcp_disabled_tools::text";
+     agent_access::text, extraction::text, mcp_disabled_tools::text, skills_disabled::text";
 
 /// A board key: two to six characters, a letter first, then letters or digits.
 /// Uppercased before the check, so `atl` is accepted and stored as `ATL`.
@@ -153,6 +153,12 @@ fn row(r: &Row) -> duckdb::Result<Project> {
         .transpose()?
         .flatten()
         .unwrap_or_default();
+    let skills_disabled: Option<String> = r.get(12)?;
+    let skills_disabled = skills_disabled
+        .map(|s| serde_json::from_str::<Option<Vec<String>>>(&s).map_err(|e| conv_err(12, Type::Text, e)))
+        .transpose()?
+        .flatten()
+        .unwrap_or_default();
     Ok(Project {
         id: Uuid::parse_str(&r.get::<_, String>(0)?).map_err(|e| conv_err(0, Type::Text, e))?,
         name: r.get(1)?,
@@ -166,6 +172,7 @@ fn row(r: &Row) -> duckdb::Result<Project> {
         agent_access,
         extraction,
         mcp_disabled_tools,
+        skills_disabled,
     })
 }
 
@@ -424,6 +431,21 @@ impl<'a> ProjectRepo<'a> {
         if let Some(names) = &patch.mcp_disabled_tools {
             repo.audit(actor, "set_mcp_disabled_tools", "project", Some(id), serde_json::json!({"disabled": names}))?;
         }
+        self.get(id)
+    }
+
+    /// Replaces the project's disabled-skill list wholesale; an empty list clears the
+    /// override. The ids are not validated here: only the skill service can say which
+    /// ids exist right now, so it checks them (`skills::set_project_skills_disabled`)
+    /// before calling this.
+    pub fn set_skills_disabled(&self, id: Uuid, ids: &[String], actor: &str) -> Result<Project> {
+        self.get(id)?;
+        let json = serde_json::to_string(ids)?;
+        self.db.with_conn(|c| {
+            c.execute("update projects set skills_disabled = ?::json where id = ?", params![json, id.to_string()])?;
+            Ok(())
+        })?;
+        crate::memories::MemoryRepo::new(self.db).audit(actor, "set_skills_disabled", "project", Some(id), serde_json::json!({"disabled": ids}))?;
         self.get(id)
     }
 
@@ -911,7 +933,7 @@ mod tests {
                 "select 'not-a-uuid' as id, 'name' as name, '/root' as root_path, null as git_remote, \
                  null as profile, '2026-01-01 00:00:00' as created_at, '2026-01-01 00:00:00' as last_seen_at, \
                  null as board_key, null as board_stages, null as agent_access, null as extraction, \
-                 null as mcp_disabled_tools",
+                 null as mcp_disabled_tools, null as skills_disabled",
             )?;
             let mut rows = st.query([])?;
             let r = rows.next()?.ok_or_else(|| AtlasError::NotFound("no row".into()))?;
@@ -928,7 +950,7 @@ mod tests {
                 "select gen_random_uuid()::text as id, 'name' as name, '/root' as root_path, null as git_remote, \
                  'not json' as profile, '2026-01-01 00:00:00' as created_at, '2026-01-01 00:00:00' as last_seen_at, \
                  null as board_key, null as board_stages, null as agent_access, null as extraction, \
-                 null as mcp_disabled_tools",
+                 null as mcp_disabled_tools, null as skills_disabled",
             )?;
             let mut rows = st.query([])?;
             let r = rows.next()?.ok_or_else(|| AtlasError::NotFound("no row".into()))?;

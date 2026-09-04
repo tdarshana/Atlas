@@ -67,6 +67,14 @@ fn check_project_root(root: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// The UUID behind a native skill's id. A discovered skill's id is
+/// `<source>:<path>`, which never parses as one, so the two routes that only make
+/// sense for a stored row (`update_skill`, `delete_skill`) refuse a file here rather
+/// than deeper down with a vaguer message.
+pub fn native_skill_id(id: &str) -> Result<Uuid> {
+    id.parse().map_err(|_| AtlasError::Invalid(format!("'{id}' is not an Atlas skill; only Atlas's own skills can be edited that way")))
+}
+
 /// `ProjectOnly` needs a project to narrow to. Refusing here rather than quietly
 /// listing every memory means a caller who asked for one project's own rows never gets
 /// another project's back.
@@ -201,6 +209,29 @@ pub trait Backend: Send + Sync + 'static {
     /// same way a direct task move or memory write is, by the project's
     /// `agent_access`.
     async fn import_framework(&self, project_id: Uuid, kind: FrameworkKind, what: ImportWhat, actor: &str) -> Result<ImportReport>;
+
+    // ---- skills (Phase 15) ----
+    /// Every skill in scope: the Atlas-native ones plus the `SKILL.md` folders found
+    /// under the user's home and, when `project_id` is given, under that project's
+    /// root. A project also fills each summary's `enabled_here`.
+    async fn list_skills(&self, project_id: Option<Uuid>) -> Result<SkillList>;
+    /// One skill with its full text. `project_id` has to name the same project the id
+    /// was listed under, or a project-scoped skill will not resolve.
+    async fn get_skill(&self, project_id: Option<Uuid>, id: &str) -> Result<Skill>;
+    async fn create_skill(&self, s: NewSkill, actor: &str) -> Result<Skill>;
+    /// Edits a native skill's name, description or body. `Invalid` for a discovered
+    /// skill, which has no such fields of its own: its text is edited through
+    /// [`write_skill_body`](Self::write_skill_body).
+    async fn update_skill(&self, id: &str, patch: SkillUpdate, actor: &str) -> Result<Skill>;
+    /// Replaces a skill's text in place: the stored body for a native skill, the whole
+    /// `SKILL.md` for a discovered one. `Invalid` when the skill is not editable.
+    async fn write_skill_body(&self, project_id: Option<Uuid>, id: &str, body: String, actor: &str) -> Result<Skill>;
+    /// Deletes a native skill. `Invalid` for a discovered one: Atlas never removes a
+    /// file it only found.
+    async fn delete_skill(&self, id: &str, actor: &str) -> Result<()>;
+    /// Replaces the project's disabled-skill list. Every id must name a skill that
+    /// applies to the project right now.
+    async fn set_project_skills_disabled(&self, project_id: Uuid, ids: Vec<String>, actor: &str) -> Result<Project>;
 
     // ---- plugin MCP tools (Phase 13b) ----
     /// Every MCP tool the running desktop plugins contribute. Defaulted to empty
@@ -466,9 +497,20 @@ impl Backend for LocalBackend {
             let seen: std::collections::HashSet<Uuid> = hits.iter().map(|h| h.memory.id).collect();
             let recent = memories.list(MemoryStatus::Active, Some(MemoryScope::Project), Some(project.id))?;
             hits.extend(recent.into_iter().filter(|m| !seen.contains(&m.id)).take(10).map(|memory| RecallHit { memory, score: 0.0 }));
+            // The skills an agent may actually use here, so the context says what is in
+            // play rather than everything that exists. Discovery reads directories, so a
+            // failure to read one must not cost the caller its whole context: an error
+            // leaves the list empty rather than failing the call.
+            let skills = crate::skills::list_skills(&db, Some(&project))
+                .map(|l| l.skills.into_iter().filter(|s| s.enabled_here != Some(false)).collect())
+                .unwrap_or_else(|e| {
+                    tracing::warn!("skills unavailable for project context: {e}");
+                    vec![]
+                });
             Ok(ProjectContext {
                 practices: docs_repo(&db, DocKind::Practice).list(Some(project.id))?,
                 workflows: workflows.list(Some(project.id))?.iter().map(WorkflowSummary::from).collect(),
+                skills,
                 project,
                 memories: hits,
             })
@@ -997,6 +1039,58 @@ impl Backend for LocalBackend {
                 }
             }
         }).await
+    }
+
+    // ---- skills (Phase 15) ----
+
+    async fn list_skills(&self, project_id: Option<Uuid>) -> Result<SkillList> {
+        let db = self.db.clone();
+        self.blocking(move || {
+            let project = project_id.map(|id| projects_repo(&db).get(id)).transpose()?;
+            crate::skills::list_skills(&db, project.as_ref())
+        }).await
+    }
+    async fn get_skill(&self, project_id: Option<Uuid>, id: &str) -> Result<Skill> {
+        let db = self.db.clone();
+        let id = id.to_string();
+        self.blocking(move || {
+            let project = project_id.map(|id| projects_repo(&db).get(id)).transpose()?;
+            crate::skills::get_skill(&db, project.as_ref(), &id)
+        }).await
+    }
+    async fn create_skill(&self, s: NewSkill, actor: &str) -> Result<Skill> {
+        let db = self.db.clone();
+        let actor = actor.to_string();
+        self.blocking(move || crate::skills::repo::SkillRepo::new(&db).create(&s, &actor)).await
+    }
+    /// Native only: `id` has to parse as a UUID, which no discovered skill's id does
+    /// (they all carry their source and a colon), so a caller cannot reach a file
+    /// through this route.
+    async fn update_skill(&self, id: &str, patch: SkillUpdate, actor: &str) -> Result<Skill> {
+        let uuid = native_skill_id(id)?;
+        let db = self.db.clone();
+        let actor = actor.to_string();
+        self.blocking(move || crate::skills::repo::SkillRepo::new(&db).update(uuid, &patch, &actor)).await
+    }
+    async fn write_skill_body(&self, project_id: Option<Uuid>, id: &str, body: String, actor: &str) -> Result<Skill> {
+        let db = self.db.clone();
+        let id = id.to_string();
+        let actor = actor.to_string();
+        self.blocking(move || {
+            let project = project_id.map(|id| projects_repo(&db).get(id)).transpose()?;
+            crate::skills::write_skill_body(&db, project.as_ref(), &id, body, &actor)
+        }).await
+    }
+    async fn delete_skill(&self, id: &str, actor: &str) -> Result<()> {
+        let uuid = native_skill_id(id)?;
+        let db = self.db.clone();
+        let actor = actor.to_string();
+        self.blocking(move || crate::skills::repo::SkillRepo::new(&db).delete(uuid, &actor)).await
+    }
+    async fn set_project_skills_disabled(&self, project_id: Uuid, ids: Vec<String>, actor: &str) -> Result<Project> {
+        let db = self.db.clone();
+        let actor = actor.to_string();
+        self.blocking(move || crate::skills::set_project_skills_disabled(&db, project_id, ids, &actor)).await
     }
 
     async fn plugin_tools(&self) -> Result<Vec<PluginToolDecl>> {
