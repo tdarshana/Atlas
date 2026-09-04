@@ -46,19 +46,24 @@
 	font-variant-numeric: var(--tabular);
 }
 
-/* View tab strip: 34px, active tab carries a 2px inset accent underline. */
+/* View tab strip: 34px, active tab carries a 2px inset accent underline. Nine tabs do not
+   all fit at the 1024px minimum window width with the side panel open, so the strip
+   scrolls sideways rather than wrapping or squeezing a label. */
 .tab-strip {
 	display: flex;
 	align-items: stretch;
 	height: var(--h-tabbar);
 	flex: 0 0 var(--h-tabbar);
 	gap: 0;
+	overflow-x: auto;
+	overflow-y: hidden;
 	border-bottom: 1px solid var(--border-subtle);
 	background: var(--bg-surface);
 }
 
 .tab-strip__item {
 	display: inline-flex;
+	flex: 0 0 auto;
 	align-items: center;
 	gap: var(--space-1);
 	height: 100%;

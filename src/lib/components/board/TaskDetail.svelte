@@ -19,6 +19,7 @@
 		DETAIL_MAX,
 		DETAIL_MIN
 	} from '$lib/stores/board.svelte';
+	import { FRAMEWORK_LABEL, reportText } from '$lib/components/project/frameworks';
 	import type { Stage, TaskDetail, TaskKind, TaskPriority } from '$lib/types';
 	import Dialog from '$lib/ui/Dialog.svelte';
 	import { push } from '$lib/ui/toasts.svelte';
@@ -224,6 +225,26 @@
 		void run('Comment added', () => api().commentTask(task.key, body));
 	}
 
+	let reimporting = $state(false);
+
+	/** Re-runs the task import for this task's source framework, so a source file edited
+	 * since the last import is picked up. Toasts the report rather than `run`'s generic
+	 * message, since "3 created, 1 updated, 12 skipped" says more than "Re-imported". */
+	async function reimport() {
+		if (!task?.source_ref || !task.project_id) return;
+		const { project_id, source_ref } = task;
+		reimporting = true;
+		try {
+			const report = await api().importFramework(project_id, source_ref.framework, 'tasks');
+			await onchanged();
+			push('success', reportText(report));
+		} catch (e) {
+			push('error', errorMessage(e));
+		} finally {
+			reimporting = false;
+		}
+	}
+
 	async function confirmDelete() {
 		if (!task) return;
 		// `task` is a live read of `detail`, and `ondeleted` closes the panel, so the
@@ -416,6 +437,23 @@
 				onchange={(e: Event & { currentTarget: HTMLSelectElement }) =>
 					onmove(task.key, e.currentTarget.value)}
 			/>
+
+			{#if task.source_ref}
+				<section>
+					<h3>Source</h3>
+					<div class="row">
+						<Badge tone="accent" mono>{FRAMEWORK_LABEL[task.source_ref.framework]}</Badge>
+						<span class="mono source-path" data-testid="task-source-path">
+							{task.source_ref.path}{task.source_ref.anchor ? `#${task.source_ref.anchor}` : ''}
+						</span>
+					</div>
+					<div class="row">
+						<Button size="sm" data-testid="task-reimport" disabled={reimporting} onclick={reimport}>
+							{reimporting ? 'Re-importing…' : 'Re-import'}
+						</Button>
+					</div>
+				</section>
+			{/if}
 
 			<section>
 				<h3>Blocked by</h3>
@@ -636,6 +674,14 @@
 	.row.end {
 		align-items: flex-end;
 		gap: 6px;
+	}
+
+	.source-path {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		color: var(--text-secondary);
 	}
 
 	.grow {

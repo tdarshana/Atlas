@@ -74,7 +74,7 @@ describe('project tabs', () => {
 		expect(idForPath('/memories')).toBe('');
 	});
 
-	it('gives a project all eight tabs, in the frame order', () => {
+	it('gives a project all nine tabs, in the frame order', () => {
 		const tabs = tabsFor('x');
 		expect(tabs.map((t) => t.id)).toEqual([
 			'profile',
@@ -83,6 +83,7 @@ describe('project tabs', () => {
 			'practices',
 			'agents',
 			'workflows',
+			'frameworks',
 			'log',
 			'settings'
 		]);

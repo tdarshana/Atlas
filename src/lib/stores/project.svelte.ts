@@ -19,6 +19,7 @@ export type ProjectTabId =
 	| 'practices'
 	| 'agents'
 	| 'workflows'
+	| 'frameworks'
 	| 'log'
 	| 'settings';
 
@@ -38,6 +39,7 @@ export const PROJECT_TABS: TabDef[] = [
 	{ id: 'practices', label: 'Practices', icon: 'book-open', segment: 'practices' },
 	{ id: 'agents', label: 'Agents', icon: 'bot', segment: 'agents' },
 	{ id: 'workflows', label: 'Workflows', icon: 'git-branch', segment: 'workflows' },
+	{ id: 'frameworks', label: 'Frameworks', icon: 'list-checks', segment: 'frameworks' },
 	{ id: 'log', label: 'Log', icon: 'history', segment: 'log' },
 	{ id: 'settings', label: 'Project settings', icon: 'settings', segment: 'settings' }
 ];

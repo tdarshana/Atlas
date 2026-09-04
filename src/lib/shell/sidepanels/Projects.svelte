@@ -5,7 +5,9 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { daemon } from '$lib/daemon.svelte';
+	import { FRAMEWORK_LABEL } from '$lib/components/project/frameworks';
 	import { connectProject, loadProjects, pickProjectRoot, projects } from '$lib/stores/projects.svelte';
+	import { project } from '$lib/stores/project.svelte';
 	import TreeGroup from '../TreeGroup.svelte';
 	import TreeRow from '../TreeRow.svelte';
 
@@ -13,6 +15,9 @@
 	const GLOBAL_ID = 'global';
 
 	const openId = $derived(page.params.id ?? '');
+	// The frameworks Atlas detected in the open project, from the last connect or refresh;
+	// empty away from a project, or before that scan has ever run.
+	const frameworks = $derived(project.current?.profile?.planning_frameworks ?? []);
 
 	onMount(() => {
 		// The projects page loads the same list; only fetch when nothing has yet.
@@ -59,6 +64,19 @@
 	{/each}
 	<TreeRow icon="plus" label="Connect a folder…" onclick={connect} />
 </TreeGroup>
+
+{#if openId && openId !== GLOBAL_ID && frameworks.length > 0}
+	<TreeGroup label="Frameworks" count={frameworks.length}>
+		{#each frameworks as fw (fw.kind)}
+			<TreeRow
+				icon="list-checks"
+				label={FRAMEWORK_LABEL[fw.kind]}
+				meta={fw.docs}
+				href={`/projects/${openId}/frameworks`}
+			/>
+		{/each}
+	</TreeGroup>
+{/if}
 
 <span class="spacer"></span>
 
