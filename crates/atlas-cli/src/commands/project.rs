@@ -107,6 +107,16 @@ fn merge_mcp_tools(current: Vec<String>, disable: Vec<String>, enable: Vec<Strin
     tools.into_iter().collect()
 }
 
+/// Rejects an unknown name in `--mcp-enable` before the merge: `BTreeSet::remove` is a
+/// silent no-op for a name that was never disabled, so a typo would otherwise report
+/// success and change nothing. `--mcp-disable` fails the same way already, server-side,
+/// since every disabled name ends up validated; this gives `--mcp-enable` the identical
+/// error shape without a round trip to find out.
+fn validate_enable(names: &[String]) -> anyhow::Result<()> {
+    atlas_core::settings::validate_mcp_tool_names(names)?;
+    Ok(())
+}
+
 pub async fn run(cmd: ProjectCmd, backend: &RemoteBackend) -> anyhow::Result<()> {
     match cmd {
         ProjectCmd::Connect { path } => super::print_json(&backend.connect_project(super::abs_path(path)?, "cli").await?),
@@ -131,6 +141,7 @@ pub async fn run(cmd: ProjectCmd, backend: &RemoteBackend) -> anyhow::Result<()>
             let mcp_disabled_tools = if mcp_disable.is_empty() && mcp_enable.is_empty() {
                 None
             } else {
+                validate_enable(&mcp_enable)?;
                 let current = backend.get_project(id).await?.mcp_disabled_tools;
                 Some(merge_mcp_tools(current, mcp_disable, mcp_enable))
             };
@@ -221,5 +232,18 @@ mod tests {
     fn mcp_disable_and_enable_together_apply_both_sides() {
         let merged = merge_mcp_tools(v(&["memory_forget"]), v(&["task_move"]), v(&["memory_forget"]));
         assert_eq!(merged, v(&["task_move"]));
+    }
+
+    /// An unknown `--mcp-enable` name fails with the same message shape a `--mcp-disable`
+    /// typo gets from server-side validation, instead of silently changing nothing.
+    #[test]
+    fn mcp_enable_of_an_unknown_tool_name_fails_loudly() {
+        let err = validate_enable(&v(&["not_a_real_tool"])).unwrap_err();
+        assert_eq!(err.to_string(), "invalid input: unknown MCP tool name 'not_a_real_tool'");
+    }
+
+    #[test]
+    fn mcp_enable_of_a_known_tool_name_passes_validation() {
+        assert!(validate_enable(&v(&["task_move"])).is_ok());
     }
 }

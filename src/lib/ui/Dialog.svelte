@@ -47,7 +47,7 @@
 
 <style>
 	.dialog {
-		width: min(560px, calc(100vw - 32px));
+		width: min(560px, calc(100vw / var(--ui-zoom, 1) - 32px));
 		padding: 0;
 		border: 1px solid var(--border-default);
 		border-radius: var(--radius-lg);

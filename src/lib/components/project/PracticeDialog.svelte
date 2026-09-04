@@ -101,10 +101,10 @@
 				</button>
 			</span>
 			<Textarea bind:value={body} mono rows={12} data-testid="practice-body" />
-			{#if previewing}
-				<MarkdownView source={body} showHeader={false} />
-			{/if}
 		</label>
+		{#if previewing}
+			<MarkdownView source={body} showHeader={false} />
+		{/if}
 
 		<label class="field">
 			<span>Tags</span>

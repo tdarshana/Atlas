@@ -215,14 +215,7 @@
 		hint="Set the board's stages in Settings, or on a project to give it its own."
 	/>
 {:else}
-	<!-- Relative, so the detail can dock over the strip's right edge and the lanes keep
-	     scrolling beneath it. `--detail-w` is the panel's width and the room the strip has
-	     to reserve; the drag rewrites it on this node so both follow the pointer. -->
-	<div
-		class="dock"
-		class:docked={!!board.selected}
-		style="--detail-w:{board.detailWidth}px"
-	>
+	<div class="dock" style="--detail-w:{board.detailWidth}px">
 		<LaneStrip
 			{lanes}
 			widths={board.laneWidths}
@@ -283,7 +276,6 @@
 		gap: 12px;
 		flex: 1;
 		min-height: 0;
-		--strip-reserve: 0px;
 	}
 
 	/* Full-height DS inputs: the toolbar row under the tab strip has room for them. */

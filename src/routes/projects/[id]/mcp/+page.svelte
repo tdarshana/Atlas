@@ -218,7 +218,7 @@
 		</div>
 
 		<div class="group" id="clients">
-			<span class="group-heading">Clients</span>
+			<span class="group-heading">Connected clients (HTTP sessions)</span>
 			<div class="clients-table" data-testid="project-mcp-clients">
 				<Table
 					id="project-mcp-clients"
@@ -238,7 +238,7 @@
 						{/if}
 					{/snippet}
 					{#snippet empty()}
-						<span class="hint">No client has called into this project yet.</span>
+						<span class="hint">No HTTP client has called into this project yet.</span>
 					{/snippet}
 				</Table>
 			</div>

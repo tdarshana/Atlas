@@ -26,20 +26,24 @@
 		href="/mcp#tools"
 		onclick={jump('tools')}
 	/>
-	<TreeRow
-		icon="file"
-		label="Resources"
-		meta={counts.resources}
-		href="/mcp#resources"
-		onclick={jump('resources')}
-	/>
-	<TreeRow
-		icon="braces"
-		label="Prompts"
-		meta={counts.prompts}
-		href="/mcp#prompts"
-		onclick={jump('prompts')}
-	/>
+	{#if counts.resources > 0}
+		<TreeRow
+			icon="file"
+			label="Resources"
+			meta={counts.resources}
+			href="/mcp#resources"
+			onclick={jump('resources')}
+		/>
+	{/if}
+	{#if counts.prompts > 0}
+		<TreeRow
+			icon="braces"
+			label="Prompts"
+			meta={counts.prompts}
+			href="/mcp#prompts"
+			onclick={jump('prompts')}
+		/>
+	{/if}
 	<TreeRow
 		icon="plug"
 		label="Clients"

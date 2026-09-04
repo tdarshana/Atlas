@@ -133,10 +133,10 @@
 				</button>
 			</span>
 			<Textarea bind:value={body} mono rows={12} data-testid="doc-body" />
-			{#if previewing}
-				<MarkdownView source={body} showHeader={false} />
-			{/if}
 		</label>
+		{#if previewing}
+			<MarkdownView source={body} showHeader={false} />
+		{/if}
 
 		<div class="pair">
 			<label class="field">

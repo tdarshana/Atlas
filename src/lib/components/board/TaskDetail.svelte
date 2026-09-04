@@ -148,6 +148,9 @@
 	});
 
 	function onWindowKey(event: KeyboardEvent) {
+		// The native <dialog> in modal mode handles its own Escape (close -> onModalClose
+		// -> onclose), so this handler would otherwise call onclose() a second time.
+		if (mode === 'modal') return;
 		// The delete dialog is modal and closes itself on Escape.
 		if (event.key !== 'Escape' || confirming) return;
 		onclose();
@@ -559,7 +562,6 @@
 </Dialog>
 
 <style>
-	/* Docked over the strip rather than beside it, so the lanes keep scrolling beneath. */
 	/* Docked: a flex sibling of the lane strip, so the strip gives up the room rather
 	   than being drawn over. */
 	.detail {

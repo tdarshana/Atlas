@@ -111,13 +111,19 @@ const ALLOWED_ATTR = [
 	'disabled'
 ];
 
+// An isolated instance rather than the shared global `DOMPurify` object: the hooks below
+// are specific to this module's rules, and registering them on the global would let them
+// silently apply to any other `sanitize()` call added elsewhere later, and stack a second
+// copy of both on an HMR re-import.
+const purify = DOMPurify(typeof window === 'undefined' ? undefined : window);
+
 // `input` is allowed only for a GFM task-list checkbox (`marked`'s own output, always
 // `type="checkbox" disabled`); an `<a>` is allowed only with an http(s) `href`, the same rule
 // the custom `link()` renderer above applies to Markdown-syntax links, so a raw HTML anchor a
 // document's own markup contains cannot smuggle a `javascript:`, `data:` or relative link past
 // it. `ALLOWED_URI_REGEXP` on the `sanitize()` call already strips a disallowed `href`; this
 // hook additionally drops the anchor itself, so the two paths behave identically.
-DOMPurify.addHook('uponSanitizeElement', (node, event) => {
+purify.addHook('uponSanitizeElement', (node, event) => {
 	if (event.tagName === 'a') {
 		const href = (node as Element).getAttribute('href');
 		if (href && !isHttpUrl(href)) (node as Element).remove();
@@ -138,7 +144,7 @@ DOMPurify.addHook('uponSanitizeElement', (node, event) => {
 const URI_SAFE_ATTR = ['type', 'checked', 'disabled', 'start', 'align', 'colspan', 'rowspan'];
 
 function sanitize(html: string): string {
-	return DOMPurify.sanitize(html, {
+	return purify.sanitize(html, {
 		ALLOWED_TAGS,
 		ALLOWED_ATTR,
 		ADD_URI_SAFE_ATTR: URI_SAFE_ATTR,

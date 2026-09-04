@@ -29,8 +29,16 @@
 	let startX = 0;
 	let startWidth = 0;
 	let live = 0;
+	let zoom = 1;
 
 	const clampWidth = (w: number) => Math.min(max, Math.max(min, w));
+
+	/** `--ui-zoom` scales the whole app via CSS `zoom` on `documentElement`, which does not
+	    scale `PointerEvent.clientX`: a viewport-pixel pointer delta has to be converted back
+	    to layout pixels before it is added to a layout-pixel width. */
+	function readZoom(): number {
+		return Number(getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom')) || 1;
+	}
 
 	function grab(event: PointerEvent) {
 		(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
@@ -38,12 +46,13 @@
 		startX = event.clientX;
 		startWidth = value;
 		live = value;
+		zoom = readZoom();
 		event.preventDefault();
 	}
 
 	function drag(event: PointerEvent) {
 		if (!dragging) return;
-		live = clampWidth(startWidth + sign * (event.clientX - startX));
+		live = clampWidth(startWidth + (sign * (event.clientX - startX)) / zoom);
 		onlive?.(live);
 	}
 
@@ -66,7 +75,7 @@
 		const step = event.key === 'ArrowLeft' ? -20 : event.key === 'ArrowRight' ? 20 : 0;
 		if (step === 0) return;
 		event.preventDefault();
-		onresize(clampWidth(value + sign * step));
+		onresize(clampWidth(value + (sign * step) / readZoom()));
 	}
 </script>
 
