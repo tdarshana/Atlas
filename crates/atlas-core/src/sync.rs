@@ -182,7 +182,7 @@ fn block_op(kind: SyncKind, path: PathBuf, block: &BlockContext) -> Result<SyncO
 
 /// A framework's own instruction file (`CLAUDE.md`, `AGENTS.md`, or whatever else an
 /// adapter's `instruction_targets` names): the same managed block `block_op` splices
-/// into `AGENTS.md`/`CLAUDE.md`, but the file itself is never created here — Atlas
+/// into `AGENTS.md`/`CLAUDE.md`, but the file itself is never created here: Atlas
 /// only edits inside one that already exists. `instruction_targets` already filters
 /// to files present on disk, so this only turns up empty if one was removed between
 /// that call and this write; treated as a skip rather than a create in that case.
@@ -643,8 +643,8 @@ mod tests {
     }
 
     /// `FrameworkInstructions` writes the managed block into a detected framework's
-    /// instruction files that already exist, and produces no op at all — not even a
-    /// skip — for one that doesn't: Atlas never creates a framework's own file.
+    /// instruction files that already exist, and produces no op at all, not even a
+    /// skip, for one that doesn't: Atlas never creates a framework's own file.
     #[test]
     fn framework_instructions_writes_only_into_existing_instruction_files() {
         let d = tempfile::tempdir().unwrap();

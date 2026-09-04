@@ -46,8 +46,8 @@ fn adapter_for(kind: FrameworkKind) -> Result<Box<dyn frameworks::FrameworkAdapt
 ///
 /// Every task write is attributed to `import/<kind>` (both `created_by` and the
 /// event actor), so the board history shows the item came from the framework
-/// rather than from whoever triggered the import; `actor` — the caller that
-/// triggered it — is recorded on one summary audit row instead.
+/// rather than from whoever triggered the import; `actor`, the caller that
+/// triggered it, is recorded on one summary audit row instead.
 pub fn import_tasks(tasks: &TaskRepo, memories: &MemoryRepo, project: &Project, kind: FrameworkKind, actor: &str) -> Result<ImportReport> {
     let adapter = adapter_for(kind)?;
     let root = Path::new(&project.root_path);
