@@ -19,7 +19,7 @@ vi.mock('$lib/daemon.svelte', () => ({
 	boot: async () => {}
 }));
 
-import { board, deriveColumns, move, refresh, stageRenames, validateStages } from './board.svelte';
+import { backTask, board, closeTask, deriveColumns, move, openTask, refresh, stageRenames, validateStages } from './board.svelte';
 
 const STAGES: Stage[] = [
 	{ name: 'Backlog', done: false },
@@ -189,6 +189,33 @@ describe('refresh', () => {
 		expect(call.top_level).toBeUndefined();
 		expect(call.query).toBe('widget');
 		board.filters.hideSubtasks = false;
+	});
+});
+
+describe('openTask history', () => {
+	it('remembers the task a subtask was opened from, steps back to it once, and forgets on close', async () => {
+		mocks.getTask.mockResolvedValue(null);
+		closeTask();
+
+		openTask('ATL-1');
+		expect(board.detailHistory).toEqual([]);
+		openTask('ATL-2');
+		expect(board.selected).toBe('ATL-2');
+		expect(board.detailHistory).toEqual(['ATL-1']);
+		// Reopening the same task adds nothing.
+		openTask('ATL-2');
+		expect(board.detailHistory).toEqual(['ATL-1']);
+
+		backTask();
+		expect(board.selected).toBe('ATL-1');
+		expect(board.detailHistory).toEqual([]);
+		backTask();
+		expect(board.selected).toBe('ATL-1');
+
+		openTask('ATL-3');
+		closeTask();
+		expect(board.selected).toBeNull();
+		expect(board.detailHistory).toEqual([]);
 	});
 });
 

@@ -249,6 +249,9 @@ export const board = $state({
 	errorLogPath: null as string | null,
 	/** The key of the task open in the drawer. */
 	selected: null as string | null,
+	/** The keys opened before the current one, newest last, so the detail can step
+	 * back from a subtask to the parent it was opened from. Cleared on close. */
+	detailHistory: [] as string[],
 	detail: null as TaskDetail | null,
 	detailLoading: false,
 	detailError: null as string | null,
@@ -494,7 +497,25 @@ export async function loadDetail(key: string): Promise<void> {
 	}
 }
 
+/** How many earlier tasks the detail remembers for its back button. */
+export const DETAIL_HISTORY_MAX = 20;
+
 export function openTask(key: string): void {
+	if (board.selected && board.selected !== key) {
+		board.detailHistory = [...board.detailHistory, board.selected].slice(-DETAIL_HISTORY_MAX);
+	}
+	show(key);
+}
+
+/** Reopens the task the current one was opened from, if there is one. */
+export function backTask(): void {
+	const previous = board.detailHistory.at(-1);
+	if (!previous) return;
+	board.detailHistory = board.detailHistory.slice(0, -1);
+	show(previous);
+}
+
+function show(key: string): void {
 	board.selected = key;
 	board.detail = null;
 	board.detailError = null;
@@ -504,6 +525,7 @@ export function openTask(key: string): void {
 export function closeTask(): void {
 	detailGeneration++;
 	board.selected = null;
+	board.detailHistory = [];
 	board.detail = null;
 	board.detailError = null;
 	board.detailLoading = false;

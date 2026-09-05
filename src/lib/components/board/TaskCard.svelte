@@ -20,6 +20,15 @@
 
 	let { task, stageOptions, selected, onopen, onmove }: Props = $props();
 
+	// Selection can come from somewhere other than a click on this card (a subtask row in
+	// the detail, `?task=` in the URL), so the selected card brings itself on screen.
+	let el: HTMLDivElement | undefined = $state();
+	$effect(() => {
+		if (selected && el && typeof el.scrollIntoView === 'function') {
+			el.scrollIntoView({ block: 'nearest' });
+		}
+	});
+
 	function activate(event: KeyboardEvent) {
 		if (event.key !== 'Enter' && event.key !== ' ') return;
 		event.preventDefault();
@@ -34,6 +43,7 @@
 
 <!-- A row in a grid is the pattern the Table uses, so a card carries the same roles. -->
 <div
+	bind:this={el}
 	class="card"
 	class:selected
 	class:subtask={task.parent_key !== null}

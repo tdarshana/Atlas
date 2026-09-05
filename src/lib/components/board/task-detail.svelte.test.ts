@@ -83,10 +83,7 @@ function detail(): TaskDetailType {
 	};
 }
 
-function open(
-	d: TaskDetailType | null = detail(),
-	overrides: { onchanged?: () => Promise<void>; onclose?: () => void } = {}
-) {
+function open(d: TaskDetailType | null = detail(), overrides: Record<string, unknown> = {}) {
 	return render(TaskDetail, {
 		props: {
 			detail: d,
@@ -105,6 +102,39 @@ function open(
 		}
 	});
 }
+
+describe('TaskDetail parent and back', () => {
+	it('names the parent above a subtask title and opens it from that line', async () => {
+		const opened: string[] = [];
+		const d = detail();
+		d.task = { ...d.task, parent_id: 'id-ATL-0', parent_key: 'ATL-0', parent_title: 'The parent' };
+		const { container } = open(d, { onopen: (key: string) => opened.push(key) });
+
+		const line = container.querySelector('[data-testid="task-detail-parent"]')!;
+		expect(line.textContent).toContain('ATL-0');
+		expect(line.textContent).toContain('The parent');
+		await fireEvent.click(line);
+		expect(opened).toEqual(['ATL-0']);
+	});
+
+	it('draws no parent line on a top-level task', () => {
+		const { container } = open();
+		expect(container.querySelector('[data-testid="task-detail-parent"]')).toBeNull();
+	});
+
+	it('shows the back button only with a task to go back to, and it calls onback', async () => {
+		const none = open();
+		expect(none.container.querySelector('[data-testid="task-detail-back"]')).toBeNull();
+		none.unmount();
+
+		let backs = 0;
+		const { container } = open(detail(), { backKey: 'ATL-0', onback: () => backs++ });
+		const back = container.querySelector('[data-testid="task-detail-back"]')!;
+		expect(back.getAttribute('aria-label')).toBe('Back to ATL-0');
+		await fireEvent.click(back);
+		expect(backs).toBe(1);
+	});
+});
 
 describe('TaskDetail tabs', () => {
 	it('shows three tabs with the subtasks, non-comment and comment counts in a badge', () => {

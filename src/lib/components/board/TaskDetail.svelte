@@ -9,7 +9,7 @@
 	import { onMount, untrack } from 'svelte';
 	import { ApiError } from '$lib/api';
 	import { api } from '$lib/daemon.svelte';
-	import { Badge, Button, IconButton, Input, Select } from '$lib/ds';
+	import { Badge, Button, Icon, IconButton, Input, Select } from '$lib/ds';
 	import { errorMessage } from '$lib/errors';
 	import { relativeAge } from '$lib/format';
 	import { copyText, TabStrip, type Tab } from '$lib/shell';
@@ -48,8 +48,11 @@
 		onmove: (key: string, stage: string) => void;
 		ondeleted: () => void | Promise<void>;
 		onresize: (width: number) => void;
-		/** Opens a subtask in this same detail. Absent in tests that don't need it. */
+		/** Opens a subtask or the parent in this same detail. Absent in tests that don't need it. */
 		onopen?: (key: string) => void;
+		/** The task this one was opened from, for the back button; null hides it. */
+		backKey?: string | null;
+		onback?: () => void;
 	}
 
 	let {
@@ -65,7 +68,9 @@
 		onmove,
 		ondeleted,
 		onresize,
-		onopen
+		onopen,
+		backKey = null,
+		onback
 	}: Props = $props();
 
 	const KINDS: TaskKind[] = ['task', 'bug', 'feature', 'chore'];
@@ -530,6 +535,15 @@
 	{/if}
 
 	<header>
+		{#if backKey}
+			<IconButton
+				size="sm"
+				icon="arrow-left"
+				label="Back to {backKey}"
+				data-testid="task-detail-back"
+				onclick={() => onback?.()}
+			/>
+		{/if}
 		<span class="key">{task?.key ?? ''}</span>
 		{#if task}
 			<IconButton
@@ -567,6 +581,23 @@
 		{:else if !task}
 			<p class="muted">{loading ? 'Loading…' : 'No task open.'}</p>
 		{:else}
+			{#if task.parent_key}
+				<!-- A subtask names its parent above its title, the way Jira draws the
+				     breadcrumb; the line opens the parent in this same panel. -->
+				<button
+					type="button"
+					class="parent"
+					data-testid="task-detail-parent"
+					title="Subtask of {task.parent_key}"
+					onclick={() => {
+						if (task?.parent_key) onopen?.(task.parent_key);
+					}}
+				>
+					<Icon name="corner-down-right" size={12} />
+					<code>{task.parent_key}</code>
+					{#if task.parent_title}<span class="parent-title">{task.parent_title}</span>{/if}
+				</button>
+			{/if}
 			<div class="field">
 				{#if titleEditing}
 					<textarea
@@ -942,6 +973,41 @@
 
 	.spacer {
 		flex: 1;
+	}
+
+	.parent {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		min-width: 0;
+		padding: 0;
+		border: 0;
+		background: none;
+		color: var(--text-tertiary);
+		font: inherit;
+		font-size: 11px;
+		cursor: pointer;
+		text-align: left;
+	}
+
+	.parent code {
+		font-family: var(--font-mono);
+		flex: 0 0 auto;
+	}
+
+	.parent:hover {
+		color: var(--text-secondary);
+	}
+
+	.parent:focus-visible {
+		outline: var(--focus-ring-width) solid var(--focus-ring);
+		outline-offset: 1px;
+	}
+
+	.parent-title {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
 	.body {

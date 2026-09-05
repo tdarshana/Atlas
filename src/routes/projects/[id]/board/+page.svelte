@@ -27,6 +27,7 @@
 		loadLayout,
 		move,
 		openTask,
+		backTask,
 		refresh,
 		reload,
 		scheduleRefresh,
@@ -249,6 +250,8 @@
 				onmove={(key, stage) => void move(key, stage)}
 				onresize={setDetailWidth}
 				onopen={openTask}
+				backKey={board.detailHistory.at(-1) ?? null}
+				onback={backTask}
 				ondeleted={() => {
 					closeTask();
 					return refresh();
