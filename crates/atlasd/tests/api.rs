@@ -2678,6 +2678,35 @@ async fn plugin_app(
     (handle, close_tx)
 }
 
+/// SEC-1: a browser page on another loopback port must not be able to become the app.
+/// The loopback guard passes any `http://localhost:<port>` origin and WebSockets skip
+/// CORS, so the channel refuses an upgrade whose `Origin` is not one of the app's own
+/// (or the Vite dev server's); a request with no `Origin` is a non-browser client.
+#[tokio::test]
+async fn plugin_channel_refuses_foreign_loopback_origins() {
+    use tokio_tungstenite::tungstenite::{ClientRequestBuilder, Error};
+    let d = start().await;
+    let uri: tokio_tungstenite::tungstenite::http::Uri = format!("ws://127.0.0.1:{}/api/v1/mcp/plugin-channel", d.port).parse().unwrap();
+
+    let foreign = ClientRequestBuilder::new(uri.clone()).with_header("Origin", "http://localhost:8888");
+    match tokio_tungstenite::connect_async(foreign).await {
+        Err(Error::Http(resp)) => {
+            assert_eq!(resp.status(), 403, "{resp:?}");
+            let body = String::from_utf8_lossy(resp.body().as_deref().unwrap_or_default()).into_owned();
+            assert!(body.contains("forbidden origin"), "{body}");
+        }
+        Ok(_) => panic!("a page on http://localhost:8888 opened the plugin channel"),
+        Err(e) => panic!("expected a 403 handshake response, got {e}"),
+    }
+
+    let dev = ClientRequestBuilder::new(uri.clone()).with_header("Origin", "http://localhost:1420");
+    let (mut socket, _) = tokio_tungstenite::connect_async(dev).await.expect("the Vite dev origin was refused");
+    let _ = futures_util::SinkExt::close(&mut socket).await;
+
+    let (mut socket, _) = tokio_tungstenite::connect_async(uri).await.expect("a request with no Origin was refused");
+    let _ = futures_util::SinkExt::close(&mut socket).await;
+}
+
 /// A registered plugin tool is listed to an MCP client under its `plugin__` name, a call
 /// is forwarded down the channel and its result comes back, the `mcp/status` report
 /// names the plugin as the row's source, `mcp.disabled_tools` hides it the way it hides

@@ -1025,10 +1025,37 @@ async fn call_plugin_tool(State(s): State<AppState>, ApiPath((plugin_id, name)):
     Ok(Json(s.backend.call_plugin_tool(&plugin_id, &name, b.args, &actor).await?))
 }
 
+/// Whether a plugin channel upgrade may proceed: no `Origin` (a non-browser client such as
+/// the Tauri host or a test) or one of `CORS_ORIGINS`. The loopback guard alone is not
+/// enough here: it admits any `http://localhost:<port>` page, WebSockets skip CORS, and
+/// whoever holds the channel becomes the process every plugin tool call is forwarded to.
+fn plugin_channel_origin_ok(headers: &HeaderMap) -> bool {
+    headers.get(header::ORIGIN).is_none_or(|v| v.to_str().is_ok_and(is_cors_origin))
+}
+
 /// `GET /api/v1/mcp/plugin-channel`: the desktop app's end of the forwarding channel.
-/// Behind the same loopback guard as every other route, which is the whole of the
-/// authentication story here: anything that can reach this port can already read and
+/// Behind the loopback guard like every other route, plus an `Origin` check of its own
+/// (`plugin_channel_origin_ok`): only the app's webview, the Vite dev server or a client
+/// that sends no `Origin` may hold the channel. Anything that passes can already read and
 /// write the database over the JSON API.
-async fn plugin_channel(State(s): State<AppState>, upgrade: axum::extract::ws::WebSocketUpgrade) -> Response {
+async fn plugin_channel(State(s): State<AppState>, headers: HeaderMap, upgrade: axum::extract::ws::WebSocketUpgrade) -> Response {
+    if !plugin_channel_origin_ok(&headers) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "forbidden origin"}))).into_response();
+    }
     upgrade.on_upgrade(move |socket| s.plugin_tools.clone().serve(socket))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_channel_admits_only_the_app_origins_or_no_origin() {
+        let with = |origin: &str| { let mut h = HeaderMap::new(); h.insert(header::ORIGIN, origin.parse().unwrap()); h };
+        assert!(plugin_channel_origin_ok(&HeaderMap::new()), "non-browser clients send no Origin");
+        for origin in CORS_ORIGINS { assert!(plugin_channel_origin_ok(&with(origin)), "{origin}"); }
+        for origin in ["http://localhost:8888", "http://127.0.0.1:7433", "http://localhost", "https://example.com", "null"] {
+            assert!(!plugin_channel_origin_ok(&with(origin)), "{origin} must not open the channel");
+        }
+    }
 }
