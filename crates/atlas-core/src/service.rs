@@ -320,39 +320,43 @@ impl MemoryService {
         Ok(hits)
     }
 
-    /// The active memory closest to `text` and its cosine similarity, for the
-    /// extraction worker's duplicate check. `None` when there is nothing to
-    /// compare against: no embedding model, an embedder that fails on this text,
-    /// or no active memory in scope with a stored vector. A caller that gets
-    /// `None` has to fall back to comparing the text itself.
+    /// For each of `texts`, the active memory closest to it and its cosine
+    /// similarity, for the extraction worker's duplicate check. An entry is `None`
+    /// when there is nothing to compare against: no embedding model, an embedder
+    /// that fails on the batch, or no active memory in scope with a stored vector.
+    /// A caller that gets `None` has to fall back to comparing the text itself.
+    /// The scope is listed once and the texts go to the embedder in one call, so a
+    /// batch costs one listing and one inference rather than one of each per text.
     ///
     /// `project_id` bounds the comparison, because the daemon serves every project
     /// at once and `vectors` spans all of them. `Some(p)` compares against that
     /// project's memories plus every global one; `None` compares against global
     /// memories only, so a project's wording never suppresses a global candidate.
-    pub fn nearest_active(&self, text: &str, project_id: Option<Uuid>) -> Result<Option<(Uuid, f64)>> {
+    pub fn nearest_active(&self, texts: &[String], project_id: Option<Uuid>) -> Result<Vec<Option<(Uuid, f64)>>> {
+        let none = || Ok(vec![None; texts.len()]);
         let emb = self.emb();
-        if emb.dims() == 0 { return Ok(None); }
+        if texts.is_empty() || emb.dims() == 0 { return none(); }
         // Which ids are in scope comes first: with nothing to compare against there is
-        // no reason to spend an embedding on the candidate. `list_active` with a project
+        // no reason to spend an embedding on the batch. `list_active` with a project
         // widens to that project plus every global memory, which is the rule wanted here.
         let scope = project_id.is_none().then_some(MemoryScope::Global);
         let allowed: std::collections::HashSet<Uuid> =
             self.repo().list_active(scope, project_id)?.into_iter().map(|m| m.id).collect();
-        if allowed.is_empty() { return Ok(None); }
-        let qvec = match emb.embed(&[text.to_string()]) {
-            Ok(mut v) if !v.is_empty() => v.remove(0),
-            Ok(_) => return Ok(None),
+        if allowed.is_empty() { return none(); }
+        let qvecs = match emb.embed(texts) {
+            Ok(v) if v.len() == texts.len() => v,
+            Ok(_) => return none(),
             // A failure here is recorded so `status()` surfaces it, exactly as in `recall`,
             // but it must not fail the ingest: the caller falls back to text comparison.
-            Err(e) => { *self.err_write() = Some(e.to_string()); return Ok(None); }
+            Err(e) => { *self.err_write() = Some(e.to_string()); return none(); }
         };
         let vectors = self.vec_read();
-        Ok(vectors
-            .iter()
-            .filter(|(id, _)| allowed.contains(*id))
-            .map(|(id, v)| (*id, cosine(&qvec, v)))
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)))
+        let in_scope: Vec<(Uuid, &Vec<f32>)> = vectors.iter().filter(|(id, _)| allowed.contains(*id)).map(|(id, v)| (*id, v)).collect();
+        Ok(qvecs.iter().map(|qv| {
+            in_scope.iter()
+                .map(|(id, v)| (*id, cosine(qv, v)))
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        }).collect())
     }
 
     /// Appends an audit row under the write gate, so a caller outside this type

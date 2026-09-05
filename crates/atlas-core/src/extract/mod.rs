@@ -313,11 +313,14 @@ pub fn dedupe(candidates: Vec<Candidate>, memories: &MemoryService, project_id: 
     for status in [MemoryStatus::Active, MemoryStatus::Pending] {
         seen.extend(memories.list(status, scope, project_id)?.into_iter().map(|m| normalize_text(&m.text)));
     }
+    // One embedder call for the whole batch, not one per candidate.
+    let texts: Vec<String> = candidates.iter().map(|c| c.text.clone()).collect();
+    let nearest = memories.nearest_active(&texts, project_id)?;
     let mut kept = Vec::with_capacity(candidates.len());
-    for c in candidates {
+    for (c, nearest) in candidates.into_iter().zip(nearest) {
         let normalized = normalize_text(&c.text);
         let duplicate = seen.contains(&normalized)
-            || memories.nearest_active(&c.text, project_id)?.is_some_and(|(_, score)| score >= DUPLICATE_COSINE);
+            || nearest.is_some_and(|(_, score)| score >= DUPLICATE_COSINE);
         if duplicate {
             continue;
         }
@@ -863,6 +866,44 @@ mod tests {
         let bun = || vec![candidate("the runtime is bun")];
         assert!(dedupe(bun(), &s, Some(b)).unwrap().is_empty(), "a global memory suppresses a candidate in any project");
         assert!(dedupe(bun(), &s, None).unwrap().is_empty());
+    }
+
+    /// Bag-of-words embedder (8 hashed buckets, L2-normalized) that records the
+    /// number of texts each `embed` call carried.
+    struct CountingEmbedder(std::sync::Mutex<Vec<usize>>);
+    impl crate::search::Embedder for CountingEmbedder {
+        fn name(&self) -> &str { "fake" }
+        fn dims(&self) -> usize { 8 }
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            self.0.lock().unwrap().push(texts.len());
+            Ok(texts.iter().map(|t| {
+                let mut buckets = [0f32; 8];
+                for tok in crate::search::tokenize(t) {
+                    let h = tok.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+                    buckets[(h % 8) as usize] += 1.0;
+                }
+                let norm = buckets.iter().map(|x| x * x).sum::<f32>().sqrt();
+                if norm > 0.0 { for b in buckets.iter_mut() { *b /= norm; } }
+                buckets.to_vec()
+            }).collect())
+        }
+    }
+
+    /// With an embedder, the whole batch is embedded in one call rather than once
+    /// per candidate, and a candidate close to a stored memory is still dropped.
+    #[test]
+    fn dedupe_embeds_the_batch_once() {
+        let emb = Arc::new(CountingEmbedder(std::sync::Mutex::new(vec![])));
+        let s = MemoryService::new(Arc::new(Db::open_in_memory().unwrap()), emb.clone()).unwrap();
+        s.remember(stored("bun is the javascript runtime here", MemoryStatus::Active), "t").unwrap();
+        emb.0.lock().unwrap().clear();
+        let out = dedupe(vec![
+            candidate("bun is javascript runtime here"),
+            candidate("deploy target is fly.io"),
+            candidate("the api listens on port 3210"),
+        ], &s, None).unwrap();
+        assert_eq!(out.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(), vec!["deploy target is fly.io", "the api listens on port 3210"]);
+        assert_eq!(emb.0.lock().unwrap().clone(), vec![3], "one embed call for the whole batch");
     }
 
     #[test]
