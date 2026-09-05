@@ -23,7 +23,7 @@ use commands::platform::{
 use commands::permissions::{permission_request, permissions_status};
 use plugins::{
     plugin_install_folder, plugin_install_github, plugin_read_file, plugin_read_main,
-    plugin_set_enabled, plugin_set_permissions, plugin_uninstall, plugins_list,
+    plugin_frame_nonce, plugin_set_enabled, plugin_set_permissions, plugin_uninstall, plugins_list, FrameNonces,
 };
 
 const DEFAULT_PORT: u16 = 7433;
@@ -187,6 +187,7 @@ pub fn run() {
         // which blocks the plugin's script.
         .register_uri_scheme_protocol(plugins::protocol::SCHEME, plugins::protocol::handle)
         .manage(ShortcutRegistration::default())
+        .manage(FrameNonces::default())
         .manage(VaultState::default())
         .manage(UpdateState::default())
         // macOS keeps its own chrome under the overlay title bar; Windows and Linux draw
@@ -258,6 +259,7 @@ pub fn run() {
             update_check,
             update_install,
             plugins_list,
+            plugin_frame_nonce,
             plugin_install_folder,
             plugin_install_github,
             plugin_set_enabled,

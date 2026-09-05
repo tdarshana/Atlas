@@ -50,6 +50,8 @@ serde_json = "1"
 # (the boot-time shortcut restore, when the daemon or the stored shortcut is unusable)
 # reaches the same log file and webview console every other log line does.
 log = "0.4"
+# SEC-6: per-frame nonces for the atlas-plugin scheme. Already in the lock file.
+getrandom = "0.3"
 # The notification poller reads the daemon's HTTP API from a Rust background task; the
 # plugin installer's GitHub download uses the same crate's blocking client instead, since
 # that work already runs inside `spawn_blocking`.

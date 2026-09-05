@@ -14,7 +14,7 @@
 	import { themeTokenAllowlist } from '$lib/shell/theme-pack';
 	import { push } from '$lib/platform/toasts.svelte';
 	import { createBridge, type Bridge, type FrameContext, type ThemeTokens } from './bridge';
-	import { frameUrl } from './frame-url';
+	import { frameNonce, frameUrl } from './frame-url';
 	import { pluginById, registerFrame, unregisterFrame } from './host.svelte';
 	import { pluginBackend } from './plugin-api';
 	import type { FrameSlot, PluginInfo } from './types';
@@ -52,6 +52,10 @@
 	const EXTRA_TOKENS = ['--bg-base'];
 
 	let platform = $state<Platform | null>(null);
+	/** The nonce the host minted for this plugin's frame (SEC-6): part of the frame URL,
+	 * and the only key under which the protocol serves this plugin's files. Minted afresh
+	 * whenever the plugin changes, so a frame the host threw away cannot be reused. */
+	let nonce = $state<{ pluginId: string; value: string } | null>(null);
 	let frame = $state<HTMLIFrameElement>();
 	let reported = $state(DEFAULT_HEIGHT);
 	let bridge: Bridge | null = null;
@@ -62,7 +66,19 @@
 	 * same values does not make the frame re-render for nothing. */
 	let sentContext = '';
 
-	const src = $derived(platform ? frameUrl(plugin.id, platform) : undefined);
+	const src = $derived(
+		platform && nonce?.pluginId === plugin.id ? frameUrl(plugin.id, nonce.value, platform) : undefined
+	);
+
+	// One nonce per plugin this component shows: a new id gets a new one, and the frame
+	// stays without a `src` until it lands. The id is checked on the way back so a slow
+	// answer for a plugin the props have since moved off never names the wrong frame.
+	$effect(() => {
+		const id = plugin.id;
+		void frameNonce(id).then((value) => {
+			if (plugin.id === id) nonce = { pluginId: id, value };
+		});
+	});
 	/**
 	 * Which document this frame is showing, as the host asked for it. Any change recreates
 	 * the iframe element, and with it the `Window` a bridge binds to.

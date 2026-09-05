@@ -9,14 +9,36 @@ pub mod manifest;
 pub mod protocol;
 pub mod registry;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use tauri::{Manager, Runtime};
 
 use registry::PluginInfo;
 
+/// The nonce the host minted for each plugin's live frame (SEC-6), by plugin id. Managed
+/// Tauri state: `plugin_frame_nonce` writes it when the web host is about to create a
+/// frame, and the `atlas-plugin` protocol serves a plugin's files only under its current
+/// nonce. In memory on purpose: a nonce is worth exactly one app run, and the frame URL
+/// that carries it is rebuilt from scratch at every mount.
+#[derive(Default)]
+pub struct FrameNonces(pub Mutex<HashMap<String, String>>);
+
 fn app_data_dir<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
     app.path().app_data_dir().map_err(|e| e.to_string())
+}
+
+/// Mints a fresh nonce for `id`'s frame and returns it, replacing any earlier one so a
+/// frame the host threw away can no longer be used to name that plugin's files. The
+/// host puts it in the frame URL as `atlas-plugin://localhost/<id>/<nonce>/__frame`.
+#[tauri::command]
+pub fn plugin_frame_nonce(nonces: tauri::State<'_, FrameNonces>, id: String) -> Result<String, String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|e| format!("could not draw a frame nonce: {e}"))?;
+    let nonce: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    nonces.0.lock().unwrap_or_else(|e| e.into_inner()).insert(id, nonce.clone());
+    Ok(nonce)
 }
 
 /// Every installed plugin, compatible or not; see [`registry::list`].

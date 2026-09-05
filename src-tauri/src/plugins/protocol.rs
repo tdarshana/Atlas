@@ -6,18 +6,22 @@
 // its own scheme gives it its own origin and lets it carry a policy of its own instead:
 // see `FRAME_CSP`, which pins the frame to files from that same scheme.
 //
-// URL shape: `atlas-plugin://localhost/<id>/<path>` on macOS and Linux, which Tauri maps
-// to `http://atlas-plugin.localhost/<id>/<path>` on Windows. Both are parsed as a `Url`,
-// so the path segments read the same on either.
+// URL shape: `atlas-plugin://localhost/<id>/<nonce>/<path>` on macOS and Linux, which
+// Tauri maps to `http://atlas-plugin.localhost/<id>/<nonce>/<path>` on Windows. Both are
+// parsed as a `Url`, so the path segments read the same on either. `<nonce>` is what the
+// host minted for that plugin's frame (SEC-6, see `serve`).
 //
-// Two paths are generated rather than read off disk: `<id>/__frame` is the host document
-// the iframe loads, and `<id>/__bridge.js` is the client script it pulls in first.
+// Two paths are generated rather than read off disk: `<id>/<nonce>/__frame` is the host
+// document the iframe loads, and `<id>/<nonce>/__bridge.js` is the client script it pulls
+// in first.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use tauri::{http, Manager, Runtime, UriSchemeContext, Url};
 
 use super::registry::{self, PluginInfo};
+use super::FrameNonces;
 
 /// The scheme name registered on the Tauri builder.
 pub const SCHEME: &str = "atlas-plugin";
@@ -119,19 +123,21 @@ fn safe_segment(segment: &str) -> bool {
         && segment.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-/// Splits `atlas-plugin://localhost/<id>/<path>` (or the Windows
-/// `http://atlas-plugin.localhost/<id>/<path>`) into the plugin id and the rest of the
-/// path. Parsed as a URL rather than split on the host, since the two forms differ only
-/// in where the scheme name sits.
-pub fn split_target(uri: &str) -> Option<(String, String)> {
+/// Splits `atlas-plugin://localhost/<id>/<nonce>/<path>` (or the Windows
+/// `http://atlas-plugin.localhost/<id>/<nonce>/<path>`) into the plugin id, the frame
+/// nonce and the rest of the path. Parsed as a URL rather than split on the host, since
+/// the two forms differ only in where the scheme name sits. A URL with no nonce segment
+/// names nothing.
+pub fn split_target(uri: &str) -> Option<(String, String, String)> {
     let url = Url::parse(uri).ok()?;
     let mut segments = url.path_segments()?;
     let id = segments.next()?.to_string();
+    let nonce = segments.next()?.to_string();
     let rest: Vec<&str> = segments.collect();
-    if id.is_empty() || rest.is_empty() {
+    if id.is_empty() || nonce.is_empty() || rest.is_empty() {
         return None;
     }
-    Some((id, rest.join("/")))
+    Some((id, nonce, rest.join("/")))
 }
 
 /// The plugin `id`, if it is installed, compatible and enabled. Anything else is a status
@@ -184,8 +190,15 @@ fn resolve_within(dir: &Path, rel: &str) -> Result<PathBuf, (u16, String)> {
 }
 
 /// Answers one request against the plugins installed under `app_data`.
-pub fn serve(app_data: &Path, uri: &str) -> Served {
-    let Some((id, rest)) = split_target(uri) else {
+///
+/// `nonces` is what the host minted for each plugin's live frame (SEC-6), by plugin id:
+/// a plugin's files are served only under its own current nonce. Every sandboxed frame
+/// has the opaque origin, and `Access-Control-Allow-Origin: *` below lets any of them
+/// load from this scheme, so without the nonce plugin A could `import()` plugin B's
+/// `main.js` and run it with A's grants. A guessed or stale nonce is a 404, the same
+/// answer as a file that is not there.
+pub fn serve(app_data: &Path, nonces: &HashMap<String, String>, uri: &str) -> Served {
+    let Some((id, nonce, rest)) = split_target(uri) else {
         return Served::error(404, format!("'{uri}' names no plugin file."));
     };
 
@@ -193,6 +206,10 @@ pub fn serve(app_data: &Path, uri: &str) -> Served {
         Ok(info) => info,
         Err((status, message)) => return Served::error(status, message),
     };
+
+    if nonces.get(&id) != Some(&nonce) {
+        return Served::error(404, format!("'{rest}' was not found."));
+    }
 
     if rest == "__bridge.js" {
         return Served { status: 200, content_type: "text/javascript", body: BRIDGE_CLIENT_JS.as_bytes().to_vec() };
@@ -226,7 +243,11 @@ pub fn handle<R: Runtime>(
     request: http::Request<Vec<u8>>,
 ) -> http::Response<Vec<u8>> {
     let served = match ctx.app_handle().path().app_data_dir() {
-        Ok(app_data) => serve(&app_data, &request.uri().to_string()),
+        Ok(app_data) => {
+            let nonces = ctx.app_handle().state::<FrameNonces>();
+            let nonces = nonces.0.lock().unwrap_or_else(|e| e.into_inner());
+            serve(&app_data, &nonces, &request.uri().to_string())
+        }
         Err(e) => Served::error(500, e.to_string()),
     };
     http::Response::builder()
@@ -250,6 +271,39 @@ mod tests {
         ScratchDir::new(&format!("atlas-desktop-plugins-protocol-test-{label}", )).unwrap()
     }
 
+    /// The nonces the host has minted: `n1` for `hello-world`, the plugin every test
+    /// installs, and `n2` for `other`.
+    fn nonces() -> HashMap<String, String> {
+        HashMap::from([("hello-world".to_string(), "n1".to_string()), ("other".to_string(), "n2".to_string())])
+    }
+
+    /// SEC-6: every sandboxed frame has the opaque origin and the scheme answers all of
+    /// them, so the nonce in the URL is what keeps plugin A out of plugin B's files. A
+    /// plugin's files are served under its own current nonce only; another plugin's
+    /// nonce, a made-up one, and no nonce segment at all are each a 404, the same answer
+    /// as a missing file.
+    #[test]
+    fn a_frame_reads_only_the_files_of_the_plugin_its_nonce_was_minted_for() {
+        let app_data = scratch_dir("nonce");
+        installed(&app_data, "hello-world", true);
+        installed(&app_data, "other", true);
+
+        assert_eq!(serve(&app_data, &nonces(), "atlas-plugin://localhost/hello-world/n1/main.js").status, 200);
+        assert_eq!(serve(&app_data, &nonces(), "atlas-plugin://localhost/other/n2/main.js").status, 200);
+        assert_eq!(serve(&app_data, &nonces(), "atlas-plugin://localhost/hello-world/n1/__frame").status, 200);
+
+        let cross = serve(&app_data, &nonces(), "atlas-plugin://localhost/other/n1/main.js");
+        assert_eq!(cross.status, 404, "hello-world's nonce must not open other's files");
+        assert_ne!(String::from_utf8(cross.body).unwrap(), "// entry");
+        assert_eq!(serve(&app_data, &nonces(), "atlas-plugin://localhost/hello-world/n2/main.js").status, 404);
+        assert_eq!(serve(&app_data, &nonces(), "atlas-plugin://localhost/hello-world/guess/main.js").status, 404);
+        assert_eq!(serve(&app_data, &nonces(), "atlas-plugin://localhost/hello-world/main.js").status, 404, "no nonce segment");
+        assert_eq!(serve(&app_data, &nonces(), "atlas-plugin://localhost/hello-world/n1/__bridge.js").status, 200);
+        assert_eq!(serve(&app_data, &nonces(), "atlas-plugin://localhost/other/n1/__bridge.js").status, 404);
+        // A plugin the host has minted no nonce for yet has nothing servable.
+        assert_eq!(serve(&app_data, &HashMap::new(), "atlas-plugin://localhost/hello-world/n1/main.js").status, 404);
+    }
+
     /// An installed, enabled, compatible plugin with `main.js` and a `style.css`.
     fn installed(app_data: &Path, id: &str, enabled: bool) {
         let plugin_dir = plugins_dir(app_data).join(id);
@@ -269,16 +323,16 @@ mod tests {
     #[test]
     fn splits_both_platform_url_shapes_the_same_way() {
         assert_eq!(
-            split_target("atlas-plugin://localhost/hello-world/main.js"),
-            Some(("hello-world".into(), "main.js".into()))
+            split_target("atlas-plugin://localhost/hello-world/n1/main.js"),
+            Some(("hello-world".into(), "n1".into(), "main.js".into()))
         );
         assert_eq!(
-            split_target("http://atlas-plugin.localhost/hello-world/main.js"),
-            Some(("hello-world".into(), "main.js".into()))
+            split_target("http://atlas-plugin.localhost/hello-world/n1/main.js"),
+            Some(("hello-world".into(), "n1".into(), "main.js".into()))
         );
         assert_eq!(
-            split_target("atlas-plugin://localhost/hello-world/assets/logo.svg"),
-            Some(("hello-world".into(), "assets/logo.svg".into()))
+            split_target("atlas-plugin://localhost/hello-world/n1/assets/logo.svg"),
+            Some(("hello-world".into(), "n1".into(), "assets/logo.svg".into()))
         );
         // An id on its own names no file.
         assert_eq!(split_target("atlas-plugin://localhost/hello-world"), None);
@@ -302,12 +356,12 @@ mod tests {
         let app_data = scratch_dir("serve-file");
         installed(&app_data, "hello-world", true);
 
-        let served = serve(&app_data, "atlas-plugin://localhost/hello-world/main.js");
+        let served = serve(&app_data, &nonces(), "atlas-plugin://localhost/hello-world/n1/main.js");
         assert_eq!(served.status, 200);
         assert_eq!(served.content_type, "text/javascript");
         assert_eq!(String::from_utf8(served.body).unwrap(), "// entry");
 
-        let css = serve(&app_data, "atlas-plugin://localhost/hello-world/style.css");
+        let css = serve(&app_data, &nonces(), "atlas-plugin://localhost/hello-world/n1/style.css");
         assert_eq!(css.status, 200);
         assert_eq!(css.content_type, "text/css");
     }
@@ -317,7 +371,7 @@ mod tests {
         let app_data = scratch_dir("frame");
         installed(&app_data, "hello-world", true);
 
-        let served = serve(&app_data, "atlas-plugin://localhost/hello-world/__frame");
+        let served = serve(&app_data, &nonces(), "atlas-plugin://localhost/hello-world/n1/__frame");
         assert_eq!(served.status, 200);
         assert_eq!(served.content_type, "text/html");
         let html = String::from_utf8(served.body).unwrap();
@@ -369,7 +423,7 @@ mod tests {
         let app_data = scratch_dir("bridge");
         installed(&app_data, "hello-world", true);
 
-        let served = serve(&app_data, "atlas-plugin://localhost/hello-world/__bridge.js");
+        let served = serve(&app_data, &nonces(), "atlas-plugin://localhost/hello-world/n1/__bridge.js");
         assert_eq!(served.status, 200);
         assert_eq!(served.content_type, "text/javascript");
         assert_eq!(String::from_utf8(served.body).unwrap(), BRIDGE_CLIENT_JS);
@@ -380,16 +434,16 @@ mod tests {
         let app_data = scratch_dir("disabled");
         installed(&app_data, "hello-world", false);
 
-        let served = serve(&app_data, "atlas-plugin://localhost/hello-world/main.js");
+        let served = serve(&app_data, &nonces(), "atlas-plugin://localhost/hello-world/n1/main.js");
         assert_eq!(served.status, 403);
         assert_eq!(String::from_utf8(served.body).unwrap(), "'hello-world' is disabled.");
-        assert_eq!(serve(&app_data, "atlas-plugin://localhost/hello-world/__frame").status, 403);
+        assert_eq!(serve(&app_data, &nonces(), "atlas-plugin://localhost/hello-world/n1/__frame").status, 403);
     }
 
     #[test]
     fn an_unknown_plugin_is_a_404() {
         let app_data = scratch_dir("unknown");
-        let served = serve(&app_data, "atlas-plugin://localhost/nope/main.js");
+        let served = serve(&app_data, &nonces(), "atlas-plugin://localhost/nope/n1/main.js");
         assert_eq!(served.status, 404);
     }
 
@@ -400,13 +454,13 @@ mod tests {
         std::fs::write(app_data.join("secret.txt"), "secret").unwrap();
 
         for uri in [
-            "atlas-plugin://localhost/hello-world/../secret.txt",
-            "atlas-plugin://localhost/hello-world/..%2Fsecret.txt",
-            "atlas-plugin://localhost/hello-world/%2e%2e/secret.txt",
-            "atlas-plugin://localhost/hello-world//etc/passwd",
-            "atlas-plugin://localhost/hello-world/sub/../../secret.txt",
+            "atlas-plugin://localhost/hello-world/n1/../secret.txt",
+            "atlas-plugin://localhost/hello-world/n1/..%2Fsecret.txt",
+            "atlas-plugin://localhost/hello-world/n1/%2e%2e/secret.txt",
+            "atlas-plugin://localhost/hello-world/n1//etc/passwd",
+            "atlas-plugin://localhost/hello-world/n1/sub/../../secret.txt",
         ] {
-            let served = serve(&app_data, uri);
+            let served = serve(&app_data, &nonces(), uri);
             assert!(served.status >= 400, "{uri} was served with {}", served.status);
             assert_ne!(String::from_utf8(served.body).unwrap(), "secret", "{uri} leaked the file");
         }
@@ -424,7 +478,7 @@ mod tests {
         #[cfg(windows)]
         std::os::windows::fs::symlink_file(&outside, &link).unwrap();
 
-        let served = serve(&app_data, "atlas-plugin://localhost/hello-world/escape.js");
+        let served = serve(&app_data, &nonces(), "atlas-plugin://localhost/hello-world/n1/escape.js");
         assert_eq!(served.status, 403, "{}", String::from_utf8_lossy(&served.body));
     }
 
@@ -432,6 +486,6 @@ mod tests {
     fn a_missing_file_inside_an_enabled_plugin_is_a_404() {
         let app_data = scratch_dir("missing");
         installed(&app_data, "hello-world", true);
-        assert_eq!(serve(&app_data, "atlas-plugin://localhost/hello-world/nothing.js").status, 404);
+        assert_eq!(serve(&app_data, &nonces(), "atlas-plugin://localhost/hello-world/n1/nothing.js").status, 404);
     }
 }
