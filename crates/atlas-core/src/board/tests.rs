@@ -2,6 +2,7 @@ use super::*;
 use crate::personas::PersonaRepo;
 use crate::projects::detect::Detected;
 use crate::projects::ProjectRepo;
+use crate::settings::SettingsRepo;
 
 fn repo() -> (Arc<Db>, TaskRepo) {
     let db = Arc::new(Db::open_in_memory().unwrap());
