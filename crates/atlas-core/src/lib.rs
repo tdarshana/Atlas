@@ -12,6 +12,7 @@ pub mod mcp_servers;
 pub mod memories;
 pub mod models;
 pub mod paths;
+pub mod personas;
 pub mod plugin_tools;
 pub mod projects;
 pub mod search;

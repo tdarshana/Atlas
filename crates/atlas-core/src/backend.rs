@@ -11,6 +11,7 @@ use crate::jobs::{Job, JobQueue, JobRepo};
 use crate::library::{AgentRepo, DocRepo};
 use crate::models::*;
 use crate::paths::AtlasPaths;
+use crate::personas::PersonaRepo;
 use crate::projects::{access, build_profile, detect_root, Action, Actor, ProjectRepo};
 use crate::search::global::{SearchQuery, SearchResult};
 use crate::search::{FastEmbedder, NoopEmbedder};
@@ -293,12 +294,33 @@ pub trait McpBackend: Send + Sync + 'static {
     }
 }
 
+/// The persona library and each project's roster (Phase 17).
+#[async_trait::async_trait]
+pub trait PersonaBackend: Send + Sync + 'static {
+    async fn list_personas(&self) -> Result<Vec<Persona>>;
+    /// By id, by slug, or by name compared without case.
+    async fn get_persona(&self, id_or_slug: &str) -> Result<Persona>;
+    /// `Conflict` when the name, or the slug it derives, is already taken.
+    async fn create_persona(&self, p: NewPersona, actor: &str) -> Result<Persona>;
+    async fn update_persona(&self, id: Uuid, patch: PersonaUpdate, actor: &str) -> Result<Persona>;
+    /// Removes the persona, its roster rows and its mark on every task.
+    async fn delete_persona(&self, id: Uuid, actor: &str) -> Result<()>;
+    async fn project_roster(&self, project_id: Uuid) -> Result<Vec<RosterRow>>;
+    /// Replaces the whole roster: ids, the one default, the order. `Invalid` with two
+    /// defaults or an id no persona holds.
+    async fn set_project_roster(&self, project_id: Uuid, entries: Vec<RosterEntry>, actor: &str) -> Result<Vec<RosterRow>>;
+    /// The persona with its skills, workflows, practices and MCP servers resolved in
+    /// the scope of `project_id`, plus one warning per reference that no longer
+    /// resolves. A missing reference never fails the call.
+    async fn resolve_persona(&self, id_or_slug: &str, project_id: Option<Uuid>) -> Result<PersonaBundle>;
+}
+
 /// The whole surface at once: every domain trait, blanket-implemented for any type
 /// that implements all of them. A client that needs everything (the MCP router, the
 /// CLI) bounds on this; one that needs a single domain bounds on that trait alone.
-pub trait Backend: StatusBackend + MemoryBackend + ProjectBackend + LibraryBackend + JobBackend + BoardBackend + WorkflowBackend + SearchBackend + SkillBackend + McpBackend + Send + Sync + 'static {}
+pub trait Backend: StatusBackend + MemoryBackend + ProjectBackend + LibraryBackend + JobBackend + BoardBackend + WorkflowBackend + SearchBackend + SkillBackend + McpBackend + PersonaBackend + Send + Sync + 'static {}
 
-impl<T: StatusBackend + MemoryBackend + ProjectBackend + LibraryBackend + JobBackend + BoardBackend + WorkflowBackend + SearchBackend + SkillBackend + McpBackend + Send + Sync + 'static> Backend for T {}
+impl<T: StatusBackend + MemoryBackend + ProjectBackend + LibraryBackend + JobBackend + BoardBackend + WorkflowBackend + SearchBackend + SkillBackend + McpBackend + PersonaBackend + Send + Sync + 'static> Backend for T {}
 
 pub struct LocalBackend {
     pub memories: Arc<MemoryService>,
@@ -310,6 +332,7 @@ pub struct LocalBackend {
     pub queue: Arc<JobQueue>,
     pub tasks: Arc<TaskRepo>,
     pub workflows: Arc<WorkflowRepo>,
+    pub personas: Arc<PersonaRepo>,
     /// Whoever can answer for the desktop plugins currently running, when anyone can.
     /// Set by the daemon (`LocalBackend::with_plugin_tool_host`) to its loopback
     /// WebSocket channel; `None` everywhere else, which leaves `plugin_tools` empty and
@@ -416,7 +439,8 @@ impl LocalBackend {
         }
         let tasks = Arc::new(TaskRepo::new(db.clone(), memories.gate_handle()));
         let workflows = Arc::new(WorkflowRepo::new(db.clone(), memories.gate_handle()));
-        Ok(Self { jobs: Arc::new(JobRepo::new(db.clone())), queue: Arc::new(JobQueue::new()), memories, db, paths: paths.clone(), port, tasks, workflows, plugin_tool_host: None })
+        let personas = Arc::new(PersonaRepo::new(db.clone(), memories.gate_handle()));
+        Ok(Self { jobs: Arc::new(JobRepo::new(db.clone())), queue: Arc::new(JobQueue::new()), memories, db, paths: paths.clone(), port, tasks, workflows, personas, plugin_tool_host: None })
     }
 
     /// Points `plugin_tools`/`call_plugin_tool` at a live host. Called once, at daemon
@@ -1242,9 +1266,140 @@ impl McpBackend for LocalBackend {
     }
 }
 
+#[async_trait::async_trait]
+impl PersonaBackend for LocalBackend {
+    async fn list_personas(&self) -> Result<Vec<Persona>> {
+        let personas = self.personas.clone();
+        self.blocking(move || personas.list()).await
+    }
+    async fn get_persona(&self, id_or_slug: &str) -> Result<Persona> {
+        let personas = self.personas.clone();
+        let key = id_or_slug.to_string();
+        self.blocking(move || personas.get(&key)).await
+    }
+    async fn create_persona(&self, p: NewPersona, actor: &str) -> Result<Persona> {
+        let personas = self.personas.clone();
+        let actor = actor.to_string();
+        self.blocking(move || personas.create(&p, &actor)).await
+    }
+    async fn update_persona(&self, id: Uuid, patch: PersonaUpdate, actor: &str) -> Result<Persona> {
+        let personas = self.personas.clone();
+        let actor = actor.to_string();
+        self.blocking(move || personas.update(id, &patch, &actor)).await
+    }
+    async fn delete_persona(&self, id: Uuid, actor: &str) -> Result<()> {
+        let personas = self.personas.clone();
+        let actor = actor.to_string();
+        self.blocking(move || personas.delete(id, &actor)).await
+    }
+    async fn project_roster(&self, project_id: Uuid) -> Result<Vec<RosterRow>> {
+        let personas = self.personas.clone();
+        self.blocking(move || personas.roster(project_id)).await
+    }
+    async fn set_project_roster(&self, project_id: Uuid, entries: Vec<RosterEntry>, actor: &str) -> Result<Vec<RosterRow>> {
+        let personas = self.personas.clone();
+        let actor = actor.to_string();
+        self.blocking(move || personas.set_roster(project_id, &entries, &actor)).await
+    }
+    /// Skills come through `list_skills` and servers through `list_mcp_servers`, so a
+    /// project's own roots and its switched-off skills are read the way every other
+    /// caller reads them; workflows match by name or id, practices by id or name.
+    async fn resolve_persona(&self, id_or_slug: &str, project_id: Option<Uuid>) -> Result<PersonaBundle> {
+        let persona = self.get_persona(id_or_slug).await?;
+        let mut warnings = Vec::new();
+
+        let mut skills = Vec::new();
+        if !persona.skills.is_empty() {
+            let listed = self.list_skills(project_id).await?;
+            warnings.extend(listed.warnings);
+            for id in &persona.skills {
+                match listed.skills.iter().find(|s| &s.id == id) {
+                    Some(s) => skills.push(s.clone()),
+                    None => warnings.push(format!("skill {id} not found")),
+                }
+            }
+        }
+
+        let mut mcp_servers = Vec::new();
+        if !persona.mcp_servers.is_empty() {
+            let listed = self.list_mcp_servers(project_id).await?;
+            warnings.extend(listed.warnings);
+            for id in &persona.mcp_servers {
+                match listed.servers.iter().find(|s| &s.id == id) {
+                    Some(s) => mcp_servers.push(s.clone()),
+                    None => warnings.push(format!("MCP server {id} not found")),
+                }
+            }
+        }
+
+        let db = self.db.clone();
+        let workflows_repo = self.workflows.clone();
+        let (workflow_names, practice_ids) = (persona.workflows.clone(), persona.practices.clone());
+        let (workflows, practices, missing) = self
+            .blocking(move || {
+                let mut missing = Vec::new();
+                let mut workflows = Vec::new();
+                if !workflow_names.is_empty() {
+                    let all = workflows_repo.list(project_id)?;
+                    for name in &workflow_names {
+                        match all.iter().find(|w| w.name.eq_ignore_ascii_case(name) || w.id.to_string() == *name) {
+                            Some(w) => workflows.push(WorkflowSummary::from(w)),
+                            None => missing.push(format!("workflow {name} not found")),
+                        }
+                    }
+                }
+                let mut practices = Vec::new();
+                if !practice_ids.is_empty() {
+                    let all = docs_repo(&db, DocKind::Practice).list(project_id)?;
+                    for id in &practice_ids {
+                        match all.iter().find(|d| d.id.to_string() == *id || d.name.eq_ignore_ascii_case(id)) {
+                            Some(d) => practices.push(d.clone()),
+                            None => missing.push(format!("practice {id} not found")),
+                        }
+                    }
+                }
+                Ok((workflows, practices, missing))
+            })
+            .await?;
+        warnings.extend(missing);
+        Ok(PersonaBundle { persona, skills, workflows, practices, mcp_servers, warnings })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A persona whose references no longer resolve still comes back as a bundle: one
+    /// warning per missing reference, never an error, so a persona keeps working while
+    /// a plugin is being reinstalled.
+    #[tokio::test]
+    async fn resolve_persona_warns_about_each_missing_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::paths::AtlasPaths::at(dir.path());
+        let b = LocalBackend::open(&paths, None, false).unwrap();
+        let practice = b.save_doc(DocKind::Practice, NewDoc { name: "tdd".into(), body: "Test first.".into(), tags: vec![], project_id: None }, "t").await.unwrap();
+        let new = NewPersona {
+            name: "Mobile Developer".into(),
+            skills: vec!["plugin:gone/gone/gone".into()],
+            workflows: vec!["nightly".into()],
+            practices: vec![practice.id.to_string()],
+            mcp_servers: vec!["atlas".into(), "claude:user:gone".into()],
+            ..Default::default()
+        };
+        let created = b.create_persona(new, "t").await.unwrap();
+        let bundle = b.resolve_persona("mobile-developer", None).await.unwrap();
+        assert_eq!(bundle.persona.id, created.id);
+        assert_eq!(bundle.practices.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["tdd"]);
+        assert_eq!(bundle.mcp_servers.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["atlas"]);
+        assert!(bundle.skills.is_empty() && bundle.workflows.is_empty());
+        let expected = ["skill plugin:gone/gone/gone not found", "MCP server claude:user:gone not found", "workflow nightly not found"];
+        for w in expected {
+            assert!(bundle.warnings.iter().any(|x| x == w), "missing {w:?} in {:?}", bundle.warnings);
+        }
+        assert!(matches!(b.resolve_persona("nobody", None).await, Err(AtlasError::NotFound(_))));
+    }
+
     #[tokio::test]
     async fn local_backend_round_trip() {
         let dir = tempfile::tempdir().unwrap();

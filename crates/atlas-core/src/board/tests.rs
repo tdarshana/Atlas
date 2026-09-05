@@ -1,4 +1,5 @@
 use super::*;
+use crate::personas::PersonaRepo;
 use crate::projects::detect::Detected;
 use crate::projects::ProjectRepo;
 
@@ -972,4 +973,42 @@ fn the_settings_route_refuses_the_stage_list() {
     let renames = HashMap::from([("Todo".to_string(), "Backlog".to_string())]);
     repo.set_global_stages(default_stages(), &renames, "t").unwrap();
     assert_eq!(repo.effective_stages(None).unwrap().stages, default_stages());
+}
+
+// -- personas (Phase 17) ------------------------------------------------------
+
+/// A task names its persona by id or slug, reads back with the three persona fields,
+/// refuses a persona that does not exist, narrows a listing, and clears on `""`.
+#[test]
+fn a_task_carries_its_persona_by_id_or_slug_and_clears_on_an_empty_string() {
+    let (db, repo) = repo();
+    let personas = PersonaRepo::new(db.clone(), Arc::new(Mutex::new(())));
+    let p = personas.create(&NewPersona { name: "Mobile Developer".into(), ..Default::default() }, "t").unwrap();
+
+    let t = repo.create(&NewTask { title: "ship".into(), persona: Some("mobile-developer".into()), ..Default::default() }, "t").unwrap();
+    assert_eq!((t.persona_id, t.persona_name.as_deref(), t.persona_slug.as_deref()), (Some(p.id), Some("Mobile Developer"), Some("mobile-developer")));
+    assert_eq!(repo.get(&t.key).unwrap().task.persona_slug.as_deref(), Some("mobile-developer"));
+
+    let err = repo.create(&NewTask { title: "x".into(), persona: Some("nobody".into()), ..Default::default() }, "t").unwrap_err();
+    assert!(matches!(&err, AtlasError::Invalid(m) if m.contains("no persona nobody")), "{err}");
+
+    // An empty persona on create is no persona; an id on update sets one.
+    let other = repo.create(&NewTask { title: "plain".into(), persona: Some("".into()), ..Default::default() }, "t").unwrap();
+    assert_eq!(other.persona_id, None);
+    let set = repo.update(&other.key, &TaskUpdate { persona: Some(Some(p.id.to_string())), ..Default::default() }, "t").unwrap();
+    assert_eq!(set.persona_slug.as_deref(), Some("mobile-developer"));
+    let err = repo.update(&other.key, &TaskUpdate { persona: Some(Some("nobody".into())), ..Default::default() }, "t").unwrap_err();
+    assert!(matches!(err, AtlasError::Invalid(_)), "{err}");
+
+    let narrowed = repo.list(&TaskFilter { persona: Some("mobile-developer".into()), ..Default::default() }).unwrap();
+    assert_eq!(narrowed.len(), 2);
+    let by_id = repo.list(&TaskFilter { persona: Some(p.id.to_string()), ..Default::default() }).unwrap();
+    assert_eq!(by_id.len(), 2);
+
+    let cleared = repo.update(&other.key, &TaskUpdate { persona: Some(Some(String::new())), ..Default::default() }, "t").unwrap();
+    assert_eq!((cleared.persona_id, cleared.persona_slug), (None, None));
+    let narrowed = repo.list(&TaskFilter { persona: Some("mobile-developer".into()), ..Default::default() }).unwrap();
+    assert_eq!(narrowed.iter().map(|t| t.id).collect::<Vec<_>>(), vec![t.id]);
+    // The patch is an ordinary edit in the history.
+    assert_eq!(events(&db, other.id).last().map(|(k, _)| k.as_str()), Some("edited"));
 }

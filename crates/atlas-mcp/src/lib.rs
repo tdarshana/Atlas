@@ -637,6 +637,7 @@ impl<B: Backend> AtlasMcp<B> {
             include_done: a.include_done.unwrap_or(false),
             global_only,
             top_level: None,
+            persona: None,
         };
         json_result(&self.backend.list_tasks(filter).await.map_err(board_err)?)
     }
@@ -661,6 +662,7 @@ impl<B: Backend> AtlasMcp<B> {
             blocked_by: a.blocked_by,
             stage: None,
             source_ref: None,
+            persona: None,
         };
         let actor = self.actor(&a.agent);
         json_result(&self.backend.create_task(new, &actor).await.map_err(board_err)?)
@@ -678,6 +680,7 @@ impl<B: Backend> AtlasMcp<B> {
             assignee: a.assignee.map(|v| if v.is_empty() { None } else { Some(v) }),
             labels: a.labels,
             parent: None,
+            persona: None,
             expected_updated_at: a.expected_updated_at,
         };
         let actor = self.actor(&a.agent);

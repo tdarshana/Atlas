@@ -368,6 +368,14 @@ export interface Task {
 	 */
 	parent_key: string | null;
 	parent_title: string | null;
+	/**
+	 * The persona this task is done as, read with the row the way `parent_key` is,
+	 * so a card can show the role without a second lookup. All three are `None` for
+	 * a task with no persona.
+	 */
+	persona_id: Uuid | null;
+	persona_name: string | null;
+	persona_slug: string | null;
 	created_by: string;
 	created_at: Timestamp;
 	updated_at: Timestamp;
@@ -803,6 +811,90 @@ export interface SkillList {
 	warnings: string[];
 }
 
+export type Case = 'plan' | 'implement' | 'review' | 'test' | 'document' | 'default';
+
+export type PersonaRule = 'allow' | 'deny' | 'review';
+
+/**
+ * A persona's own write permissions, applied after the project's agent rules with the
+ * stricter answer winning. Every rule defaults to `allow`.
+ */
+export interface PersonaAccess {
+	memory_write: PersonaRule;
+	task_move: PersonaRule;
+	workflow_trigger: PersonaRule;
+}
+
+/**
+ * A library persona: a role an agent adopts, bundling what it works with and how.
+ * Global and unique by name (compared without case); `slug` is derived from the name
+ * and is the export file name and the `persona_use` key.
+ */
+export interface Persona {
+	id: Uuid;
+	name: string;
+	slug: string;
+	/** One line, the job title shown on chips. */
+	role: string;
+	/** One paragraph, shown in rosters and in `project_context`. */
+	summary: string;
+	/** Markdown: decision style, preferences, rules. */
+	instructions: string;
+	/** Skill ids as `skill_list` names them. */
+	skills: string[];
+	/** Workflow names, global or project. */
+	workflows: string[];
+	/** Practice ids. */
+	practices: string[];
+	/** MCP server ids as `GET /mcp/servers` names them. */
+	mcp_servers: string[];
+	/** Atlas MCP tool names a session may see; empty means all. */
+	tools: string[];
+	access: PersonaAccess;
+	/** A model name per case, any subset of the six. */
+	models: {
+		default?: string;
+		document?: string;
+		implement?: string;
+		plan?: string;
+		review?: string;
+		test?: string;
+	};
+	tags: string[];
+	created_at: Timestamp;
+	updated_at: Timestamp;
+}
+
+/**
+ * One line of a project's roster as it reads back: the persona's summary fields
+ * with its place on this project.
+ */
+export interface RosterRow {
+	persona_id: Uuid;
+	name: string;
+	slug: string;
+	role: string;
+	summary: string;
+	tags: string[];
+	is_default: boolean;
+	position: number;
+	project_id: Uuid;
+}
+
+/**
+ * A persona with everything it references resolved. A reference that no longer
+ * resolves is a warning here, never an error: a persona keeps working while a plugin
+ * is being reinstalled.
+ */
+export interface PersonaBundle {
+	persona: Persona;
+	skills: SkillSummary[];
+	workflows: WorkflowSummary[];
+	practices: Doc[];
+	mcp_servers: McpServerEntry[];
+	warnings: string[];
+}
+
 // ---- shapes the daemon reads (a defaulted or Option field may be left out) ----
 
 export interface NewMemory {
@@ -916,12 +1008,14 @@ export interface NewTask {
 	stage?: string | null;
 	/** Set by `import::import_tasks` so a re-import finds this task again. */
 	source_ref?: SourceRef | null;
+	/** The persona to do this task as, by id or slug. Empty is the same as absent. */
+	persona?: string | null;
 }
 
 /**
- * A patch. An absent field is left alone. `assignee` and `parent` are double
- * options so an explicit JSON `null` clears them: absent is `None`, `null` is
- * `Some(None)`, a value is `Some(Some(v))`.
+ * A patch. An absent field is left alone. `assignee`, `parent` and `persona` are
+ * double options so an explicit JSON `null` clears them: absent is `None`, `null` is
+ * `Some(None)`, a value is `Some(Some(v))`. `persona` also clears on `""`.
  */
 export interface TaskUpdate {
 	title?: string | null;
@@ -931,6 +1025,8 @@ export interface TaskUpdate {
 	assignee?: string | null;
 	labels?: string[] | null;
 	parent?: string | null;
+	/** The persona by id or slug; `null` or `""` clears it. */
+	persona?: string | null;
 	expected_updated_at?: Timestamp | null;
 }
 
@@ -953,6 +1049,8 @@ export interface TaskFilter {
 	 * keeps only subtasks; `None` applies no filter either way.
 	 */
 	top_level?: boolean | null;
+	/** Keep only tasks done as this persona, by id or slug. */
+	persona?: string | null;
 }
 
 export interface NewWorkflow {
@@ -1025,4 +1123,60 @@ export interface SkillUpdate {
 	name?: string | null;
 	description?: string | null;
 	body?: string | null;
+}
+
+/** A persona to create. Everything but `name` has a default. */
+export interface NewPersona {
+	name: string;
+	role?: string;
+	summary?: string;
+	instructions?: string;
+	skills?: string[];
+	workflows?: string[];
+	practices?: string[];
+	mcp_servers?: string[];
+	tools?: string[];
+	access?: PersonaAccess;
+	models?: {
+		default?: string;
+		document?: string;
+		implement?: string;
+		plan?: string;
+		review?: string;
+		test?: string;
+	};
+	tags?: string[];
+}
+
+/** A patch to a persona. An absent field is left alone; a new `name` derives a new slug. */
+export interface PersonaUpdate {
+	name?: string | null;
+	role?: string | null;
+	summary?: string | null;
+	instructions?: string | null;
+	skills?: string[] | null;
+	workflows?: string[] | null;
+	practices?: string[] | null;
+	mcp_servers?: string[] | null;
+	tools?: string[] | null;
+	access?: PersonaAccess | null;
+	models?: {
+		default?: string;
+		document?: string;
+		implement?: string;
+		plan?: string;
+		review?: string;
+		test?: string;
+	} | null;
+	tags?: string[] | null;
+}
+
+/**
+ * One line of a project's roster as a caller sets it. `PUT /projects/{id}/personas`
+ * takes the whole list: ids, which one is the default, and the order.
+ */
+export interface RosterEntry {
+	persona_id: Uuid;
+	is_default?: boolean;
+	position?: number;
 }

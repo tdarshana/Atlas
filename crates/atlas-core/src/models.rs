@@ -8,7 +8,7 @@ macro_rules! str_enum {
         // Each variant is renamed to the same literal `as_str`/`FromStr` use, so the JSON
         // wire form and the string form never drift apart (`rename_all = "lowercase"`
         // would spell `AgentsMd` as `agentsmd` while `as_str` says `agents_md`).
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema)]
         pub enum $name { $(#[serde(rename = $s)] $var),* }
         impl $name {
             pub fn as_str(&self) -> &'static str { match self { $(Self::$var => $s),* } }
@@ -481,6 +481,12 @@ pub struct Task {
     /// same listing.
     #[serde(default)] pub parent_key: Option<String>,
     #[serde(default)] pub parent_title: Option<String>,
+    /// The persona this task is done as, read with the row the way `parent_key` is,
+    /// so a card can show the role without a second lookup. All three are `None` for
+    /// a task with no persona.
+    #[serde(default)] pub persona_id: Option<Uuid>,
+    #[serde(default)] pub persona_name: Option<String>,
+    #[serde(default)] pub persona_slug: Option<String>,
     pub created_by: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -522,11 +528,13 @@ pub struct NewTask {
     #[serde(default)] pub stage: Option<String>,
     /// Set by `import::import_tasks` so a re-import finds this task again.
     #[serde(default)] pub source_ref: Option<SourceRef>,
+    /// The persona to do this task as, by id or slug. Empty is the same as absent.
+    #[serde(default)] pub persona: Option<String>,
 }
 
-/// A patch. An absent field is left alone. `assignee` and `parent` are double
-/// options so an explicit JSON `null` clears them: absent is `None`, `null` is
-/// `Some(None)`, a value is `Some(Some(v))`.
+/// A patch. An absent field is left alone. `assignee`, `parent` and `persona` are
+/// double options so an explicit JSON `null` clears them: absent is `None`, `null` is
+/// `Some(None)`, a value is `Some(Some(v))`. `persona` also clears on `""`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct TaskUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")] pub title: Option<String>,
@@ -538,6 +546,9 @@ pub struct TaskUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")] pub labels: Option<Vec<String>>,
     #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
     pub parent: Option<Option<String>>,
+    /// The persona by id or slug; `null` or `""` clears it.
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub persona: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub expected_updated_at: Option<DateTime<Utc>>,
 }
 
@@ -587,6 +598,8 @@ pub struct TaskFilter {
     /// `Some(true)` keeps only tasks with no parent (`parent_id is null`); `Some(false)`
     /// keeps only subtasks; `None` applies no filter either way.
     #[serde(default)] pub top_level: Option<bool>,
+    /// Keep only tasks done as this persona, by id or slug.
+    #[serde(default)] pub persona: Option<String>,
 }
 
 // ---- workflows ----
@@ -1063,6 +1076,139 @@ pub struct NewMcpServer {
     pub transport: McpTransportInput,
 }
 
+// ---------------------------------------------------------------------------
+// Personas (Phase 17)
+// ---------------------------------------------------------------------------
+
+// The kinds of work a persona can name a model for. A workflow action node may carry
+// one; `default` is the fallback for a run that names none.
+str_enum!(Case { Plan => "plan", Implement => "implement", Review => "review", Test => "test", Document => "document", Default => "default" });
+
+// What a persona may do with one kind of write. `review` only means something for
+// `memory_write`, where it forces the memory to land pending; `PersonaRepo` refuses it
+// on the other two.
+str_enum!(PersonaRule { Allow => "allow", Deny => "deny", Review => "review" });
+
+fn allow() -> PersonaRule { PersonaRule::Allow }
+
+/// A persona's own write permissions, applied after the project's agent rules with the
+/// stricter answer winning. Every rule defaults to `allow`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PersonaAccess {
+    #[serde(default = "allow")] pub memory_write: PersonaRule,
+    #[serde(default = "allow")] pub task_move: PersonaRule,
+    #[serde(default = "allow")] pub workflow_trigger: PersonaRule,
+}
+
+impl Default for PersonaAccess {
+    fn default() -> Self {
+        Self { memory_write: PersonaRule::Allow, task_move: PersonaRule::Allow, workflow_trigger: PersonaRule::Allow }
+    }
+}
+
+/// A library persona: a role an agent adopts, bundling what it works with and how.
+/// Global and unique by name (compared without case); `slug` is derived from the name
+/// and is the export file name and the `persona_use` key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Persona {
+    pub id: Uuid,
+    pub name: String,
+    pub slug: String,
+    /// One line, the job title shown on chips.
+    pub role: String,
+    /// One paragraph, shown in rosters and in `project_context`.
+    pub summary: String,
+    /// Markdown: decision style, preferences, rules.
+    pub instructions: String,
+    /// Skill ids as `skill_list` names them.
+    pub skills: Vec<String>,
+    /// Workflow names, global or project.
+    pub workflows: Vec<String>,
+    /// Practice ids.
+    pub practices: Vec<String>,
+    /// MCP server ids as `GET /mcp/servers` names them.
+    pub mcp_servers: Vec<String>,
+    /// Atlas MCP tool names a session may see; empty means all.
+    pub tools: Vec<String>,
+    pub access: PersonaAccess,
+    /// A model name per case, any subset of the six.
+    pub models: std::collections::BTreeMap<Case, String>,
+    pub tags: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A persona to create. Everything but `name` has a default.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct NewPersona {
+    pub name: String,
+    #[serde(default)] pub role: String,
+    #[serde(default)] pub summary: String,
+    #[serde(default)] pub instructions: String,
+    #[serde(default)] pub skills: Vec<String>,
+    #[serde(default)] pub workflows: Vec<String>,
+    #[serde(default)] pub practices: Vec<String>,
+    #[serde(default)] pub mcp_servers: Vec<String>,
+    #[serde(default)] pub tools: Vec<String>,
+    #[serde(default)] pub access: PersonaAccess,
+    #[serde(default)] pub models: std::collections::BTreeMap<Case, String>,
+    #[serde(default)] pub tags: Vec<String>,
+}
+
+/// A patch to a persona. An absent field is left alone; a new `name` derives a new slug.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PersonaUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub skills: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub workflows: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub practices: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub mcp_servers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub tools: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub access: Option<PersonaAccess>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub models: Option<std::collections::BTreeMap<Case, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub tags: Option<Vec<String>>,
+}
+
+/// One line of a project's roster as a caller sets it. `PUT /projects/{id}/personas`
+/// takes the whole list: ids, which one is the default, and the order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RosterEntry {
+    pub persona_id: Uuid,
+    #[serde(default)] pub is_default: bool,
+    #[serde(default)] pub position: i32,
+}
+
+/// One line of a project's roster as it reads back: the persona's summary fields
+/// with its place on this project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RosterRow {
+    pub persona_id: Uuid,
+    pub name: String,
+    pub slug: String,
+    pub role: String,
+    pub summary: String,
+    pub tags: Vec<String>,
+    pub is_default: bool,
+    pub position: i32,
+    pub project_id: Uuid,
+}
+
+/// A persona with everything it references resolved. A reference that no longer
+/// resolves is a warning here, never an error: a persona keeps working while a plugin
+/// is being reinstalled.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PersonaBundle {
+    pub persona: Persona,
+    pub skills: Vec<SkillSummary>,
+    pub workflows: Vec<WorkflowSummary>,
+    pub practices: Vec<Doc>,
+    pub mcp_servers: Vec<McpServerEntry>,
+    #[serde(default)] pub warnings: Vec<String>,
+}
+
 /// One write the daemon has just made, published on `GET /api/v1/events` the moment
 /// it lands, so a client can refresh what it shows without polling. Every board write
 /// records a task event and every other write an audit row, and those two writers are
@@ -1108,5 +1254,18 @@ mod tests {
         assert_eq!(json, r#"{"assignee":null,"parent":null}"#);
         let again: TaskUpdate = serde_json::from_str(&json).unwrap();
         assert_eq!(again.assignee, Some(None));
+    }
+
+    /// `models` is keyed by `Case`, which travels as its lower-case literal, so a JSON
+    /// object keyed by case names round-trips; an unknown case is refused on the way in.
+    #[test]
+    fn persona_models_are_keyed_by_case_and_access_defaults_to_allow() {
+        let p: NewPersona = serde_json::from_str(r#"{"name": "Reviewer", "models": {"review": "opus", "default": "sonnet"}}"#).unwrap();
+        assert_eq!(p.models.get(&Case::Review).map(String::as_str), Some("opus"));
+        assert_eq!(p.access, PersonaAccess::default());
+        assert_eq!(serde_json::to_value(&p.models).unwrap(), serde_json::json!({"default": "sonnet", "review": "opus"}));
+        assert!(serde_json::from_str::<NewPersona>(r#"{"name": "x", "models": {"deploy": "opus"}}"#).is_err());
+        let a: PersonaAccess = serde_json::from_str(r#"{"memory_write": "review"}"#).unwrap();
+        assert_eq!((a.memory_write, a.task_move), (PersonaRule::Review, PersonaRule::Allow));
     }
 }

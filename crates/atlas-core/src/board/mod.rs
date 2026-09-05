@@ -42,7 +42,8 @@ pub const MIRROR_SETTING: &str = "board.mirror_tasks_md";
 
 const TASK_COLS: &str = "id::text, key, project_id::text, seq, title, description, stage, kind, priority, \
      assignee, labels::text, parent_id::text, created_by, epoch_us(created_at), epoch_us(updated_at), epoch_us(closed_at), source_ref::text, \
-     (select p.key from tasks p where p.id = tasks.parent_id), (select p.title from tasks p where p.id = tasks.parent_id)";
+     (select p.key from tasks p where p.id = tasks.parent_id), (select p.title from tasks p where p.id = tasks.parent_id), \
+     persona_id::text, (select q.name from personas q where q.id = tasks.persona_id), (select q.slug from personas q where q.id = tasks.persona_id)";
 
 const EVENT_COLS: &str = "id::text, task_id::text, actor, kind, body, detail::text, epoch_us(created_at)";
 
@@ -81,6 +82,9 @@ fn row_to_task(r: &Row) -> duckdb::Result<Task> {
         parent_id: parse_uuid(11, r.get::<_, Option<String>>(11)?)?,
         parent_key: r.get(17)?,
         parent_title: r.get(18)?,
+        persona_id: parse_uuid(19, r.get::<_, Option<String>>(19)?)?,
+        persona_name: r.get(20)?,
+        persona_slug: r.get(21)?,
         created_by: r.get(12)?,
         created_at: ts(13, r.get(13)?)?,
         updated_at: ts(14, r.get(14)?)?,
@@ -97,6 +101,25 @@ fn row_to_task(r: &Row) -> duckdb::Result<Task> {
         subtasks_total: 0,
         subtasks_done: 0,
     })
+}
+
+/// The persona `id_or_slug` names, for a task write. `Invalid` rather than `NotFound`:
+/// the task is the thing being written, and a persona that does not exist is a bad
+/// field on it, the same reading an unknown stage gets.
+fn resolve_persona(c: &Connection, id_or_slug: &str) -> Result<Uuid> {
+    let key = id_or_slug.trim();
+    let mut st = c.prepare("select id::text from personas where slug = ? or id::text = lower(?)")?;
+    let mut rows = st.query(params![key, key])?;
+    match rows.next()? {
+        Some(r) => Ok(Uuid::parse_str(&r.get::<_, String>(0)?).map_err(|e| conv_err(0, Type::Text, e))?),
+        None => Err(AtlasError::Invalid(format!("no persona {key}"))),
+    }
+}
+
+/// `Some(id)` for a persona to set, `None` for an absent or empty value, which a
+/// create reads as "no persona" and an update as "clear it".
+fn persona_field(c: &Connection, value: Option<&str>) -> Result<Option<Uuid>> {
+    value.map(str::trim).filter(|v| !v.is_empty()).map(|v| resolve_persona(c, v)).transpose()
 }
 
 fn row_to_event(r: &Row) -> duckdb::Result<TaskEvent> {
@@ -484,6 +507,11 @@ impl TaskRepo {
                 sql.push_str(" and lower(assignee) = lower(?)");
                 args.push(a.clone());
             }
+            if let Some(p) = &f.persona {
+                sql.push_str(" and persona_id in (select id from personas where slug = ? or id::text = lower(?))");
+                let p = p.trim().to_string();
+                args.extend([p.clone(), p]);
+            }
             if let Some(q) = &f.query {
                 // `contains` rather than `like`, so `%` and `_` in a search term are
                 // literal characters and not wildcards.
@@ -742,6 +770,7 @@ impl TaskRepo {
                 .flatten()
                 .map(|b| self.resolve(c, b))
                 .collect::<Result<Vec<_>>>()?;
+            let persona = persona_field(c, new.persona.as_deref())?;
 
             let (key, seq) = self.next_key(c, new.project_id)?;
             let id = Uuid::new_v4();
@@ -751,8 +780,8 @@ impl TaskRepo {
             let closed = if stage.done { "now()" } else { "null" };
             c.execute(
                 &format!(
-                    "insert into tasks (id, key, project_id, seq, title, description, stage, kind, priority, assignee, labels, parent_id, created_by, source_ref, created_at, updated_at, closed_at) \
-                     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::json, ?, ?, ?::json, now(), now(), {closed})"
+                    "insert into tasks (id, key, project_id, seq, title, description, stage, kind, priority, assignee, labels, parent_id, created_by, source_ref, persona_id, created_at, updated_at, closed_at) \
+                     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::json, ?, ?, ?::json, ?, now(), now(), {closed})"
                 ),
                 params![
                     id.to_string(),
@@ -769,6 +798,7 @@ impl TaskRepo {
                     parent.map(|p| p.to_string()),
                     actor,
                     source_ref,
+                    persona.map(|p| p.to_string()),
                 ],
             )?;
             self.replace_blockers(c, id, &blockers)?;
@@ -777,7 +807,8 @@ impl TaskRepo {
         })
     }
 
-    /// Applies a patch. `assignee` and `parent` clear on an explicit null.
+    /// Applies a patch. `assignee` and `parent` clear on an explicit null; `persona`
+    /// clears on null or `""`.
     pub fn update(&self, id_or_key: &str, upd: &TaskUpdate, actor: &str) -> Result<Task> {
         let _gate = self.gate();
         self.db.with_conn(|c| {
@@ -842,6 +873,15 @@ impl TaskRepo {
                     None => duckdb::types::Value::Null,
                 });
                 detail.insert("parent".into(), json!(parent.map(|v| v.to_string())));
+            }
+            if let Some(p) = &upd.persona {
+                let persona = persona_field(c, p.as_deref())?;
+                sets.push("persona_id = ?".into());
+                args.push(match persona {
+                    Some(v) => text(v.to_string()),
+                    None => duckdb::types::Value::Null,
+                });
+                detail.insert("persona".into(), json!(persona.map(|v| v.to_string())));
             }
             if sets.is_empty() {
                 return self.load_one(c, id);

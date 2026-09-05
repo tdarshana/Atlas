@@ -156,6 +156,7 @@ pub async fn run_task(cmd: TaskCmd, backend: &RemoteBackend) -> anyhow::Result<(
                 include_done: all,
                 global_only: target.is_none(),
                 top_level: None,
+                persona: None,
             };
             let tasks = backend.list_tasks(filter).await?;
             let rows: Vec<Vec<String>> = tasks
@@ -186,6 +187,7 @@ pub async fn run_task(cmd: TaskCmd, backend: &RemoteBackend) -> anyhow::Result<(
                 blocked_by: (!blocked_by.is_empty()).then_some(blocked_by),
                 stage,
                 source_ref: None,
+                persona: None,
             };
             println!("{}", backend.create_task(new, &actor).await?.key);
         }
@@ -199,6 +201,7 @@ pub async fn run_task(cmd: TaskCmd, backend: &RemoteBackend) -> anyhow::Result<(
                 assignee: clearable(assignee, no_assignee),
                 labels: (!labels.is_empty()).then_some(labels),
                 parent: clearable(parent, no_parent),
+                persona: None,
                 expected_updated_at: None,
             };
             println!("{}", line(&backend.update_task(&key, update, &actor).await?));

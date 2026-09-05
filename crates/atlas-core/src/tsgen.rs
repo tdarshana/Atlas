@@ -44,6 +44,7 @@ fn outputs(g: &mut SchemaGenerator) -> Vec<&'static str> {
         McpServerSource, McpServerScope, McpTransport, McpServerEntry, McpServerList, McpToolInfo,
         McpCheckResult,
         SkillSource, SkillSummary, Skill, SkillList,
+        Case, PersonaRule, PersonaAccess, Persona, RosterRow, PersonaBundle,
     ]
 }
 
@@ -54,6 +55,7 @@ fn inputs(g: &mut SchemaGenerator) -> Vec<&'static str> {
         NewMemory, RecallQuery, ProjectExtraction, ProjectPatch, LogFilter, NewAgent, NewDoc,
         SyncRequest, NewTask, TaskUpdate, TaskFilter, NewWorkflow, WorkflowPatch, SearchQuery,
         McpTransportInput, NewMcpServer, NewSkill, SkillUpdate,
+        NewPersona, PersonaUpdate, RosterEntry,
     ]
 }
 
