@@ -85,6 +85,8 @@
 		{ combo: 'Mod+K', label: 'Command palette' },
 		{ combo: 'Mod+J', label: 'Toggle side panel' },
 		{ combo: 'Mod+B', label: 'Toggle rail' },
+		{ combo: 'Mod+Shift+=', label: 'Larger UI scale' },
+		{ combo: 'Mod+Shift+-', label: 'Smaller UI scale' },
 		...VIEWS.map((v) => ({ combo: v.combo, label: v.label }))
 	];
 </script>

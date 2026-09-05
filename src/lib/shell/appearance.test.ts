@@ -64,13 +64,13 @@ describe('applyAppearance', () => {
 	});
 
 	it('removes zoom and the mirror at 100', () => {
-		// jsdom does not recognise `zoom` as a real CSS property, so a value set via the
-		// dot assignment never comes back out through `removeProperty`; spy on the call
-		// instead of re-reading the (browser-only) style to prove the mechanism runs.
+		// jsdom does not recognise `zoom` as a real CSS property, so it is cleared by
+		// assigning an empty string, which is what a browser's removal amounts to too.
+		document.documentElement.style.zoom = '1.25';
 		const removeProperty = vi.spyOn(document.documentElement.style, 'removeProperty');
 		applyAppearance('dark', null, 'system', 'jetbrains-mono', 12, 100);
 
-		expect(removeProperty).toHaveBeenCalledWith('zoom');
+		expect(document.documentElement.style.zoom).toBe('');
 		expect(removeProperty).toHaveBeenCalledWith('--ui-zoom');
 		expect(localStorage.getItem(SCALE_KEY)).toBeNull();
 	});

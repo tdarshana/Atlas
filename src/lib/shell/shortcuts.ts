@@ -2,8 +2,13 @@
 // elsewhere, matching what the rail
 // prints. Typing in a field must not navigate, so every combo but Mod+K is ignored while
 // the focus is in an editable control; Mod+K reaches the palette from anywhere.
+// Mod+Shift+= and Mod+Shift+- step the UI scale through its stops, from anywhere too.
 
 import { goto } from '$app/navigation';
+import { UI_SCALE_KEY } from '$lib/types';
+import { saveSettings } from '$lib/stores/settings.svelte';
+import { push } from '$lib/platform/toasts.svelte';
+import { applyScale, nextScale } from './appearance';
 import { inTauri } from './platform';
 import { shell, toggleRail, toggleSidePanel } from './shell.svelte';
 import { MAIN_VIEWS, SETTINGS_VIEW } from './views';
@@ -22,10 +27,41 @@ function hasMod(e: KeyboardEvent): boolean {
 	return shell.platform === 'mac' ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
 }
 
+/** +1 for the larger-scale keys, -1 for the smaller, 0 for anything else. Shift turns
+ * `=` into `+` and `-` into `_` on most layouts, so the code and both keys are read. */
+function scaleStep(e: KeyboardEvent): 1 | -1 | 0 {
+	if (e.code === 'Equal' || e.code === 'NumpadAdd' || e.key === '+' || e.key === '=') return 1;
+	if (e.code === 'Minus' || e.code === 'NumpadSubtract' || e.key === '-' || e.key === '_') return -1;
+	return 0;
+}
+
+/** Applies the next stop at once, then saves `ui.scale` so the setting and the next
+ * launch agree; at the end of the list nothing changes. */
+export async function stepScale(direction: 1 | -1): Promise<void> {
+	const next = nextScale(direction);
+	if (next === null) return;
+	applyScale(next);
+	push('info', `UI scale ${next}%`);
+	try {
+		await saveSettings({ [UI_SCALE_KEY]: next });
+	} catch {
+		/* the zoom is already applied and remembered locally; the setting catches up on the next Save */
+	}
+}
+
 export function handleKeydown(e: KeyboardEvent): void {
-	// Shift is not part of any combo here, so a shifted press belongs to whatever else
-	// claims it. Add the exception alongside the combo when one declares Shift.
-	if (!hasMod(e) || e.altKey || e.shiftKey) return;
+	if (!hasMod(e) || e.altKey) return;
+
+	// The only shifted combos: Mod+Shift+= and Mod+Shift+- step the UI scale. Any other
+	// shifted press belongs to whatever else claims it.
+	if (e.shiftKey) {
+		const step = scaleStep(e);
+		if (step !== 0) {
+			e.preventDefault();
+			void stepScale(step);
+		}
+		return;
+	}
 
 	if (e.key.toLowerCase() === 'k') {
 		e.preventDefault();

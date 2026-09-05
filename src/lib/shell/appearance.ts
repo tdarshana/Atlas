@@ -22,14 +22,45 @@ export const SCALE_KEY = 'atlas.scale';
  * rather than in `./fonts`. */
 export type UiScale = 80 | 90 | 100 | 110 | 125 | 150;
 
-export const SCALE_OPTIONS: { value: string; label: string }[] = [
-	{ value: '80', label: '80%' },
-	{ value: '90', label: '90%' },
-	{ value: '100', label: '100%' },
-	{ value: '110', label: '110%' },
-	{ value: '125', label: '125%' },
-	{ value: '150', label: '150%' }
-];
+/** The stops, in order; the scale shortcuts step along this list. */
+export const SCALE_STOPS: readonly UiScale[] = [80, 90, 100, 110, 125, 150];
+
+export const SCALE_OPTIONS: { value: string; label: string }[] = SCALE_STOPS.map((v) => ({
+	value: String(v),
+	label: `${v}%`
+}));
+
+/** The scale the document is at now, read back from the root's zoom; 100 when unset. */
+export function currentScale(): UiScale {
+	if (typeof document === 'undefined') return 100;
+	const zoom = parseFloat(document.documentElement.style.zoom);
+	const pct = Number.isFinite(zoom) && zoom > 0 ? Math.round(zoom * 100) : 100;
+	return (SCALE_STOPS as readonly number[]).includes(pct) ? (pct as UiScale) : 100;
+}
+
+/** Zooms the document to one stop and remembers it locally. The daemon's `ui.scale`
+ * is the caller's to save, so a shortcut and the Appearance card share this. */
+export function applyScale(scale: UiScale): void {
+	if (typeof document !== 'undefined') {
+		// `--ui-zoom` rides along for the body rule in the root layout: WebKit's zoom gets
+		// a fixed body's bottom edge wrong, so the body divides its height by this instead.
+		const root = document.documentElement.style;
+		if (scale === 100) {
+			// An empty string clears the property (and, unlike removeProperty, also in jsdom).
+			root.zoom = '';
+			root.removeProperty('--ui-zoom');
+		} else {
+			root.zoom = String(scale / 100);
+			root.setProperty('--ui-zoom', String(scale / 100));
+		}
+	}
+	writeStored(SCALE_KEY, scale === 100 ? null : String(scale));
+}
+
+/** The stop after (or before) the current one, or null at either end of the list. */
+export function nextScale(direction: 1 | -1): UiScale | null {
+	return SCALE_STOPS[SCALE_STOPS.indexOf(currentScale()) + direction] ?? null;
+}
 
 function writeStored(key: string, value: string | null): void {
 	try {
@@ -57,19 +88,8 @@ export function applyAppearance(
 	scale: UiScale
 ): void {
 	shell.theme = base;
-	if (typeof document !== 'undefined') {
-		document.documentElement.dataset.theme = base;
-		// `--ui-zoom` rides along for the body rule in the root layout: WebKit's zoom gets
-		// a fixed body's bottom edge wrong, so the body divides its height by this instead.
-		const root = document.documentElement.style;
-		if (scale === 100) {
-			root.removeProperty('zoom');
-			root.removeProperty('--ui-zoom');
-		} else {
-			root.zoom = String(scale / 100);
-			root.setProperty('--ui-zoom', String(scale / 100));
-		}
-	}
+	if (typeof document !== 'undefined') document.documentElement.dataset.theme = base;
+	applyScale(scale);
 	if (pack) applyThemePack(pack);
 	else clearThemePack();
 	applyFonts(fontUi, fontMono, fontSize);
@@ -79,5 +99,4 @@ export function applyAppearance(
 	writeStored(FONT_UI_KEY, fontUi);
 	writeStored(FONT_MONO_KEY, fontMono);
 	writeStored(FONT_SIZE_KEY, String(fontSize));
-	writeStored(SCALE_KEY, scale === 100 ? null : String(scale));
 }
