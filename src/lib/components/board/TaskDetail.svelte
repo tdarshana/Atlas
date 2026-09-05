@@ -1121,6 +1121,8 @@
 	/* The stage as a status lozenge under the title: white text on the stage's colour. */
 	.stage-lozenge {
 		display: inline-block;
+		align-self: flex-start;
+		width: max-content;
 		margin-top: 6px;
 		padding: 1px 8px;
 		border-radius: 3px;
