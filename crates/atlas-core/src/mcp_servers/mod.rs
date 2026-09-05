@@ -412,10 +412,11 @@ mod tests {
     fn a_plugin_server_switches_per_project_through_disabled_mcp_servers() {
         let db = Db::open_in_memory().unwrap();
         let (_temp, paths, project) = fixture(&db);
+        let root = project.root_path.clone();
         let project = Some(&project);
         let disabled_list = || -> Vec<String> {
             let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(paths.agent_home().join(".claude.json")).unwrap()).unwrap();
-            let block = &config["projects"][&project.unwrap().root_path];
+            let block = &config["projects"][&root];
             block["disabledMcpServers"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect()
         };
 
