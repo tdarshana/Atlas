@@ -16,6 +16,11 @@ use uuid::Uuid;
 /// by an enqueue whose notification was lost to a restart.
 const IDLE_TICK: Duration = Duration::from_secs(30);
 
+/// How long a `done` or `failed` job row stays for `GET /jobs/{id}` before the
+/// idle tick deletes it. Without the sweep the table grows by one row per Claude
+/// Code turn for ever (PERF-2).
+const FINISHED_JOB_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
 /// What a panicking job records. A panic payload can quote anything that was in
 /// scope, so none of it reaches the log or the `jobs.error` column.
 const INTERNAL_ERROR: &str = "internal error";
@@ -68,14 +73,27 @@ async fn sweep_orphaned_runs(backend: &LocalBackend) {
     }
 }
 
+/// Deletes finished job rows older than `FINISHED_JOB_RETENTION`. Run at startup
+/// and on every idle tick; with the `jobs(status)` index the delete touches only
+/// terminal rows, so it is cheap to repeat.
+async fn prune_finished(backend: &LocalBackend) {
+    let jobs = backend.jobs.clone();
+    match backend.blocking(move || jobs.prune_finished(FINISHED_JOB_RETENTION)).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("pruned {n} finished job(s) older than {} days", FINISHED_JOB_RETENTION.as_secs() / 86_400),
+        Err(e) => tracing::warn!("could not prune finished jobs: {e}"),
+    }
+}
+
 pub async fn run(backend: Arc<LocalBackend>) {
     requeue_stale(&backend).await;
     sweep_orphaned_runs(&backend).await;
+    prune_finished(&backend).await;
     loop {
         drain(&backend).await;
         tokio::select! {
             _ = backend.queue.notify.notified() => {}
-            _ = tokio::time::sleep(IDLE_TICK) => {}
+            _ = tokio::time::sleep(IDLE_TICK) => prune_finished(&backend).await,
         }
     }
 }

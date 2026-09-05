@@ -164,6 +164,11 @@ create table if not exists skills (
   created_at timestamp not null default now(),
   updated_at timestamp not null default now());
 alter table projects add column if not exists skills_disabled json;
+"#), (10, r#"
+-- PERF-2 (ATL-304): `next_queued` runs `where status = 'queued'` on every worker
+-- wake, so the status column gets an index. `if not exists` keeps a replay over a
+-- database that already carries it a no-op, the same shape the column migrations use.
+create index if not exists jobs_status_idx on jobs (status);
 "#)];
 
 /// Moves the Markdown workflow documents aside so migration 6 can give the name
@@ -232,7 +237,7 @@ mod tests {
     #[test]
     fn migrate_creates_tables_and_is_idempotent() {
         let db = Db::open_in_memory().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 9);
+        assert_eq!(db.schema_version().unwrap(), 10);
         let n: i64 = db.with_conn(|c| Ok(c.query_row(
             "select count(*) from information_schema.tables where table_name in ('memories','memory_embeddings','audit','settings','projects','agents','practices','workflow_docs','sync_targets','jobs','tasks','task_blockers','task_events','board_counters','workflows','workflow_runs','workflow_steps','skills')",
             [], |r| r.get(0))?)).unwrap();
@@ -243,7 +248,7 @@ mod tests {
             [], |r| r.get(0))?)).unwrap();
         assert_eq!(cols, 6);
         db.migrate().unwrap(); // second run is a no-op
-        assert_eq!(db.schema_version().unwrap(), 9);
+        assert_eq!(db.schema_version().unwrap(), 10);
     }
 
     /// Migration 6 renames the Markdown doc table out of the way and puts the real
@@ -286,7 +291,7 @@ mod tests {
         .unwrap();
         assert_eq!(db.schema_version().unwrap(), 4);
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 9);
+        assert_eq!(db.schema_version().unwrap(), 10);
     }
 
     /// A database stamped 3 by the build that shipped migration 3 without
@@ -303,7 +308,7 @@ mod tests {
         assert_eq!(db.schema_version().unwrap(), 3);
 
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 9);
+        assert_eq!(db.schema_version().unwrap(), 10);
         let n: i64 = db
             .with_conn(|c| {
                 Ok(c.query_row("select count(*) from information_schema.tables where table_name = 'board_counters'", [], |r| r.get(0))?)
@@ -324,7 +329,7 @@ mod tests {
         .unwrap();
         assert_eq!(db.schema_version().unwrap(), 7);
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 9);
+        assert_eq!(db.schema_version().unwrap(), 10);
         let n: i64 = db
             .with_conn(|c| {
                 Ok(c.query_row(
@@ -350,7 +355,7 @@ mod tests {
         .unwrap();
         assert_eq!(db.schema_version().unwrap(), 8);
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 9);
+        assert_eq!(db.schema_version().unwrap(), 10);
         let n: i64 = db
             .with_conn(|c| {
                 Ok(c.query_row(
@@ -361,6 +366,46 @@ mod tests {
             })
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    fn jobs_status_index_count(db: &Db) -> i64 {
+        db.with_conn(|c| {
+            Ok(c.query_row(
+                "select count(*) from duckdb_indexes() where table_name = 'jobs' and index_name = 'jobs_status_idx'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap()
+    }
+
+    /// Migration 10 adds the `jobs(status)` index with `if not exists`: a fresh
+    /// database gets it, and a database already at version 9 (the previous release)
+    /// gets it too, without failing when the index is already there.
+    #[test]
+    fn migration_10_adds_the_jobs_status_index_to_a_v9_database() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(jobs_status_index_count(&db), 1, "a fresh database carries the index");
+        db.with_conn(|c| {
+            c.execute_batch("drop index jobs_status_idx; delete from schema_version where version >= 10;")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(db.schema_version().unwrap(), 9);
+        assert_eq!(jobs_status_index_count(&db), 0);
+        db.migrate().unwrap();
+        assert_eq!(db.schema_version().unwrap(), 10);
+        assert_eq!(jobs_status_index_count(&db), 1);
+
+        // Replaying over a database that already has the index is a no-op.
+        db.with_conn(|c| {
+            c.execute_batch("delete from schema_version where version >= 10;")?;
+            Ok(())
+        })
+        .unwrap();
+        db.migrate().unwrap();
+        assert_eq!(db.schema_version().unwrap(), 10);
+        assert_eq!(jobs_status_index_count(&db), 1);
     }
 
     #[test]

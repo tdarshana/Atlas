@@ -6,10 +6,11 @@ use crate::db::Db;
 use crate::memories::parse_ts_pub;
 use crate::Result;
 use chrono::{DateTime, Utc};
-use duckdb::{params, Row};
+use duckdb::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 
 /// `Deserialize` as well as `Serialize`, so `RemoteBackend` can read a job back
@@ -62,6 +63,30 @@ fn row_to_job(r: &Row) -> duckdb::Result<Job> {
     })
 }
 
+/// Drops the heavy part of a finished job's payload. Nothing reads a job's payload
+/// once it has left `running`, and an `ingest` job's `text` is up to a million
+/// characters of transcript, so `text` is replaced by its character count `chars`
+/// (the shape `GET /jobs/{id}` already serves) and every other key stays. A payload
+/// that is not an object, or carries no `text`, is left as it is, so other job
+/// kinds are unaffected. Runs on the connection the status update just used.
+fn trim_payload(c: &Connection, id: &str) -> Result<()> {
+    let mut st = c.prepare("select payload::text from jobs where id = ?")?;
+    let mut rows = st.query(params![id])?;
+    let raw = match rows.next()? {
+        Some(r) => r.get::<_, Option<String>>(0)?,
+        None => None,
+    };
+    let Some(raw) = raw else { return Ok(()) };
+    let mut payload: Value = serde_json::from_str(&raw)?;
+    let Some(obj) = payload.as_object_mut() else { return Ok(()) };
+    let Some(text) = obj.remove("text") else { return Ok(()) };
+    if let Some(chars) = text.as_str().map(|t| t.chars().count()) {
+        obj.insert("chars".into(), Value::from(chars));
+    }
+    c.execute("update jobs set payload = ?::json where id = ?", params![payload.to_string(), id])?;
+    Ok(())
+}
+
 pub struct JobRepo {
     db: Arc<Db>,
 }
@@ -108,7 +133,7 @@ impl JobRepo {
                 "update jobs set status = 'done', result = ?::json, error = null, updated_at = now() where id = ?",
                 params![json, id.to_string()],
             )?;
-            Ok(())
+            trim_payload(c, &id.to_string())
         })
     }
 
@@ -118,7 +143,21 @@ impl JobRepo {
                 "update jobs set status = 'failed', error = ?, updated_at = now() where id = ?",
                 params![error, id.to_string()],
             )?;
-            Ok(())
+            trim_payload(c, &id.to_string())
+        })
+    }
+
+    /// Deletes `done` and `failed` jobs whose last status change is older than
+    /// `older_than`. A finished row only exists so `GET /jobs/{id}` can answer for a
+    /// while after the caller was handed the id; without this sweep the table keeps
+    /// one row per Claude Code turn for ever. Returns how many rows went.
+    pub fn prune_finished(&self, older_than: Duration) -> Result<usize> {
+        let secs = i64::try_from(older_than.as_secs()).unwrap_or(i64::MAX);
+        self.db.with_conn(|c| {
+            Ok(c.execute(
+                "delete from jobs where status in ('done','failed') and updated_at < now()::timestamp - to_seconds(?)",
+                params![secs],
+            )?)
         })
     }
 
@@ -273,5 +312,84 @@ mod tests {
         assert_eq!(r.get(queued).unwrap().unwrap().status, "queued");
 
         assert_eq!(r.requeue_stale().unwrap(), 0, "nothing left running to requeue");
+    }
+
+    /// Once an ingest job is finished nothing reads its transcript again, so the
+    /// row drops `payload.text` (replaced by its character count) and keeps every
+    /// other key a caller follows the job by.
+    #[test]
+    fn a_finished_ingest_job_drops_the_transcript_and_keeps_the_rest() {
+        let r = repo();
+        let payload = json!({"text": "héllo", "source_tool": "test", "project_root": "/p", "project_id": "abc"});
+        let done = r.enqueue("ingest", payload.clone()).unwrap();
+        r.next_queued().unwrap().unwrap();
+        r.mark_done(done, json!({"inserted": 1})).unwrap();
+        let job = r.get(done).unwrap().unwrap();
+        assert!(job.payload.get("text").is_none(), "text must be gone: {}", job.payload);
+        assert_eq!(job.payload["chars"], 5);
+        assert_eq!(job.payload["source_tool"], "test");
+        assert_eq!(job.payload["project_root"], "/p");
+        assert_eq!(job.payload["project_id"], "abc");
+        assert_eq!(job.result.unwrap()["inserted"], 1);
+
+        let failed = r.enqueue("ingest", payload).unwrap();
+        r.next_queued().unwrap().unwrap();
+        r.mark_failed(failed, "boom").unwrap();
+        let job = r.get(failed).unwrap().unwrap();
+        assert!(job.payload.get("text").is_none(), "text must be gone: {}", job.payload);
+        assert_eq!(job.payload["chars"], 5);
+        assert_eq!(job.payload["source_tool"], "test");
+        assert_eq!(job.error.as_deref(), Some("boom"));
+    }
+
+    /// A job kind whose payload carries no `text` is stored back unchanged, and a
+    /// job with no payload at all does not fail to finish.
+    #[test]
+    fn finishing_a_job_without_text_leaves_its_payload_alone() {
+        let r = repo();
+        let run_id = Uuid::new_v4().to_string();
+        let id = r.enqueue("workflow_run", json!({"run_id": run_id, "actor": "scheduler"})).unwrap();
+        r.next_queued().unwrap().unwrap();
+        r.mark_done(id, json!({})).unwrap();
+        let job = r.get(id).unwrap().unwrap();
+        assert_eq!(job.payload, json!({"run_id": run_id, "actor": "scheduler"}));
+
+        let bare = r.enqueue("ingest", Value::Null).unwrap();
+        r.next_queued().unwrap().unwrap();
+        r.mark_failed(bare, "no payload").unwrap();
+        assert_eq!(r.get(bare).unwrap().unwrap().status, "failed");
+    }
+
+    /// Only `done` and `failed` rows past the retention window go; a queued or
+    /// running row of any age, and a recently finished one, stay.
+    #[test]
+    fn prune_finished_removes_only_old_terminal_rows() {
+        let r = repo();
+        let old_done = r.enqueue("ingest", json!({})).unwrap();
+        r.next_queued().unwrap().unwrap();
+        r.mark_done(old_done, json!({})).unwrap();
+        let old_failed = r.enqueue("ingest", json!({})).unwrap();
+        r.next_queued().unwrap().unwrap();
+        r.mark_failed(old_failed, "x").unwrap();
+        let old_running = r.enqueue("ingest", json!({})).unwrap();
+        r.next_queued().unwrap().unwrap();
+        let old_queued = r.enqueue("ingest", json!({})).unwrap();
+        // Everything so far is backdated ten days; the rows below stay recent.
+        r.db.with_conn(|c| {
+            c.execute("update jobs set updated_at = now()::timestamp - to_days(10), created_at = now()::timestamp - to_days(10)", [])?;
+            Ok(())
+        })
+        .unwrap();
+        // Finished without a claim: `next_queued` would hand out `old_queued` first.
+        let recent_done = r.enqueue("ingest", json!({})).unwrap();
+        r.mark_done(recent_done, json!({})).unwrap();
+
+        assert_eq!(r.prune_finished(std::time::Duration::from_secs(7 * 24 * 3600)).unwrap(), 2);
+        assert!(r.get(old_done).unwrap().is_none(), "old done row must be gone");
+        assert!(r.get(old_failed).unwrap().is_none(), "old failed row must be gone");
+        assert_eq!(r.get(old_running).unwrap().unwrap().status, "running");
+        assert_eq!(r.get(old_queued).unwrap().unwrap().status, "queued");
+        assert_eq!(r.get(recent_done).unwrap().unwrap().status, "done");
+        assert_eq!(r.prune_finished(std::time::Duration::from_secs(7 * 24 * 3600)).unwrap(), 0);
     }
 }

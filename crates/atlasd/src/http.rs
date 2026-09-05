@@ -577,12 +577,14 @@ async fn ingest(State(s): State<AppState>, headers: HeaderMap, ApiJson(b): ApiJs
     }
 }
 
-/// The `jobs` row keeps the transcript so the worker can read it, but the route does
+/// The `jobs` row keeps the transcript while the worker needs it, but the route does
 /// not hand it back: an ingest payload is up to a million characters of somebody's
-/// conversation, the rows are never pruned, and re-serving them turns every job id
-/// into a second copy for anything on loopback to read. The payload's other fields
+/// conversation, and re-serving it would turn every queued or running job id into a
+/// second copy for anything on loopback to read. The payload's other fields
 /// (`source_tool`, `project_root`) are what a caller actually follows a job by, so
-/// they stay, and `text` becomes its own character count.
+/// they stay, and `text` becomes its own character count. Once the job is `done` or
+/// `failed` the row itself has already made that swap (`JobRepo::mark_done` drops
+/// `text` for `chars`), and the worker deletes finished rows after seven days.
 async fn get_job(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Result<Json<Job>, ApiError> {
     let mut job = s.backend.get_job(id).await?.ok_or_else(|| ApiError(AtlasError::NotFound(format!("job {id}"))))?;
     if let Some(payload) = job.payload.as_object_mut() {
