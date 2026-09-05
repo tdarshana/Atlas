@@ -155,7 +155,7 @@
 		/* A zero basis: the box sits on the badges' line whenever 80px remain, and grows
 		   to fill it, rather than wrapping under them at its intrinsic width. */
 		flex: 1 1 0;
-		min-width: 80px;
+		min-width: 48px;
 		height: 20px;
 		border: none;
 		background: none;
