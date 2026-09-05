@@ -1153,11 +1153,19 @@
 	   left, scrolling inside, so the dialog neither grows with a long history nor leaves
 	   dead space under a short one. */
 	.detail-modal .columns {
-		min-height: 100%;
+		flex: 1;
+		min-height: 0;
 		grid-template-rows: auto auto minmax(0, 1fr);
 	}
 
+	/* The tabs row is the modal's one scroller; the body itself never scrolls (the
+	   description box caps its own height, so the first row stays bounded). */
+	.detail-modal .body {
+		overflow: hidden;
+	}
+
 	.detail-modal .tabs {
+		align-self: stretch;
 		min-height: 0;
 		overflow: hidden;
 	}
