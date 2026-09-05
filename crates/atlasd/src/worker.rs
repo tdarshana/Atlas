@@ -272,11 +272,11 @@ mod tests {
 
         drain(&backend).await;
 
-        let failed = backend.jobs.get(boom).unwrap().expect("the panicking job");
+        let failed = backend.jobs.get(boom).expect("the panicking job");
         assert_eq!(failed.status, "failed");
         assert_eq!(failed.error.as_deref(), Some(INTERNAL_ERROR));
 
-        let next = backend.jobs.get(after).unwrap().expect("the job behind it");
+        let next = backend.jobs.get(after).expect("the job behind it");
         assert_eq!(next.status, "failed", "the drain must not stop at the panic");
         assert!(next.error.unwrap().contains("unknown job kind"));
 

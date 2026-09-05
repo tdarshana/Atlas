@@ -635,7 +635,7 @@ async fn ingest(State(s): State<AppState>, headers: HeaderMap, ApiJson(b): ApiJs
 /// `failed` the row itself has already made that swap (`JobRepo::mark_done` drops
 /// `text` for `chars`), and the worker deletes finished rows after seven days.
 async fn get_job(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Result<Json<Job>, ApiError> {
-    let mut job = s.backend.get_job(id).await?.ok_or_else(|| ApiError(AtlasError::NotFound(format!("job {id}"))))?;
+    let mut job = s.backend.get_job(id).await?;
     if let Some(payload) = job.payload.as_object_mut() {
         if let Some(chars) = payload.remove("text").as_ref().and_then(|t| t.as_str()).map(|t| t.chars().count()) {
             payload.insert("chars".into(), serde_json::json!(chars));

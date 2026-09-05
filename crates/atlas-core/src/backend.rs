@@ -175,7 +175,7 @@ pub trait JobBackend: Send + Sync + 'static {
     /// Fails with `Conflict` when extraction is off, so nothing is queued that the
     /// worker could not run.
     async fn ingest_transcript(&self, text: String, source_tool: String, project_root: Option<PathBuf>) -> Result<Uuid>;
-    async fn get_job(&self, id: Uuid) -> Result<Option<Job>>;
+    async fn get_job(&self, id: Uuid) -> Result<Job>;
     /// Sends a minimal connectivity check to the model configured for `project_id`
     /// (or the global one when it is `None`) and answers with its reply, trimmed.
     /// `Conflict` when extraction is off or half configured, the same gate
@@ -1028,7 +1028,7 @@ impl JobBackend for LocalBackend {
         Ok(id)
     }
 
-    async fn get_job(&self, id: Uuid) -> Result<Option<Job>> {
+    async fn get_job(&self, id: Uuid) -> Result<Job> {
         let jobs = self.jobs.clone();
         self.blocking(move || jobs.get(id)).await
     }

@@ -420,10 +420,8 @@ impl JobBackend for RemoteBackend {
     }
 
     /// A job the daemon has never heard of is `None`, not an error.
-    async fn get_job(&self, id: Uuid) -> Result<Option<Job>> {
-        let r = self.client.get(format!("{}/jobs/{id}", self.base)).send().await.map_err(Self::net)?;
-        if r.status() == reqwest::StatusCode::NOT_FOUND { return Ok(None); }
-        Self::handle(r).await.map(Some)
+    async fn get_job(&self, id: Uuid) -> Result<Job> {
+        Self::handle(self.client.get(format!("{}/jobs/{id}", self.base)).send().await.map_err(Self::net)?).await
     }
 
     /// The daemon runs the connectivity check, so a 409 here is its "extraction is

@@ -4,7 +4,7 @@
 
 use crate::db::Db;
 use crate::memories::parse_ts_pub;
-use crate::Result;
+use crate::{AtlasError, Result};
 use chrono::{DateTime, Utc};
 use duckdb::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
@@ -184,14 +184,16 @@ impl JobRepo {
         })
     }
 
-    pub fn get(&self, id: Uuid) -> Result<Option<Job>> {
+    /// One job by id, or `NotFound`: a key lookup, so it answers the way every other
+    /// repository's `get` does rather than with an `Option` a caller has to remember.
+    pub fn get(&self, id: Uuid) -> Result<Job> {
         self.db.with_conn(|c| {
             let mut st = c.prepare(&format!("select {SEL} from jobs where id = ?"))?;
             let mut rows = st.query(params![id.to_string()])?;
-            Ok(match rows.next()? {
-                Some(r) => Some(row_to_job(r)?),
-                None => None,
-            })
+            match rows.next()? {
+                Some(r) => Ok(row_to_job(r)?),
+                None => Err(AtlasError::NotFound(format!("job {id}"))),
+            }
         })
     }
 }
@@ -218,6 +220,15 @@ mod tests {
         JobRepo::new(Arc::new(Db::open_in_memory().unwrap()))
     }
 
+    /// ARCH-18: a lookup by primary key misses with `NotFound`, like every other repo.
+    #[test]
+    fn get_of_an_unknown_id_is_not_found() {
+        let r = repo();
+        let missing = Uuid::new_v4();
+        let err = r.get(missing).unwrap_err();
+        assert!(matches!(&err, AtlasError::NotFound(m) if m.contains(&missing.to_string())), "{err}");
+    }
+
     #[test]
     fn next_queued_claims_a_job_once() {
         let r = repo();
@@ -228,7 +239,7 @@ mod tests {
         assert_eq!(job.status, "running");
         assert_eq!(job.payload["text"], "hello");
         assert!(r.next_queued().unwrap().is_none(), "a claimed job must not be handed out again");
-        assert_eq!(r.get(id).unwrap().unwrap().status, "running");
+        assert_eq!(r.get(id).unwrap().status, "running");
     }
 
     #[test]
@@ -246,7 +257,7 @@ mod tests {
         let id = r.enqueue("ingest", json!({"text": "x"})).unwrap();
         r.next_queued().unwrap().unwrap();
         r.mark_done(id, json!({"inserted": 2, "skipped_duplicates": 0})).unwrap();
-        let job = r.get(id).unwrap().expect("the job");
+        let job = r.get(id).expect("the job");
         assert_eq!(job.status, "done");
         assert_eq!(job.result.unwrap()["inserted"], 2);
         assert_eq!(job.error, None);
@@ -258,15 +269,10 @@ mod tests {
         let id = r.enqueue("mystery", json!({})).unwrap();
         r.next_queued().unwrap().unwrap();
         r.mark_failed(id, "unknown job kind").unwrap();
-        let job = r.get(id).unwrap().expect("the job");
+        let job = r.get(id).expect("the job");
         assert_eq!(job.status, "failed");
         assert_eq!(job.error.as_deref(), Some("unknown job kind"));
         assert!(job.result.is_none());
-    }
-
-    #[test]
-    fn get_of_an_unknown_id_is_none() {
-        assert!(repo().get(Uuid::new_v4()).unwrap().is_none());
     }
 
     /// A `workflow_run` job still `queued` or `running` for a run id is active; one
@@ -298,7 +304,7 @@ mod tests {
         let r = repo();
         let running = r.enqueue("ingest", json!({})).unwrap();
         r.next_queued().unwrap().unwrap();
-        assert_eq!(r.get(running).unwrap().unwrap().status, "running");
+        assert_eq!(r.get(running).unwrap().status, "running");
 
         let done = r.enqueue("ingest", json!({})).unwrap();
         r.next_queued().unwrap().unwrap();
@@ -307,9 +313,9 @@ mod tests {
         let queued = r.enqueue("ingest", json!({})).unwrap();
 
         assert_eq!(r.requeue_stale().unwrap(), 1);
-        assert_eq!(r.get(running).unwrap().unwrap().status, "queued");
-        assert_eq!(r.get(done).unwrap().unwrap().status, "done");
-        assert_eq!(r.get(queued).unwrap().unwrap().status, "queued");
+        assert_eq!(r.get(running).unwrap().status, "queued");
+        assert_eq!(r.get(done).unwrap().status, "done");
+        assert_eq!(r.get(queued).unwrap().status, "queued");
 
         assert_eq!(r.requeue_stale().unwrap(), 0, "nothing left running to requeue");
     }
@@ -324,7 +330,7 @@ mod tests {
         let done = r.enqueue("ingest", payload.clone()).unwrap();
         r.next_queued().unwrap().unwrap();
         r.mark_done(done, json!({"inserted": 1})).unwrap();
-        let job = r.get(done).unwrap().unwrap();
+        let job = r.get(done).unwrap();
         assert!(job.payload.get("text").is_none(), "text must be gone: {}", job.payload);
         assert_eq!(job.payload["chars"], 5);
         assert_eq!(job.payload["source_tool"], "test");
@@ -335,7 +341,7 @@ mod tests {
         let failed = r.enqueue("ingest", payload).unwrap();
         r.next_queued().unwrap().unwrap();
         r.mark_failed(failed, "boom").unwrap();
-        let job = r.get(failed).unwrap().unwrap();
+        let job = r.get(failed).unwrap();
         assert!(job.payload.get("text").is_none(), "text must be gone: {}", job.payload);
         assert_eq!(job.payload["chars"], 5);
         assert_eq!(job.payload["source_tool"], "test");
@@ -351,13 +357,13 @@ mod tests {
         let id = r.enqueue("workflow_run", json!({"run_id": run_id, "actor": "scheduler"})).unwrap();
         r.next_queued().unwrap().unwrap();
         r.mark_done(id, json!({})).unwrap();
-        let job = r.get(id).unwrap().unwrap();
+        let job = r.get(id).unwrap();
         assert_eq!(job.payload, json!({"run_id": run_id, "actor": "scheduler"}));
 
         let bare = r.enqueue("ingest", Value::Null).unwrap();
         r.next_queued().unwrap().unwrap();
         r.mark_failed(bare, "no payload").unwrap();
-        assert_eq!(r.get(bare).unwrap().unwrap().status, "failed");
+        assert_eq!(r.get(bare).unwrap().status, "failed");
     }
 
     /// Only `done` and `failed` rows past the retention window go; a queued or
@@ -385,11 +391,11 @@ mod tests {
         r.mark_done(recent_done, json!({})).unwrap();
 
         assert_eq!(r.prune_finished(std::time::Duration::from_secs(7 * 24 * 3600)).unwrap(), 2);
-        assert!(r.get(old_done).unwrap().is_none(), "old done row must be gone");
-        assert!(r.get(old_failed).unwrap().is_none(), "old failed row must be gone");
-        assert_eq!(r.get(old_running).unwrap().unwrap().status, "running");
-        assert_eq!(r.get(old_queued).unwrap().unwrap().status, "queued");
-        assert_eq!(r.get(recent_done).unwrap().unwrap().status, "done");
+        assert!(r.get(old_done).is_err(), "old done row must be gone");
+        assert!(r.get(old_failed).is_err(), "old failed row must be gone");
+        assert_eq!(r.get(old_running).unwrap().status, "running");
+        assert_eq!(r.get(old_queued).unwrap().status, "queued");
+        assert_eq!(r.get(recent_done).unwrap().status, "done");
         assert_eq!(r.prune_finished(std::time::Duration::from_secs(7 * 24 * 3600)).unwrap(), 0);
     }
 }
