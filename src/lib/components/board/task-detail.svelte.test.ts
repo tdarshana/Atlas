@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 // The task detail's lower half: a Subtasks/Activity/Comments tab strip over the
-// children list, the non-comment events and the comment events plus the composer.
+// children list, every event (comments included) and the comment events plus the composer.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
@@ -161,7 +161,7 @@ describe('TaskDetail parent and back', () => {
 });
 
 describe('TaskDetail tabs', () => {
-	it('shows three tabs with the subtasks, non-comment and comment counts in a badge', () => {
+	it('shows three tabs with the subtasks, all-event and comment counts in a badge', () => {
 		const { container } = open();
 
 		const strip = container.querySelector('[data-testid="task-tabs"]');
@@ -173,7 +173,7 @@ describe('TaskDetail tabs', () => {
 
 		const activityTab = container.querySelector('[data-testid="task-tab-activity"]');
 		expect(activityTab?.textContent).toContain('Activity');
-		expect(activityTab?.querySelector('.dbm-badge')?.textContent?.trim()).toBe('2');
+		expect(activityTab?.querySelector('.dbm-badge')?.textContent?.trim()).toBe('3');
 
 		const commentsTab = container.querySelector('[data-testid="task-tab-comments"]');
 		expect(commentsTab?.textContent).toContain('Comments');
@@ -188,13 +188,13 @@ describe('TaskDetail tabs', () => {
 		expect(container.querySelectorAll('[data-testid="task-children"] li')).toHaveLength(2);
 	});
 
-	it('selecting Activity shows the two non-comment events and no textarea', async () => {
+	it('selecting Activity shows all three events, comment included, and no textarea', async () => {
 		const { container } = open();
 
 		await fireEvent.click(container.querySelector('[data-testid="task-tab-activity"]')!);
 
 		const events = container.querySelectorAll('[data-testid="task-events"] li');
-		expect(events).toHaveLength(2);
+		expect(events).toHaveLength(3);
 		expect(container.querySelector('[data-testid="task-comment"]')).toBeNull();
 	});
 

@@ -91,8 +91,8 @@
 	const task = $derived(detail?.task ?? null);
 
 	// The lower half's three tabs.
-	// Newest first, like the comments: the latest change is what a reader looks for.
-	const activityEvents = $derived([...(detail?.events.filter((e) => e.kind !== 'commented') ?? [])].reverse());
+	// The whole history, comments included, newest first; Comments is the filtered view.
+	const activityEvents = $derived([...(detail?.events ?? [])].reverse());
 	// Newest first: the latest word on a task is what a reader opens the tab for.
 	const commentEvents = $derived([...(detail?.events.filter((e) => e.kind === 'commented') ?? [])].reverse());
 	const tabs = $derived([
