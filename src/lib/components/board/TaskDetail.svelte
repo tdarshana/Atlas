@@ -1123,13 +1123,14 @@
 		display: inline-block;
 		align-self: flex-start;
 		width: max-content;
-		margin-top: 6px;
-		padding: 1px 8px;
+		margin-top: 4px;
+		padding: 0 6px;
 		border-radius: 3px;
 		color: #fff;
-		font-size: 11px;
+		font-size: 10px;
 		font-weight: 600;
-		letter-spacing: 0.02em;
+		line-height: 16px;
+		letter-spacing: 0.03em;
 		text-transform: uppercase;
 	}
 
