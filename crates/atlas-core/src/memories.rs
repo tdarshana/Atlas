@@ -62,6 +62,23 @@ fn row_to_memory(r: &Row) -> duckdb::Result<Memory> {
     })
 }
 
+/// Appends the scope and project clauses the listings share: `All` widens a
+/// `project_id` to that project plus the global memories, `ProjectOnly` keeps just
+/// the project's rows, `GlobalOnly` ignores the project.
+fn push_scope_filter(sql: &mut String, args: &mut Vec<Value>, scope: Option<MemoryScope>, project_id: Option<Uuid>, only: MemoryScopeFilter) {
+    if let Some(s) = scope { sql.push_str(" and scope = ?"); args.push(Value::Text(s.as_str().to_string())); }
+    if only == MemoryScopeFilter::GlobalOnly {
+        sql.push_str(" and scope = 'global'");
+    } else if let Some(p) = project_id {
+        match only {
+            MemoryScopeFilter::All => sql.push_str(" and (project_id = ? or scope = 'global')"),
+            MemoryScopeFilter::ProjectOnly => sql.push_str(" and project_id = ?"),
+            MemoryScopeFilter::GlobalOnly => unreachable!("handled above"),
+        }
+        args.push(Value::Text(p.to_string()));
+    }
+}
+
 // Select list that casts to text so row mapping is uniform across DuckDB types.
 fn select_cols() -> String {
     "id::text, scope, project_id::text, kind, text, to_json(tags)::text, source_agent, source_tool, confidence, status, superseded_by::text, created_at::text, updated_at::text".to_string()
@@ -154,21 +171,47 @@ impl<'a> MemoryRepo<'a> {
         self.db.with_conn(|c| {
             let mut sql = format!("select {} from memories where status = ?", select_cols());
             let mut args: Vec<Value> = vec![Value::Text(status.as_str().to_string())];
-            if let Some(s) = scope { sql.push_str(" and scope = ?"); args.push(Value::Text(s.as_str().to_string())); }
-            if only == MemoryScopeFilter::GlobalOnly {
-                sql.push_str(" and scope = 'global'");
-            } else if let Some(p) = project_id {
-                match only {
-                    MemoryScopeFilter::All => sql.push_str(" and (project_id = ? or scope = 'global')"),
-                    MemoryScopeFilter::ProjectOnly => sql.push_str(" and project_id = ?"),
-                    MemoryScopeFilter::GlobalOnly => unreachable!("handled above"),
-                }
-                args.push(Value::Text(p.to_string()));
-            }
+            push_scope_filter(&mut sql, &mut args, scope, project_id, only);
             sql.push_str(" order by created_at desc");
             // Bound, never formatted in: the numbers come off the wire.
             if let Some(l) = page.limit() { sql.push_str(" limit ?"); args.push(Value::BigInt(l as i64)); }
             if let Some(o) = page.offset { sql.push_str(" offset ?"); args.push(Value::BigInt(i64::try_from(o).unwrap_or(i64::MAX))); }
+            let mut st = c.prepare(&sql)?;
+            let rows = st.query_map(duckdb::params_from_iter(args.iter()), row_to_memory)?;
+            Ok(rows.collect::<duckdb::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// The active memories among `ids` that pass the scope and project filter of
+    /// [`list_by_status_scoped`](Self::list_by_status_scoped), belong to one of
+    /// `kinds` (any kind when empty) and carry one of `tags` (any tag when empty).
+    /// Order is unspecified. Recall's fetch step: it scores ids in memory and reads
+    /// only the rows it is about to hand back, so the filters run in SQL on that
+    /// small set rather than over the whole active table.
+    pub fn list_active_by_ids(
+        &self,
+        ids: &[Uuid],
+        scope: Option<MemoryScope>,
+        project_id: Option<Uuid>,
+        only: MemoryScopeFilter,
+        kinds: &[MemoryKind],
+        tags: &[String],
+    ) -> Result<Vec<Memory>> {
+        if ids.is_empty() { return Ok(vec![]); }
+        let placeholders = |n: usize| vec!["?"; n].join(", ");
+        self.db.with_conn(|c| {
+            let mut sql = format!("select {} from memories where status = 'active' and id in ({})", select_cols(), placeholders(ids.len()));
+            let mut args: Vec<Value> = ids.iter().map(|i| Value::Text(i.to_string())).collect();
+            push_scope_filter(&mut sql, &mut args, scope, project_id, only);
+            if !kinds.is_empty() {
+                sql.push_str(&format!(" and kind in ({})", placeholders(kinds.len())));
+                args.extend(kinds.iter().map(|k| Value::Text(k.as_str().to_string())));
+            }
+            if !tags.is_empty() {
+                // Tag literals, quoted the way `insert_as` writes them.
+                let list = tags.iter().map(|t| format!("'{}'", t.replace('\'', "''"))).collect::<Vec<_>>().join(",");
+                sql.push_str(&format!(" and list_has_any(tags, [{list}]::text[])"));
+            }
             let mut st = c.prepare(&sql)?;
             let rows = st.query_map(duckdb::params_from_iter(args.iter()), row_to_memory)?;
             Ok(rows.collect::<duckdb::Result<Vec<_>>>()?)
@@ -401,6 +444,41 @@ mod tests {
         repo.insert(&mem("one", MemoryScope::Global), "test").unwrap();
         let rows = repo.list_by_status_scoped(MemoryStatus::Active, None, None, MemoryScopeFilter::All, MemoryPage { limit: Some(usize::MAX), offset: None }).unwrap();
         assert_eq!(rows.len(), 1, "an oversized limit still lists, capped");
+    }
+
+    /// Recall's fetch step reads only the ids it is given, and applies the status,
+    /// scope, project, kind and tag filters on that set in SQL.
+    #[test]
+    fn list_active_by_ids_filters_the_given_ids_in_sql() {
+        let db = Db::open_in_memory().unwrap();
+        let repo = MemoryRepo::new(&db);
+        let p = Uuid::new_v4();
+        let a = repo.insert(&mem("global fact", MemoryScope::Global), "test").unwrap();
+        let mut pref = mem("global preference", MemoryScope::Global);
+        pref.kind = MemoryKind::Preference;
+        pref.tags = vec!["it's".into(), "style".into()];
+        let b = repo.insert(&pref, "test").unwrap();
+        let mut proj = mem("project fact", MemoryScope::Project);
+        proj.project_id = Some(p);
+        let c = repo.insert(&proj, "test").unwrap();
+        repo.insert(&mem("not listed", MemoryScope::Global), "test").unwrap();
+        let e = repo.insert(&mem("superseded", MemoryScope::Global), "test").unwrap();
+        repo.supersede(e.id, None, "test").unwrap();
+        let ids = |v: Vec<Memory>| { let mut out = v.into_iter().map(|m| m.id).collect::<Vec<_>>(); out.sort(); out };
+        let sorted = |mut v: Vec<Uuid>| { v.sort(); v };
+        let all = [a.id, b.id, c.id, e.id];
+
+        assert!(repo.list_active_by_ids(&[], None, None, MemoryScopeFilter::All, &[], &[]).unwrap().is_empty());
+        assert_eq!(ids(repo.list_active_by_ids(&all, None, None, MemoryScopeFilter::All, &[], &[]).unwrap()), sorted(vec![a.id, b.id, c.id]), "only active rows among the given ids");
+        assert_eq!(ids(repo.list_active_by_ids(&all, None, Some(p), MemoryScopeFilter::All, &[], &[]).unwrap()), sorted(vec![a.id, b.id, c.id]));
+        assert_eq!(ids(repo.list_active_by_ids(&all, None, Some(p), MemoryScopeFilter::ProjectOnly, &[], &[]).unwrap()), vec![c.id]);
+        assert_eq!(ids(repo.list_active_by_ids(&all, None, Some(p), MemoryScopeFilter::GlobalOnly, &[], &[]).unwrap()), sorted(vec![a.id, b.id]));
+        assert_eq!(ids(repo.list_active_by_ids(&all, None, Some(Uuid::new_v4()), MemoryScopeFilter::All, &[], &[]).unwrap()), sorted(vec![a.id, b.id]), "another project sees only global");
+        assert_eq!(ids(repo.list_active_by_ids(&all, Some(MemoryScope::Project), None, MemoryScopeFilter::All, &[], &[]).unwrap()), vec![c.id]);
+        assert_eq!(ids(repo.list_active_by_ids(&all, None, None, MemoryScopeFilter::All, &[MemoryKind::Preference], &[]).unwrap()), vec![b.id]);
+        assert_eq!(ids(repo.list_active_by_ids(&all, None, None, MemoryScopeFilter::All, &[], &["style".into()]).unwrap()), vec![b.id]);
+        assert_eq!(ids(repo.list_active_by_ids(&all, None, None, MemoryScopeFilter::All, &[], &["it's".into(), "none".into()]).unwrap()), vec![b.id], "a quote in a tag is escaped");
+        assert_eq!(ids(repo.list_active_by_ids(&all, None, None, MemoryScopeFilter::All, &[], &["t1".into()]).unwrap()), sorted(vec![a.id, c.id]));
     }
 
     #[test]

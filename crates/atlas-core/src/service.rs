@@ -258,14 +258,16 @@ impl MemoryService {
         Ok(m)
     }
 
+    /// How many scored ids one recall fetch reads at once, at least.
+    const RECALL_FETCH: usize = 64;
+
+    /// Scores every active memory from the in-memory index and vectors alone, then
+    /// reads rows in score order, a chunk at a time, applying the scope, project,
+    /// kind and tag filters in SQL on that chunk, until `limit` rows are in hand.
+    /// Nothing is loaded or cloned for a memory that is not returned.
     pub fn recall(&self, q: &RecallQuery) -> Result<Vec<RecallHit>> {
-        let candidates = self.repo().list_by_status_scoped(MemoryStatus::Active, q.scope, q.project_id, q.list_scope, MemoryPage::default())?;
-        let candidates: Vec<Memory> = candidates.into_iter().filter(|m| {
-            (q.kinds.is_empty() || q.kinds.contains(&m.kind)) && (q.tags.is_empty() || q.tags.iter().any(|t| m.tags.contains(t)))
-        }).collect();
-        if candidates.is_empty() { return Ok(vec![]); }
-        let allowed: HashMap<Uuid, &Memory> = candidates.iter().map(|m| (m.id, m)).collect();
-        let kw: HashMap<Uuid, f64> = self.idx_read().query(&q.query, usize::MAX).into_iter().filter(|(id, _)| allowed.contains_key(id)).collect();
+        if q.limit == 0 { return Ok(vec![]); }
+        let kw: HashMap<Uuid, f64> = self.idx_read().query(&q.query, usize::MAX).into_iter().collect();
         // Only probe the embedder when it can actually produce vectors; a failure here is
         // recorded so `status()` surfaces it, but recall still falls back to keyword-only.
         let emb = self.emb();
@@ -276,24 +278,36 @@ impl MemoryService {
                 Err(e) => { *self.err_write() = Some(e.to_string()); None }
             }
         } else { None };
-        let vectors = self.vec_read();
-        let mut hits: Vec<RecallHit> = candidates.iter().filter_map(|m| {
-            let k = kw.get(&m.id).copied().unwrap_or(0.0);
+        let mut scored: Vec<(Uuid, f64)> = match &qvec {
             // A memory only gets the hybrid treatment when both the query and the memory
             // itself have a vector; otherwise fall back to pure keyword scoring so memories
             // written before an embedding model was available aren't penalized.
-            let score = match (&qvec, vectors.get(&m.id)) {
-                (Some(qv), Some(mv)) => {
-                    let c = cosine(qv, mv).max(0.0);
-                    let s = 0.6 * c + 0.4 * k;
-                    (s > 0.35).then_some(s)
+            Some(qv) => {
+                let vectors = self.vec_read();
+                let mut scored: Vec<(Uuid, f64)> = vectors.iter().filter_map(|(id, mv)| {
+                    let k = kw.get(id).copied().unwrap_or(0.0);
+                    let s = 0.6 * cosine(qv, mv).max(0.0) + 0.4 * k;
+                    (s > 0.35).then_some((*id, s))
+                }).collect();
+                scored.extend(kw.iter().filter(|(id, _)| !vectors.contains_key(id)).map(|(id, k)| (*id, *k)));
+                scored
+            }
+            None => kw.into_iter().collect(),
+        };
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.0.cmp(&b.0)));
+        let mut hits = Vec::with_capacity(q.limit.min(scored.len()));
+        for chunk in scored.chunks(q.limit.max(Self::RECALL_FETCH)) {
+            let ids: Vec<Uuid> = chunk.iter().map(|(id, _)| *id).collect();
+            let mut rows: HashMap<Uuid, Memory> = self.repo()
+                .list_active_by_ids(&ids, q.scope, q.project_id, q.list_scope, &q.kinds, &q.tags)?
+                .into_iter().map(|m| (m.id, m)).collect();
+            for (id, score) in chunk {
+                if let Some(memory) = rows.remove(id) {
+                    hits.push(RecallHit { memory, score: *score });
+                    if hits.len() == q.limit { return Ok(hits); }
                 }
-                _ => (k > 0.0).then_some(k),
-            };
-            score.map(|score| RecallHit { memory: m.clone(), score })
-        }).collect();
-        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-        hits.truncate(q.limit);
+            }
+        }
         Ok(hits)
     }
 
@@ -422,6 +436,26 @@ mod tests {
         assert_eq!(q(vec![], vec!["style".into()], None), 1);
         assert_eq!(q(vec![], vec![], Some(p)), 2);        // project + global
         assert_eq!(q(vec![], vec![], Some(uuid::Uuid::new_v4())), 1); // other project sees only global
+    }
+
+    /// Recall reads rows in score order and keeps going past a chunk whose rows the
+    /// kind filter rejects, so a small `limit` still finds the lower-scoring rows that
+    /// pass, and a `limit` of zero returns nothing.
+    #[test]
+    fn recall_pages_past_filtered_out_hits() {
+        let s = svc();
+        for _ in 0..70 { let mut m = nm("bun bun bun bun"); m.kind = MemoryKind::Preference; s.remember(m, "t").unwrap(); }
+        let facts: Vec<Uuid> = (0..3).map(|_| s.remember(nm("bun runtime"), "t").unwrap().id).collect();
+        let q = |kinds: Vec<MemoryKind>, limit: usize| s.recall(&RecallQuery { query: "bun".into(), limit, scope: None, list_scope: MemoryScopeFilter::All, project_id: None, kinds, tags: vec![] }).unwrap();
+        let top = q(vec![], 5);
+        assert_eq!(top.len(), 5);
+        assert!(top.iter().all(|h| h.memory.kind == MemoryKind::Preference), "the repeated term ranks first");
+        let hits = q(vec![MemoryKind::Fact], 2);
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|h| facts.contains(&h.memory.id)));
+        assert!(hits[0].score < top[0].score);
+        assert_eq!(q(vec![MemoryKind::Fact], 10).len(), 3);
+        assert!(q(vec![], 0).is_empty());
     }
 
     #[test]
