@@ -107,9 +107,21 @@ fn claude_settings_file(global: bool) -> &'static str {
     if global { "settings.json" } else { "settings.local.json" }
 }
 
+/// Test seam: every thread `plan_sync` and `apply` have run on, so a backend test can
+/// check the filesystem work stays off the async runtime's thread (PERF-10).
+#[cfg(test)]
+pub(crate) static FS_THREADS: std::sync::Mutex<Vec<std::thread::ThreadId>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn note_fs_thread() {
+    FS_THREADS.lock().unwrap_or_else(|e| e.into_inner()).push(std::thread::current().id());
+}
+
 /// Computes what a sync would do, without touching the filesystem beyond
 /// reading existing files to decide each op's action.
 pub fn plan_sync(i: &SyncInputs) -> Result<Vec<SyncOp>> {
+    #[cfg(test)]
+    note_fs_thread();
     let mut ops = Vec::new();
     for kind in i.targets {
         match kind {
@@ -357,6 +369,8 @@ fn codex_hook_op(path: PathBuf) -> Result<SyncOp> {
 /// planned writes had already completed, since a bare io error gives no way to
 /// tell which file or how much progress was made.
 pub fn apply(ops: &[SyncOp]) -> Result<SyncReport> {
+    #[cfg(test)]
+    note_fs_thread();
     let total = ops.iter().filter(|o| matches!(o.action, SyncAction::Create | SyncAction::Update)).count();
     let mut done = 0usize;
     for op in ops {

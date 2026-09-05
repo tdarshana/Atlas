@@ -768,9 +768,10 @@ impl ProjectBackend for LocalBackend {
     }
 
     /// Plans the sync on the daemon host and, unless `check_only`, writes it. Every
-    /// step that touches the Db runs through `blocking`; `detect_root`,
-    /// `check_project_root`, `sync::plan_sync` and `sync::apply` do filesystem and git
-    /// work, not Db work, so they stay off the blocking helper.
+    /// step that touches the Db runs through `blocking`, and so do `sync::plan_sync`
+    /// and `sync::apply`: they read and write every target file, which must not sit
+    /// on a runtime worker thread. `detect_root` and `check_project_root` do one
+    /// repository lookup each and stay inline.
     async fn sync(&self, req: SyncRequest) -> Result<SyncReport> {
         let db = self.db.clone();
         let agents = self.blocking({ let db = db.clone(); move || agents_repo(&db).list() }).await?;
@@ -851,25 +852,31 @@ impl ProjectBackend for LocalBackend {
             }
             None => (Vec::new(), None),
         };
-        let mut ops = sync::plan_sync(&SyncInputs {
-            root: &root,
-            agents: &agents,
-            block,
-            targets: &targets,
-            home: &home,
-            hooks,
-            global: req.global,
-            mirror_tasks_md,
-            board_stages: &board_stages,
-            board_tasks: &board_tasks,
-            personas: &personas,
-            default_persona,
-        })?;
-        ops.extend(skipped);
-        if req.check_only {
-            return Ok(sync::summarize(&ops));
+        let (global, check_only) = (req.global, req.check_only);
+        let report = self.blocking(move || {
+            let mut ops = sync::plan_sync(&SyncInputs {
+                root: &root,
+                agents: &agents,
+                block,
+                targets: &targets,
+                home: &home,
+                hooks,
+                global,
+                mirror_tasks_md,
+                board_stages: &board_stages,
+                board_tasks: &board_tasks,
+                personas: &personas,
+                default_persona,
+            })?;
+            ops.extend(skipped);
+            if check_only {
+                return Ok(sync::summarize(&ops));
+            }
+            sync::apply(&ops)
+        }).await?;
+        if check_only {
+            return Ok(report);
         }
-        let report = sync::apply(&ops)?;
         // The project log reads this row as its `synced` entry. A check-only pass writes
         // nothing and so records nothing, and a global sync belongs to no project.
         if let Some(project_id) = project_id {
@@ -1484,6 +1491,28 @@ mod tests {
     /// Connecting a project whose root holds a Superpowers tree should come back
     /// with `planning_frameworks` filled in, on a fresh (temp) `ATLAS_HOME`, the
     /// same path `atlas` itself takes on a real connect.
+    /// PERF-10: the sync's file reads and writes run on the blocking pool. A
+    /// current-thread runtime (the `#[tokio::test]` default) runs this body on the
+    /// test's own thread, so a plan or apply that ran there would record its id.
+    #[tokio::test]
+    async fn sync_plans_and_applies_off_the_runtime_thread() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = crate::paths::AtlasPaths::at(home.path());
+        let b = LocalBackend::open(&paths, None, false).unwrap();
+        let project_root = tempfile::tempdir().unwrap();
+        git2::Repository::init(project_root.path()).unwrap();
+        b.save_agent(NewAgent { name: "reviewer".into(), description: "Reviews.".into(), instructions: "Review.".into(), model_hint: None, tools: vec![], tags: vec![] }, "t").await.unwrap();
+
+        let req = SyncRequest { root: Some(project_root.path().to_path_buf()), global: false, targets: vec![SyncKind::Claude], check_only: false };
+        let report = b.sync(req).await.unwrap();
+        assert_eq!(report.created, 1, "{report:?}");
+
+        let here = std::thread::current().id();
+        let threads = sync::FS_THREADS.lock().unwrap().clone();
+        assert!(threads.len() >= 2, "plan and apply should both have recorded a thread: {threads:?}");
+        assert!(threads.iter().all(|t| *t != here), "sync did filesystem work on the runtime thread");
+    }
+
     #[tokio::test]
     async fn connect_project_fills_planning_frameworks() {
         let home = tempfile::tempdir().unwrap();
