@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::manifest::{compatible, Manifest, ATLAS_API_VERSION};
-use super::registry::{plugins_dir, record_install, PluginInfo, SourceRef};
+use super::registry::{installed_source, plugins_dir, record_install, PluginInfo, SourceRef};
 use crate::scratch::ScratchDir;
 
 /// A downloaded archive over this size is refused rather than extracted.
@@ -22,7 +22,8 @@ const MAX_ARCHIVE_ENTRIES: usize = 10_000;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Validates the manifest at `src`, copies `src` into `<plugins_dir>/<id>` (replacing an
-/// existing install of the same id) and records `source` in the state file. Shared by
+/// existing install of the same id from the same `source`) and records `source` in the
+/// state file. Shared by
 /// [`install_from_folder`] and [`install_from_archive_url`], which differ only in where
 /// `src` came from and what `source` says about it.
 fn install_prepared(app_data: &Path, src: &Path, source: SourceRef) -> Result<PluginInfo, String> {
@@ -31,6 +32,16 @@ fn install_prepared(app_data: &Path, src: &Path, source: SourceRef) -> Result<Pl
         .map_err(|e| format!("Could not read atlas-plugin.json: {e}"))?;
     let manifest = Manifest::parse(&text)?;
     manifest.validate(src)?;
+
+    // The id is a plugin's only identity, so a second source whose manifest reuses an
+    // installed id would otherwise delete that plugin and take its place with nothing
+    // recording the swap. Only the source it was installed from may replace it.
+    if let Some(installed) = installed_source(app_data, &manifest.id)?.filter(|s| *s != source) {
+        return Err(format!(
+            "'{}' is already installed from {} {}; uninstall it before installing it from {} {}.",
+            manifest.id, installed.kind, installed.value, source.kind, source.value
+        ));
+    }
 
     let dest = plugins_dir(app_data).join(&manifest.id);
     if dest.exists() {
@@ -153,6 +164,12 @@ fn download_capped(url: &str) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
+/// Extracts the archive into `dest`, stopping at [`MAX_UNPACKED_BYTES`] of decompressed
+/// data or [`MAX_ARCHIVE_ENTRIES`] entries. [`MAX_ARCHIVE_BYTES`] caps only the download,
+/// and gzip reaches roughly 1000:1 on repetitive data, so without these a 20 MiB archive
+/// could write about 20 GB into the OS temp dir before the scratch dir was dropped.
+/// Entries are unpacked one at a time with `unpack_in`, which refuses a path that would
+/// land outside `dest`, the same check `Archive::unpack` runs.
 fn extract_tar_gz(bytes: &[u8], dest: &Path) -> Result<(), String> {
     let decoder = flate2::read::GzDecoder::new(bytes).take(MAX_UNPACKED_BYTES + 1);
     let mut archive = tar::Archive::new(decoder);
@@ -181,12 +198,6 @@ fn extract_tar_gz(bytes: &[u8], dest: &Path) -> Result<(), String> {
 fn single_top_level_dir(dir: &Path) -> Result<PathBuf, String> {
     let entries: Vec<PathBuf> =
         std::fs::read_dir(dir).map_err(|e| e.to_string())?.filter_map(|e| e.ok()).map(|e| e.path()).collect();
-/// Extracts the archive into `dest`, stopping at [`MAX_UNPACKED_BYTES`] of decompressed
-/// data or [`MAX_ARCHIVE_ENTRIES`] entries. [`MAX_ARCHIVE_BYTES`] caps only the download,
-/// and gzip reaches roughly 1000:1 on repetitive data, so without these a 20 MiB archive
-/// could write about 20 GB into the OS temp dir before the scratch dir was dropped.
-/// Entries are unpacked one at a time with `unpack_in`, which refuses a path that would
-/// land outside `dest`, the same check `Archive::unpack` runs.
     match entries.as_slice() {
         [only] if only.is_dir() => Ok(only.clone()),
         _ => Err("The archive did not contain a single top-level directory.".to_string()),
@@ -422,17 +433,6 @@ mod tests {
         assert!(!plugins_dir(&app_data).join("escaped.txt").exists());
     }
 
-    #[test]
-    fn parse_github_url_defaults_the_ref_to_head() {
-        let (owner, repo, git_ref) = parse_github_url("https://github.com/acme/hello-world").unwrap();
-        assert_eq!((owner.as_str(), repo.as_str(), git_ref.as_str()), ("acme", "hello-world", "HEAD"));
-    }
-
-    #[test]
-    fn parse_github_url_reads_the_tree_ref() {
-        let (owner, repo, git_ref) = parse_github_url("https://github.com/acme/hello-world/tree/v2").unwrap();
-        assert_eq!((owner.as_str(), repo.as_str(), git_ref.as_str()), ("acme", "hello-world", "v2"));
-    }
     /// A gzip stream holding one tar entry of `size` zero bytes under `hello-world-main/`.
     /// Zeros compress at roughly 1000:1, so the archive stays small however large the
     /// entry claims to be, which is exactly the shape a disk-filling plugin would take.
@@ -492,6 +492,42 @@ mod tests {
         assert!(err.contains("more than"), "{err}");
     }
 
+    /// SEC-7 (ATL-301). The manifest id is the only identity a plugin has, so a second
+    /// source whose manifest reuses an installed id would delete the installed files and
+    /// take their place, with nothing recording the swap. Such an install is refused, the
+    /// message names both sources, and the installed plugin is untouched. Reinstalling
+    /// from the same source (an update) still replaces the folder.
+    #[test]
+    fn an_install_from_a_different_source_does_not_replace_an_installed_id() {
+        let app_data = scratch_dir("same-id");
+        let other_scratch = scratch_dir("same-id-other");
+        install_from_folder(&app_data, &fixture_dir()).unwrap();
+        let stray = plugins_dir(&app_data).join("hello-world/stray.txt");
+        std::fs::write(&stray, "trusted install").unwrap();
+
+        let other = source_with_git_dir(&other_scratch);
+        let err = install_from_folder(&app_data, &other).unwrap_err();
+        assert!(err.contains("hello-world"), "{err}");
+        assert!(err.contains(&fixture_dir().display().to_string()), "names the installed source: {err}");
+        assert!(err.contains(&other.display().to_string()), "names the refused source: {err}");
+        assert!(stray.exists(), "the installed plugin's files are untouched");
+
+        let infos = list(&app_data).unwrap();
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].id, "hello-world");
+    }
+
+    #[test]
+    fn parse_github_url_defaults_the_ref_to_head() {
+        let (owner, repo, git_ref) = parse_github_url("https://github.com/acme/hello-world").unwrap();
+        assert_eq!((owner.as_str(), repo.as_str(), git_ref.as_str()), ("acme", "hello-world", "HEAD"));
+    }
+
+    #[test]
+    fn parse_github_url_reads_the_tree_ref() {
+        let (owner, repo, git_ref) = parse_github_url("https://github.com/acme/hello-world/tree/v2").unwrap();
+        assert_eq!((owner.as_str(), repo.as_str(), git_ref.as_str()), ("acme", "hello-world", "v2"));
+    }
 
     #[test]
     fn parse_github_url_rejects_a_non_github_url() {

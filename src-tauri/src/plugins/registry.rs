@@ -23,7 +23,7 @@ fn state_path(app_data: &Path) -> PathBuf {
 
 /// Where an installed plugin came from, recorded so a later reinstall or an "update"
 /// feature knows how to fetch it again.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceRef {
     pub kind: String,
     pub value: String,
@@ -65,6 +65,12 @@ fn now_rfc3339() -> Result<String, String> {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .map_err(|e| e.to_string())
+}
+
+/// The source the state file says `id` was installed from, or `None` for an id it does
+/// not hold. [`super::install`] refuses to replace a plugin from any other source.
+pub(super) fn installed_source(app_data: &Path, id: &str) -> Result<Option<SourceRef>, String> {
+    Ok(read_state(app_data)?.remove(id).map(|entry| entry.source))
 }
 
 /// Adds or replaces the state entry for `id`. Called once a plugin's files are already
