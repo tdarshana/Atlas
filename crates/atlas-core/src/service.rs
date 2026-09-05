@@ -115,16 +115,25 @@ impl MemoryService {
         for m in &mems { idx.upsert(m.id, &m.text); }
         *self.idx_write() = idx;
         let emb = self.emb();
+        // The vectors come back through Arrow, where a `float[]` column is one
+        // contiguous f32 buffer plus offsets, so no row is rendered to text and parsed.
         let vecs: Vec<(Uuid, Vec<f32>)> = self.db.with_conn(|c| {
-            let mut st = c.prepare("select e.memory_id::text, to_json(e.vector)::text from memory_embeddings e join memories m on m.id = e.memory_id where m.status='active' and e.model = ?")?;
-            let rows = st.query_map([emb.name()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            use duckdb::arrow::array::{Array, AsArray};
+            use duckdb::arrow::datatypes::Float32Type;
+            let shape = |what: &str| AtlasError::Other(format!("memory_embeddings.{what} did not read as expected through arrow"));
+            let mut st = c.prepare("select e.memory_id::text, e.vector from memory_embeddings e join memories m on m.id = e.memory_id where m.status='active' and e.model = ?")?;
             let mut out = vec![];
-            for row in rows {
-                let (id, v) = row?;
-                match (Uuid::parse_str(&id), serde_json::from_str::<Vec<f32>>(&v)) {
-                    (Ok(id), Ok(v)) => out.push((id, v)),
-                    (Ok(id), Err(e)) => tracing::warn!("skipping unparseable stored vector for memory {id}: {e}"),
-                    (Err(e), _) => tracing::warn!("skipping stored vector with unparseable memory id {id:?}: {e}"),
+            for batch in st.query_arrow([emb.name()])? {
+                let ids = batch.column(0).as_string_opt::<i32>().ok_or_else(|| shape("memory_id"))?;
+                let lists = batch.column(1).as_list_opt::<i32>().ok_or_else(|| shape("vector"))?;
+                let values = lists.values().as_primitive_opt::<Float32Type>().ok_or_else(|| shape("vector values"))?.values();
+                let offsets = lists.value_offsets();
+                for row in 0..batch.num_rows() {
+                    if ids.is_null(row) || lists.is_null(row) { continue; }
+                    match Uuid::parse_str(ids.value(row)) {
+                        Ok(id) => out.push((id, values[offsets[row] as usize..offsets[row + 1] as usize].to_vec())),
+                        Err(e) => tracing::warn!("skipping stored vector with unparseable memory id {:?}: {e}", ids.value(row)),
+                    }
                 }
             }
             Ok(out)
@@ -494,6 +503,24 @@ mod tests {
         assert_eq!(hits1[0].memory.id, hits2[0].memory.id);
         let count: i64 = db.with_conn(|c| Ok(c.query_row("select count(*) from memory_embeddings", [], |r| r.get(0))?)).unwrap();
         assert_eq!(count, 2);
+    }
+
+    /// Reload reads the stored `float[]` column back as the exact vectors that were
+    /// written, each under its own memory, whatever order the rows come back in.
+    #[test]
+    fn reload_round_trips_stored_vector_values() {
+        let db = Arc::new(Db::open_in_memory().unwrap());
+        let s = MemoryService::new(db.clone(), Arc::new(FakeEmbedder)).unwrap();
+        let ids: Vec<Uuid> = (0..5).map(|i| s.remember(nm(&format!("memory {i} about bun")), "t").unwrap().id).collect();
+        let stored: Vec<(Uuid, Vec<f32>)> = ids.iter().enumerate().map(|(i, id)| (*id, (0..8).map(|j| (i * 8 + j) as f32 * 0.25 - 3.0).collect())).collect();
+        for (id, v) in &stored {
+            let json = serde_json::to_string(v).unwrap();
+            db.with_conn(|c| { c.execute(&format!("update memory_embeddings set vector = {json}::float[] where memory_id = ?"), [id.to_string()])?; Ok(()) }).unwrap();
+        }
+        s.reload().unwrap();
+        let vectors = s.vec_read();
+        assert_eq!(vectors.len(), 5);
+        for (id, v) in &stored { assert_eq!(vectors.get(id), Some(v), "vector of memory {id}"); }
     }
 
     #[test]
