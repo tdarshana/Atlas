@@ -1446,12 +1446,12 @@
 	/* A child's stage as the same small lozenge the title carries. */
 	.child-stage {
 		flex: 0 0 auto;
-		padding: 0 6px;
-		border-radius: 3px;
+		padding: 0 5px;
+		border-radius: 2px;
 		color: #fff;
-		font-size: 10px;
+		font-size: 9px;
 		font-weight: 600;
-		line-height: 16px;
+		line-height: 14px;
 		letter-spacing: 0.03em;
 		text-transform: uppercase;
 	}
