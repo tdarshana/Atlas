@@ -959,7 +959,7 @@
 				/>
 				<TagInput
 					label="Labels"
-					placeholder="Add a label"
+					placeholder=""
 					value={splitList(labels)}
 					testId="task-labels"
 					onchange={(v) => {

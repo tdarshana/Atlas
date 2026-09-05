@@ -133,7 +133,7 @@
 
 		<TagInput
 			label="Labels"
-			placeholder="Add a label"
+			placeholder=""
 			value={splitList(labels)}
 			testId="new-task-labels"
 			onchange={(v) => (labels = v.join(', '))}
