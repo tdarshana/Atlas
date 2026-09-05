@@ -209,11 +209,18 @@
 		flex: 1;
 		min-height: 0;
 		overflow-y: auto;
-		/* The list reaches into the lane's right padding and pads itself by the scrollbar's
-		   10px, so the bar (an overlay on macOS, no gutter of its own) sits over empty
-		   space instead of the cards' right border. */
+		/* The list reaches across the lane's 8px right padding and pads itself back by
+		   the same 8px, so a lane with no scrollbar keeps the cards 8px from the lane
+		   edge, and a lane with the 10px bar shows the bar in the padding, its thumb
+		   flush against that 8px gap: the same gap as the left side and between cards. */
 		margin-right: -8px;
-		padding-right: 10px;
+		padding-right: 8px;
+	}
+
+	/* The shared thumb is inset 2px all round; here the inset moves to the outer side
+	   so the thumb starts exactly 8px from the cards and ends 4px from the lane edge. */
+	.body::-webkit-scrollbar-thumb {
+		border-width: 2px 4px 2px 0;
 	}
 
 	.empty {
