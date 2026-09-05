@@ -1341,8 +1341,6 @@
 					{#if about}
 						<dt>App version</dt>
 						<dd class="mono">{about.app_version}</dd>
-						<dt>Tauri version</dt>
-						<dd class="mono">{about.tauri_version}</dd>
 					{/if}
 					<dt>Daemon version</dt>
 					<dd class="mono">{status.report?.version ?? '…'}</dd>

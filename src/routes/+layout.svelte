@@ -6,7 +6,8 @@
 	import { page } from '$app/state';
 	import '../app.css';
 	import { boot, daemon } from '$lib/daemon.svelte';
-	import { refreshStatus, startStatusPolling } from '$lib/stores/status.svelte';
+	import { refreshStatus, startStatusPolling, status } from '$lib/stores/status.svelte';
+	import { desktop } from '$lib/shell/platform';
 	import { connectChanges, onChange } from '$lib/stores/changes.svelte';
 	import { loadSettings, settings } from '$lib/stores/settings.svelte';
 	import { UI_THEME_KEY } from '$lib/types';
@@ -44,6 +45,18 @@
 	$effect(() => {
 		if (!daemon.ready) return;
 		return startStatusPolling();
+	});
+
+	// The native About panel names the daemon's version and database once they are
+	// known, and again only if they change (a daemon restart on a new build).
+	let aboutSent = '';
+	$effect(() => {
+		const report = status.report;
+		if (!report) return;
+		const key = `${report.version}|${report.db_path}`;
+		if (key === aboutSent) return;
+		aboutSent = key;
+		void desktop('about_menu_refresh', { daemonVersion: report.version, dbPath: report.db_path }, () => undefined);
 	});
 
 	// The change stream is what keeps every view live; polling is the fallback. The

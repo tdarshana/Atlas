@@ -13,7 +13,7 @@ mod plugins;
 mod scratch;
 
 use commands::platform::{
-    about_info, app_exit, app_relaunch, autostart_get, autostart_set, clipboard_write,
+    about_info, about_menu_refresh, app_exit, app_relaunch, autostart_get, autostart_set, clipboard_write,
     install_shortcut, log_dir, notification_permission, notification_request_permission, notify,
     open_log_folder, shortcut_set, ui_state_all, ui_state_get, ui_state_set, update_check,
     update_install, vault_list, vault_lock, vault_put_key, vault_reapply, vault_set_passphrase,
@@ -200,6 +200,13 @@ pub fn run() {
             // Restores the last shortcut the user applied, once the daemon is up: a
             // shortcut set before quitting must still work after a relaunch.
             restore_global_shortcut_at_boot(app.handle().clone());
+            // The native About panel lists the same facts as Settings > About; the
+            // daemon's version and database are filled in by `about_menu_refresh` once
+            // the webview has heard from the daemon.
+            #[cfg(target_os = "macos")]
+            if let Err(e) = commands::platform::install_app_menu(app.handle(), None) {
+                log::warn!("app menu not installed: {e}");
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -223,6 +230,7 @@ pub fn run() {
             notification_request_permission,
             clipboard_write,
             about_info,
+            about_menu_refresh,
             open_log_folder,
             vault_status,
             vault_set_passphrase,
