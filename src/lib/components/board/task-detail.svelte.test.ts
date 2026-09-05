@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import type { Stage, Task, TaskDetail as TaskDetailType, TaskEvent } from '$lib/types';
 
-const mocks = vi.hoisted(() => ({ updateTask: vi.fn() }));
+const mocks = vi.hoisted(() => ({ updateTask: vi.fn(), listTasks: vi.fn(), setTaskBlockers: vi.fn() }));
 
 vi.mock('$lib/daemon.svelte', () => ({
 	api: () => mocks,
@@ -27,6 +27,9 @@ beforeEach(() => {
 	setDetailTab('subtasks');
 	mocks.updateTask.mockReset();
 	mocks.updateTask.mockResolvedValue({});
+	mocks.listTasks.mockReset();
+	mocks.listTasks.mockResolvedValue([]);
+	mocks.setTaskBlockers.mockReset();
 	clearToasts();
 });
 
@@ -478,5 +481,41 @@ describe('TaskDetail persona select', () => {
 		d.task = { ...d.task, persona_id: 'id-r', persona_name: 'Reviewer', persona_slug: 'reviewer' };
 		const { getByTestId } = open(d);
 		expect(getByTestId('task-persona').textContent).toContain('Reviewer');
+	});
+});
+
+describe('TaskDetail blocker search', () => {
+	it('lists matching project tasks newest first as the box is typed in, and picking one adds it', async () => {
+		const older = { ...task('ATL-3'), title: 'Older daemon fix', created_at: '2026-09-01T10:00:00Z' };
+		const newer = { ...task('ATL-9'), title: 'Newer daemon fix', created_at: '2026-09-05T10:00:00Z' };
+		mocks.listTasks.mockResolvedValue([older, newer, task('ATL-1')]);
+		mocks.setTaskBlockers.mockResolvedValue({ ...task('ATL-1'), blocked_by: ['ATL-9'] });
+		const { getByTestId, queryByTestId, getAllByRole } = open();
+		const box = getByTestId('task-blocker-key') as HTMLInputElement;
+		expect(box.placeholder).toBe('Nothing is holding this up.');
+		expect(queryByTestId('task-blocker-menu')).toBeNull();
+
+		await fireEvent.input(box, { target: { value: 'daemon' } });
+		await waitFor(() => expect(queryByTestId('task-blocker-menu')).not.toBeNull());
+		expect(mocks.listTasks).toHaveBeenCalledWith(expect.objectContaining({ query: 'daemon', include_done: true }));
+		// Newest first, and the task itself is never offered.
+		const keys = getAllByRole('option').map((o) => o.querySelector('code')?.textContent);
+		expect(keys).toEqual(['ATL-9', 'ATL-3']);
+
+		await fireEvent.click(getByTestId('task-blocker-hit-ATL-9'));
+		await waitFor(() => expect(mocks.setTaskBlockers).toHaveBeenCalledWith('ATL-1', ['ATL-9']));
+		expect(queryByTestId('task-blocker-menu')).toBeNull();
+		expect(box.value).toBe('');
+	});
+});
+
+describe('TaskDetail blocker history', () => {
+	it('shows a blocked event, with the keys, in History', async () => {
+		const d = detail();
+		d.events = [...d.events, { ...event('e-blocked', 'blocked', 'ATL-1 is blocked by ATL-7'), detail: { blocked_by: ['ATL-7'] } }];
+		const { getByText, getByTestId } = open(d);
+		await fireEvent.click(getByTestId('task-tab-activity'));
+		expect(getByText('blocked')).toBeTruthy();
+		expect(getByText('ATL-1 is blocked by ATL-7')).toBeTruthy();
 	});
 });

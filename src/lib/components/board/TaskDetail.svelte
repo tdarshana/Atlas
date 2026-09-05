@@ -32,13 +32,14 @@
 	import { FRAMEWORK_LABEL, reportText } from '$lib/components/project/frameworks';
 	import PluginFrame from '$lib/plugins/PluginFrame.svelte';
 	import { contributions, loadPlugins, pluginById, plugins } from '$lib/plugins/host.svelte';
-	import type { Stage, TaskDetail, TaskEvent, TaskKind, TaskPriority } from '$lib/types';
+	import type { Stage, Task, TaskDetail, TaskEvent, TaskKind, TaskPriority } from '$lib/types';
 	import { autogrow } from '$lib/ui/autogrow';
 	import Dialog from '$lib/ui/Dialog.svelte';
 	import EmptyState from '$lib/ui/EmptyState.svelte';
 	import MarkdownView from '$lib/ui/MarkdownView.svelte';
 	import ResizeBar from '$lib/ui/ResizeBar.svelte';
 	import { push } from '$lib/platform/toasts.svelte';
+	import { api } from '$lib/daemon.svelte';
 
 	interface Props {
 		detail: TaskDetail | null;
@@ -123,6 +124,11 @@
 	// Written the moment it changes rather than on Save, so it always follows the server.
 	let persona = $state('');
 	let blockerKey = $state('');
+	/** Tasks in this project matching what is typed in the blocker box, newest first. */
+	let blockerHits = $state<Task[]>([]);
+	let blockerOpen = $state(false);
+	let blockerTimer: ReturnType<typeof setTimeout> | undefined;
+	let blockerGeneration = 0;
 	let comment = $state('');
 
 	let saving = $state(false);
@@ -139,6 +145,7 @@
 		if (!t.closest('[data-menu]')) {
 			actionsOpen = false;
 			statusOpen = false;
+			blockerOpen = false;
 		}
 	}
 	/** `: kind, priority` for an edit that recorded its fields, else nothing. */
@@ -456,12 +463,60 @@
 		}
 	}
 
-	function addBlocker() {
-		const key = blockerKey.trim();
+	function addBlocker(key = blockerKey.trim()) {
 		if (!task || !key) return;
 		const next = [...task.blocked_by, key];
 		blockerKey = '';
+		blockerHits = [];
+		blockerOpen = false;
 		void run('Blocker added', () => setBlockers(task.key, next));
+	}
+
+	/** Lists the project's tasks matching the typed text (the daemon matches key, title
+	 * and description), newest first, without this task and the keys already listed. */
+	async function searchBlockers(query: string) {
+		const g = ++blockerGeneration;
+		const q = query.trim();
+		if (!task || q === '') {
+			blockerHits = [];
+			blockerOpen = false;
+			return;
+		}
+		try {
+			const hits = await api().listTasks({
+				project_id: task.project_id,
+				global_only: task.project_id === null ? true : undefined,
+				query: q,
+				include_done: true,
+				brief: true
+			});
+			if (g !== blockerGeneration || !task) return;
+			const taken = new Set([task.key, ...task.blocked_by]);
+			blockerHits = hits
+				.filter((t) => !taken.has(t.key))
+				.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+				.slice(0, 8);
+			blockerOpen = blockerHits.length > 0;
+		} catch {
+			blockerHits = [];
+			blockerOpen = false;
+		}
+	}
+
+	function onBlockerInput() {
+		clearTimeout(blockerTimer);
+		blockerTimer = setTimeout(() => void searchBlockers(blockerKey), 150);
+	}
+
+	function onBlockerKey(event: KeyboardEvent) {
+		if (event.key === 'Escape' && blockerOpen) {
+			event.stopPropagation();
+			blockerOpen = false;
+		} else if (event.key === 'Enter') {
+			event.preventDefault();
+			if (blockerOpen && blockerHits.length > 0) addBlocker(blockerHits[0].key);
+			else addBlocker();
+		}
 	}
 
 	function removeBlocker(key: string) {
@@ -986,9 +1041,7 @@
 
 			<section class="full">
 				<h3>Blocked by</h3>
-				{#if task.blocked_by.length === 0}
-					<p class="muted">Nothing is holding this up.</p>
-				{:else}
+				{#if task.blocked_by.length > 0}
 					<ul class="chips">
 						{#each task.blocked_by as key (key)}
 							<li>
@@ -1005,16 +1058,38 @@
 					</ul>
 				{/if}
 				<div class="row end">
-					<div class="grow">
+					<!-- Inline position: the hits menu anchors here, as in MenuSelect. -->
+					<div class="grow" data-menu style="position:relative">
 						<Input
-							mono
 							bind:value={blockerKey}
-							placeholder="ATL-12"
-							aria-label="Blocker key"
+							placeholder="Nothing is holding this up."
+							aria-label="Blocker key or title"
+							autocomplete="off"
 							data-testid="task-blocker-key"
+							oninput={onBlockerInput}
+							onkeydown={onBlockerKey}
+							onfocus={() => (blockerOpen = blockerHits.length > 0)}
 						/>
+						{#if blockerOpen}
+							<div class="dbm-menu blocker-menu" role="listbox" data-testid="task-blocker-menu">
+								{#each blockerHits as hit (hit.key)}
+									<button
+										type="button"
+										class="dbm-menu__item blocker-hit"
+										role="option"
+										aria-selected="false"
+										data-testid="task-blocker-hit-{hit.key}"
+										onclick={() => addBlocker(hit.key)}
+									>
+										<KindIcon kind={hit.kind} size={14} />
+										<code class="hit-key">{hit.key}</code>
+										<span class="hit-title">{hit.title}</span>
+									</button>
+								{/each}
+							</div>
+						{/if}
 					</div>
-					<Button data-testid="task-blocker-add" disabled={busy} onclick={addBlocker}>Add</Button>
+					<Button data-testid="task-blocker-add" disabled={busy} onclick={() => addBlocker()}>Add</Button>
 				</div>
 			</section>
 
@@ -1680,6 +1755,39 @@
 
 	.grow {
 		flex: 1;
+	}
+
+	.blocker-menu {
+		position: absolute;
+		left: 0;
+		right: 0;
+		top: calc(100% + 4px);
+		z-index: 30;
+		max-height: 240px;
+		overflow-y: auto;
+	}
+
+	.blocker-hit {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		width: 100%;
+		text-align: left;
+	}
+
+	.hit-key {
+		flex: none;
+		font-family: var(--font-mono);
+		font-size: var(--mono-sm);
+		color: var(--text-secondary);
+	}
+
+	.hit-title {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
 	section {
