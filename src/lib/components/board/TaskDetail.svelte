@@ -872,9 +872,10 @@
 										class="child-row"
 										onclick={() => onopen?.(child.key)}
 									>
+										<KindIcon kind={child.kind} size={12} />
 										<code>{child.key}</code>
 										<span>{child.title}</span>
-										<Badge variant="outline">{child.stage}</Badge>
+										<span class="child-stage" style="background:{stageColor(child.stage)}">{child.stage}</span>
 									</button>
 								</li>
 							{/each}
@@ -1292,6 +1293,19 @@
 		padding: 0;
 		list-style: none;
 		font-size: 12px;
+	}
+
+	/* A child's stage as the same small lozenge the title carries. */
+	.child-stage {
+		flex: 0 0 auto;
+		padding: 0 6px;
+		border-radius: 3px;
+		color: #fff;
+		font-size: 10px;
+		font-weight: 600;
+		line-height: 16px;
+		letter-spacing: 0.03em;
+		text-transform: uppercase;
 	}
 
 	.child-row {
