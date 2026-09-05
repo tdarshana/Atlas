@@ -242,7 +242,9 @@
 							<span class="hint mono" data-testid="detail-{row.id}">{row.detail}</span>
 						{/if}
 					</div>
-					<Badge tone={row.tone} data-testid="badge-{row.id}">{row.badge}</Badge>
+					<div class="status">
+						<Badge tone={row.tone} data-testid="badge-{row.id}">{row.badge}</Badge>
+					</div>
 					<div class="actions">
 						{#if row.canRequest}
 							<Button
@@ -461,6 +463,13 @@
 		font-size: 11px;
 		color: var(--text-tertiary);
 		max-width: 80ch;
+	}
+
+	/* One column for the status, so every badge starts at the same x whatever its word. */
+	.status {
+		flex: 0 0 120px;
+		display: flex;
+		align-items: center;
 	}
 
 	.actions {
