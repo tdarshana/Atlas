@@ -4,43 +4,17 @@
 //! Served by `GET /api/v1/mcp/status`.
 use std::collections::HashMap;
 use std::sync::Mutex;
-use chrono::{DateTime, Utc};
-use serde::Serialize;
+use chrono::Utc;
 use uuid::Uuid;
+
+/// The row and its transport are `atlas_core` models, so the desktop's generated types
+/// cover `GET /api/v1/mcp/status`. `last_project_id` is the project this client's last
+/// tool call resolved, best effort: only the HTTP transport (`record_http_call`) reports
+/// one, since it comes from the router's own project resolution on that call.
+pub use atlas_core::models::{McpClient, McpClientTransport as Transport};
 
 /// An entry with no heartbeat in this long is dropped from `ClientRegistry::live`.
 const STALE_AFTER_MINUTES: i64 = 10;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Transport { Stdio, Http }
-
-impl std::str::FromStr for Transport {
-    type Err = ();
-    fn from_str(s: &str) -> Result<Self, ()> {
-        match s {
-            "stdio" => Ok(Transport::Stdio),
-            "http" => Ok(Transport::Http),
-            _ => Err(()),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct McpClient {
-    pub id: String,
-    pub transport: Transport,
-    pub client_name: String,
-    pub client_version: Option<String>,
-    pub first_seen: DateTime<Utc>,
-    pub last_seen: DateTime<Utc>,
-    pub tool_calls: u64,
-    /// The project this client's last tool call resolved, best effort: only the HTTP
-    /// transport (`record_http_call`) reports one, since it comes from the router's own
-    /// project resolution on that call. `None` for a stdio session, or a call that named
-    /// no project.
-    #[serde(default)] pub last_project_id: Option<Uuid>,
-}
 
 #[derive(Default)]
 pub struct ClientRegistry {

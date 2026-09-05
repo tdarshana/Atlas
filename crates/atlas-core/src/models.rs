@@ -1263,6 +1263,212 @@ pub struct Change {
     pub at: DateTime<Utc>,
 }
 
+// ---------------------------------------------------------------------------
+// The daemon's own wire shapes (ARCH-6)
+// ---------------------------------------------------------------------------
+// What `atlasd`'s routes answer with or read when no repository model covers it. They
+// live here rather than in `atlasd/src/http.rs` so `tsgen` generates their TypeScript
+// and the route table (`atlasd/src/routes.rs`) can name them. The query-string structs
+// stay in `http.rs`: they carry axum-specific deserializers and no client types them.
+
+/// `POST /api/v1/extraction/test`: 200 carries `reply`, the 400 connectivity failure carries `error`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ExtractionTestResult {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub reply: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub error: Option<String>,
+}
+
+/// `POST /api/v1/ingest`'s 202 body: the job to follow with `GET /api/v1/jobs/{id}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct IngestReceipt { pub job_id: Uuid }
+
+/// `GET /api/v1/projects/{id}/frameworks/{kind}/docs/{path}`: one document's text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FrameworkDocContent { pub content: String }
+
+/// One row of `GET /api/v1/tasks/counts`; every stage appears, including empty ones.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct StageCount { pub stage: String, pub count: i64 }
+
+/// `GET /api/v1/runs/{id}`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RunDetail { pub run: WorkflowRun, pub steps: Vec<WorkflowStep> }
+
+// The MCP status routes. `McpResource` and `McpPrompt` are the subset of rmcp's own
+// `Resource` and `Prompt` the desktop shows, in rmcp's camelCase with the optional
+// fields left out rather than null, so the wire form did not change when they moved here.
+
+/// Whether an MCP tool reads or writes. A project's agent-access rules gate the writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum McpToolScope { Read, Write }
+
+/// One row of `GET /api/v1/mcp/status`'s tools table. `source` is `builtin` for a tool
+/// the daemon carries itself, `plugin:<id>` for one a plugin registered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct McpToolRow { pub name: String, pub description: String, pub args: String, pub scope: McpToolScope, pub enabled: bool, pub source: String }
+
+/// One tool as the MCP server exposes it from one project's point of view, built-in or
+/// plugin, with the two gates a call meets reported separately: the global
+/// `mcp.disabled_tools` list, then that project's own `mcp_disabled_tools` override.
+/// `enabled_here` is what a call actually gets; without a project it equals
+/// `enabled_globally`. The desktop's badges need both, since a tool can be enabled
+/// globally and disabled here. `GET /api/v1/projects/{id}/mcp`'s tool row, and the row
+/// `atlas_mcp::effective_tools` computes, the same computation the router gates on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ProjectMcpToolRow {
+    pub name: String,
+    pub description: String,
+    /// A short, comma-joined summary of arguments, `*` marking a required one: the
+    /// hand-written one from `TOOL_TABLE` for a built-in, the schema's own property
+    /// names for a plugin's, since a plugin declares a JSON Schema instead.
+    pub args: String,
+    pub scope: McpToolScope,
+    pub enabled_globally: bool,
+    /// Actually callable here: enabled globally and not in the project's own override.
+    pub enabled_here: bool,
+    /// `builtin`, or `plugin:<id>` for a tool a plugin contributed.
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct McpStdioTransport { pub command: String }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct McpHttpTransport { pub url: String, pub protocol_version: String }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct McpTransports { pub stdio: McpStdioTransport, pub http: McpHttpTransport }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct McpCounts { pub tools: usize, pub resources: usize, pub prompts: usize, pub clients: usize }
+
+/// An MCP resource as `resources/list` shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct McpResource {
+    pub uri: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub description: Option<String>,
+    #[serde(default, rename = "mimeType", skip_serializing_if = "Option::is_none")] pub mime_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub size: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct McpPromptArgument {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub required: Option<bool>,
+}
+
+/// An MCP prompt as `prompts/list` shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct McpPrompt {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub arguments: Option<Vec<McpPromptArgument>>,
+}
+
+str_enum!(McpClientTransport { Stdio => "stdio", Http => "http" });
+
+/// One MCP client connected to the daemon: a stdio shim that registered itself, or an
+/// HTTP session picked up on its first tool call.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct McpClient {
+    pub id: String,
+    pub transport: McpClientTransport,
+    pub client_name: String,
+    pub client_version: Option<String>,
+    pub first_seen: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+    pub tool_calls: u64,
+    /// The project this client's last tool call resolved, best effort: only an HTTP
+    /// session reports one (it comes from the router's own project resolution on that
+    /// call); null for a stdio session, or a call that named no project.
+    #[serde(default)] pub last_project_id: Option<Uuid>,
+}
+
+/// `GET /api/v1/mcp/status`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct McpStatusReport {
+    pub transports: McpTransports,
+    pub counts: McpCounts,
+    pub tools: Vec<McpToolRow>,
+    pub resources: Vec<McpResource>,
+    pub prompts: Vec<McpPrompt>,
+    pub clients: Vec<McpClient>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ProjectMcpConnect { pub stdio: McpStdioTransport, pub http: McpHttpTransport, pub project_root: String }
+
+/// `GET /api/v1/projects/{id}/mcp`: MCP from one project's point of view. Tool gating
+/// applies at call time, not at `tools/list`, so this route (not the live tool list) is
+/// where a project's own MCP overrides show.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ProjectMcpReport {
+    pub tools: Vec<ProjectMcpToolRow>,
+    /// Only this project's own `atlas://` resources (its context, practices and board).
+    pub resources: Vec<McpResource>,
+    pub prompts: Vec<McpPrompt>,
+    /// Registry entries whose last call resolved to this project.
+    pub clients: Vec<McpClient>,
+    pub connect: ProjectMcpConnect,
+}
+
+// Request bodies the routes read, where no `New*`/`*Update` model is the body. Named
+// after the route, one line each, so the generated client's payloads type-check against
+// exactly what the handler deserialises.
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ForgetBody { pub reason: Option<String> }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RootBody { pub root: PathBuf }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct StatusBody { pub status: String }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct IngestBody {
+    pub text: String,
+    /// Deprecated: send the actor as `X-Atlas-Actor` instead. Kept for one release so
+    /// an older caller still works; the header wins when both are sent.
+    #[serde(default)] pub source_tool: Option<String>,
+    #[serde(default)] pub project_root: Option<PathBuf>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct MoveBody { pub stage: String, #[serde(default)] pub expected_updated_at: Option<DateTime<Utc>> }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CommentBody { pub body: String }
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ClaimBody { #[serde(default)] pub force: bool }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct BlockersBody { pub blocked_by: Vec<String> }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SetStagesBody { pub stages: Vec<Stage>, #[serde(default)] pub renames: std::collections::HashMap<String, String> }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SetProjectStagesBody { #[serde(default)] pub stages: Option<Vec<Stage>>, #[serde(default)] pub renames: std::collections::HashMap<String, String> }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FrameworkImportBody { pub what: ImportWhat }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SkillBodyBody { pub body: String }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SkillsDisabledBody { pub disabled: Vec<String> }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct McpToolsBody { pub disabled: Vec<String> }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct McpEnabledBody { pub enabled: bool }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RunWorkflowBody { #[serde(default)] pub trigger: Option<TriggerKind>, #[serde(default)] pub input: Option<String> }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RegisterMcpClientBody { pub id: String, pub transport: String, pub client_name: String, #[serde(default)] pub client_version: Option<String> }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct McpHeartbeatBody { pub tool_calls: u64 }
+/// `PUT /api/v1/mcp/plugin-tools/{plugin_id}`'s body. Each decl's `plugin_id` is
+/// optional in the JSON and overwritten from the path.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PluginToolsBody { pub tools: Vec<PluginToolDecl> }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PluginToolCallBody { #[serde(default)] pub args: serde_json::Value }
+
 #[cfg(test)]
 mod tests {
     use super::*;

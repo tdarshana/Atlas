@@ -19,6 +19,7 @@ use schemars::SchemaGenerator;
 use serde_json::{Map, Value};
 use std::fmt::Write;
 
+use crate::jobs::Job;
 use crate::models::*;
 use crate::search::global::{SearchGroup, SearchHit, SearchKind, SearchQuery, SearchResult};
 
@@ -45,6 +46,10 @@ fn outputs(g: &mut SchemaGenerator) -> Vec<&'static str> {
         McpCheckResult,
         SkillSource, SkillSummary, Skill, SkillList,
         Case, PersonaRule, PersonaAccess, Persona, RosterRow, PersonaBundle, PersonaContext,
+        Job, ExtractionTestResult, IngestReceipt, FrameworkDocContent, StageCount, RunDetail,
+        McpToolScope, McpToolRow, ProjectMcpToolRow, McpStdioTransport, McpHttpTransport, McpTransports, McpCounts,
+        McpResource, McpPromptArgument, McpPrompt, McpClientTransport, McpClient, McpStatusReport, ProjectMcpConnect,
+        ProjectMcpReport,
     ]
 }
 
@@ -56,6 +61,9 @@ fn inputs(g: &mut SchemaGenerator) -> Vec<&'static str> {
         SyncRequest, NewTask, TaskUpdate, TaskFilter, NewWorkflow, WorkflowPatch, SearchQuery,
         McpTransportInput, NewMcpServer, NewSkill, SkillUpdate,
         NewPersona, PersonaUpdate, RosterEntry,
+        ForgetBody, RootBody, StatusBody, IngestBody, MoveBody, CommentBody, ClaimBody, BlockersBody, SetStagesBody,
+        SetProjectStagesBody, FrameworkImportBody, SkillBodyBody, SkillsDisabledBody, McpToolsBody, McpEnabledBody,
+        RunWorkflowBody, RegisterMcpClientBody, McpHeartbeatBody, PluginToolsBody, PluginToolCallBody,
     ]
 }
 
@@ -68,8 +76,9 @@ pub fn generate() -> String {
     let de_defs = de.take_definitions(true);
 
     let mut ts = String::new();
-    ts.push_str("// Generated from the `schemars::JsonSchema` derives in crates/atlas-core/src/models.rs and\n");
-    ts.push_str("// crates/atlas-core/src/search/global.rs by crates/atlas-core/src/tsgen.rs. Do not edit.\n");
+    ts.push_str("// Generated from the `schemars::JsonSchema` derives in crates/atlas-core/src/models.rs,\n");
+    ts.push_str("// crates/atlas-core/src/search/global.rs and crates/atlas-core/src/jobs.rs by\n");
+    ts.push_str("// crates/atlas-core/src/tsgen.rs. Do not edit.\n");
     ts.push_str(&format!("// Regenerate with: {REGEN}\n"));
     ts.push_str("//\n// UUIDs and `DateTime<Utc>` both travel as strings; a `str_enum!` is its literal union.\n\n");
     ts.push_str("export type Uuid = string;\n/** RFC 3339, e.g. \"2026-09-02T10:30:00Z\". */\nexport type Timestamp = string;\n");
@@ -217,7 +226,7 @@ fn literal(v: &Value) -> String {
 /// Every `JsonSchema` type declared in the model sources, so a new model that is not in
 /// `outputs` or `inputs` fails here rather than drifting silently.
 fn declared_json_schema_types() -> Vec<String> {
-    let sources = [include_str!("models.rs"), include_str!("search/global.rs")];
+    let sources = [include_str!("models.rs"), include_str!("search/global.rs"), include_str!("jobs.rs")];
     let mut names = Vec::new();
     for src in sources {
         let mut derives_schema = false;

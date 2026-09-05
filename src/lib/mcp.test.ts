@@ -105,8 +105,8 @@ describe('mcpSidepanelCounts', () => {
 		transports: { stdio: { command: 'atlas mcp' }, http: { url: '', protocol_version: '' } },
 		counts: { tools: 2, resources: 1, prompts: 1, clients: 1 },
 		tools: [
-			{ name: 'a', description: '', args: '', scope: 'read', enabled: true },
-			{ name: 'b', description: '', args: '', scope: 'read', enabled: false }
+			{ name: 'a', description: '', args: '', scope: 'read', enabled: true, source: 'builtin' },
+			{ name: 'b', description: '', args: '', scope: 'read', enabled: false, source: 'builtin' }
 		],
 		resources: [{ uri: 'atlas://memories/recent', name: 'recent' }],
 		prompts: [{ name: 'atlas.bootstrap' }],

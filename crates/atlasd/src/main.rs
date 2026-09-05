@@ -1,6 +1,10 @@
+#[cfg(test)]
+mod apigen;
 mod http;
 mod mcp_clients;
 mod plugin_tools;
+#[cfg(test)]
+mod routes;
 mod scheduler;
 mod state;
 mod worker;

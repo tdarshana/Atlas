@@ -36,7 +36,7 @@ const report: McpStatusReport = {
 	},
 	counts: { tools: 1, resources: 0, prompts: 0, clients: 0 },
 	tools: [
-		{ name: 'memory_remember', description: '', args: '', scope: 'write', enabled: false }
+		{ name: 'memory_remember', description: '', args: '', scope: 'write', enabled: false, source: 'builtin' }
 	],
 	resources: [],
 	prompts: [],

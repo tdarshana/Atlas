@@ -14,8 +14,9 @@ use std::time::Duration;
 use uuid::Uuid;
 
 /// `Deserialize` as well as `Serialize`, so `RemoteBackend` can read a job back
-/// off `GET /jobs/{id}` rather than re-describing the shape.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// off `GET /jobs/{id}` rather than re-describing the shape; `JsonSchema` so `tsgen`
+/// types it for the desktop. `status` is `queued`, `running`, `done` or `failed`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Job {
     pub id: Uuid,
     pub kind: String,

@@ -3,11 +3,11 @@
 // Every type the daemon's Rust models define is generated into ./types.generated.ts from
 // the `schemars::JsonSchema` derives (crates/atlas-core/src/tsgen.rs) and re-exported
 // from here; `cargo test -p atlas-core` fails when that file is stale, and
-// `bun run gen:types` regenerates it. What stays hand-written below is either not a
-// Rust model at all (Tauri commands, settings keys, the desktop's own helpers) or a
-// daemon-side shape declared in crates/atlasd/src/http.rs without a `JsonSchema`
-// derive. A local declaration shadows a generated export of the same name, so when one
-// of those moves into models.rs, delete it here.
+// `bun run gen:types` regenerates it. What stays hand-written below is not a Rust
+// model at all: Tauri commands, settings keys and the desktop's own helpers. The
+// daemon's own wire shapes (the MCP reports, the request bodies, `Job`) are models
+// too and come through the generated file. A local declaration would shadow a
+// generated export of the same name, so do not add one for a type Rust has.
 //
 // UUIDs and `DateTime<Utc>` both arrive as strings; the string unions match the
 // `str_enum!` literals exactly, so a value that type checks here parses there.
@@ -30,11 +30,7 @@ import type {
 	SearchQuery,
 	SkillUpdate,
 	SyncAction,
-	Timestamp,
-	TriggerKind,
-	Uuid,
-	WorkflowRun,
-	WorkflowStep
+	TriggerKind
 } from './types.generated';
 
 // ---- the desktop's names for generated types ----
@@ -173,140 +169,3 @@ export interface RunSummary {
 	tokens: number | null;
 }
 
-// ---- daemon shapes without a JsonSchema model (crates/atlas-core/src/jobs.rs, crates/atlasd/src/http.rs) ----
-
-export type JobStatus = 'queued' | 'running' | 'done' | 'failed';
-
-/** A background extraction job, returned by `POST /ingest` (as `job_id`) and `GET /jobs/{id}`. */
-export interface Job {
-	id: Uuid;
-	kind: string;
-	status: JobStatus;
-	payload: unknown;
-	result: unknown;
-	error: string | null;
-	created_at: Timestamp;
-	updated_at: Timestamp;
-}
-
-/** `POST /extraction/test`'s body: 200 carries `reply`, the 400 connectivity failure carries `error`. */
-export interface ExtractionTestResult {
-	ok: boolean;
-	reply?: string;
-	error?: string;
-}
-
-/** One row of `GET /tasks/counts`; every stage appears, including empty ones. */
-export interface StageCount {
-	stage: string;
-	count: number;
-}
-
-/** `GET /api/v1/runs/{id}`. */
-export interface RunDetail {
-	run: WorkflowRun;
-	steps: WorkflowStep[];
-}
-
-// ---- MCP (Phase 10) ----
-// `GET /api/v1/mcp/status` (crates/atlasd/src/http.rs: McpStatusReport). `McpResource`
-// and `McpPrompt` mirror the rmcp `Resource` and `Prompt` wire shapes (camelCase,
-// optional fields omitted rather than null).
-
-export type McpToolScope = 'read' | 'write';
-
-export interface McpToolRow {
-	name: string;
-	description: string;
-	args: string;
-	scope: McpToolScope;
-	enabled: boolean;
-	/** `builtin` for a tool the daemon carries itself, `plugin:<id>` for one a plugin
-	 * registered. Optional so a report from an older daemon still type-checks. */
-	source?: string;
-}
-
-export interface McpResource {
-	uri: string;
-	name: string;
-	title?: string;
-	description?: string;
-	mimeType?: string;
-	size?: number;
-}
-
-export interface McpPromptArgument {
-	name: string;
-	title?: string;
-	description?: string;
-	required?: boolean;
-}
-
-export interface McpPrompt {
-	name: string;
-	title?: string;
-	description?: string;
-	arguments?: McpPromptArgument[];
-}
-
-export type McpTransportKind = 'stdio' | 'http';
-
-export interface McpClient {
-	id: string;
-	transport: McpTransportKind;
-	client_name: string;
-	client_version: string | null;
-	first_seen: Timestamp;
-	last_seen: Timestamp;
-	tool_calls: number;
-	/**
-	 * The project this client's last tool call resolved, best effort: only an HTTP
-	 * session reports one (it comes from the router's own project resolution on that
-	 * call); null for a stdio session, or a call that named no project.
-	 */
-	last_project_id: Uuid | null;
-}
-
-export interface McpStatusReport {
-	transports: {
-		stdio: { command: string };
-		http: { url: string; protocol_version: string };
-	};
-	counts: { tools: number; resources: number; prompts: number; clients: number };
-	tools: McpToolRow[];
-	resources: McpResource[];
-	prompts: McpPrompt[];
-	clients: McpClient[];
-}
-
-// ---- Project MCP view (Task MCP-A) ----
-// `GET /api/v1/projects/{id}/mcp` (crates/atlasd/src/http.rs: ProjectMcpReport). Tool
-// gating applies at call time, not at `tools/list`, so this route (not the live tool
-// list) is where a project's own MCP overrides show.
-
-export interface ProjectMcpToolRow {
-	name: string;
-	description: string;
-	args: string;
-	scope: McpToolScope;
-	enabled_globally: boolean;
-	/** Actually callable here: enabled globally and not in this project's own override. */
-	enabled_here: boolean;
-	/** Read the same way as `McpToolRow.source`: `builtin`, or `plugin:<id>` for a tool a
-	 * plugin contributed. Optional only for a report written by an older daemon. */
-	source?: string;
-}
-
-export interface ProjectMcpReport {
-	tools: ProjectMcpToolRow[];
-	/** Only this project's own `atlas://` resources (its context, practices and board). */
-	resources: McpResource[];
-	prompts: McpPrompt[];
-	/** Registry entries whose last call resolved to this project. */
-	clients: McpClient[];
-	connect: {
-		stdio: { command: string };
-		http: { url: string; protocol_version: string };
-		project_root: string;
-	};
-}

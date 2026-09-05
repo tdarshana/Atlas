@@ -737,14 +737,6 @@ impl McpBackend for RemoteBackend {
     }
 }
 
-/// The shape `GET /runs/{id}` answers with.
-#[derive(serde::Deserialize)]
-struct RunDetail { run: WorkflowRun, steps: Vec<WorkflowStep> }
-
-/// The shape `GET /tasks/counts` answers with, one row per board stage.
-#[derive(serde::Deserialize)]
-struct StageCount { stage: String, count: i64 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

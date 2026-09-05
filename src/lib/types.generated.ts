@@ -1,5 +1,6 @@
-// Generated from the `schemars::JsonSchema` derives in crates/atlas-core/src/models.rs and
-// crates/atlas-core/src/search/global.rs by crates/atlas-core/src/tsgen.rs. Do not edit.
+// Generated from the `schemars::JsonSchema` derives in crates/atlas-core/src/models.rs,
+// crates/atlas-core/src/search/global.rs and crates/atlas-core/src/jobs.rs by
+// crates/atlas-core/src/tsgen.rs. Do not edit.
 // Regenerate with: ATLAS_WRITE_TS=1 cargo test -p atlas-core --lib tsgen
 //
 // UUIDs and `DateTime<Utc>` both travel as strings; a `str_enum!` is its literal union.
@@ -930,6 +931,192 @@ export interface PersonaContext {
 	current: PersonaBundle | null;
 }
 
+/**
+ * `Deserialize` as well as `Serialize`, so `RemoteBackend` can read a job back
+ * off `GET /jobs/{id}` rather than re-describing the shape; `JsonSchema` so `tsgen`
+ * types it for the desktop. `status` is `queued`, `running`, `done` or `failed`.
+ */
+export interface Job {
+	id: Uuid;
+	kind: string;
+	status: string;
+	payload: unknown;
+	result: unknown;
+	error: string | null;
+	created_at: Timestamp;
+	updated_at: Timestamp;
+}
+
+/** `POST /api/v1/extraction/test`: 200 carries `reply`, the 400 connectivity failure carries `error`. */
+export interface ExtractionTestResult {
+	ok: boolean;
+	reply?: string | null;
+	error?: string | null;
+}
+
+/** `POST /api/v1/ingest`'s 202 body: the job to follow with `GET /api/v1/jobs/{id}`. */
+export interface IngestReceipt {
+	job_id: Uuid;
+}
+
+/** `GET /api/v1/projects/{id}/frameworks/{kind}/docs/{path}`: one document's text. */
+export interface FrameworkDocContent {
+	content: string;
+}
+
+/** One row of `GET /api/v1/tasks/counts`; every stage appears, including empty ones. */
+export interface StageCount {
+	stage: string;
+	count: number;
+}
+
+/** `GET /api/v1/runs/{id}`. */
+export interface RunDetail {
+	run: WorkflowRun;
+	steps: WorkflowStep[];
+}
+
+/** Whether an MCP tool reads or writes. A project's agent-access rules gate the writes. */
+export type McpToolScope = 'read' | 'write';
+
+/**
+ * One row of `GET /api/v1/mcp/status`'s tools table. `source` is `builtin` for a tool
+ * the daemon carries itself, `plugin:<id>` for one a plugin registered.
+ */
+export interface McpToolRow {
+	name: string;
+	description: string;
+	args: string;
+	scope: McpToolScope;
+	enabled: boolean;
+	source: string;
+}
+
+/**
+ * One tool as the MCP server exposes it from one project's point of view, built-in or
+ * plugin, with the two gates a call meets reported separately: the global
+ * `mcp.disabled_tools` list, then that project's own `mcp_disabled_tools` override.
+ * `enabled_here` is what a call actually gets; without a project it equals
+ * `enabled_globally`. The desktop's badges need both, since a tool can be enabled
+ * globally and disabled here. `GET /api/v1/projects/{id}/mcp`'s tool row, and the row
+ * `atlas_mcp::effective_tools` computes, the same computation the router gates on.
+ */
+export interface ProjectMcpToolRow {
+	name: string;
+	description: string;
+	/**
+	 * A short, comma-joined summary of arguments, `*` marking a required one: the
+	 * hand-written one from `TOOL_TABLE` for a built-in, the schema's own property
+	 * names for a plugin's, since a plugin declares a JSON Schema instead.
+	 */
+	args: string;
+	scope: McpToolScope;
+	enabled_globally: boolean;
+	/** Actually callable here: enabled globally and not in the project's own override. */
+	enabled_here: boolean;
+	/** `builtin`, or `plugin:<id>` for a tool a plugin contributed. */
+	source: string;
+}
+
+export interface McpStdioTransport {
+	command: string;
+}
+
+export interface McpHttpTransport {
+	url: string;
+	protocol_version: string;
+}
+
+export interface McpTransports {
+	stdio: McpStdioTransport;
+	http: McpHttpTransport;
+}
+
+export interface McpCounts {
+	tools: number;
+	resources: number;
+	prompts: number;
+	clients: number;
+}
+
+/** An MCP resource as `resources/list` shows it. */
+export interface McpResource {
+	uri: string;
+	name: string;
+	title?: string | null;
+	description?: string | null;
+	mimeType?: string | null;
+	size?: number | null;
+}
+
+export interface McpPromptArgument {
+	name: string;
+	title?: string | null;
+	description?: string | null;
+	required?: boolean | null;
+}
+
+/** An MCP prompt as `prompts/list` shows it. */
+export interface McpPrompt {
+	name: string;
+	title?: string | null;
+	description?: string | null;
+	arguments?: McpPromptArgument[] | null;
+}
+
+export type McpClientTransport = 'stdio' | 'http';
+
+/**
+ * One MCP client connected to the daemon: a stdio shim that registered itself, or an
+ * HTTP session picked up on its first tool call.
+ */
+export interface McpClient {
+	id: string;
+	transport: McpClientTransport;
+	client_name: string;
+	client_version: string | null;
+	first_seen: Timestamp;
+	last_seen: Timestamp;
+	tool_calls: number;
+	/**
+	 * The project this client's last tool call resolved, best effort: only an HTTP
+	 * session reports one (it comes from the router's own project resolution on that
+	 * call); null for a stdio session, or a call that named no project.
+	 */
+	last_project_id: Uuid | null;
+}
+
+/** `GET /api/v1/mcp/status`. */
+export interface McpStatusReport {
+	transports: McpTransports;
+	counts: McpCounts;
+	tools: McpToolRow[];
+	resources: McpResource[];
+	prompts: McpPrompt[];
+	clients: McpClient[];
+}
+
+export interface ProjectMcpConnect {
+	stdio: McpStdioTransport;
+	http: McpHttpTransport;
+	project_root: string;
+}
+
+/**
+ * `GET /api/v1/projects/{id}/mcp`: MCP from one project's point of view. Tool gating
+ * applies at call time, not at `tools/list`, so this route (not the live tool list) is
+ * where a project's own MCP overrides show.
+ */
+export interface ProjectMcpReport {
+	tools: ProjectMcpToolRow[];
+	/** Only this project's own `atlas://` resources (its context, practices and board). */
+	resources: McpResource[];
+	prompts: McpPrompt[];
+	/** Registry entries whose last call resolved to this project. */
+	clients: McpClient[];
+	connect: ProjectMcpConnect;
+}
+
 // ---- shapes the daemon reads (a defaulted or Option field may be left out) ----
 
 export interface NewMemory {
@@ -1220,4 +1407,101 @@ export interface RosterEntry {
 	persona_id: Uuid;
 	is_default?: boolean;
 	position?: number;
+}
+
+export interface ForgetBody {
+	reason?: string | null;
+}
+
+export interface RootBody {
+	root: string;
+}
+
+export interface StatusBody {
+	status: string;
+}
+
+export interface IngestBody {
+	text: string;
+	/**
+	 * Deprecated: send the actor as `X-Atlas-Actor` instead. Kept for one release so
+	 * an older caller still works; the header wins when both are sent.
+	 */
+	source_tool?: string | null;
+	project_root?: string | null;
+}
+
+export interface MoveBody {
+	stage: string;
+	expected_updated_at?: Timestamp | null;
+}
+
+export interface CommentBody {
+	body: string;
+}
+
+export interface ClaimBody {
+	force?: boolean;
+}
+
+export interface BlockersBody {
+	blocked_by: string[];
+}
+
+export interface SetStagesBody {
+	stages: Stage[];
+	renames?: Record<string, string>;
+}
+
+export interface SetProjectStagesBody {
+	stages?: Stage[] | null;
+	renames?: Record<string, string>;
+}
+
+export interface FrameworkImportBody {
+	what: ImportWhat;
+}
+
+export interface SkillBodyBody {
+	body: string;
+}
+
+export interface SkillsDisabledBody {
+	disabled: string[];
+}
+
+export interface McpToolsBody {
+	disabled: string[];
+}
+
+export interface McpEnabledBody {
+	enabled: boolean;
+}
+
+export interface RunWorkflowBody {
+	trigger?: TriggerKind | null;
+	input?: string | null;
+}
+
+export interface RegisterMcpClientBody {
+	id: string;
+	transport: string;
+	client_name: string;
+	client_version?: string | null;
+}
+
+export interface McpHeartbeatBody {
+	tool_calls: number;
+}
+
+/**
+ * `PUT /api/v1/mcp/plugin-tools/{plugin_id}`'s body. Each decl's `plugin_id` is
+ * optional in the JSON and overwritten from the path.
+ */
+export interface PluginToolsBody {
+	tools: PluginToolDecl[];
+}
+
+export interface PluginToolCallBody {
+	args?: unknown;
 }

@@ -1,9 +1,7 @@
 use axum::{body::Bytes, extract::{FromRequest, FromRequestParts, Path, Query, Request, State}, http::{header, request::Parts, HeaderMap, Method, StatusCode}, middleware::{self, Next}, response::{IntoResponse, Response}, routing::{delete, get, post, put}, Json, Router};
 use atlas_core::{backend::{StatusBackend, MemoryBackend, ProjectBackend, LibraryBackend, JobBackend, BoardBackend, WorkflowBackend, SearchBackend, SkillBackend, McpBackend, PersonaBackend}, jobs::Job, models::*, search::global::{SearchKind, SearchQuery, SearchResult, DEFAULT_LIMIT}, AtlasError};
-use atlas_mcp::{ToolRow, ToolScope};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde::Deserialize;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
 use atlas_core::projects::PersonaRef;
@@ -245,10 +243,11 @@ pub fn cors_layer() -> CorsLayer {
         .max_age(std::time::Duration::from_secs(600))
 }
 
+// The query-string shapes. Every request body and every response shape the routes
+// use is an `atlas_core::models` type (the `*Body` structs and the MCP report types
+// moved there under ARCH-6), so `tsgen` types them and `routes.rs` can name them.
+
 #[derive(Deserialize)] pub struct ActorQ { pub actor: Option<String> }
-#[derive(Deserialize)] pub struct ForgetBody { pub reason: Option<String> }
-#[derive(Deserialize)] pub struct RootBody { pub root: std::path::PathBuf }
-#[derive(Deserialize)] pub struct StatusBody { pub status: String }
 #[derive(Deserialize)] pub struct ProjectQ { pub project_id: Option<Uuid> }
 #[derive(Deserialize)] pub struct ListMemoriesQ { pub status: Option<String>, pub project_id: Option<Uuid>, pub scope: Option<String>, pub limit: Option<usize>, pub offset: Option<usize> }
 #[derive(Deserialize)] pub struct MemoryFacetsQ { pub project_id: Option<Uuid>, pub scope: Option<String> }
@@ -259,58 +258,20 @@ pub fn cors_layer() -> CorsLayer {
     #[serde(default)] pub after: Option<DateTime<Utc>>,
     #[serde(default)] pub limit: Option<usize>,
 }
-#[derive(Deserialize)] pub struct IngestBody {
-    pub text: String,
-    /// Deprecated: send the actor as `X-Atlas-Actor` instead. Kept for one release so
-    /// an older caller still works; the header wins when both are sent.
-    #[serde(default)] pub source_tool: Option<String>,
-    #[serde(default)] pub project_root: Option<std::path::PathBuf>,
-}
 
 // ---- MCP (Phase 10) ----
 
-#[derive(Deserialize)] pub struct RegisterMcpClientBody { pub id: String, pub transport: String, pub client_name: String, #[serde(default)] pub client_version: Option<String> }
-#[derive(Deserialize)] pub struct McpHeartbeatBody { pub tool_calls: u64 }
-/// One row of `GET /api/v1/mcp/status`'s tools table. The strings are owned rather than
-/// `&'static str` because a plugin's tools are registered at run time; `source` says
-/// which they are: `"builtin"` for `TOOL_TABLE`, `"plugin:<id>"` for a plugin's.
-#[derive(Serialize)] pub struct McpToolRow { pub name: String, pub description: String, pub args: String, pub scope: ToolScope, pub enabled: bool, pub source: String }
-#[derive(Serialize)] pub struct McpStdioTransport { pub command: &'static str }
-#[derive(Serialize)] pub struct McpHttpTransport { pub url: String, pub protocol_version: String }
-#[derive(Serialize)] pub struct McpTransports { pub stdio: McpStdioTransport, pub http: McpHttpTransport }
-#[derive(Serialize)] pub struct McpCounts { pub tools: usize, pub resources: usize, pub prompts: usize, pub clients: usize }
-#[derive(Serialize)] pub struct McpStatusReport {
-    pub transports: McpTransports,
-    pub counts: McpCounts,
-    pub tools: Vec<McpToolRow>,
-    pub resources: Vec<rmcp::model::Resource>,
-    pub prompts: Vec<rmcp::model::Prompt>,
-    pub clients: Vec<McpClient>,
+/// The desktop's view of an rmcp resource: the fields it shows, in rmcp's own camelCase.
+fn mcp_resource(r: rmcp::model::Resource) -> McpResource {
+    McpResource { uri: r.uri, name: r.name, title: r.title, description: r.description, mime_type: r.mime_type, size: r.size }
 }
 
-/// Task MCP-A: `GET /api/v1/projects/{id}/mcp`'s tool row. Unlike `McpToolRow`'s single
-/// `enabled`, this project view carries the two flags separately, since a tool can be
-/// enabled globally and disabled here, or (with `mcp.disabled_tools` naming it) the
-/// other way, and the desktop's badges need to tell those apart. It is exactly the row
-/// `atlas_mcp::effective_tools` computes, the same computation the router gates on.
-pub type ProjectMcpToolRow = ToolRow;
-#[derive(Serialize)] pub struct ProjectMcpConnect {
-    pub stdio: McpStdioTransport,
-    pub http: McpHttpTransport,
-    pub project_root: String,
+fn mcp_prompt(p: rmcp::model::Prompt) -> McpPrompt {
+    let arguments = p.arguments.map(|args| {
+        args.into_iter().map(|a| McpPromptArgument { name: a.name, title: a.title, description: a.description, required: a.required }).collect()
+    });
+    McpPrompt { name: p.name, title: p.title, description: p.description, arguments }
 }
-#[derive(Serialize)] pub struct ProjectMcpReport {
-    pub tools: Vec<ProjectMcpToolRow>,
-    pub resources: Vec<rmcp::model::Resource>,
-    pub prompts: Vec<rmcp::model::Prompt>,
-    pub clients: Vec<McpClient>,
-    pub connect: ProjectMcpConnect,
-}
-#[derive(Deserialize)] pub struct McpToolsBody { pub disabled: Vec<String> }
-/// `PUT /api/v1/mcp/plugin-tools/{plugin_id}`'s body. Each decl's `plugin_id` is
-/// optional in the JSON and overwritten from the path.
-#[derive(Deserialize)] pub struct PluginToolsBody { pub tools: Vec<PluginToolDecl> }
-#[derive(Deserialize)] pub struct PluginToolCallBody { #[serde(default)] pub args: serde_json::Value }
 
 fn actor(q: &ActorQ) -> &str { q.actor.as_deref().unwrap_or("api") }
 
@@ -351,10 +312,6 @@ fn query_flag_opt<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result
     /// board's listing (PERF-5, ATL-307).
     #[serde(default, deserialize_with = "query_flag")] pub brief: bool,
 }
-#[derive(Deserialize)] pub struct MoveBody { pub stage: String, #[serde(default)] pub expected_updated_at: Option<DateTime<Utc>> }
-#[derive(Deserialize)] pub struct CommentBody { pub body: String }
-#[derive(Deserialize, Default)] pub struct ClaimBody { #[serde(default)] pub force: bool }
-#[derive(Deserialize)] pub struct BlockersBody { pub blocked_by: Vec<String> }
 #[derive(Deserialize)] pub struct BoardStagesQ { pub project_id: Option<Uuid> }
 #[derive(Deserialize)] pub struct TaskCountsQ {
     #[serde(default)] pub project_id: Option<Uuid>,
@@ -365,19 +322,10 @@ fn query_flag_opt<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result
     /// a board list narrowed to parent tasks.
     #[serde(default, deserialize_with = "query_flag_opt")] pub top_level: Option<bool>,
 }
-#[derive(Deserialize)] pub struct SetStagesBody { pub stages: Vec<Stage>, #[serde(default)] pub renames: HashMap<String, String> }
-#[derive(Deserialize)] pub struct SetProjectStagesBody { #[serde(default)] pub stages: Option<Vec<Stage>>, #[serde(default)] pub renames: HashMap<String, String> }
-#[derive(Serialize)] pub struct StageCount { pub stage: String, pub count: i64 }
-
-// ---- frameworks (Phase 12) ----
-
-#[derive(Deserialize)] pub struct FrameworkImportBody { pub what: ImportWhat }
 
 // ---- skills (Phase 15) ----
 
 #[derive(Deserialize)] pub struct SkillsQ { #[serde(default)] pub project_id: Option<Uuid> }
-#[derive(Deserialize)] pub struct SkillBodyBody { pub body: String }
-#[derive(Deserialize)] pub struct SkillsDisabledBody { pub disabled: Vec<String> }
 
 // ---- personas (Phase 17) ----
 
@@ -386,15 +334,12 @@ fn query_flag_opt<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result
 // ---- the agents' MCP servers (Phase 16) ----
 
 #[derive(Deserialize)] pub struct McpServersQ { #[serde(default)] pub project_id: Option<Uuid> }
-#[derive(Deserialize)] pub struct McpEnabledBody { pub enabled: bool }
 
 // ---- workflows (Phase 9) ----
 
 #[derive(Deserialize)] pub struct WorkflowListQ { #[serde(default)] pub project_id: Option<Uuid> }
 #[derive(Deserialize)] pub struct RunsQ { #[serde(default)] pub limit: Option<usize> }
 #[derive(Deserialize)] pub struct AllRunsQ { #[serde(default)] pub since: Option<DateTime<Utc>>, #[serde(default)] pub limit: Option<usize> }
-#[derive(Deserialize)] pub struct RunWorkflowBody { #[serde(default)] pub trigger: Option<TriggerKind>, #[serde(default)] pub input: Option<String> }
-#[derive(Serialize)] pub struct RunDetail { pub run: WorkflowRun, pub steps: Vec<WorkflowStep> }
 /// `GET /workflows/{id}/runs?limit=` default, for a caller who leaves it off.
 const DEFAULT_RUNS_LIMIT: usize = 20;
 /// `GET /runs?since=&limit=` default, for a caller who leaves it off.
@@ -670,7 +615,7 @@ async fn ingest(State(s): State<AppState>, headers: HeaderMap, ApiJson(b): ApiJs
         Err(e) => return e.into_response(),
     };
     match s.backend.ingest_transcript(b.text, source_tool, b.project_root).await {
-        Ok(job_id) => (StatusCode::ACCEPTED, Json(serde_json::json!({"job_id": job_id}))).into_response(),
+        Ok(job_id) => (StatusCode::ACCEPTED, Json(IngestReceipt { job_id })).into_response(),
         Err(e) => ApiError(e).into_response(),
     }
 }
@@ -700,9 +645,9 @@ async fn get_job(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Resul
 /// a fatal one.
 async fn test_extraction(State(s): State<AppState>, ApiQuery(q): ApiQuery<ProjectQ>) -> Response {
     match s.backend.test_extraction_for(q.project_id).await {
-        Ok(reply) => (StatusCode::OK, Json(serde_json::json!({"ok": true, "reply": reply}))).into_response(),
+        Ok(reply) => (StatusCode::OK, Json(ExtractionTestResult { ok: true, reply: Some(reply), error: None })).into_response(),
         Err(e @ AtlasError::Conflict(_)) => ApiError(e).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"ok": false, "error": e.to_string()}))).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(ExtractionTestResult { ok: false, reply: None, error: Some(e.to_string()) })).into_response(),
     }
 }
 
@@ -778,10 +723,10 @@ async fn list_frameworks(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) 
 /// (`{*path}`), already percent-decoded, so it carries the relative path exactly as
 /// `FrameworkDoc.path` (and `RemoteBackend::get_framework_doc`) built it, slashes
 /// included; `kind.parse()` answers a 400 naming the bad value for an unknown one.
-async fn get_framework_doc(State(s): State<AppState>, ApiPath((id, kind, path)): ApiPath<(Uuid, String, String)>) -> Result<Json<serde_json::Value>, ApiError> {
+async fn get_framework_doc(State(s): State<AppState>, ApiPath((id, kind, path)): ApiPath<(Uuid, String, String)>) -> Result<Json<FrameworkDocContent>, ApiError> {
     let kind: FrameworkKind = kind.parse()?;
     let content = s.backend.get_framework_doc(id, kind, &path).await?;
-    Ok(Json(serde_json::json!({"content": content})))
+    Ok(Json(FrameworkDocContent { content }))
 }
 async fn import_framework(
     State(s): State<AppState>,
@@ -1010,13 +955,13 @@ async fn mcp_status(State(s): State<AppState>) -> Result<Json<McpStatusReport>, 
         .into_iter()
         .map(|r| McpToolRow { name: r.name, description: r.description, args: r.args, scope: r.scope, enabled: r.enabled_globally, source: r.source })
         .collect();
-    let resources = atlas_mcp::resources_for(&*s.backend).await?;
-    let prompts = atlas_mcp::prompts_for(&*s.backend).await?;
+    let resources: Vec<McpResource> = atlas_mcp::resources_for(&*s.backend).await?.into_iter().map(mcp_resource).collect();
+    let prompts: Vec<McpPrompt> = atlas_mcp::prompts_for(&*s.backend).await?.into_iter().map(mcp_prompt).collect();
     let clients = s.mcp_clients.live();
     let port = s.backend.port.unwrap_or(0);
     Ok(Json(McpStatusReport {
         transports: McpTransports {
-            stdio: McpStdioTransport { command: "atlas mcp" },
+            stdio: McpStdioTransport { command: "atlas mcp".into() },
             http: McpHttpTransport { url: format!("http://127.0.0.1:{port}/mcp"), protocol_version: rmcp::model::ProtocolVersion::LATEST.to_string() },
         },
         counts: McpCounts { tools: tools.len(), resources: resources.len(), prompts: prompts.len(), clients: clients.len() },
@@ -1040,8 +985,8 @@ async fn project_mcp(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> R
     // project's override both name), and without them the desktop's `Plugin` badge on the
     // project tab never lights.
     let tools = atlas_mcp::effective_tools(&disabled_globally, Some(&project), &s.plugin_tools.list());
-    let resources = atlas_mcp::resources_for_project(&project);
-    let prompts = atlas_mcp::prompts_for(&*s.backend).await?;
+    let resources = atlas_mcp::resources_for_project(&project).into_iter().map(mcp_resource).collect();
+    let prompts = atlas_mcp::prompts_for(&*s.backend).await?.into_iter().map(mcp_prompt).collect();
     let clients = s.mcp_clients.live().into_iter().filter(|c| c.last_project_id == Some(id)).collect();
     let port = s.backend.port.unwrap_or(0);
     Ok(Json(ProjectMcpReport {
@@ -1050,7 +995,7 @@ async fn project_mcp(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> R
         prompts,
         clients,
         connect: ProjectMcpConnect {
-            stdio: McpStdioTransport { command: "atlas mcp" },
+            stdio: McpStdioTransport { command: "atlas mcp".into() },
             http: McpHttpTransport { url: format!("http://127.0.0.1:{port}/mcp"), protocol_version: rmcp::model::ProtocolVersion::LATEST.to_string() },
             project_root: project.root_path,
         },

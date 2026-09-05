@@ -296,9 +296,9 @@ pub struct PersonaUseArgs {
 /// `/api/v1/mcp/status` tools table (Task 2) as a badge: read is informational, write
 /// is a warning, since a write tool run by an agent this project has not admitted is
 /// refused by the backend's own `agent_access` gate, not by anything in this crate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ToolScope { Read, Write }
+/// The type itself is `atlas_core::models::McpToolScope`, so the desktop's generated
+/// types cover it.
+pub use atlas_core::models::McpToolScope as ToolScope;
 
 /// The prefix every plugin-contributed MCP tool name carries. No name in [`TOOL_TABLE`]
 /// starts with it (asserted by `plugin_tool_names_never_collide_with_a_builtin`), so a
@@ -1261,21 +1261,8 @@ pub async fn disabled_tool_names<B: StatusBackend>(backend: &B) -> atlas_core::R
 /// project is given) that project's own `mcp_disabled_tools` override. `enabled_here`
 /// is what a call actually gets; without a project it equals `enabled_globally`. The
 /// desktop's badges need both, since a tool can be enabled globally and disabled here.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct ToolRow {
-    pub name: String,
-    pub description: String,
-    /// A short, comma-joined summary of arguments, `*` marking a required one: the
-    /// hand-written one from [`TOOL_TABLE`] for a built-in, the schema's own property
-    /// names for a plugin's, since a plugin declares a JSON Schema instead.
-    pub args: String,
-    pub scope: ToolScope,
-    pub enabled_globally: bool,
-    /// Actually callable here: enabled globally and not in the project's own override.
-    pub enabled_here: bool,
-    /// `builtin`, or `plugin:<id>` for a tool a plugin contributed.
-    pub source: String,
-}
+/// The type itself is `atlas_core::models::ProjectMcpToolRow`, `GET /api/v1/projects/{id}/mcp`'s row.
+pub use atlas_core::models::ProjectMcpToolRow as ToolRow;
 
 /// Every tool the MCP server exposes and whether each is on, from one project's point
 /// of view or (with `None`) the global one. Plugin tools are listed under the same MCP

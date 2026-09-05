@@ -3697,3 +3697,65 @@ async fn a_terminate_signal_stops_the_daemon_and_checkpoints_the_log() {
         .unwrap();
     assert_eq!(found, 1, "{key} survived the stop and reopen");
 }
+
+// ---- the route table (ARCH-6) ----
+
+#[path = "../src/routes.rs"]
+#[allow(dead_code)]
+mod routes;
+
+/// Every entry of `routes::ROUTES` is served by the running daemon, and the router mounts
+/// nothing the table lacks. A route dropped from the router answers the axum fallback
+/// (a 404 with an empty body); one dropped from the table is caught by the count below.
+/// A handler's own 404 (`{"error": ..}` for the nil uuid) and 400 (no body sent) both
+/// mean the route is there, so they pass.
+#[tokio::test]
+async fn every_route_in_the_table_is_served() {
+    let d = start().await;
+    let c = reqwest::Client::builder().timeout(Duration::from_secs(10)).build().unwrap();
+    let nil = uuid::Uuid::nil().to_string();
+    let mut failures = Vec::new();
+    for r in routes::ROUTES {
+        let mut path = String::new();
+        for (i, seg) in r.path.split('/').enumerate() {
+            if i > 0 { path.push('/'); }
+            let filled = match seg {
+                "{id}" | "{*id}" => nil.as_str(),
+                "{id_or_key}" => "ATL-1",
+                "{kind}" => "superpowers",
+                s if s.starts_with('{') => "x",
+                s => s,
+            };
+            path.push_str(filled);
+        }
+        let method = reqwest::Method::from_bytes(r.method.as_bytes()).unwrap();
+        let resp = c.request(method, format!("http://127.0.0.1:{}{path}", d.port)).send().await.unwrap();
+        let status = resp.status().as_u16();
+        let served = match status {
+            405 => false,
+            404 => {
+                let body = resp.text().await.unwrap_or_default();
+                serde_json::from_str::<serde_json::Value>(&body).ok().is_some_and(|v| v.get("error").is_some())
+            }
+            _ => true,
+        };
+        if !served {
+            failures.push(format!("{} {} ({}) answered {status}", r.method, r.path, r.name));
+        }
+    }
+    assert!(failures.is_empty(), "routes in the table the daemon does not serve:\n{}", failures.join("\n"));
+
+    // The other direction: every `.route(` line of `http.rs` mounts a path the table has,
+    // with as many methods as the table lists for it.
+    let http = include_str!("../src/http.rs");
+    let mut missing = Vec::new();
+    for line in http.lines().map(str::trim_start).filter(|l| l.starts_with(".route(\"/api/v1")) {
+        let path = line.split('"').nth(1).unwrap();
+        let mounted = ["get(", "post(", "put(", "patch(", "delete("].iter().filter(|m| line.contains(*m)).count();
+        let listed = routes::ROUTES.iter().filter(|r| r.path == path).count();
+        if listed != mounted {
+            missing.push(format!("{path}: router mounts {mounted} method(s), the table lists {listed}"));
+        }
+    }
+    assert!(missing.is_empty(), "routes the table does not match:\n{}", missing.join("\n"));
+}
