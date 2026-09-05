@@ -12,7 +12,7 @@ fn docs_path(kind: DocKind) -> &'static str {
 #[derive(Clone)]
 pub struct RemoteBackend {
     base: String,
-    client: reqwest::Client,
+    client: Http,
     /// The caller's identity for board routes, which read it from `X-Atlas-Actor`
     /// rather than a query parameter. Set by the CLI (`cli`, or `cli/NAME` for
     /// `--as NAME`); a board call whose trait method takes its own `actor` argument
@@ -20,7 +20,38 @@ pub struct RemoteBackend {
     pub actor: String,
 }
 
+/// The HTTP client plus the session persona every request it builds is stamped with
+/// as `X-Atlas-Persona`. The persona is read per request rather than baked into the
+/// client's default headers, so `set_persona` takes effect on the next call and every
+/// clone of the backend (rmcp hands one to each session) shares it.
+#[derive(Clone)]
+struct Http {
+    inner: reqwest::Client,
+    persona: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl Http {
+    fn stamp(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self.persona.lock().unwrap_or_else(|e| e.into_inner()).as_deref() {
+            Some(slug) => req.header("X-Atlas-Persona", slug),
+            None => req,
+        }
+    }
+    fn get(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder { self.stamp(self.inner.get(url)) }
+    fn post(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder { self.stamp(self.inner.post(url)) }
+    fn put(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder { self.stamp(self.inner.put(url)) }
+    fn patch(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder { self.stamp(self.inner.patch(url)) }
+    fn delete(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder { self.stamp(self.inner.delete(url)) }
+}
+
 impl RemoteBackend {
+    /// Binds every later request to the persona `slug` names (sent as
+    /// `X-Atlas-Persona`, which the daemon's gates read), or unbinds it with `None`.
+    /// The MCP router calls this from `persona_use` and `task_claim`.
+    pub fn set_persona(&self, slug: Option<String>) {
+        *self.client.persona.lock().unwrap_or_else(|e| e.into_inner()) = slug;
+    }
+
     /// A request deadline matters because `atlas ingest --hook-stdin` runs inside
     /// someone else's turn: a daemon that accepts the connection and then never
     /// answers (a lock it cannot take, a wedged worker) must not hold the turn open.
@@ -28,8 +59,8 @@ impl RemoteBackend {
     /// through. `Client::builder` only fails on a bad TLS or resolver setup, which a
     /// loopback client has none of, so the default is a sound fallback.
     pub fn new(port: u16) -> Self {
-        let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_default();
-        Self { base: format!("http://127.0.0.1:{port}/api/v1"), client, actor: "cli".into() }
+        let inner = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_default();
+        Self { base: format!("http://127.0.0.1:{port}/api/v1"), client: Http { inner, persona: Default::default() }, actor: "cli".into() }
     }
     async fn handle<T: serde::de::DeserializeOwned>(r: reqwest::Response) -> Result<T> {
         if r.status().is_success() { return r.json::<T>().await.map_err(|e| AtlasError::Other(e.to_string())); }
@@ -589,6 +620,9 @@ impl SkillBackend for RemoteBackend {
 
 #[async_trait::async_trait]
 impl PersonaBackend for RemoteBackend {
+    fn set_session_persona(&self, slug: Option<String>) {
+        self.set_persona(slug);
+    }
     async fn list_personas(&self) -> Result<Vec<Persona>> {
         Self::handle(self.client.get(format!("{}/personas", self.base)).send().await.map_err(Self::net)?).await
     }
@@ -717,5 +751,23 @@ mod tests {
         assert_eq!(decoded.get("project_id").map(String::as_str), Some(pid.to_string().as_str()));
         assert_eq!(decoded.get("kinds").map(String::as_str), Some("task,memory"));
         assert_eq!(decoded.get("limit").map(String::as_str), Some("5"));
+    }
+
+    /// Every request a backend builds carries `X-Atlas-Persona` while a persona is
+    /// set, and none once it is cleared; the header is read per request, so a clone
+    /// made before `set_persona` sees the change too.
+    #[test]
+    fn set_persona_stamps_every_later_request_until_cleared() {
+        let b = RemoteBackend::new(1);
+        let twin = b.clone();
+        let header = |req: reqwest::RequestBuilder| req.build().unwrap().headers().get("x-atlas-persona").map(|v| v.to_str().unwrap().to_string());
+        assert_eq!(header(b.client.get("http://127.0.0.1:1/x")), None);
+        b.set_persona(Some("mobile-developer".into()));
+        assert_eq!(header(b.client.get("http://127.0.0.1:1/x")).as_deref(), Some("mobile-developer"));
+        assert_eq!(header(b.client.post("http://127.0.0.1:1/x")).as_deref(), Some("mobile-developer"));
+        assert_eq!(header(twin.client.put("http://127.0.0.1:1/x")).as_deref(), Some("mobile-developer"), "a clone shares the session");
+        PersonaBackend::set_session_persona(&b, None);
+        assert_eq!(header(b.client.delete("http://127.0.0.1:1/x")), None);
+        assert_eq!(header(twin.client.patch("http://127.0.0.1:1/x")), None);
     }
 }

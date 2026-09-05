@@ -302,6 +302,21 @@ mod tests {
     /// the row names them, so a client hears about memories (and every other audited
     /// write) the moment they land.
     #[test]
+    fn insert_as_names_the_persona_in_the_audit_detail_only() {
+        let db = Db::open_in_memory().unwrap();
+        let repo = MemoryRepo::new(&db);
+        let bound = repo.insert_as(&mem("bound", MemoryScope::Global), "codex", Some("mobile-developer")).unwrap();
+        let plain = repo.insert(&mem("plain", MemoryScope::Global), "codex").unwrap();
+        let detail = |id: Uuid| -> serde_json::Value {
+            db.with_conn(|c| Ok(c.query_row("select actor, detail::text from audit where entity = 'memory' and entity_id = ?", [id.to_string()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?))
+                .map(|(actor, d)| { assert_eq!(actor, "codex"); serde_json::from_str(&d).unwrap() })
+                .unwrap()
+        };
+        assert_eq!(detail(bound.id)["persona"], "mobile-developer");
+        assert!(detail(plain.id).get("persona").is_none());
+    }
+
+    #[test]
     fn an_audited_write_announces_a_change() {
         let db = Db::open_in_memory().unwrap();
         let repo = MemoryRepo::new(&db);

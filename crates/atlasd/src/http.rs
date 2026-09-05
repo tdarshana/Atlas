@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
+use atlas_core::projects::PersonaRef;
 use crate::mcp_clients::{McpClient, Transport};
 use crate::state::AppState;
 
@@ -91,16 +92,44 @@ fn parse_actor_header(headers: &HeaderMap) -> std::result::Result<Option<String>
     }
 }
 
+/// Resolves `X-Atlas-Persona`, when present, to the persona it names. The header takes
+/// a slug and nothing else (not a name, not an id), and one no persona holds is
+/// `Invalid`: the MCP router is the only sender, and it only ever sends a slug it was
+/// given back by the daemon, so anything else is a bug worth surfacing as 400.
+async fn parse_persona_header(headers: &HeaderMap, state: &AppState) -> std::result::Result<Option<PersonaRef>, ApiError> {
+    let Some(v) = headers.get("x-atlas-persona") else { return Ok(None) };
+    let slug = v.to_str().map_err(|e| ApiError(AtlasError::Invalid(format!("X-Atlas-Persona: {e}"))))?.trim();
+    if slug.is_empty() {
+        return Ok(None);
+    }
+    let unknown = || ApiError(AtlasError::Invalid(format!("no persona {slug}")));
+    match state.backend.get_persona(slug).await {
+        Ok(p) if p.slug == slug => Ok(Some(PersonaRef { id: p.id, slug: p.slug })),
+        Ok(_) => Err(unknown()),
+        Err(AtlasError::NotFound(_)) => Err(unknown()),
+        Err(e) => Err(ApiError(e)),
+    }
+}
+
 /// The board's caller identity: `X-Atlas-Actor`, defaulting to `api` when the header
-/// is absent.
-pub struct Actor(pub String);
-impl<S> FromRequestParts<S> for Actor
-where
-    S: Send + Sync,
-{
+/// is absent, plus the persona `X-Atlas-Persona` names, which the gated writes hand
+/// to the backend beside the label.
+pub struct Actor(pub String, pub Option<PersonaRef>);
+impl FromRequestParts<AppState> for Actor {
     type Rejection = ApiError;
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        Ok(Self(parse_actor_header(&parts.headers)?.unwrap_or_else(|| "api".into())))
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+        let label = parse_actor_header(&parts.headers)?.unwrap_or_else(|| "api".into());
+        Ok(Self(label, parse_persona_header(&parts.headers, state).await?))
+    }
+}
+
+/// `X-Atlas-Persona` alone, for the memory route, whose actor still arrives as the
+/// deprecated `?actor=` query parameter rather than in `X-Atlas-Actor`.
+pub struct PersonaHeader(pub Option<PersonaRef>);
+impl FromRequestParts<AppState> for PersonaHeader {
+    type Rejection = ApiError;
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+        Ok(Self(parse_persona_header(&parts.headers, state).await?))
     }
 }
 
@@ -434,8 +463,8 @@ async fn events(State(s): State<AppState>) -> axum::response::Sse<impl tokio_str
     });
     Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
 }
-async fn create_memory(State(s): State<AppState>, ApiQuery(q): ApiQuery<ActorQ>, ApiJson(m): ApiJson<NewMemory>) -> Result<(StatusCode, Json<Memory>), ApiError> {
-    Ok((StatusCode::CREATED, Json(s.backend.remember(m, actor(&q)).await?)))
+async fn create_memory(State(s): State<AppState>, ApiQuery(q): ApiQuery<ActorQ>, PersonaHeader(persona): PersonaHeader, ApiJson(m): ApiJson<NewMemory>) -> Result<(StatusCode, Json<Memory>), ApiError> {
+    Ok((StatusCode::CREATED, Json(s.backend.remember_as(m, actor(&q), persona).await?)))
 }
 async fn list_memories(State(s): State<AppState>, ApiQuery(q): ApiQuery<ListMemoriesQ>) -> Result<Json<Vec<Memory>>, ApiError> {
     // An empty `?status=` is a caller who left the filter blank, not a bad status; the
@@ -483,10 +512,10 @@ async fn delete_project(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, A
     s.backend.delete_project(id, actor(&q)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
-async fn patch_project(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor): Actor, ApiJson(p): ApiJson<ProjectPatch>) -> Result<Json<Project>, ApiError> {
+async fn patch_project(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor, _): Actor, ApiJson(p): ApiJson<ProjectPatch>) -> Result<Json<Project>, ApiError> {
     Ok(Json(s.backend.update_project(id, p, &actor).await?))
 }
-async fn put_agent_access(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor): Actor, ApiJson(a): ApiJson<AgentAccess>) -> Result<Json<Project>, ApiError> {
+async fn put_agent_access(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor, _): Actor, ApiJson(a): ApiJson<AgentAccess>) -> Result<Json<Project>, ApiError> {
     Ok(Json(s.backend.set_agent_access(id, a, &actor).await?))
 }
 /// The project's own `agent_access`, the global `access.*` defaults, and the two
@@ -496,7 +525,7 @@ async fn get_project_access(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid
 }
 /// A body of `null` clears the override and puts the project back on the global
 /// extraction settings.
-async fn put_project_extraction(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor): Actor, ApiJson(e): ApiJson<Option<ProjectExtraction>>) -> Result<Json<Project>, ApiError> {
+async fn put_project_extraction(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor, _): Actor, ApiJson(e): ApiJson<Option<ProjectExtraction>>) -> Result<Json<Project>, ApiError> {
     Ok(Json(s.backend.set_project_extraction(id, e, &actor).await?))
 }
 async fn get_project_log(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, ApiQuery(q): ApiQuery<LogQ>) -> Result<Json<Vec<LogEntry>>, ApiError> {
@@ -644,38 +673,38 @@ async fn list_tasks(State(s): State<AppState>, ApiQuery(q): ApiQuery<TaskListQ>)
     let f = TaskFilter { project_id: q.project_id, stage: q.stage, assignee: q.assignee, ready: q.ready, query: q.q, include_done: q.include_done, global_only, top_level: q.top_level, persona: q.persona.filter(|p| !p.trim().is_empty()) };
     Ok(Json(s.backend.list_tasks(f).await?))
 }
-async fn create_task(State(s): State<AppState>, Actor(actor): Actor, ApiJson(t): ApiJson<NewTask>) -> Result<(StatusCode, Json<Task>), ApiError> {
+async fn create_task(State(s): State<AppState>, Actor(actor, _): Actor, ApiJson(t): ApiJson<NewTask>) -> Result<(StatusCode, Json<Task>), ApiError> {
     Ok((StatusCode::CREATED, Json(s.backend.create_task(t, &actor).await?)))
 }
 async fn get_task(State(s): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Json<TaskDetail>, ApiError> {
     Ok(Json(s.backend.get_task(&id).await?))
 }
-async fn update_task(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor): Actor, ApiJson(u): ApiJson<TaskUpdate>) -> Result<Json<Task>, ApiError> {
+async fn update_task(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor, _): Actor, ApiJson(u): ApiJson<TaskUpdate>) -> Result<Json<Task>, ApiError> {
     Ok(Json(s.backend.update_task(&id, u, &actor).await?))
 }
-async fn move_task(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor): Actor, ApiJson(b): ApiJson<MoveBody>) -> Result<Json<Task>, ApiError> {
-    Ok(Json(s.backend.move_task(&id, &b.stage, b.expected_updated_at, &actor).await?))
+async fn move_task(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor, persona): Actor, ApiJson(b): ApiJson<MoveBody>) -> Result<Json<Task>, ApiError> {
+    Ok(Json(s.backend.move_task_as(&id, &b.stage, b.expected_updated_at, &actor, persona).await?))
 }
-async fn comment_task(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor): Actor, ApiJson(b): ApiJson<CommentBody>) -> Result<Json<TaskEvent>, ApiError> {
+async fn comment_task(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor, _): Actor, ApiJson(b): ApiJson<CommentBody>) -> Result<Json<TaskEvent>, ApiError> {
     Ok(Json(s.backend.comment_task(&id, &b.body, &actor).await?))
 }
-async fn claim_task(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor): Actor, ApiJson(b): ApiJson<ClaimBody>) -> Result<Json<Task>, ApiError> {
-    Ok(Json(s.backend.claim_task(&id, b.force, &actor).await?))
+async fn claim_task(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor, persona): Actor, ApiJson(b): ApiJson<ClaimBody>) -> Result<Json<Task>, ApiError> {
+    Ok(Json(s.backend.claim_task_as(&id, b.force, &actor, persona).await?))
 }
-async fn set_task_blockers(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor): Actor, ApiJson(b): ApiJson<BlockersBody>) -> Result<Json<Task>, ApiError> {
+async fn set_task_blockers(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor, _): Actor, ApiJson(b): ApiJson<BlockersBody>) -> Result<Json<Task>, ApiError> {
     Ok(Json(s.backend.set_task_blockers(&id, b.blocked_by, &actor).await?))
 }
-async fn delete_task(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor): Actor) -> Result<StatusCode, ApiError> {
+async fn delete_task(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor, _): Actor) -> Result<StatusCode, ApiError> {
     s.backend.delete_task(&id, &actor).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 async fn get_board_stages(State(s): State<AppState>, ApiQuery(q): ApiQuery<BoardStagesQ>) -> Result<Json<StageList>, ApiError> {
     Ok(Json(s.backend.board_stages(q.project_id).await?))
 }
-async fn put_board_stages(State(s): State<AppState>, Actor(actor): Actor, ApiJson(b): ApiJson<SetStagesBody>) -> Result<Json<Vec<Stage>>, ApiError> {
+async fn put_board_stages(State(s): State<AppState>, Actor(actor, _): Actor, ApiJson(b): ApiJson<SetStagesBody>) -> Result<Json<Vec<Stage>>, ApiError> {
     Ok(Json(s.backend.set_board_stages(b.stages, b.renames, &actor).await?))
 }
-async fn put_project_stages(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor): Actor, ApiJson(b): ApiJson<SetProjectStagesBody>) -> Result<Json<StageList>, ApiError> {
+async fn put_project_stages(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor, _): Actor, ApiJson(b): ApiJson<SetProjectStagesBody>) -> Result<Json<StageList>, ApiError> {
     Ok(Json(s.backend.set_project_stages(id, b.stages, b.renames, &actor).await?))
 }
 async fn task_counts(State(s): State<AppState>, ApiQuery(q): ApiQuery<TaskCountsQ>) -> Result<Json<Vec<StageCount>>, ApiError> {
@@ -701,7 +730,7 @@ async fn get_framework_doc(State(s): State<AppState>, ApiPath((id, kind, path)):
 async fn import_framework(
     State(s): State<AppState>,
     ApiPath((id, kind)): ApiPath<(Uuid, String)>,
-    Actor(actor): Actor,
+    Actor(actor, _): Actor,
     ApiJson(b): ApiJson<FrameworkImportBody>,
 ) -> Result<Json<ImportReport>, ApiError> {
     let kind: FrameworkKind = kind.parse()?;
@@ -715,7 +744,7 @@ async fn import_framework(
 async fn list_skills(State(s): State<AppState>, ApiQuery(q): ApiQuery<SkillsQ>) -> Result<Json<SkillList>, ApiError> {
     Ok(Json(s.backend.list_skills(q.project_id).await?))
 }
-async fn create_skill(State(s): State<AppState>, Actor(actor): Actor, ApiJson(b): ApiJson<NewSkill>) -> Result<(StatusCode, Json<Skill>), ApiError> {
+async fn create_skill(State(s): State<AppState>, Actor(actor, _): Actor, ApiJson(b): ApiJson<NewSkill>) -> Result<(StatusCode, Json<Skill>), ApiError> {
     Ok((StatusCode::CREATED, Json(s.backend.create_skill(b, &actor).await?)))
 }
 /// A skill id carries a `:` and, for a plugin skill, slashes, so it arrives through
@@ -730,24 +759,24 @@ async fn put_skill_body(
     State(s): State<AppState>,
     ApiPath(id): ApiPath<String>,
     ApiQuery(q): ApiQuery<SkillsQ>,
-    Actor(actor): Actor,
+    Actor(actor, _): Actor,
     ApiJson(b): ApiJson<SkillBodyBody>,
 ) -> Result<Json<Skill>, ApiError> {
     Ok(Json(s.backend.write_skill_body(q.project_id, &id, b.body, &actor).await?))
 }
 /// A native skill's name and description. A discovered skill has neither of its own,
 /// so this answers 400 for one rather than pretending to store them.
-async fn patch_skill(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor): Actor, ApiJson(p): ApiJson<SkillUpdate>) -> Result<Json<Skill>, ApiError> {
+async fn patch_skill(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor, _): Actor, ApiJson(p): ApiJson<SkillUpdate>) -> Result<Json<Skill>, ApiError> {
     Ok(Json(s.backend.update_skill(&id, p, &actor).await?))
 }
-async fn delete_skill(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor): Actor) -> Result<StatusCode, ApiError> {
+async fn delete_skill(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor, _): Actor) -> Result<StatusCode, ApiError> {
     s.backend.delete_skill(&id, &actor).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 /// Replaces this project's disabled-skill list wholesale; `disabled: []` clears it.
 /// Every id has to name a skill that applies here right now, the same shape
 /// `PUT /projects/{id}/mcp/tools` takes for tool names.
-async fn put_project_skills(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor): Actor, ApiJson(b): ApiJson<SkillsDisabledBody>) -> Result<Json<Project>, ApiError> {
+async fn put_project_skills(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor, _): Actor, ApiJson(b): ApiJson<SkillsDisabledBody>) -> Result<Json<Project>, ApiError> {
     Ok(Json(s.backend.set_project_skills_disabled(id, b.disabled, &actor).await?))
 }
 
@@ -756,17 +785,17 @@ async fn put_project_skills(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid
 async fn list_personas(State(s): State<AppState>) -> Result<Json<Vec<Persona>>, ApiError> {
     Ok(Json(s.backend.list_personas().await?))
 }
-async fn create_persona(State(s): State<AppState>, Actor(actor): Actor, ApiJson(p): ApiJson<NewPersona>) -> Result<(StatusCode, Json<Persona>), ApiError> {
+async fn create_persona(State(s): State<AppState>, Actor(actor, _): Actor, ApiJson(p): ApiJson<NewPersona>) -> Result<(StatusCode, Json<Persona>), ApiError> {
     Ok((StatusCode::CREATED, Json(s.backend.create_persona(p, &actor).await?)))
 }
 /// `{id}` is an id, a slug or a name here; the two writes below take the id alone.
 async fn get_persona(State(s): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Json<Persona>, ApiError> {
     Ok(Json(s.backend.get_persona(&id).await?))
 }
-async fn put_persona(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor): Actor, ApiJson(p): ApiJson<PersonaUpdate>) -> Result<Json<Persona>, ApiError> {
+async fn put_persona(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor, _): Actor, ApiJson(p): ApiJson<PersonaUpdate>) -> Result<Json<Persona>, ApiError> {
     Ok(Json(s.backend.update_persona(id, p, &actor).await?))
 }
-async fn delete_persona(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor): Actor) -> Result<StatusCode, ApiError> {
+async fn delete_persona(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor, _): Actor) -> Result<StatusCode, ApiError> {
     s.backend.delete_persona(id, &actor).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -779,7 +808,7 @@ async fn project_roster(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -
     Ok(Json(s.backend.project_roster(id).await?))
 }
 /// Replaces the roster wholesale: the body is the full list of entries, `[]` clears it.
-async fn put_project_roster(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor): Actor, ApiJson(entries): ApiJson<Vec<RosterEntry>>) -> Result<Json<Vec<RosterRow>>, ApiError> {
+async fn put_project_roster(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor, _): Actor, ApiJson(entries): ApiJson<Vec<RosterEntry>>) -> Result<Json<Vec<RosterRow>>, ApiError> {
     Ok(Json(s.backend.set_project_roster(id, entries, &actor).await?))
 }
 
@@ -805,17 +834,17 @@ async fn set_mcp_server_enabled(
     State(s): State<AppState>,
     ApiPath(id): ApiPath<String>,
     ApiQuery(q): ApiQuery<McpServersQ>,
-    Actor(actor): Actor,
+    Actor(actor, _): Actor,
     ApiJson(b): ApiJson<McpEnabledBody>,
 ) -> Result<Json<McpServerEntry>, ApiError> {
     Ok(Json(s.backend.set_mcp_server_enabled(q.project_id, &id, b.enabled, &actor).await?))
 }
 
-async fn add_mcp_server(State(s): State<AppState>, Actor(actor): Actor, ApiJson(b): ApiJson<NewMcpServer>) -> Result<(StatusCode, Json<McpServerEntry>), ApiError> {
+async fn add_mcp_server(State(s): State<AppState>, Actor(actor, _): Actor, ApiJson(b): ApiJson<NewMcpServer>) -> Result<(StatusCode, Json<McpServerEntry>), ApiError> {
     Ok((StatusCode::CREATED, Json(s.backend.add_mcp_server(b, &actor).await?)))
 }
 
-async fn remove_mcp_server(State(s): State<AppState>, ApiPath(id): ApiPath<String>, ApiQuery(q): ApiQuery<McpServersQ>, Actor(actor): Actor) -> Result<StatusCode, ApiError> {
+async fn remove_mcp_server(State(s): State<AppState>, ApiPath(id): ApiPath<String>, ApiQuery(q): ApiQuery<McpServersQ>, Actor(actor, _): Actor) -> Result<StatusCode, ApiError> {
     s.backend.remove_mcp_server(q.project_id, &id, &actor).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -825,24 +854,24 @@ async fn remove_mcp_server(State(s): State<AppState>, ApiPath(id): ApiPath<Strin
 async fn list_workflows(State(s): State<AppState>, ApiQuery(q): ApiQuery<WorkflowListQ>) -> Result<Json<Vec<Workflow>>, ApiError> {
     Ok(Json(s.backend.list_workflows(q.project_id).await?))
 }
-async fn create_workflow(State(s): State<AppState>, Actor(actor): Actor, ApiJson(w): ApiJson<NewWorkflow>) -> Result<(StatusCode, Json<Workflow>), ApiError> {
+async fn create_workflow(State(s): State<AppState>, Actor(actor, _): Actor, ApiJson(w): ApiJson<NewWorkflow>) -> Result<(StatusCode, Json<Workflow>), ApiError> {
     Ok((StatusCode::CREATED, Json(s.backend.create_workflow(w, &actor).await?)))
 }
 async fn get_workflow(State(s): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Json<Workflow>, ApiError> {
     Ok(Json(s.backend.get_workflow(&id).await?))
 }
-async fn patch_workflow(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor): Actor, ApiJson(p): ApiJson<WorkflowPatch>) -> Result<Json<Workflow>, ApiError> {
+async fn patch_workflow(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor, _): Actor, ApiJson(p): ApiJson<WorkflowPatch>) -> Result<Json<Workflow>, ApiError> {
     Ok(Json(s.backend.update_workflow(&id, p, &actor).await?))
 }
-async fn delete_workflow(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor): Actor) -> Result<StatusCode, ApiError> {
+async fn delete_workflow(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor, _): Actor) -> Result<StatusCode, ApiError> {
     s.backend.delete_workflow(&id, &actor).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 /// Queues a run and answers 202 with it: the run itself takes as long as the model
 /// call, the same asynchronous shape `POST /ingest` uses.
-async fn run_workflow(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor): Actor, ApiJson(b): ApiJson<RunWorkflowBody>) -> Result<(StatusCode, Json<WorkflowRun>), ApiError> {
+async fn run_workflow(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor, persona): Actor, ApiJson(b): ApiJson<RunWorkflowBody>) -> Result<(StatusCode, Json<WorkflowRun>), ApiError> {
     let trigger = b.trigger.unwrap_or(TriggerKind::Manual);
-    Ok((StatusCode::ACCEPTED, Json(s.backend.run_workflow(&id, trigger, &actor, b.input).await?)))
+    Ok((StatusCode::ACCEPTED, Json(s.backend.run_workflow_as(&id, trigger, &actor, b.input, persona).await?)))
 }
 async fn list_runs(State(s): State<AppState>, ApiPath(id): ApiPath<String>, ApiQuery(q): ApiQuery<RunsQ>) -> Result<Json<Vec<WorkflowRun>>, ApiError> {
     Ok(Json(s.backend.list_runs(&id, q.limit.unwrap_or(DEFAULT_RUNS_LIMIT)).await?))
@@ -858,7 +887,7 @@ async fn get_run(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Resul
     let (run, steps) = s.backend.get_run(id).await?;
     Ok(Json(RunDetail { run, steps }))
 }
-async fn cancel_run(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor): Actor) -> Result<Json<WorkflowRun>, ApiError> {
+async fn cancel_run(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor, _): Actor) -> Result<Json<WorkflowRun>, ApiError> {
     Ok(Json(s.backend.cancel_run(id, &actor).await?))
 }
 async fn export_run(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Result<Response, ApiError> {
@@ -1027,7 +1056,7 @@ async fn project_mcp(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> R
 /// tool override wholesale. Goes through `ProjectPatch` like `PATCH
 /// /api/v1/projects/{id}`, so the same known-tool-name validation and audit trail
 /// apply; `disabled: []` clears the override.
-async fn put_project_mcp_tools(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor): Actor, ApiJson(b): ApiJson<McpToolsBody>) -> Result<Json<Project>, ApiError> {
+async fn put_project_mcp_tools(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor, _): Actor, ApiJson(b): ApiJson<McpToolsBody>) -> Result<Json<Project>, ApiError> {
     Ok(Json(s.backend.update_project(id, ProjectPatch { mcp_disabled_tools: Some(b.disabled), ..Default::default() }, &actor).await?))
 }
 
@@ -1068,7 +1097,7 @@ async fn list_plugin_tools(State(s): State<AppState>) -> Json<Vec<PluginToolDecl
 /// `POST /api/v1/mcp/plugin-tools/{plugin_id}/{name}/call`: the stdio shim's way to
 /// reach a plugin tool, since only this process holds the app's socket. The reply is the
 /// plugin's own JSON result, or the usual `{"error": string}` shape.
-async fn call_plugin_tool(State(s): State<AppState>, ApiPath((plugin_id, name)): ApiPath<(String, String)>, Actor(actor): Actor, ApiJson(b): ApiJson<PluginToolCallBody>) -> Result<Json<serde_json::Value>, ApiError> {
+async fn call_plugin_tool(State(s): State<AppState>, ApiPath((plugin_id, name)): ApiPath<(String, String)>, Actor(actor, _): Actor, ApiJson(b): ApiJson<PluginToolCallBody>) -> Result<Json<serde_json::Value>, ApiError> {
     Ok(Json(s.backend.call_plugin_tool(&plugin_id, &name, b.args, &actor).await?))
 }
 
