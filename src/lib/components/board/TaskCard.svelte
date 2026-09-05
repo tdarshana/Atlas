@@ -178,11 +178,6 @@
 		overflow-wrap: anywhere;
 	}
 
-	/* A subtask reads as one at a glance: a thin accent edge and the parent line. */
-	.card.subtask {
-		border-left: 2px solid var(--accent);
-	}
-
 	.parent {
 		display: flex;
 		align-items: center;
