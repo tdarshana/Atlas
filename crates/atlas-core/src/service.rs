@@ -62,24 +62,39 @@ impl MemoryService {
     /// Swap in a new embedder, drop any stale error, reload persisted vectors for it, and
     /// backfill a vector for every active memory that doesn't have one under the new model.
     pub fn set_embedder(&self, e: Arc<dyn Embedder>) -> Result<()> {
-        let _gate = self.gate();
         // `loading` spans the swap, reload and backfill so `embedding_status` doesn't
         // announce "ready" while memories still have no vector under the new model.
         self.set_loading(true);
-        let result = self.set_embedder_gated(e);
+        let result = self.set_embedder_inner(e);
         self.set_loading(false);
         result
     }
 
-    fn set_embedder_gated(&self, e: Arc<dyn Embedder>) -> Result<()> {
-        *self.embedder.write().unwrap_or_else(|e| e.into_inner()) = e;
-        *self.err_write() = None;
-        self.reload_gated()?;
+    /// How many texts one backfill `embed` call carries.
+    const BACKFILL_BATCH: usize = 32;
+
+    fn set_embedder_inner(&self, e: Arc<dyn Embedder>) -> Result<()> {
+        // The swap and rebuild are gated; the backfill is not. Holding the gate across
+        // every missing memory's inference blocked every memory, task and workflow
+        // write for the whole backfill, which is minutes on a large store.
         let missing: Vec<(Uuid, String)> = {
+            let _gate = self.gate();
+            *self.embedder.write().unwrap_or_else(|e| e.into_inner()) = e.clone();
+            *self.err_write() = None;
+            self.reload_gated()?;
             let vectors = self.vec_read();
             self.repo().list_active(None, None)?.into_iter().filter(|m| !vectors.contains_key(&m.id)).map(|m| (m.id, m.text)).collect()
         };
-        for (id, text) in missing { self.try_embed(id, &text); }
+        for batch in missing.chunks(Self::BACKFILL_BATCH) {
+            let texts: Vec<String> = batch.iter().map(|(_, t)| t.clone()).collect();
+            match e.embed(&texts) {
+                Ok(vecs) => {
+                    let _gate = self.gate();
+                    for ((id, _), vec) in batch.iter().zip(vecs) { self.store_vector_gated(*id, e.name(), vec); }
+                }
+                Err(err) => self.record_embed_error(&e, err.to_string()),
+            }
+        }
         Ok(())
     }
 
@@ -118,52 +133,72 @@ impl MemoryService {
         Ok(())
     }
 
-    /// Embed `text` and, only if the embedding is both computed and durably persisted,
-    /// make it visible in the in-memory `vectors` map. A DB write failure must not leave
-    /// the in-memory index claiming a vector exists that isn't actually stored.
-    fn try_embed(&self, id: Uuid, text: &str) {
+    /// Embed `text` with no gate held, then take the gate only to store the result.
+    /// Inference is the slow part of a write, and holding `write_gate` across it made
+    /// every memory, task and workflow write wait on the model.
+    fn embed_and_store(&self, id: Uuid, text: &str) {
         let emb = self.emb();
         match emb.embed(&[text.to_string()]) {
             Ok(mut v) if !v.is_empty() => {
-                let vec = v.remove(0);
-                let json = serde_json::to_string(&vec).unwrap_or_default();
-                let write_result = self.db.with_conn(|c| {
-                    c.execute("delete from memory_embeddings where memory_id = ?", [id.to_string()])?;
-                    c.execute(&format!("insert into memory_embeddings values (?, ?, {json}::float[])"), duckdb::params![id.to_string(), emb.name()])?;
-                    Ok(())
-                });
-                match write_result {
-                    Ok(()) => {
-                        self.vec_write().insert(id, vec);
-                        *self.err_write() = None;
-                    }
-                    Err(e) => {
-                        let msg = format!("failed to persist embedding: {e}");
-                        tracing::warn!("{msg}");
-                        *self.err_write() = Some(msg);
-                    }
-                }
+                let _gate = self.gate();
+                self.store_vector_gated(id, emb.name(), v.remove(0));
             }
             Ok(_) => {}
-            Err(e) => { *self.err_write() = Some(e.to_string()); }
+            Err(e) => self.record_embed_error(&emb, e.to_string()),
+        }
+    }
+
+    /// Records an embed failure, unless `emb` has already been replaced: a stale
+    /// embedder's error must not mask the status of the one now in use.
+    fn record_embed_error(&self, emb: &Arc<dyn Embedder>, msg: String) {
+        if self.emb().name() == emb.name() { *self.err_write() = Some(msg); }
+    }
+
+    /// Persist a vector computed by the embedder named `model` and, only once it is
+    /// durably stored, make it visible in the in-memory `vectors` map. A DB write
+    /// failure must not leave the in-memory index claiming a vector that isn't stored.
+    ///
+    /// The vector was computed with the gate released, so the world may have moved on:
+    /// if the embedder changed, this vector belongs to the wrong model and the new
+    /// model's backfill covers the memory; if the memory left the active set, `reload`
+    /// would drop the vector anyway. Both cases skip the store. Callers must hold `write_gate`.
+    fn store_vector_gated(&self, id: Uuid, model: &str, vec: Vec<f32>) {
+        if self.emb().name() != model { return; }
+        match self.repo().get(id) {
+            Ok(m) if m.status == MemoryStatus::Active => {}
+            _ => return,
+        }
+        let json = serde_json::to_string(&vec).unwrap_or_default();
+        let write_result = self.db.with_conn(|c| {
+            c.execute("delete from memory_embeddings where memory_id = ?", [id.to_string()])?;
+            c.execute(&format!("insert into memory_embeddings values (?, ?, {json}::float[])"), duckdb::params![id.to_string(), model])?;
+            Ok(())
+        });
+        match write_result {
+            Ok(()) => {
+                self.vec_write().insert(id, vec);
+                *self.err_write() = None;
+            }
+            Err(e) => {
+                let msg = format!("failed to persist embedding: {e}");
+                tracing::warn!("{msg}");
+                *self.err_write() = Some(msg);
+            }
         }
     }
 
     pub fn remember(&self, m: NewMemory, actor: &str) -> Result<Memory> {
         if m.scope == MemoryScope::Project && m.project_id.is_none() { return Err(AtlasError::Invalid("project scope requires project_id".into())); }
-        let _gate = self.gate();
-        let saved = self.repo().insert(&m, actor)?;
-        // Only active memories belong in the derived state: `reload` rebuilds it from the
-        // active rows alone, so indexing a pending one here would not survive a restart.
-        if saved.status == MemoryStatus::Active { self.index_gated(&saved); }
+        let saved = {
+            let _gate = self.gate();
+            let saved = self.repo().insert(&m, actor)?;
+            // Only active memories belong in the derived state: `reload` rebuilds it from the
+            // active rows alone, so indexing a pending one here would not survive a restart.
+            if saved.status == MemoryStatus::Active { self.idx_write().upsert(saved.id, &saved.text); }
+            saved
+        };
+        if saved.status == MemoryStatus::Active { self.embed_and_store(saved.id, &saved.text); }
         Ok(saved)
-    }
-
-    /// Adds `m` to the keyword index and, when the embedder can, to the vector map.
-    /// Callers must already hold `write_gate`.
-    fn index_gated(&self, m: &Memory) {
-        self.idx_write().upsert(m.id, &m.text);
-        self.try_embed(m.id, &m.text);
     }
 
     pub fn get(&self, id: Uuid) -> Result<Memory> { self.repo().get(id) }
@@ -193,14 +228,18 @@ impl MemoryService {
     /// Moves a memory between statuses, keeping the search index in step: becoming
     /// active makes it searchable, leaving active takes it back out.
     pub fn set_status(&self, id: Uuid, status: MemoryStatus, actor: &str) -> Result<Memory> {
-        let _gate = self.gate();
-        let m = self.repo().set_status(id, status, actor)?;
-        if status == MemoryStatus::Active {
-            self.index_gated(&m);
-        } else {
-            self.idx_write().remove(id);
-            self.vec_write().remove(&id);
-        }
+        let m = {
+            let _gate = self.gate();
+            let m = self.repo().set_status(id, status, actor)?;
+            if status == MemoryStatus::Active {
+                self.idx_write().upsert(m.id, &m.text);
+            } else {
+                self.idx_write().remove(id);
+                self.vec_write().remove(&id);
+            }
+            m
+        };
+        if status == MemoryStatus::Active { self.embed_and_store(m.id, &m.text); }
         Ok(m)
     }
 
@@ -319,7 +358,8 @@ mod tests {
     use super::*;
     use crate::db::Db;
     use crate::search::NoopEmbedder;
-    use std::sync::Arc;
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
 
     fn svc() -> MemoryService { MemoryService::new(Arc::new(Db::open_in_memory().unwrap()), Arc::new(NoopEmbedder)).unwrap() }
     fn nm(text: &str) -> NewMemory { NewMemory { scope: MemoryScope::Global, project_id: None, kind: MemoryKind::Fact, text: text.into(), tags: vec![], source_agent: None, source_tool: Some("test".into()), confidence: 1.0, status: MemoryStatus::Active } }
@@ -461,6 +501,94 @@ mod tests {
             let token = format!("zqx{i}");
             assert!(!s.idx_read().query(&token, 5).is_empty(), "memory {token} is unrecallable");
         }
+    }
+
+    /// `FakeEmbedder` that parks every `embed` call until the test releases it, and
+    /// records how many texts each call carried. `started` fires once per call.
+    struct BlockingEmbedder { calls: Mutex<Vec<usize>>, started: mpsc::Sender<()>, release: Mutex<mpsc::Receiver<()>> }
+    impl BlockingEmbedder {
+        fn new() -> (Arc<Self>, mpsc::Receiver<()>, mpsc::Sender<()>) {
+            let (started_tx, started_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            (Arc::new(Self { calls: Mutex::new(vec![]), started: started_tx, release: Mutex::new(release_rx) }), started_rx, release_tx)
+        }
+        fn calls(&self) -> Vec<usize> { self.calls.lock().unwrap().clone() }
+    }
+    impl Embedder for BlockingEmbedder {
+        fn name(&self) -> &str { "fake" }
+        fn dims(&self) -> usize { 8 }
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            self.calls.lock().unwrap().push(texts.len());
+            self.started.send(()).ok();
+            self.release.lock().unwrap().recv().ok();
+            FakeEmbedder.embed(texts)
+        }
+    }
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    /// Acquires and drops `write_gate` on another thread; `true` if that finished
+    /// within `WAIT`, which it only does when no other thread is holding the gate.
+    fn gate_is_free(s: &Arc<MemoryService>) -> bool {
+        let (tx, rx) = mpsc::channel();
+        let s = s.clone();
+        std::thread::spawn(move || { drop(s.write_gate()); tx.send(()).ok(); });
+        rx.recv_timeout(WAIT).is_ok()
+    }
+
+    fn stored_vectors(s: &MemoryService) -> i64 {
+        s.db.with_conn(|c| Ok(c.query_row("select count(*) from memory_embeddings", [], |r| r.get(0))?)).unwrap()
+    }
+
+    #[test]
+    fn remember_does_not_hold_gate_while_embedding() {
+        let (emb, started, release) = BlockingEmbedder::new();
+        let s = Arc::new(MemoryService::new(Arc::new(Db::open_in_memory().unwrap()), emb).unwrap());
+        let writer = { let s = s.clone(); std::thread::spawn(move || s.remember(nm("bun is the runtime"), "t").unwrap()) };
+        started.recv_timeout(WAIT).expect("embed never started");
+        assert!(gate_is_free(&s), "write_gate is held while the embedder runs");
+        // The row and its keyword index entry are already visible mid-embed.
+        assert_eq!(s.list(MemoryStatus::Active, None, None).unwrap().len(), 1);
+        assert_eq!(s.idx_read().len(), 1);
+        assert!(s.vec_read().is_empty(), "a vector was claimed before it was computed");
+        release.send(()).unwrap();
+        let saved = writer.join().unwrap();
+        assert!(s.vec_read().contains_key(&saved.id));
+        assert_eq!(stored_vectors(&s), 1);
+    }
+
+    #[test]
+    fn memory_forgotten_during_embed_gets_no_vector() {
+        let (emb, started, release) = BlockingEmbedder::new();
+        let s = Arc::new(MemoryService::new(Arc::new(Db::open_in_memory().unwrap()), emb).unwrap());
+        let writer = { let s = s.clone(); std::thread::spawn(move || s.remember(nm("convex listens on 3210"), "t").unwrap()) };
+        started.recv_timeout(WAIT).expect("embed never started");
+        let id = s.list(MemoryStatus::Active, None, None).unwrap()[0].id;
+        s.forget(id, None, "t").unwrap();
+        release.send(()).unwrap();
+        writer.join().unwrap();
+        assert!(s.vec_read().is_empty(), "a forgotten memory kept a vector");
+        assert_eq!(stored_vectors(&s), 0);
+        assert!(s.idx_read().is_empty());
+    }
+
+    #[test]
+    fn set_embedder_backfills_in_batches_outside_the_gate() {
+        let s = Arc::new(svc());
+        for i in 0..70 { s.remember(nm(&format!("memory number {i} about bun")), "t").unwrap(); }
+        let (emb, started, release) = BlockingEmbedder::new();
+        let swapper = { let (s, emb) = (s.clone(), emb.clone()); std::thread::spawn(move || s.set_embedder(emb).unwrap()) };
+        for _ in 0..3 {
+            started.recv_timeout(WAIT).expect("backfill batch never started");
+            assert_eq!(s.embedding_status(), "loading");
+            assert!(gate_is_free(&s), "write_gate is held during the backfill");
+            release.send(()).unwrap();
+        }
+        swapper.join().unwrap();
+        assert_eq!(emb.calls(), vec![32, 32, 6]);
+        assert_eq!(s.vec_read().len(), 70);
+        assert_eq!(stored_vectors(&s), 70);
+        assert_eq!(s.embedding_status(), "ready");
     }
 
     #[test]
