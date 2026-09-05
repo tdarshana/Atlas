@@ -59,6 +59,20 @@
 			transform var(--dur-modal) var(--ease-overlay);
 	}
 
+	/* The element itself never scrolls: the header and footer stay put and the body is
+	   the only scroller, even when zoom makes 60vh taller than the top layer allows. */
+	.dialog[open] {
+		display: flex;
+		flex-direction: column;
+		overflow: hidden;
+	}
+
+	.inner {
+		display: flex;
+		flex-direction: column;
+		min-height: 0;
+	}
+
 	/* Flat scrim, modals only; the palette and popovers carry none. No blur anywhere. */
 	.dialog::backdrop {
 		background: rgba(6, 8, 12, 0.55);
@@ -103,6 +117,8 @@
 	}
 
 	.body {
+		flex: 1 1 auto;
+		min-height: 0;
 		padding: var(--space-4);
 		max-height: 60vh;
 		overflow-y: auto;

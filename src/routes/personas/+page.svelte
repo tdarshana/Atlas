@@ -423,22 +423,16 @@
 
 <!-- A persona not yet created is drafted in a modal rather than the docked panel; once
      saved it has an id and the panel takes over. -->
-<Dialog open={creating} title="New persona" onclose={close} class="persona-dialog">
+<Dialog open={creating} title="New persona" onclose={close}>
 	{#if creating}
-		<div class="detail-body" data-testid="persona-create">
+		<div class="dialog-form" data-testid="persona-create">
 			{@render form(true)}
 		</div>
 	{/if}
 	{#snippet footer()}
 		{#if creating}
-			<Button size="sm" variant="ghost" onclick={close}>Cancel</Button>
-			<Button
-				size="sm"
-				variant="primary"
-				disabled={!canSave}
-				onclick={save}
-				data-testid="persona-save"
-			>
+			<Button onclick={close}>Cancel</Button>
+			<Button variant="primary" disabled={!canSave} onclick={save} data-testid="persona-save">
 				{saving ? 'Saving…' : 'Save'}
 			</Button>
 		{/if}
@@ -835,15 +829,15 @@
 		padding: 12px;
 	}
 
-	:global(.dialog.persona-dialog) {
-		width: min(760px, calc(100vw / var(--ui-zoom, 1) - 32px));
+	/* The modal keeps the panel's two-by-two grid at the shared dialog width, with the
+	   board's field spacing. */
+	.dialog-form {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+		gap: var(--space-3);
 	}
 
-	:global(.persona-dialog) .detail-body {
-		padding: 0;
-		overflow: visible;
-	}
-
+	.dialog-form > .full,
 	.detail-body > .full,
 	.detail-body > :global(.bad) {
 		grid-column: 1 / -1;
