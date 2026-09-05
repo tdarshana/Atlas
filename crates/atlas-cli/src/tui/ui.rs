@@ -579,6 +579,7 @@ mod tests {
                 practices: vec![],
                 workflows: vec![],
                 skills: vec![],
+                personas: None,
             }),
             ..Default::default()
         };

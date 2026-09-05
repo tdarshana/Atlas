@@ -1,5 +1,6 @@
 use crate::remote::RemoteBackend;
-use atlas_core::backend::ProjectBackend;
+use atlas_core::backend::{PersonaBackend, ProjectBackend};
+use atlas_core::models::{Persona, RosterEntry, RosterRow};
 use clap::Subcommand;
 use std::path::PathBuf;
 
@@ -58,6 +59,52 @@ pub enum ProjectCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Show a project's persona roster, or change it with --add, --remove and --default
+    Personas {
+        /// The project's UUID, or the root path it was connected at
+        target: String,
+        /// Put a persona (by name or slug) on the roster; repeatable
+        #[arg(long)]
+        add: Vec<String>,
+        /// Take a persona (by name or slug) off the roster; repeatable
+        #[arg(long)]
+        remove: Vec<String>,
+        /// Make a persona on the roster the project's default
+        #[arg(long)]
+        default: Option<String>,
+    },
+}
+
+/// The roster after `add`, `remove` and `default` are applied to `current`, as the
+/// entries the route takes: an added persona goes on the end, a removed one drops
+/// out, and `default` moves the one default to the named persona. `Err` when the
+/// default is not on the resulting roster, since the route would only say `Invalid`.
+fn edit_roster(current: &[RosterRow], add: Vec<Persona>, remove: &[Persona], default: Option<&Persona>) -> anyhow::Result<Vec<RosterEntry>> {
+    let mut entries: Vec<RosterEntry> = current.iter().map(|r| RosterEntry { persona_id: r.persona_id, is_default: r.is_default, position: r.position }).collect();
+    for p in add {
+        if !entries.iter().any(|e| e.persona_id == p.id) {
+            let position = entries.iter().map(|e| e.position + 1).max().unwrap_or(0);
+            entries.push(RosterEntry { persona_id: p.id, is_default: false, position });
+        }
+    }
+    entries.retain(|e| !remove.iter().any(|p| p.id == e.persona_id));
+    if let Some(p) = default {
+        if !entries.iter().any(|e| e.persona_id == p.id) {
+            anyhow::bail!("persona '{}' is not on the roster; add it first", p.slug);
+        }
+        for e in &mut entries {
+            e.is_default = e.persona_id == p.id;
+        }
+    }
+    Ok(entries)
+}
+
+fn print_roster(rows: &[RosterRow]) {
+    let table: Vec<Vec<String>> = rows
+        .iter()
+        .map(|r| vec![r.name.clone(), r.slug.clone(), r.role.clone(), if r.is_default { "yes".into() } else { String::new() }])
+        .collect();
+    super::print_table(&["NAME", "SLUG", "ROLE", "DEFAULT"], &table);
 }
 
 /// Resolves a `forget`, `log` or `set` argument to a project id. A UUID is taken as an
@@ -175,6 +222,29 @@ pub async fn run(cmd: ProjectCmd, backend: &RemoteBackend) -> anyhow::Result<()>
             super::print_table(&["TIME", "SOURCE", "EVENT", "DETAIL", "REF"], &rows);
             Ok(())
         }
+        ProjectCmd::Personas { target, add, remove, default } => {
+            let id = resolve(&target, backend).await?;
+            let current = backend.project_roster(id).await?;
+            if add.is_empty() && remove.is_empty() && default.is_none() {
+                print_roster(&current);
+                return Ok(());
+            }
+            let mut added = Vec::with_capacity(add.len());
+            for name in &add {
+                added.push(backend.get_persona(name).await?);
+            }
+            let mut removed = Vec::with_capacity(remove.len());
+            for name in &remove {
+                removed.push(backend.get_persona(name).await?);
+            }
+            let default = match &default {
+                Some(name) => Some(backend.get_persona(name).await?),
+                None => None,
+            };
+            let entries = edit_roster(&current, added, &removed, default.as_ref())?;
+            print_roster(&backend.set_project_roster(id, entries, &backend.actor).await?);
+            Ok(())
+        }
         ProjectCmd::List => {
             let projects = backend.list_projects().await?;
             let rows: Vec<Vec<String>> = projects
@@ -245,5 +315,40 @@ mod tests {
     #[test]
     fn mcp_enable_of_a_known_tool_name_passes_validation() {
         assert!(validate_enable(&v(&["task_move"])).is_ok());
+    }
+
+    fn persona(slug: &str) -> Persona {
+        Persona {
+            id: uuid::Uuid::new_v4(), name: slug.into(), slug: slug.into(), role: String::new(), summary: String::new(), instructions: String::new(),
+            skills: vec![], workflows: vec![], practices: vec![], mcp_servers: vec![], tools: vec![], access: Default::default(), models: Default::default(),
+            tags: vec![], created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn row(p: &Persona, is_default: bool, position: i32) -> RosterRow {
+        RosterRow { persona_id: p.id, name: p.name.clone(), slug: p.slug.clone(), role: String::new(), summary: String::new(), tags: vec![], is_default, position, project_id: uuid::Uuid::nil() }
+    }
+
+    /// An add lands at the end without a duplicate, a remove drops the row, and the
+    /// default moves to the named persona and nowhere else.
+    #[test]
+    fn roster_edits_add_remove_and_move_the_default() {
+        let (a, b, c) = (persona("a"), persona("b"), persona("c"));
+        let current = vec![row(&a, true, 0), row(&b, false, 1)];
+        let edited = edit_roster(&current, vec![b.clone(), c.clone()], &[], Some(&c)).unwrap();
+        assert_eq!(edited.iter().map(|e| (e.persona_id, e.is_default, e.position)).collect::<Vec<_>>(), vec![(a.id, false, 0), (b.id, false, 1), (c.id, true, 2)]);
+        let edited = edit_roster(&current, vec![], &[a.clone()], None).unwrap();
+        assert_eq!(edited.iter().map(|e| e.persona_id).collect::<Vec<_>>(), vec![b.id]);
+        assert!(!edited[0].is_default, "removing the default leaves none rather than picking one");
+    }
+
+    /// A default that is not on the resulting roster is refused here, by name.
+    #[test]
+    fn a_default_off_the_roster_is_refused() {
+        let (a, b) = (persona("a"), persona("b"));
+        let err = edit_roster(&[row(&a, false, 0)], vec![], &[], Some(&b)).unwrap_err();
+        assert_eq!(err.to_string(), "persona 'b' is not on the roster; add it first");
+        let err = edit_roster(&[row(&a, false, 0)], vec![], &[a.clone()], Some(&a)).unwrap_err();
+        assert!(err.to_string().contains("not on the roster"), "a persona removed in the same call cannot be the default");
     }
 }

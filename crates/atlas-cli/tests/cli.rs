@@ -276,6 +276,65 @@ fn mcp_stdio_shim_lists_tools() {
     for t in ["memory_remember", "memory_search", "memory_forget", "status"] { assert!(listing.contains(&format!("\"name\":\"{t}\"")), "tools/list missing {t}: {listing}"); }
 }
 
+/// `atlas persona list` prints the library as a table, `atlas persona show` prints
+/// the bundle as JSON, and `atlas project personas <root>` reads and edits the roster
+/// with `--add`, `--default` and `--remove`. Personas are seeded over the HTTP API,
+/// since the CLI has no `persona create`.
+#[test]
+fn persona_list_show_and_project_roster_via_the_cli() {
+    let daemon = TestDaemon::new();
+    assert!(daemon.cmd().args(["daemon", "start"]).status().unwrap().success());
+    let repo = tempfile::tempdir().unwrap();
+    common::fixture_repo(repo.path());
+    let repo_path = repo.path().to_str().unwrap();
+    let run = |args: &[&str]| {
+        let out = daemon.cmd().args(args).output().unwrap();
+        (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+
+    let base = format!("http://127.0.0.1:{}/api/v1", daemon.port);
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let c = reqwest::Client::new();
+        for (name, role) in [("Mobile Developer", "Builds the app"), ("Security Reviewer", "Reads every diff")] {
+            let r = c.post(format!("{base}/personas")).json(&serde_json::json!({"name": name, "role": role, "summary": "One paragraph.", "skills": ["plugin:gone/gone/gone"]})).send().await.unwrap();
+            assert_eq!(r.status(), 201, "{name}");
+        }
+    });
+
+    let (code, out, err) = run(&["persona", "list"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("NAME") && out.contains("SLUG") && out.contains("ROLE"), "list should print a table: {out}");
+    assert!(out.contains("mobile-developer") && out.contains("Reads every diff"), "{out}");
+
+    let (code, out, err) = run(&["persona", "show", "mobile developer"]);
+    assert_eq!(code, 0, "{err}");
+    let bundle: serde_json::Value = serde_json::from_str(&out).expect("show prints the bundle as JSON");
+    assert_eq!(bundle["persona"]["slug"], "mobile-developer", "{out}");
+    assert!(bundle["warnings"].as_array().unwrap().iter().any(|w| w == "skill plugin:gone/gone/gone not found"), "{out}");
+    let (code, _, err) = run(&["persona", "show", "nobody"]);
+    assert_ne!(code, 0);
+    assert!(err.contains("not found"), "{err}");
+
+    let (code, _, err) = run(&["project", "connect", repo_path]);
+    assert_eq!(code, 0, "{err}");
+    let (code, out, err) = run(&["project", "personas", repo_path]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!out.contains("mobile-developer"), "an empty roster lists nothing: {out}");
+
+    let (code, out, err) = run(&["project", "personas", repo_path, "--add", "mobile-developer", "--add", "Security Reviewer", "--default", "security-reviewer"]);
+    assert_eq!(code, 0, "{err}");
+    let mobile = out.lines().find(|l| l.contains("mobile-developer")).unwrap_or_else(|| panic!("{out}"));
+    let security = out.lines().find(|l| l.contains("security-reviewer")).unwrap_or_else(|| panic!("{out}"));
+    assert!(security.contains("yes") && !mobile.contains("yes"), "the default column marks one row: {out}");
+
+    let (code, out, err) = run(&["project", "personas", repo_path, "--remove", "mobile-developer"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!out.contains("mobile-developer") && out.contains("security-reviewer"), "{out}");
+    let (code, _, err) = run(&["project", "personas", repo_path, "--default", "mobile-developer"]);
+    assert_ne!(code, 0, "a default must be on the roster");
+    assert!(err.contains("not on the roster"), "{err}");
+}
+
 /// `atlas workflow` has no `save`: a workflow is a graph, seeded here straight against
 /// the HTTP API the way a GUI would. `atlas workflow list` must show it, and `atlas
 /// workflow run NAME` must start it and print the run number `POST .../run` answered
