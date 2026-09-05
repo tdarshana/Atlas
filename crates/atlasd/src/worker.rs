@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use atlas_core::backend::LocalBackend;
+use atlas_core::memories::MemoryRepo;
 use atlas_core::{extract, AtlasError, Result};
 use serde_json::Value;
 use uuid::Uuid;
@@ -20,6 +21,17 @@ const IDLE_TICK: Duration = Duration::from_secs(30);
 /// idle tick deletes it. Without the sweep the table grows by one row per Claude
 /// Code turn for ever (PERF-2).
 const FINISHED_JOB_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// How long an audit row stays before the idle tick deletes it, in days, unless
+/// `ATLAS_AUDIT_RETENTION_DAYS` says otherwise. Every write appends a row and
+/// nothing else removed one, so the table grew without bound (PERF-6). The Log tab
+/// and global search only ever show rows inside this window.
+const AUDIT_RETENTION_DAYS: u64 = 180;
+
+fn audit_retention() -> Duration {
+    let days = std::env::var("ATLAS_AUDIT_RETENTION_DAYS").ok().and_then(|v| v.trim().parse::<u64>().ok()).filter(|d| *d > 0).unwrap_or(AUDIT_RETENTION_DAYS);
+    Duration::from_secs(days * 24 * 60 * 60)
+}
 
 /// What a panicking job records. A panic payload can quote anything that was in
 /// scope, so none of it reaches the log or the `jobs.error` column.
@@ -82,6 +94,13 @@ async fn prune_finished(backend: &LocalBackend) {
         Ok(0) => {}
         Ok(n) => tracing::info!("pruned {n} finished job(s) older than {} days", FINISHED_JOB_RETENTION.as_secs() / 86_400),
         Err(e) => tracing::warn!("could not prune finished jobs: {e}"),
+    }
+    let db = backend.db.clone();
+    let retention = audit_retention();
+    match backend.blocking(move || MemoryRepo::new(&db).prune_audit(retention)).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("pruned {n} audit row(s) older than {} days", retention.as_secs() / 86_400),
+        Err(e) => tracing::warn!("could not prune audit rows: {e}"),
     }
 }
 

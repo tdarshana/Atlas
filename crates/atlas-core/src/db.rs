@@ -188,6 +188,11 @@ create table if not exists project_personas (
   is_default boolean not null default false, position integer not null default 0,
   primary key (project_id, persona_id));
 alter table tasks add column if not exists persona_id uuid;
+"#), (12, r#"
+-- PERF-6 (ATL-308): every task detail read and the task-event part of global search
+-- filter `task_events` on `task_id`, and the table grows one row per task write with
+-- nothing pruning it. `if not exists`, the same shape as migration 10.
+create index if not exists task_events_task_id_idx on task_events (task_id);
 "#)];
 
 /// Moves the Markdown workflow documents aside so migration 6 can give the name
@@ -303,7 +308,7 @@ mod tests {
     #[test]
     fn migrate_creates_tables_and_is_idempotent() {
         let db = Db::open_in_memory().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 11);
+        assert_eq!(db.schema_version().unwrap(), 12);
         let n: i64 = db.with_conn(|c| Ok(c.query_row(
             "select count(*) from information_schema.tables where table_name in ('memories','memory_embeddings','audit','settings','projects','agents','practices','workflow_docs','sync_targets','jobs','tasks','task_blockers','task_events','board_counters','workflows','workflow_runs','workflow_steps','skills','personas','project_personas')",
             [], |r| r.get(0))?)).unwrap();
@@ -314,7 +319,7 @@ mod tests {
             [], |r| r.get(0))?)).unwrap();
         assert_eq!(cols, 6);
         db.migrate().unwrap(); // second run is a no-op
-        assert_eq!(db.schema_version().unwrap(), 11);
+        assert_eq!(db.schema_version().unwrap(), 12);
     }
 
     /// Migration 6 renames the Markdown doc table out of the way and puts the real
@@ -357,7 +362,7 @@ mod tests {
         .unwrap();
         assert_eq!(db.schema_version().unwrap(), 4);
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 11);
+        assert_eq!(db.schema_version().unwrap(), 12);
     }
 
     /// A database stamped 3 by the build that shipped migration 3 without
@@ -374,7 +379,7 @@ mod tests {
         assert_eq!(db.schema_version().unwrap(), 3);
 
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 11);
+        assert_eq!(db.schema_version().unwrap(), 12);
         let n: i64 = db
             .with_conn(|c| {
                 Ok(c.query_row("select count(*) from information_schema.tables where table_name = 'board_counters'", [], |r| r.get(0))?)
@@ -395,7 +400,7 @@ mod tests {
         .unwrap();
         assert_eq!(db.schema_version().unwrap(), 7);
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 11);
+        assert_eq!(db.schema_version().unwrap(), 12);
         let n: i64 = db
             .with_conn(|c| {
                 Ok(c.query_row(
@@ -421,7 +426,7 @@ mod tests {
         .unwrap();
         assert_eq!(db.schema_version().unwrap(), 8);
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 11);
+        assert_eq!(db.schema_version().unwrap(), 12);
         let n: i64 = db
             .with_conn(|c| {
                 Ok(c.query_row(
@@ -434,15 +439,36 @@ mod tests {
         assert_eq!(n, 1);
     }
 
-    fn jobs_status_index_count(db: &Db) -> i64 {
+    fn index_count(db: &Db, table: &str, index: &str) -> i64 {
         db.with_conn(|c| {
-            Ok(c.query_row(
-                "select count(*) from duckdb_indexes() where table_name = 'jobs' and index_name = 'jobs_status_idx'",
-                [],
-                |r| r.get(0),
-            )?)
+            Ok(c.query_row("select count(*) from duckdb_indexes() where table_name = ? and index_name = ?", [table, index], |r| r.get(0))?)
         })
         .unwrap()
+    }
+
+    fn jobs_status_index_count(db: &Db) -> i64 {
+        index_count(db, "jobs", "jobs_status_idx")
+    }
+
+    /// PERF-6 (ATL-308): migration 12 indexes `task_events(task_id)`, the column every
+    /// task detail read and the task-event part of global search filter on. Same
+    /// `if not exists` shape as migration 10: a fresh database and a database already
+    /// at version 11 both end up with exactly one.
+    #[test]
+    fn migration_12_adds_the_task_events_task_id_index_to_a_v11_database() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(index_count(&db, "task_events", "task_events_task_id_idx"), 1, "a fresh database carries the index");
+        db.with_conn(|c| {
+            c.execute_batch("drop index task_events_task_id_idx; delete from schema_version where version >= 12;")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(db.schema_version().unwrap(), 11);
+        db.migrate().unwrap();
+        assert_eq!(db.schema_version().unwrap(), 12);
+        assert_eq!(index_count(&db, "task_events", "task_events_task_id_idx"), 1);
+        db.migrate().unwrap();
+        assert_eq!(index_count(&db, "task_events", "task_events_task_id_idx"), 1, "a replay is a no-op");
     }
 
     /// Migration 10 adds the `jobs(status)` index with `if not exists`: a fresh
@@ -460,7 +486,7 @@ mod tests {
         assert_eq!(db.schema_version().unwrap(), 9);
         assert_eq!(jobs_status_index_count(&db), 0);
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 11);
+        assert_eq!(db.schema_version().unwrap(), 12);
         assert_eq!(jobs_status_index_count(&db), 1);
 
         // Replaying over a database that already has the index is a no-op.
@@ -470,7 +496,7 @@ mod tests {
         })
         .unwrap();
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 11);
+        assert_eq!(db.schema_version().unwrap(), 12);
         assert_eq!(jobs_status_index_count(&db), 1);
     }
 
@@ -499,7 +525,7 @@ mod tests {
         assert_eq!(db.schema_version().unwrap(), 10);
         assert_eq!(persona_object_count(&db), 0);
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 11);
+        assert_eq!(db.schema_version().unwrap(), 12);
         assert_eq!(persona_object_count(&db), 3);
 
         db.with_conn(|c| {
@@ -508,7 +534,7 @@ mod tests {
         })
         .unwrap();
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 11);
+        assert_eq!(db.schema_version().unwrap(), 12);
         assert_eq!(persona_object_count(&db), 3);
     }
 

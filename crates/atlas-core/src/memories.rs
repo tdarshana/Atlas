@@ -4,7 +4,13 @@ use crate::{AtlasError, Result};
 use chrono::{DateTime, Utc};
 use duckdb::types::{Type, Value};
 use duckdb::{params, Row};
+use std::time::Duration;
 use uuid::Uuid;
+
+/// How many of the newest audit rows global search looks at. Well past what a few
+/// agents write in a month, and small enough that a keystroke stays a few
+/// milliseconds however long the daemon has run (PERF-6, ATL-308).
+pub const AUDIT_SEARCH_WINDOW: usize = 20_000;
 
 pub struct MemoryRepo<'a> { db: &'a Db }
 
@@ -268,16 +274,33 @@ impl<'a> MemoryRepo<'a> {
     /// them into a search response. The exclusion is the belt to
     /// `mcp_servers::edit`'s braces.
     pub fn list_audit_for_search(&self, pattern: &str) -> Result<Vec<AuditEntry>> {
+        self.list_audit_for_search_within(pattern, AUDIT_SEARCH_WINDOW)
+    }
+
+    /// `list_audit_for_search` over the newest `recent` rows only. The `LIKE` over
+    /// the JSON detail is what makes the search cost a row each, so the window is
+    /// picked before the cast rather than after it (PERF-6, ATL-308).
+    pub(crate) fn list_audit_for_search_within(&self, pattern: &str, recent: usize) -> Result<Vec<AuditEntry>> {
         self.db.with_conn(|c| {
             let mut st = c.prepare(
-                "select id::text, actor, action, entity, entity_id::text, detail::text, \"at\"::text from audit \
-                 where action <> 'mcp_config_edit' \
-                 and (lower(action) like ? escape '\\' or lower(detail::text) like ? escape '\\') \
+                "select id::text, actor, action, entity, entity_id::text, detail::text, \"at\"::text \
+                 from (select * from audit where action <> 'mcp_config_edit' order by \"at\" desc limit ?) \
+                 where lower(action) like ? escape '\\' or lower(detail::text) like ? escape '\\' \
                  order by \"at\" desc limit 500",
             )?;
-            let rows = st.query_map(params![pattern, pattern], row_to_audit)?;
+            let recent = i64::try_from(recent).unwrap_or(i64::MAX);
+            let rows = st.query_map(params![recent, pattern, pattern], row_to_audit)?;
             Ok(rows.collect::<duckdb::Result<Vec<_>>>()?)
         })
+    }
+
+    /// Deletes audit rows older than `older_than`. The trail is a retention window,
+    /// not a ledger: every write still appends a row, and the memory and task rows
+    /// keep their own history (`superseded_by`, `task_events`), so a row past the
+    /// window has nothing left to answer for. Returns how many rows went.
+    pub fn prune_audit(&self, older_than: Duration) -> Result<usize> {
+        let secs = i64::try_from(older_than.as_secs()).unwrap_or(i64::MAX);
+        self.db.with_conn(|c| Ok(c.execute("delete from audit where \"at\" < now()::timestamp - to_seconds(?)", params![secs])?))
     }
 
     pub fn audit(&self, actor: &str, action: &str, entity: &str, entity_id: Option<Uuid>, detail: serde_json::Value) -> Result<()> {
@@ -441,5 +464,57 @@ mod tests {
             Ok(row_to_memory(r)?)
         });
         assert!(result.is_err());
+    }
+
+    /// PERF-6 (ATL-308): global search reads only the newest `recent` audit rows, so
+    /// the per-keystroke `LIKE` over the JSON detail is bounded by the window and not
+    /// by how long the daemon has been writing. Newest first inside the window.
+    #[test]
+    fn audit_search_looks_only_at_the_newest_rows() {
+        let db = Db::open_in_memory().unwrap();
+        let repo = MemoryRepo::new(&db);
+        for n in 1..=3 {
+            repo.audit("t", "needle", "memory", None, serde_json::json!({"n": n})).unwrap();
+            // Spread the rows out: `"at"` defaults to `now()` and three inserts can
+            // share a microsecond.
+            db.with_conn(|c| {
+                c.execute("update audit set \"at\" = \"at\" + to_seconds(?) where detail->>'n' = ?", params![n * 60, n.to_string()])?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        let found = |recent: usize| -> Vec<String> {
+            repo.list_audit_for_search_within("%needle%", recent).unwrap().into_iter().map(|a| a.detail.unwrap()["n"].to_string()).collect()
+        };
+        assert_eq!(found(AUDIT_SEARCH_WINDOW), vec!["3", "2", "1"]);
+        assert_eq!(found(2), vec!["3", "2"]);
+    }
+
+    /// PERF-6 (ATL-308): the retention sweep removes audit rows older than the window
+    /// and nothing inside it, so the Log tab and global search keep every row they
+    /// still show.
+    #[test]
+    fn prune_audit_removes_only_rows_older_than_the_window() {
+        let db = Db::open_in_memory().unwrap();
+        let repo = MemoryRepo::new(&db);
+        repo.audit("t", "old", "memory", None, serde_json::json!({})).unwrap();
+        repo.audit("t", "older", "memory", None, serde_json::json!({})).unwrap();
+        repo.audit("t", "recent", "memory", None, serde_json::json!({})).unwrap();
+        db.with_conn(|c| {
+            c.execute("update audit set \"at\" = \"at\" - interval 200 day where action = 'old'", [])?;
+            c.execute("update audit set \"at\" = \"at\" - interval 400 day where action = 'older'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        let window = std::time::Duration::from_secs(180 * 24 * 3600);
+        assert_eq!(repo.prune_audit(window).unwrap(), 2);
+        assert_eq!(repo.prune_audit(window).unwrap(), 0);
+        let left: Vec<String> = db
+            .with_conn(|c| {
+                let mut st = c.prepare("select action from audit")?;
+                Ok(st.query_map([], |r| r.get(0))?.collect::<duckdb::Result<Vec<String>>>()?)
+            })
+            .unwrap();
+        assert_eq!(left, vec!["recent"]);
     }
 }
