@@ -88,7 +88,7 @@ pub fn set_enabled(
         }
         (McpServerSource::Codex, _) => {
             let path = editable_file(project, entry)?;
-            let mut doc = read_toml(&path)?;
+            let (mut doc, read) = read_toml(&path)?;
             let table = table_for(&mut doc)?
                 .get_mut(&entry.name)
                 .and_then(Item::as_table_like_mut)
@@ -100,11 +100,11 @@ pub fn set_enabled(
             } else {
                 table.insert("enabled", toml_edit::value(false));
             }
-            write(paths, db, &path, doc.to_string(), Edited { agent: entry.source.as_str(), action, id: &entry.id, actor })
+            write(paths, db, &path, doc.to_string(), read, Edited { agent: entry.source.as_str(), action, id: &entry.id, actor })
         }
         (McpServerSource::Cursor, _) => {
             let path = editable_file(project, entry)?;
-            let mut config = read_json(&path)?;
+            let (mut config, read) = read_json(&path)?;
             let server = config
                 .get_mut("mcpServers")
                 .and_then(Value::as_object_mut)
@@ -118,7 +118,7 @@ pub fn set_enabled(
             } else {
                 server.insert("disabled".into(), Value::Bool(true));
             }
-            write(paths, db, &path, pretty(&config), Edited { agent: entry.source.as_str(), action, id: &entry.id, actor })
+            write(paths, db, &path, pretty(&config), read, Edited { agent: entry.source.as_str(), action, id: &entry.id, actor })
         }
         _ => Err(AtlasError::Invalid(NO_SWITCH.into())),
     }
@@ -137,7 +137,8 @@ pub fn add_server(paths: &AtlasPaths, db: &Db, project: Option<&Project>, input:
     let edited = Edited { agent: input.source.as_str(), action: "add", id: &id, actor };
     match input.source {
         McpServerSource::Codex => {
-            let mut doc = match read_toml_if_present(&target)? {
+            let (doc, read) = read_toml_if_present(&target)?;
+            let mut doc = match doc {
                 Some(doc) => doc,
                 None => {
                     ensure_creatable(input.scope, &target)?;
@@ -149,10 +150,11 @@ pub fn add_server(paths: &AtlasPaths, db: &Db, project: Option<&Project>, input:
                 return Err(AtlasError::Conflict(format!("{} already has a server called '{}'", target.display(), input.name)));
             }
             table.insert(&input.name, Item::Table(toml_entry(&input.transport)));
-            write(paths, db, &target, doc.to_string(), edited)?;
+            write(paths, db, &target, doc.to_string(), read, edited)?;
         }
         _ => {
-            let mut config = match read_json_if_present(&target)? {
+            let (config, read) = read_json_if_present(&target)?;
+            let mut config = match config {
                 Some(config) => config,
                 None => {
                     ensure_creatable(input.scope, &target)?;
@@ -164,7 +166,7 @@ pub fn add_server(paths: &AtlasPaths, db: &Db, project: Option<&Project>, input:
                 return Err(AtlasError::Conflict(format!("{} already has a server called '{}'", target.display(), input.name)));
             }
             servers.insert(input.name.clone(), json_entry(&input.transport));
-            write(paths, db, &target, pretty(&config), edited)?;
+            write(paths, db, &target, pretty(&config), read, edited)?;
         }
     }
     Ok(id)
@@ -180,16 +182,16 @@ pub fn remove_server(paths: &AtlasPaths, db: &Db, project: Option<&Project>, ent
     let path = editable_file(project, entry)?;
     let edited = Edited { agent: entry.source.as_str(), action: "remove", id: &entry.id, actor };
     if entry.source == McpServerSource::Codex {
-        let mut doc = read_toml(&path)?;
+        let (mut doc, read) = read_toml(&path)?;
         table_for(&mut doc)?
             .remove(&entry.name)
             .ok_or_else(|| AtlasError::NotFound(format!("mcp server {}", entry.id)))?;
-        return write(paths, db, &path, doc.to_string(), edited);
+        return write(paths, db, &path, doc.to_string(), read, edited);
     }
-    let mut config = read_json(&path)?;
+    let (mut config, read) = read_json(&path)?;
     let servers = json_servers_mut(&mut config, project, entry.source, entry.scope)?;
     servers.remove(&entry.name).ok_or_else(|| AtlasError::NotFound(format!("mcp server {}", entry.id)))?;
-    write(paths, db, &path, pretty(&config), edited)
+    write(paths, db, &path, pretty(&config), read, edited)
 }
 
 // ---------------------------------------------------------------------------
@@ -304,7 +306,7 @@ fn claude_list_edit(
     edit: impl FnOnce(&mut Map<String, Value>, &str),
 ) -> Result<()> {
     let path = claude::config_path(paths.agent_home());
-    let mut config = read_json(&path)?;
+    let (mut config, read) = read_json(&path)?;
     let object = config.as_object_mut().ok_or_else(|| AtlasError::Invalid(format!("{} is not a JSON object", path.display())))?;
     let block = object
         .entry("projects")
@@ -316,7 +318,7 @@ fn claude_list_edit(
         .as_object_mut()
         .ok_or_else(|| AtlasError::Invalid("the project's block is not an object".into()))?;
     edit(block, &entry.name);
-    write(paths, db, &path, pretty(&config), Edited { agent: entry.source.as_str(), action, id: &entry.id, actor })
+    write(paths, db, &path, pretty(&config), read, Edited { agent: entry.source.as_str(), action, id: &entry.id, actor })
 }
 
 /// Puts `name` in `key`'s array, or takes it out, leaving the rest of the list in the
@@ -404,25 +406,49 @@ fn validate_name(name: &str) -> Result<()> {
 // Reading and writing files
 // ---------------------------------------------------------------------------
 
-fn read_json(path: &Path) -> Result<Value> {
-    read_json_if_present(path)?.ok_or_else(|| AtlasError::NotFound(format!("{}", path.display())))
-}
+/// What a config file looked like when it was read for an edit: its length and
+/// modification time, or `None` for a file that did not exist. [`write`] compares it
+/// with the file as it stands before renaming the replacement over it, so an agent
+/// that saved the same file in between (Claude Code rewrites `~/.claude.json` often)
+/// keeps its write and the edit is retried on a fresh read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stamp(Option<(u64, Option<std::time::SystemTime>)>);
 
-fn read_json_if_present(path: &Path) -> Result<Option<Value>> {
-    let Some(text) = super::read_config_for_edit(path)? else { return Ok(None) };
-    if text.trim().is_empty() {
-        return Ok(Some(Value::Object(Map::new())));
+fn stamp(path: &Path) -> Result<Stamp> {
+    match std::fs::metadata(path) {
+        Ok(m) => Ok(Stamp(Some((m.len(), m.modified().ok())))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Stamp(None)),
+        Err(e) => Err(e.into()),
     }
-    serde_json::from_str(&text).map(Some).map_err(|e| AtlasError::Invalid(super::json_error(path, &e)))
 }
 
-fn read_toml(path: &Path) -> Result<DocumentMut> {
-    read_toml_if_present(path)?.ok_or_else(|| AtlasError::NotFound(format!("{}", path.display())))
+fn read_json(path: &Path) -> Result<(Value, Stamp)> {
+    let (config, stamp) = read_json_if_present(path)?;
+    Ok((config.ok_or_else(|| AtlasError::NotFound(format!("{}", path.display())))?, stamp))
 }
 
-fn read_toml_if_present(path: &Path) -> Result<Option<DocumentMut>> {
-    let Some(text) = super::read_config_for_edit(path)? else { return Ok(None) };
-    text.parse::<DocumentMut>().map(Some).map_err(|e| AtlasError::Invalid(super::toml_error(path, &text, &e)))
+/// The stamp is taken before the bytes are read, so a save that lands between the two
+/// reads as a change rather than being missed.
+fn read_json_if_present(path: &Path) -> Result<(Option<Value>, Stamp)> {
+    let stamp = stamp(path)?;
+    let Some(text) = super::read_config_for_edit(path)? else { return Ok((None, stamp)) };
+    if text.trim().is_empty() {
+        return Ok((Some(Value::Object(Map::new())), stamp));
+    }
+    let config = serde_json::from_str(&text).map_err(|e| AtlasError::Invalid(super::json_error(path, &e)))?;
+    Ok((Some(config), stamp))
+}
+
+fn read_toml(path: &Path) -> Result<(DocumentMut, Stamp)> {
+    let (doc, stamp) = read_toml_if_present(path)?;
+    Ok((doc.ok_or_else(|| AtlasError::NotFound(format!("{}", path.display())))?, stamp))
+}
+
+fn read_toml_if_present(path: &Path) -> Result<(Option<DocumentMut>, Stamp)> {
+    let stamp = stamp(path)?;
+    let Some(text) = super::read_config_for_edit(path)? else { return Ok((None, stamp)) };
+    let doc = text.parse::<DocumentMut>().map_err(|e| AtlasError::Invalid(super::toml_error(path, &text, &e)))?;
+    Ok((Some(doc), stamp))
 }
 
 /// `[mcp_servers]` in a Codex document, created implicit so it renders as
@@ -490,8 +516,15 @@ struct Edited<'a> {
 /// a dotfiles repository rewrites the file it points at rather than replacing the link
 /// with a regular file and leaving the real one stale. A project scope path has already
 /// been through [`confine_to_project`] by the time it gets here.
-fn write(paths: &AtlasPaths, db: &Db, path: &Path, text: String, edited: Edited<'_>) -> Result<()> {
+///
+/// `read` is the [`Stamp`] the caller's read took. A target that no longer matches it
+/// has been written by something else since, most likely the agent itself, and the
+/// edit is refused as a `Conflict` rather than renamed over that write.
+fn write(paths: &AtlasPaths, db: &Db, path: &Path, text: String, read: Stamp, edited: Edited<'_>) -> Result<()> {
     let path = &resolve(path)?;
+    if stamp(path)? != read {
+        return Err(AtlasError::Conflict(format!("{} changed while it was being edited; retry", path.display())));
+    }
     let previous = std::fs::read(path).unwrap_or_default();
     let directory = path.parent().ok_or_else(|| AtlasError::Invalid(format!("{} has no directory", path.display())))?;
     let backup = if previous.is_empty() { None } else { Some(write_backup(paths, path, edited.agent, &previous)?) };
@@ -648,4 +681,45 @@ fn write_with_mode(path: &Path, bytes: &[u8], mode: Option<u32>) -> std::io::Res
     let mut file = options.open(path)?;
     file.write_all(bytes)?;
     file.sync_all()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn edited() -> Edited<'static> {
+        Edited { agent: "claude", action: "enable", id: "claude:user:x", actor: "t" }
+    }
+
+    /// SEC-8 (ATL-302). An agent that saves its own config between Atlas's read and
+    /// Atlas's write (Claude Code rewrites `~/.claude.json` for project state and OAuth)
+    /// must not have that save renamed away: the write compares the file with the stamp
+    /// the read took and refuses with a `Conflict` that says to retry. A fresh read makes
+    /// the same edit go through.
+    #[test]
+    fn a_config_that_changed_since_it_was_read_is_not_overwritten() {
+        let temp = tempfile::tempdir().unwrap();
+        let atlas_home = temp.path().join("atlas-home");
+        std::fs::create_dir_all(&atlas_home).unwrap();
+        let paths = AtlasPaths::at(&atlas_home);
+        let db = Db::open_in_memory().unwrap();
+        let path = temp.path().join(".claude.json");
+        std::fs::write(&path, "{\"numStartups\":7}").unwrap();
+
+        let (mut config, read) = read_json(&path).unwrap();
+        // The agent's own save lands between the read and the write.
+        std::fs::write(&path, "{\"numStartups\":8,\"oauthAccount\":{}}").unwrap();
+        config["atlas"] = Value::Bool(true);
+        let err = write(&paths, &db, &path, pretty(&config), read, edited()).unwrap_err();
+        assert!(matches!(err, AtlasError::Conflict(_)), "{err:?}");
+        assert!(err.to_string().contains("retry"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"numStartups\":8,\"oauthAccount\":{}}", "the agent's save survives");
+
+        let (mut config, read) = read_json(&path).unwrap();
+        config["atlas"] = Value::Bool(true);
+        write(&paths, &db, &path, pretty(&config), read, edited()).unwrap();
+        let written: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["numStartups"], 8);
+        assert_eq!(written["atlas"], true);
+    }
 }
