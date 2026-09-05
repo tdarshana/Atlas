@@ -21,7 +21,7 @@
 //! the triggering actor's own exemption (the user's own hands are always exempt) rather
 //! than always applying, which `workflow/<name>` — never a user identity — would.
 
-use crate::backend::{Backend, LocalBackend};
+use crate::backend::{BoardBackend, LocalBackend, MemoryBackend};
 use crate::db::Db;
 use crate::extract::{self, ExtractionConfig};
 use crate::jobs::Job;

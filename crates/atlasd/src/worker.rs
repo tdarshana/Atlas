@@ -204,7 +204,7 @@ async fn drain(backend: &Arc<LocalBackend>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atlas_core::backend::Backend;
+    use atlas_core::backend::{StatusBackend, WorkflowBackend};
     use atlas_core::models::*;
     use atlas_core::paths::AtlasPaths;
     use serde_json::json;

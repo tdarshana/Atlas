@@ -1,5 +1,5 @@
 use crate::remote::RemoteBackend;
-use atlas_core::backend::Backend;
+use atlas_core::backend::{MemoryBackend, ProjectBackend, LibraryBackend};
 use atlas_core::export::claude_agent_md;
 use atlas_core::library::validate_name;
 use atlas_core::models::{Doc, DocKind, MemoryStatus};

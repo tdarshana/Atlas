@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use atlas_core::backend::{Backend, LocalBackend};
+use atlas_core::backend::{MemoryBackend, ProjectBackend, BoardBackend, WorkflowBackend, LocalBackend};
 use atlas_core::models::*;
 use atlas_core::AtlasError;
 use rmcp::model::CallToolRequestParams;

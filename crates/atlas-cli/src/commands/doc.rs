@@ -1,5 +1,5 @@
 use crate::remote::RemoteBackend;
-use atlas_core::backend::Backend;
+use atlas_core::backend::{ProjectBackend, LibraryBackend};
 use atlas_core::models::{DocKind, NewDoc};
 use clap::Subcommand;
 use std::path::PathBuf;

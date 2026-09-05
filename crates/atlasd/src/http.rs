@@ -1,5 +1,5 @@
 use axum::{body::Bytes, extract::{FromRequest, FromRequestParts, Path, Query, Request, State}, http::{header, request::Parts, HeaderMap, Method, StatusCode}, middleware::{self, Next}, response::{IntoResponse, Response}, routing::{delete, get, post, put}, Json, Router};
-use atlas_core::{backend::Backend, jobs::Job, models::*, search::global::{SearchKind, SearchQuery, SearchResult, DEFAULT_LIMIT}, AtlasError};
+use atlas_core::{backend::{StatusBackend, MemoryBackend, ProjectBackend, LibraryBackend, JobBackend, BoardBackend, WorkflowBackend, SearchBackend, SkillBackend, McpBackend}, jobs::Job, models::*, search::global::{SearchKind, SearchQuery, SearchResult, DEFAULT_LIMIT}, AtlasError};
 use atlas_mcp::{ToolScope, TOOL_TABLE};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

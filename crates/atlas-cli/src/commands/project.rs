@@ -1,5 +1,5 @@
 use crate::remote::RemoteBackend;
-use atlas_core::backend::Backend;
+use atlas_core::backend::ProjectBackend;
 use clap::Subcommand;
 use std::path::PathBuf;
 

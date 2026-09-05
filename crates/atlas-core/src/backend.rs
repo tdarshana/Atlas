@@ -85,11 +85,19 @@ pub fn check_scope(project_id: Option<Uuid>, scope: MemoryScopeFilter) -> Result
     Ok(())
 }
 
+/// Daemon-wide state: the status report and the settings map.
 #[async_trait::async_trait]
-pub trait Backend: Send + Sync + 'static {
+pub trait StatusBackend: Send + Sync + 'static {
     async fn status(&self) -> Result<StatusReport>;
 
-    // ---- memories ----
+    // ---- settings ----
+    async fn get_settings(&self) -> Result<serde_json::Map<String, serde_json::Value>>;
+    async fn set_settings(&self, values: serde_json::Map<String, serde_json::Value>, actor: &str) -> Result<serde_json::Map<String, serde_json::Value>>;
+}
+
+/// Memories: remember, recall, forget, list and facet them.
+#[async_trait::async_trait]
+pub trait MemoryBackend: Send + Sync + 'static {
     async fn remember(&self, m: NewMemory, actor: &str) -> Result<Memory>;
     async fn recall(&self, q: RecallQuery) -> Result<Vec<RecallHit>>;
     async fn forget(&self, id: Uuid, reason: Option<String>, actor: &str) -> Result<Memory>;
@@ -103,7 +111,11 @@ pub trait Backend: Send + Sync + 'static {
     /// same way [`list_memories`](Self::list_memories) reads it.
     async fn memory_facets(&self, project_id: Option<Uuid>, scope: MemoryScopeFilter) -> Result<MemoryFacets>;
     async fn set_memory_status(&self, id: Uuid, status: MemoryStatus, actor: &str) -> Result<Memory>;
+}
 
+/// Projects, their agent access and extraction settings, their log, the managed-file sync and the planning frameworks found in them.
+#[async_trait::async_trait]
+pub trait ProjectBackend: Send + Sync + 'static {
     // ---- projects ----
     async fn connect_project(&self, root: PathBuf, actor: &str) -> Result<Project>;
     async fn project_context(&self, root: PathBuf, actor: &str) -> Result<ProjectContext>;
@@ -125,7 +137,25 @@ pub trait Backend: Send + Sync + 'static {
     /// The whole log as JSON lines, uncapped.
     async fn project_log_export(&self, id: Uuid) -> Result<String>;
 
-    // ---- library ----
+    // ---- sync ----
+    async fn sync(&self, req: SyncRequest) -> Result<SyncReport>;
+
+    // ---- frameworks (Phase 12) ----
+    /// Every framework detected in the project, each with the documents it holds.
+    async fn list_frameworks(&self, project_id: Uuid) -> Result<Vec<FrameworkListing>>;
+    /// One document's text, addressed the way `documents`/`tasks` on the adapter
+    /// itself hand its path back. `Invalid` for an unknown `kind` or a path that
+    /// does not exist, or that resolves outside the project root.
+    async fn get_framework_doc(&self, project_id: Uuid, kind: FrameworkKind, path: &str) -> Result<String>;
+    /// Imports `kind`'s tasks or decisions into the project. A write: gated the
+    /// same way a direct task move or memory write is, by the project's
+    /// `agent_access`.
+    async fn import_framework(&self, project_id: Uuid, kind: FrameworkKind, what: ImportWhat, actor: &str) -> Result<ImportReport>;
+}
+
+/// The library: agents and documents.
+#[async_trait::async_trait]
+pub trait LibraryBackend: Send + Sync + 'static {
     async fn list_agents(&self) -> Result<Vec<Agent>>;
     async fn get_agent(&self, name: &str) -> Result<Agent>;
     async fn save_agent(&self, a: NewAgent, actor: &str) -> Result<Agent>;
@@ -135,15 +165,11 @@ pub trait Backend: Send + Sync + 'static {
     async fn get_doc(&self, kind: DocKind, name: &str) -> Result<Doc>;
     async fn save_doc(&self, kind: DocKind, d: NewDoc, actor: &str) -> Result<Doc>;
     async fn delete_doc(&self, kind: DocKind, name: &str, actor: &str) -> Result<()>;
+}
 
-    // ---- sync ----
-    async fn sync(&self, req: SyncRequest) -> Result<SyncReport>;
-
-    // ---- settings ----
-    async fn get_settings(&self) -> Result<serde_json::Map<String, serde_json::Value>>;
-    async fn set_settings(&self, values: serde_json::Map<String, serde_json::Value>, actor: &str) -> Result<serde_json::Map<String, serde_json::Value>>;
-
-    // ---- extraction ----
+/// Extraction jobs: queue a transcript, read a job, probe the model.
+#[async_trait::async_trait]
+pub trait JobBackend: Send + Sync + 'static {
     /// Queues a transcript for the extraction worker and answers with the job id.
     /// Fails with `Conflict` when extraction is off, so nothing is queued that the
     /// worker could not run.
@@ -154,8 +180,11 @@ pub trait Backend: Send + Sync + 'static {
     /// `Conflict` when extraction is off or half configured, the same gate
     /// `ingest_transcript` checks.
     async fn test_extraction_for(&self, project_id: Option<Uuid>) -> Result<String>;
+}
 
-    // ---- board (Phase 6) ----
+/// The task board: tasks and stages.
+#[async_trait::async_trait]
+pub trait BoardBackend: Send + Sync + 'static {
     async fn list_tasks(&self, f: TaskFilter) -> Result<Vec<Task>>;
     async fn get_task(&self, id_or_key: &str) -> Result<TaskDetail>;
     async fn create_task(&self, t: NewTask, actor: &str) -> Result<Task>;
@@ -176,8 +205,11 @@ pub trait Backend: Send + Sync + 'static {
     /// `top_level` narrows further to parent-less tasks (`Some(true)`) or subtasks
     /// (`Some(false)`), or applies no such filter (`None`).
     async fn task_counts(&self, project_id: Option<Uuid>, global_only: bool, top_level: Option<bool>) -> Result<Vec<(String, i64)>>;
+}
 
-    // ---- workflows (Phase 9) ----
+/// Workflows and their runs.
+#[async_trait::async_trait]
+pub trait WorkflowBackend: Send + Sync + 'static {
     async fn list_workflows(&self, project_id: Option<Uuid>) -> Result<Vec<Workflow>>;
     async fn get_workflow(&self, id_or_name: &str) -> Result<Workflow>;
     async fn create_workflow(&self, w: NewWorkflow, actor: &str) -> Result<Workflow>;
@@ -195,23 +227,17 @@ pub trait Backend: Send + Sync + 'static {
     /// The run's full log as plain text: a header line, then one `ts level [step] text`
     /// line per log line, across every step in order.
     async fn export_run_log(&self, run_id: Uuid) -> Result<String>;
+}
 
-    // ---- search ----
+/// Global search across memories, tasks, projects and workflows.
+#[async_trait::async_trait]
+pub trait SearchBackend: Send + Sync + 'static {
     async fn search(&self, q: SearchQuery) -> Result<SearchResult>;
+}
 
-    // ---- frameworks (Phase 12) ----
-    /// Every framework detected in the project, each with the documents it holds.
-    async fn list_frameworks(&self, project_id: Uuid) -> Result<Vec<FrameworkListing>>;
-    /// One document's text, addressed the way `documents`/`tasks` on the adapter
-    /// itself hand its path back. `Invalid` for an unknown `kind` or a path that
-    /// does not exist, or that resolves outside the project root.
-    async fn get_framework_doc(&self, project_id: Uuid, kind: FrameworkKind, path: &str) -> Result<String>;
-    /// Imports `kind`'s tasks or decisions into the project. A write: gated the
-    /// same way a direct task move or memory write is, by the project's
-    /// `agent_access`.
-    async fn import_framework(&self, project_id: Uuid, kind: FrameworkKind, what: ImportWhat, actor: &str) -> Result<ImportReport>;
-
-    // ---- skills (Phase 15) ----
+/// Skills: Atlas's own and the `SKILL.md` folders it discovers.
+#[async_trait::async_trait]
+pub trait SkillBackend: Send + Sync + 'static {
     /// Every skill in scope: the Atlas-native ones plus the `SKILL.md` folders found
     /// under the user's home and, when `project_id` is given, under that project's
     /// root. A project also fills each summary's `enabled_here`.
@@ -233,7 +259,11 @@ pub trait Backend: Send + Sync + 'static {
     /// Replaces the project's disabled-skill list. Every id must name a skill that
     /// applies to the project right now.
     async fn set_project_skills_disabled(&self, project_id: Uuid, ids: Vec<String>, actor: &str) -> Result<Project>;
+}
 
+/// The agents' MCP servers and the desktop plugins' MCP tools.
+#[async_trait::async_trait]
+pub trait McpBackend: Send + Sync + 'static {
     // ---- the agents' MCP servers (Phase 16) ----
     /// Every MCP server the user's agents are wired to. Without `project_id` this is each
     /// agent's user-level configuration, the installed plugins' servers and Atlas; with
@@ -262,6 +292,13 @@ pub trait Backend: Send + Sync + 'static {
         Err(AtlasError::Invalid("plugin tools are not available here".into()))
     }
 }
+
+/// The whole surface at once: every domain trait, blanket-implemented for any type
+/// that implements all of them. A client that needs everything (the MCP router, the
+/// CLI) bounds on this; one that needs a single domain bounds on that trait alone.
+pub trait Backend: StatusBackend + MemoryBackend + ProjectBackend + LibraryBackend + JobBackend + BoardBackend + WorkflowBackend + SearchBackend + SkillBackend + McpBackend + Send + Sync + 'static {}
+
+impl<T: StatusBackend + MemoryBackend + ProjectBackend + LibraryBackend + JobBackend + BoardBackend + WorkflowBackend + SearchBackend + SkillBackend + McpBackend + Send + Sync + 'static> Backend for T {}
 
 pub struct LocalBackend {
     pub memories: Arc<MemoryService>,
@@ -408,7 +445,7 @@ impl LocalBackend {
 }
 
 #[async_trait::async_trait]
-impl Backend for LocalBackend {
+impl StatusBackend for LocalBackend {
     async fn status(&self) -> Result<StatusReport> {
         let memories = self.memories.clone();
         let paths = self.paths.clone();
@@ -419,6 +456,30 @@ impl Backend for LocalBackend {
             Ok(s)
         }).await
     }
+
+    async fn get_settings(&self) -> Result<serde_json::Map<String, serde_json::Value>> {
+        let db = self.db.clone();
+        self.blocking(move || settings_repo(&db).get_all()).await
+    }
+    async fn set_settings(&self, values: serde_json::Map<String, serde_json::Value>, actor: &str) -> Result<serde_json::Map<String, serde_json::Value>> {
+        let db = self.db.clone();
+        let actor = actor.to_string();
+        self.blocking(move || {
+            let cleared = settings_repo(&db).set_many(&values, &actor)?;
+            let mut out = settings_repo(&db).get_all()?;
+            // Not one of `SETTING_KEYS`: a one-off flag telling the caller that pointing the
+            // base url somewhere new dropped the key it was entered against, so the endpoint
+            // it just named will not receive it.
+            if cleared {
+                out.insert("extraction.api_key_cleared".into(), serde_json::Value::Bool(true));
+            }
+            Ok(out)
+        }).await
+    }
+}
+
+#[async_trait::async_trait]
+impl MemoryBackend for LocalBackend {
     /// The project's `agent_access` is enforced here rather than in the MCP router,
     /// because MCP reaches the daemon over HTTP and the shim cannot see the rule. An
     /// actor the project has not admitted is refused, and `require_review` turns an
@@ -463,7 +524,10 @@ impl Backend for LocalBackend {
         let actor = actor.to_string();
         self.blocking(move || memories.set_status(id, status, &actor)).await
     }
+}
 
+#[async_trait::async_trait]
+impl ProjectBackend for LocalBackend {
     /// Detects the project at `root` and records it, building a profile when the
     /// stored one is missing or stale. The upsert runs first, without a profile, so
     /// `needs_refresh` can consult what is already stored before doing the work.
@@ -605,48 +669,6 @@ impl Backend for LocalBackend {
         self.blocking(move || crate::projects::log::project_log_export(&db, id)).await
     }
 
-    async fn list_agents(&self) -> Result<Vec<Agent>> {
-        let db = self.db.clone();
-        self.blocking(move || agents_repo(&db).list()).await
-    }
-    async fn get_agent(&self, name: &str) -> Result<Agent> {
-        let db = self.db.clone();
-        let name = name.to_string();
-        self.blocking(move || agents_repo(&db).get(&name)).await
-    }
-    async fn save_agent(&self, a: NewAgent, actor: &str) -> Result<Agent> {
-        let db = self.db.clone();
-        let actor = actor.to_string();
-        self.blocking(move || agents_repo(&db).save(&a, &actor)).await
-    }
-    async fn delete_agent(&self, name: &str, actor: &str) -> Result<()> {
-        let db = self.db.clone();
-        let name = name.to_string();
-        let actor = actor.to_string();
-        self.blocking(move || agents_repo(&db).delete(&name, &actor)).await
-    }
-
-    async fn list_docs(&self, kind: DocKind, project_id: Option<Uuid>) -> Result<Vec<Doc>> {
-        let db = self.db.clone();
-        self.blocking(move || docs_repo(&db, kind).list(project_id)).await
-    }
-    async fn get_doc(&self, kind: DocKind, name: &str) -> Result<Doc> {
-        let db = self.db.clone();
-        let name = name.to_string();
-        self.blocking(move || docs_repo(&db, kind).get(&name)).await
-    }
-    async fn save_doc(&self, kind: DocKind, d: NewDoc, actor: &str) -> Result<Doc> {
-        let db = self.db.clone();
-        let actor = actor.to_string();
-        self.blocking(move || docs_repo(&db, kind).save(&d, &actor)).await
-    }
-    async fn delete_doc(&self, kind: DocKind, name: &str, actor: &str) -> Result<()> {
-        let db = self.db.clone();
-        let name = name.to_string();
-        let actor = actor.to_string();
-        self.blocking(move || docs_repo(&db, kind).delete(&name, &actor)).await
-    }
-
     /// Plans the sync on the daemon host and, unless `check_only`, writes it. Every
     /// step that touches the Db runs through `blocking`; `detect_root`,
     /// `check_project_root`, `sync::plan_sync` and `sync::apply` do filesystem and git
@@ -751,26 +773,107 @@ impl Backend for LocalBackend {
         Ok(report)
     }
 
-    async fn get_settings(&self) -> Result<serde_json::Map<String, serde_json::Value>> {
+    async fn list_frameworks(&self, project_id: Uuid) -> Result<Vec<FrameworkListing>> {
         let db = self.db.clone();
-        self.blocking(move || settings_repo(&db).get_all()).await
-    }
-    async fn set_settings(&self, values: serde_json::Map<String, serde_json::Value>, actor: &str) -> Result<serde_json::Map<String, serde_json::Value>> {
-        let db = self.db.clone();
-        let actor = actor.to_string();
         self.blocking(move || {
-            let cleared = settings_repo(&db).set_many(&values, &actor)?;
-            let mut out = settings_repo(&db).get_all()?;
-            // Not one of `SETTING_KEYS`: a one-off flag telling the caller that pointing the
-            // base url somewhere new dropped the key it was entered against, so the endpoint
-            // it just named will not receive it.
-            if cleared {
-                out.insert("extraction.api_key_cleared".into(), serde_json::Value::Bool(true));
+            let project = projects_repo(&db).get(project_id)?;
+            let root = std::path::Path::new(&project.root_path);
+            let mut out = Vec::new();
+            for adapter in crate::frameworks::adapters() {
+                if let Some(inventory) = adapter.detect(root) {
+                    let documents = adapter.documents(root);
+                    out.push(FrameworkListing { inventory, documents });
+                }
             }
             Ok(out)
         }).await
     }
+    async fn get_framework_doc(&self, project_id: Uuid, kind: FrameworkKind, path: &str) -> Result<String> {
+        let db = self.db.clone();
+        let path = path.to_string();
+        self.blocking(move || {
+            let project = projects_repo(&db).get(project_id)?;
+            let root = std::path::Path::new(&project.root_path);
+            let adapter = crate::frameworks::adapters()
+                .into_iter()
+                .find(|a| a.kind() == kind)
+                .ok_or_else(|| AtlasError::Invalid(format!("unknown framework: {kind}")))?;
+            adapter.read(root, &path)
+        }).await
+    }
+    /// Gated by the write the import actually performs: a task import needs
+    /// `task_movers` (it files board tasks), a decision import needs
+    /// `memory_writers` (it files memories). The user's own hands, and the actors
+    /// `check_task_move`/`check_memory_write` already exempt, pass either way.
+    async fn import_framework(&self, project_id: Uuid, kind: FrameworkKind, what: ImportWhat, actor: &str) -> Result<ImportReport> {
+        let db = self.db.clone();
+        let tasks = self.tasks.clone();
+        let actor = actor.to_string();
+        self.blocking(move || {
+            let project = projects_repo(&db).get(project_id)?;
+            let defaults = crate::projects::access_defaults(&settings_repo(&db))?;
+            let memories = crate::memories::MemoryRepo::new(&db);
+            match what {
+                ImportWhat::Tasks => {
+                    crate::projects::check_task_move(&actor, &project, &defaults)?;
+                    crate::frameworks::import::import_tasks(&tasks, &memories, &project, kind, &actor)
+                }
+                ImportWhat::Decisions => {
+                    crate::projects::check_memory_write(&actor, &project, &defaults)?;
+                    crate::frameworks::import::import_decisions(&memories, &project, kind, &actor)
+                }
+            }
+        }).await
+    }
+}
 
+#[async_trait::async_trait]
+impl LibraryBackend for LocalBackend {
+    async fn list_agents(&self) -> Result<Vec<Agent>> {
+        let db = self.db.clone();
+        self.blocking(move || agents_repo(&db).list()).await
+    }
+    async fn get_agent(&self, name: &str) -> Result<Agent> {
+        let db = self.db.clone();
+        let name = name.to_string();
+        self.blocking(move || agents_repo(&db).get(&name)).await
+    }
+    async fn save_agent(&self, a: NewAgent, actor: &str) -> Result<Agent> {
+        let db = self.db.clone();
+        let actor = actor.to_string();
+        self.blocking(move || agents_repo(&db).save(&a, &actor)).await
+    }
+    async fn delete_agent(&self, name: &str, actor: &str) -> Result<()> {
+        let db = self.db.clone();
+        let name = name.to_string();
+        let actor = actor.to_string();
+        self.blocking(move || agents_repo(&db).delete(&name, &actor)).await
+    }
+
+    async fn list_docs(&self, kind: DocKind, project_id: Option<Uuid>) -> Result<Vec<Doc>> {
+        let db = self.db.clone();
+        self.blocking(move || docs_repo(&db, kind).list(project_id)).await
+    }
+    async fn get_doc(&self, kind: DocKind, name: &str) -> Result<Doc> {
+        let db = self.db.clone();
+        let name = name.to_string();
+        self.blocking(move || docs_repo(&db, kind).get(&name)).await
+    }
+    async fn save_doc(&self, kind: DocKind, d: NewDoc, actor: &str) -> Result<Doc> {
+        let db = self.db.clone();
+        let actor = actor.to_string();
+        self.blocking(move || docs_repo(&db, kind).save(&d, &actor)).await
+    }
+    async fn delete_doc(&self, kind: DocKind, name: &str, actor: &str) -> Result<()> {
+        let db = self.db.clone();
+        let name = name.to_string();
+        let actor = actor.to_string();
+        self.blocking(move || docs_repo(&db, kind).delete(&name, &actor)).await
+    }
+}
+
+#[async_trait::async_trait]
+impl JobBackend for LocalBackend {
     /// Every check a transcript has to pass lives here rather than in the HTTP
     /// handler, because MCP reaches this same method and is just as unauthenticated:
     /// the enable gate, so a caller who has not configured extraction is told straight
@@ -818,7 +921,10 @@ impl Backend for LocalBackend {
         let reply = client.chat("You are a connectivity check.", "Reply with the single word OK").await?;
         Ok(reply.trim().to_string())
     }
+}
 
+#[async_trait::async_trait]
+impl BoardBackend for LocalBackend {
     async fn list_tasks(&self, f: TaskFilter) -> Result<Vec<Task>> {
         let tasks = self.tasks.clone();
         self.blocking(move || tasks.list(&f)).await
@@ -898,7 +1004,10 @@ impl Backend for LocalBackend {
         let tasks = self.tasks.clone();
         self.blocking(move || tasks.counts_by_stage(project_id, global_only, top_level)).await
     }
+}
 
+#[async_trait::async_trait]
+impl WorkflowBackend for LocalBackend {
     async fn list_workflows(&self, project_id: Option<Uuid>) -> Result<Vec<Workflow>> {
         let workflows = self.workflows.clone();
         self.blocking(move || workflows.list(project_id)).await
@@ -981,7 +1090,10 @@ impl Backend for LocalBackend {
             Ok(out)
         }).await
     }
+}
 
+#[async_trait::async_trait]
+impl SearchBackend for LocalBackend {
     async fn search(&self, q: SearchQuery) -> Result<SearchResult> {
         let db = self.db.clone();
         let tasks = self.tasks.clone();
@@ -992,62 +1104,10 @@ impl Backend for LocalBackend {
             crate::search::global::search(&q, &tasks, &memories, &projects, &workflows)
         }).await
     }
+}
 
-    async fn list_frameworks(&self, project_id: Uuid) -> Result<Vec<FrameworkListing>> {
-        let db = self.db.clone();
-        self.blocking(move || {
-            let project = projects_repo(&db).get(project_id)?;
-            let root = std::path::Path::new(&project.root_path);
-            let mut out = Vec::new();
-            for adapter in crate::frameworks::adapters() {
-                if let Some(inventory) = adapter.detect(root) {
-                    let documents = adapter.documents(root);
-                    out.push(FrameworkListing { inventory, documents });
-                }
-            }
-            Ok(out)
-        }).await
-    }
-    async fn get_framework_doc(&self, project_id: Uuid, kind: FrameworkKind, path: &str) -> Result<String> {
-        let db = self.db.clone();
-        let path = path.to_string();
-        self.blocking(move || {
-            let project = projects_repo(&db).get(project_id)?;
-            let root = std::path::Path::new(&project.root_path);
-            let adapter = crate::frameworks::adapters()
-                .into_iter()
-                .find(|a| a.kind() == kind)
-                .ok_or_else(|| AtlasError::Invalid(format!("unknown framework: {kind}")))?;
-            adapter.read(root, &path)
-        }).await
-    }
-    /// Gated by the write the import actually performs: a task import needs
-    /// `task_movers` (it files board tasks), a decision import needs
-    /// `memory_writers` (it files memories). The user's own hands, and the actors
-    /// `check_task_move`/`check_memory_write` already exempt, pass either way.
-    async fn import_framework(&self, project_id: Uuid, kind: FrameworkKind, what: ImportWhat, actor: &str) -> Result<ImportReport> {
-        let db = self.db.clone();
-        let tasks = self.tasks.clone();
-        let actor = actor.to_string();
-        self.blocking(move || {
-            let project = projects_repo(&db).get(project_id)?;
-            let defaults = crate::projects::access_defaults(&settings_repo(&db))?;
-            let memories = crate::memories::MemoryRepo::new(&db);
-            match what {
-                ImportWhat::Tasks => {
-                    crate::projects::check_task_move(&actor, &project, &defaults)?;
-                    crate::frameworks::import::import_tasks(&tasks, &memories, &project, kind, &actor)
-                }
-                ImportWhat::Decisions => {
-                    crate::projects::check_memory_write(&actor, &project, &defaults)?;
-                    crate::frameworks::import::import_decisions(&memories, &project, kind, &actor)
-                }
-            }
-        }).await
-    }
-
-    // ---- skills (Phase 15) ----
-
+#[async_trait::async_trait]
+impl SkillBackend for LocalBackend {
     async fn list_skills(&self, project_id: Option<Uuid>) -> Result<SkillList> {
         let db = self.db.clone();
         let home = self.paths.skills_home.clone();
@@ -1101,7 +1161,10 @@ impl Backend for LocalBackend {
         let home = self.paths.skills_home.clone();
         self.blocking(move || crate::skills::set_project_skills_disabled(&db, project_id, ids, &actor, &home)).await
     }
+}
 
+#[async_trait::async_trait]
+impl McpBackend for LocalBackend {
     // ---- the agents' MCP servers (Phase 16) ----
 
     async fn list_mcp_servers(&self, project_id: Option<Uuid>) -> Result<McpServerList> {

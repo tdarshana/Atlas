@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use atlas_core::backend::Backend;
+use atlas_core::backend::{Backend, LibraryBackend, ProjectBackend, StatusBackend, WorkflowBackend};
 use atlas_core::board::render::render_board_markdown;
 use atlas_core::export::claude_agent_md;
 use atlas_core::models::*;
@@ -1122,7 +1122,7 @@ fn workflow_markdown(w: &Workflow) -> String {
 /// of `self` so `GET /api/v1/mcp/status` (`atlasd`) can compute the tools table's
 /// `enabled` flags without a live session, from the same read [`AtlasMcp::disabled_tools`]
 /// wraps for the router itself.
-pub async fn disabled_tool_names<B: Backend>(backend: &B) -> atlas_core::Result<std::collections::HashSet<String>> {
+pub async fn disabled_tool_names<B: StatusBackend>(backend: &B) -> atlas_core::Result<std::collections::HashSet<String>> {
     let settings = backend.get_settings().await?;
     let names = match settings.get("mcp.disabled_tools").and_then(|v| v.as_array()) {
         Some(arr) => arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
@@ -1152,7 +1152,7 @@ fn project_resources(p: &Project) -> [Resource; 3] {
 /// Every resource `list_resources` would return, from the same backend calls the
 /// router itself makes. Free of `self` so `GET /api/v1/mcp/status` can count them
 /// without a live session.
-pub async fn resources_for<B: Backend>(backend: &B) -> atlas_core::Result<Vec<Resource>> {
+pub async fn resources_for<B: LibraryBackend + WorkflowBackend + ProjectBackend>(backend: &B) -> atlas_core::Result<Vec<Resource>> {
     let mut out = vec![];
     for a in backend.list_agents().await? {
         out.push(Resource::new(format!("{AGENTS}{}", a.name), a.name.clone()).with_description(a.description).with_mime_type(MARKDOWN));
@@ -1194,7 +1194,7 @@ pub fn resources_for_project(p: &Project) -> Vec<Resource> {
 /// Every prompt `list_prompts` would return, from the same backend call the router
 /// itself makes. Free of `self` so `GET /api/v1/mcp/status` can count them without a
 /// live session.
-pub async fn prompts_for<B: Backend>(backend: &B) -> atlas_core::Result<Vec<Prompt>> {
+pub async fn prompts_for<B: LibraryBackend>(backend: &B) -> atlas_core::Result<Vec<Prompt>> {
     let mut prompts = vec![
         Prompt::new(BOOTSTRAP_PROMPT, Some(BOOTSTRAP_DESCRIPTION), None),
         Prompt::new(HANDOFF_PROMPT, Some(HANDOFF_DESCRIPTION), None),
@@ -1415,7 +1415,7 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atlas_core::backend::LocalBackend;
+    use atlas_core::backend::{LibraryBackend, LocalBackend, McpBackend, MemoryBackend, ProjectBackend, SkillBackend, StatusBackend};
     use atlas_core::paths::AtlasPaths;
     use rmcp::ServiceExt;
 

@@ -1,4 +1,4 @@
-use atlas_core::{backend::Backend, jobs::Job, models::*, search::global::{SearchQuery, SearchResult}, AtlasError, Result};
+use atlas_core::{backend::{StatusBackend, MemoryBackend, ProjectBackend, LibraryBackend, JobBackend, BoardBackend, WorkflowBackend, SearchBackend, SkillBackend, McpBackend}, jobs::Job, models::*, search::global::{SearchQuery, SearchResult}, AtlasError, Result};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -213,8 +213,17 @@ impl RemoteBackend {
 }
 
 #[async_trait::async_trait]
-impl Backend for RemoteBackend {
+impl StatusBackend for RemoteBackend {
     async fn status(&self) -> Result<StatusReport> { Self::handle(self.client.get(format!("{}/status", self.base)).send().await.map_err(Self::net)?).await }
+
+    async fn get_settings(&self) -> Result<serde_json::Map<String, serde_json::Value>> { Self::handle(self.client.get(format!("{}/settings", self.base)).send().await.map_err(Self::net)?).await }
+    async fn set_settings(&self, values: serde_json::Map<String, serde_json::Value>, actor: &str) -> Result<serde_json::Map<String, serde_json::Value>> {
+        Self::handle(self.client.put(format!("{}/settings?actor={actor}", self.base)).json(&values).send().await.map_err(Self::net)?).await
+    }
+}
+
+#[async_trait::async_trait]
+impl MemoryBackend for RemoteBackend {
     async fn remember(&self, m: NewMemory, actor: &str) -> Result<Memory> { Self::handle(self.client.post(format!("{}/memories?actor={actor}", self.base)).json(&m).send().await.map_err(Self::net)?).await }
     async fn recall(&self, q: RecallQuery) -> Result<Vec<RecallHit>> {
         atlas_core::backend::check_scope(q.project_id, q.list_scope)?;
@@ -237,7 +246,10 @@ impl Backend for RemoteBackend {
         let project = project_id.map(|p| format!("&project_id={p}")).unwrap_or_default();
         Self::handle(self.client.get(format!("{}/memories/facets?scope={scope}{project}", self.base)).send().await.map_err(Self::net)?).await
     }
+}
 
+#[async_trait::async_trait]
+impl ProjectBackend for RemoteBackend {
     async fn connect_project(&self, root: PathBuf, actor: &str) -> Result<Project> {
         Self::handle(self.client.post(format!("{}/projects/connect?actor={actor}", self.base)).json(&serde_json::json!({"root": root})).send().await.map_err(Self::net)?).await
     }
@@ -277,6 +289,32 @@ impl Backend for RemoteBackend {
         r.text().await.map_err(|e| AtlasError::Other(e.to_string()))
     }
 
+    /// The daemon runs the sync, so the paths written are the daemon host's.
+    async fn sync(&self, req: SyncRequest) -> Result<SyncReport> { Self::handle(self.client.post(format!("{}/sync", self.base)).json(&req).send().await.map_err(Self::net)?).await }
+
+    // ---- frameworks (Phase 12) ----
+
+    async fn list_frameworks(&self, project_id: Uuid) -> Result<Vec<FrameworkListing>> {
+        Self::handle(self.client.get(format!("{}/projects/{project_id}/frameworks", self.base)).send().await.map_err(Self::net)?).await
+    }
+    async fn get_framework_doc(&self, project_id: Uuid, kind: FrameworkKind, path: &str) -> Result<String> {
+        let url = Self::framework_doc_url(&self.base, project_id, kind, path)?;
+        let r = self.client.get(url).send().await.map_err(Self::net)?;
+        if !r.status().is_success() { return Err(Self::error(r).await); }
+        let v: serde_json::Value = r.json().await.map_err(|e| AtlasError::Other(e.to_string()))?;
+        v["content"].as_str().map(str::to_string).ok_or_else(|| AtlasError::Other(format!("framework doc response had no content: {v}")))
+    }
+    async fn import_framework(&self, project_id: Uuid, kind: FrameworkKind, what: ImportWhat, actor: &str) -> Result<ImportReport> {
+        Self::handle(
+            self.client.post(format!("{}/projects/{project_id}/frameworks/{}/import", self.base, kind.as_str())).header("X-Atlas-Actor", actor)
+                .json(&serde_json::json!({"what": what})).send().await.map_err(Self::net)?,
+        )
+        .await
+    }
+}
+
+#[async_trait::async_trait]
+impl LibraryBackend for RemoteBackend {
     async fn list_agents(&self) -> Result<Vec<Agent>> { Self::handle(self.client.get(format!("{}/agents", self.base)).send().await.map_err(Self::net)?).await }
     async fn get_agent(&self, name: &str) -> Result<Agent> { Self::handle(self.client.get(format!("{}/agents/{name}", self.base)).send().await.map_err(Self::net)?).await }
     async fn save_agent(&self, a: NewAgent, actor: &str) -> Result<Agent> { Self::handle(self.client.post(format!("{}/agents?actor={actor}", self.base)).json(&a).send().await.map_err(Self::net)?).await }
@@ -315,15 +353,10 @@ impl Backend for RemoteBackend {
         }
         Self::handle_empty(self.client.delete(format!("{}/{}/{name}?actor={actor}", self.base, docs_path(kind))).send().await.map_err(Self::net)?).await
     }
+}
 
-    /// The daemon runs the sync, so the paths written are the daemon host's.
-    async fn sync(&self, req: SyncRequest) -> Result<SyncReport> { Self::handle(self.client.post(format!("{}/sync", self.base)).json(&req).send().await.map_err(Self::net)?).await }
-
-    async fn get_settings(&self) -> Result<serde_json::Map<String, serde_json::Value>> { Self::handle(self.client.get(format!("{}/settings", self.base)).send().await.map_err(Self::net)?).await }
-    async fn set_settings(&self, values: serde_json::Map<String, serde_json::Value>, actor: &str) -> Result<serde_json::Map<String, serde_json::Value>> {
-        Self::handle(self.client.put(format!("{}/settings?actor={actor}", self.base)).json(&values).send().await.map_err(Self::net)?).await
-    }
-
+#[async_trait::async_trait]
+impl JobBackend for RemoteBackend {
     /// The daemon runs the extraction, so a 409 here is its "extraction is
     /// disabled", carried back as the same error a `LocalBackend` would raise. The
     /// actor goes in `X-Atlas-Actor`, not the deprecated `source_tool` body field.
@@ -351,7 +384,10 @@ impl Backend for RemoteBackend {
         let v: serde_json::Value = Self::handle(r).await?;
         v["reply"].as_str().map(str::to_string).ok_or_else(|| AtlasError::Other(format!("extraction test response had no reply: {v}")))
     }
+}
 
+#[async_trait::async_trait]
+impl BoardBackend for RemoteBackend {
     // ---- board ----
 
     async fn list_tasks(&self, f: TaskFilter) -> Result<Vec<Task>> {
@@ -438,9 +474,10 @@ impl Backend for RemoteBackend {
             Self::handle(self.client.get(format!("{}/tasks/counts{query}", self.base)).header("X-Atlas-Actor", &self.actor).send().await.map_err(Self::net)?).await?;
         Ok(rows.into_iter().map(|r| (r.stage, r.count)).collect())
     }
+}
 
-    // ---- workflows (Phase 9) ----
-
+#[async_trait::async_trait]
+impl WorkflowBackend for RemoteBackend {
     async fn list_workflows(&self, project_id: Option<Uuid>) -> Result<Vec<Workflow>> {
         let project = project_id.map(|p| format!("?project_id={p}")).unwrap_or_default();
         Self::handle(self.client.get(format!("{}/workflows{project}", self.base)).send().await.map_err(Self::net)?).await
@@ -489,36 +526,18 @@ impl Backend for RemoteBackend {
         if !r.status().is_success() { return Err(Self::error(r).await); }
         r.text().await.map_err(|e| AtlasError::Other(e.to_string()))
     }
+}
 
-    // ---- search ----
-
+#[async_trait::async_trait]
+impl SearchBackend for RemoteBackend {
     async fn search(&self, q: SearchQuery) -> Result<SearchResult> {
         let url = Self::search_url(&self.base, &q)?;
         Self::handle(self.client.get(url).send().await.map_err(Self::net)?).await
     }
+}
 
-    // ---- frameworks (Phase 12) ----
-
-    async fn list_frameworks(&self, project_id: Uuid) -> Result<Vec<FrameworkListing>> {
-        Self::handle(self.client.get(format!("{}/projects/{project_id}/frameworks", self.base)).send().await.map_err(Self::net)?).await
-    }
-    async fn get_framework_doc(&self, project_id: Uuid, kind: FrameworkKind, path: &str) -> Result<String> {
-        let url = Self::framework_doc_url(&self.base, project_id, kind, path)?;
-        let r = self.client.get(url).send().await.map_err(Self::net)?;
-        if !r.status().is_success() { return Err(Self::error(r).await); }
-        let v: serde_json::Value = r.json().await.map_err(|e| AtlasError::Other(e.to_string()))?;
-        v["content"].as_str().map(str::to_string).ok_or_else(|| AtlasError::Other(format!("framework doc response had no content: {v}")))
-    }
-    async fn import_framework(&self, project_id: Uuid, kind: FrameworkKind, what: ImportWhat, actor: &str) -> Result<ImportReport> {
-        Self::handle(
-            self.client.post(format!("{}/projects/{project_id}/frameworks/{}/import", self.base, kind.as_str())).header("X-Atlas-Actor", actor)
-                .json(&serde_json::json!({"what": what})).send().await.map_err(Self::net)?,
-        )
-        .await
-    }
-
-    // ---- skills (Phase 15) ----
-
+#[async_trait::async_trait]
+impl SkillBackend for RemoteBackend {
     async fn list_skills(&self, project_id: Option<Uuid>) -> Result<SkillList> {
         let pairs: Vec<(&str, String)> = project_id.map(|p| ("project_id", p.to_string())).into_iter().collect();
         let url = Self::url_with(&self.base, "/skills", &pairs)?;
@@ -553,7 +572,10 @@ impl Backend for RemoteBackend {
         )
         .await
     }
+}
 
+#[async_trait::async_trait]
+impl McpBackend for RemoteBackend {
     // ---- the agents' MCP servers (Phase 16) ----
 
     async fn list_mcp_servers(&self, project_id: Option<Uuid>) -> Result<McpServerList> {

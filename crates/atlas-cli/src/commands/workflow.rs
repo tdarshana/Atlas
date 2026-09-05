@@ -1,7 +1,7 @@
 //! `atlas workflow`: list and inspect workflows, start and follow their runs.
 
 use crate::remote::RemoteBackend;
-use atlas_core::backend::Backend;
+use atlas_core::backend::{ProjectBackend, WorkflowBackend};
 use atlas_core::models::{TriggerKind, WorkflowRun};
 use clap::Subcommand;
 use std::path::PathBuf;

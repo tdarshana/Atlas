@@ -4,7 +4,7 @@
 
 use super::state::{Action, Effect};
 use crate::remote::RemoteBackend;
-use atlas_core::backend::Backend;
+use atlas_core::backend::{StatusBackend, MemoryBackend, ProjectBackend, LibraryBackend, BoardBackend};
 use atlas_core::models::{MemoryStatus, NewTask, RecallHit, RecallQuery, SyncRequest, TaskFilter};
 use std::path::PathBuf;
 use std::sync::Arc;

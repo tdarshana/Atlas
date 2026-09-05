@@ -1,6 +1,6 @@
 use crate::remote::RemoteBackend;
 use crate::daemon_ctl;
-use atlas_core::backend::Backend;
+use atlas_core::backend::JobBackend;
 use atlas_core::paths::AtlasPaths;
 use atlas_core::AtlasError;
 use std::collections::VecDeque;

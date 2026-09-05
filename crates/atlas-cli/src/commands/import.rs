@@ -1,5 +1,5 @@
 use crate::remote::RemoteBackend;
-use atlas_core::backend::Backend;
+use atlas_core::backend::{MemoryBackend, LibraryBackend, WorkflowBackend};
 use atlas_core::models::{DocKind, Memory, NewAgent, NewDoc, NewMemory, NewWorkflow, Trigger};
 use atlas_core::workflow::migrate_docs::single_action_graph;
 use std::collections::{HashMap, HashSet};

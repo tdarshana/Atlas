@@ -1,7 +1,7 @@
 //! `atlas skill ...`: list, read and gate the skills agents can use here.
 
 use crate::remote::RemoteBackend;
-use atlas_core::backend::Backend;
+use atlas_core::backend::{ProjectBackend, SkillBackend};
 use atlas_core::models::*;
 use clap::Subcommand;
 use std::path::PathBuf;

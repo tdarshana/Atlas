@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use atlas_cli::{commands, daemon_ctl, remote::RemoteBackend};
-use atlas_core::backend::Backend;
+use atlas_core::backend::{StatusBackend, MemoryBackend};
 use atlas_core::{models::*, paths::AtlasPaths};
 use atlas_mcp::AtlasMcp;
 use clap::{Parser, Subcommand};

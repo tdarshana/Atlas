@@ -7,7 +7,7 @@ use common::TestDaemon;
 use atlas_cli::remote::RemoteBackend;
 use atlas_cli::tui::data::perform;
 use atlas_cli::tui::state::{Action, Effect};
-use atlas_core::backend::Backend;
+use atlas_core::backend::MemoryBackend;
 use atlas_core::models::*;
 use uuid::Uuid;
 

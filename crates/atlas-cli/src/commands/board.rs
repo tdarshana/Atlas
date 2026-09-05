@@ -6,7 +6,7 @@
 //! reads in this module carry it too.
 
 use crate::remote::RemoteBackend;
-use atlas_core::backend::Backend;
+use atlas_core::backend::{ProjectBackend, BoardBackend};
 use atlas_core::models::*;
 use chrono::{DateTime, Utc};
 use clap::Subcommand;
