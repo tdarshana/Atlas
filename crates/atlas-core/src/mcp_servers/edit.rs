@@ -29,7 +29,7 @@ use crate::models::{
 use crate::paths::AtlasPaths;
 use crate::{AtlasError, Result};
 
-use super::generic_json::server_id;
+use super::generic_json::{server_id, JSON_AGENTS};
 use super::{claude, codex};
 
 /// Where under Atlas's own home a replaced agent config is copied before it is replaced.
@@ -198,7 +198,9 @@ pub fn remove_server(paths: &AtlasPaths, db: &Db, project: Option<&Project>, ent
 // Where a server lives
 // ---------------------------------------------------------------------------
 
-/// The file a new server of this source and scope belongs in.
+/// The file a new server of this source and scope belongs in. Claude Code and Codex
+/// have files of their own shape; every other agent is a row of [`JSON_AGENTS`], the
+/// same table discovery reads, so the file an Add writes is the file a listing shows.
 fn target_file(home: &Path, project: Option<&Project>, source: McpServerSource, scope: McpServerScope) -> Result<PathBuf> {
     let root = |p: Option<&Project>| require_project(p).map(|p| PathBuf::from(&p.root_path));
     Ok(match (source, scope) {
@@ -207,13 +209,11 @@ fn target_file(home: &Path, project: Option<&Project>, source: McpServerSource, 
         (McpServerSource::Claude, McpServerScope::Project) => root(project)?.join(".mcp.json"),
         (McpServerSource::Codex, McpServerScope::User) => home.join(".codex/config.toml"),
         (McpServerSource::Codex, McpServerScope::Project) => root(project)?.join(".codex/config.toml"),
-        (McpServerSource::Cursor, McpServerScope::User) => home.join(".cursor/mcp.json"),
-        (McpServerSource::Cursor, McpServerScope::Project) => root(project)?.join(".cursor/mcp.json"),
-        (McpServerSource::Gemini, McpServerScope::User) => home.join(".gemini/settings.json"),
-        (McpServerSource::Windsurf, McpServerScope::User) => home.join(".codeium/windsurf/mcp_config.json"),
-        (source, scope) => {
-            return Err(AtlasError::Invalid(format!("Atlas cannot add a {} server in the {scope} scope", source.as_str())))
-        }
+        (source, scope) => match JSON_AGENTS.iter().find(|a| a.source == source && a.scope == scope) {
+            Some(agent) if scope == McpServerScope::Project => agent.path(&root(project)?),
+            Some(agent) => agent.path(home),
+            None => return Err(AtlasError::Invalid(format!("Atlas cannot add a {} server in the {scope} scope", source.as_str()))),
+        },
     })
 }
 

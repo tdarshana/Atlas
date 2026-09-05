@@ -9,7 +9,7 @@
 //! better said out loud than silently missing.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use uuid::Uuid;
@@ -17,6 +17,36 @@ use uuid::Uuid;
 use crate::models::{McpServerEntry, McpServerScope, McpServerSource, McpTransport};
 
 use super::{Found, Resolved};
+
+/// One agent whose whole configuration is a plain `mcpServers` object, at one scope:
+/// where its file is and whether the agent has a switch of its own (`disabled: true`
+/// inside the entry, which only Cursor has; for the other two Remove is the way to
+/// stop a server). Discovery and `edit::target_file` both read [`JSON_AGENTS`], so
+/// adding such an agent, or a project scope for one, is one row here rather than a
+/// new arm in each. Claude Code and Codex are not rows: their files have their own
+/// shape (nested project blocks, TOML) and their own modules.
+pub struct JsonAgent {
+    pub source: McpServerSource,
+    pub scope: McpServerScope,
+    /// Relative to the user's home for `User` scope, to the project root for `Project`.
+    pub file: &'static str,
+    pub can_toggle: bool,
+}
+
+impl JsonAgent {
+    /// The configuration file under `base`: the home for a user row, the project root
+    /// for a project row.
+    pub fn path(&self, base: &Path) -> PathBuf {
+        base.join(self.file)
+    }
+}
+
+pub const JSON_AGENTS: &[JsonAgent] = &[
+    JsonAgent { source: McpServerSource::Cursor, scope: McpServerScope::User, file: ".cursor/mcp.json", can_toggle: true },
+    JsonAgent { source: McpServerSource::Cursor, scope: McpServerScope::Project, file: ".cursor/mcp.json", can_toggle: true },
+    JsonAgent { source: McpServerSource::Gemini, scope: McpServerScope::User, file: ".gemini/settings.json", can_toggle: false },
+    JsonAgent { source: McpServerSource::Windsurf, scope: McpServerScope::User, file: ".codeium/windsurf/mcp_config.json", can_toggle: false },
+];
 
 /// One parsed entry: how to reach the server, the secret values its file holds, and
 /// whether the entry switches itself off.

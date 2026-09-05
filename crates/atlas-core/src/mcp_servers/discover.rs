@@ -11,6 +11,7 @@ use std::path::Path;
 
 use crate::models::{McpServerEntry, McpServerScope, McpServerSource, McpTransport, Project};
 
+use super::generic_json::{JsonAgent, JSON_AGENTS};
 use super::{claude, codex, generic_json, Found, Resolved};
 
 /// Atlas's own entry, which no file declares.
@@ -25,44 +26,18 @@ pub fn discover(home: &Path, project: Option<&Project>) -> Found {
         None => {
             claude::user_servers(home, &mut found);
             codex::servers(&home.join(".codex/config.toml"), McpServerScope::User, None, &mut found);
-            json_agent(
-                &home.join(".cursor/mcp.json"),
-                McpServerSource::Cursor,
-                McpServerScope::User,
-                None,
-                true,
-                &mut found,
-            );
-            json_agent(
-                &home.join(".gemini/settings.json"),
-                McpServerSource::Gemini,
-                McpServerScope::User,
-                None,
-                false,
-                &mut found,
-            );
-            json_agent(
-                &home.join(".codeium/windsurf/mcp_config.json"),
-                McpServerSource::Windsurf,
-                McpServerScope::User,
-                None,
-                false,
-                &mut found,
-            );
+            for agent in JSON_AGENTS.iter().filter(|a| a.scope == McpServerScope::User) {
+                json_agent(&agent.path(home), agent, None, &mut found);
+            }
         }
         Some(p) => {
             let root = Path::new(&p.root_path);
             claude::project_servers(home, p, &mut found);
             claude::local_servers(home, p, &mut found);
             codex::servers(&root.join(".codex/config.toml"), McpServerScope::Project, Some(p.id), &mut found);
-            json_agent(
-                &root.join(".cursor/mcp.json"),
-                McpServerSource::Cursor,
-                McpServerScope::Project,
-                Some(p.id),
-                true,
-                &mut found,
-            );
+            for agent in JSON_AGENTS.iter().filter(|a| a.scope == McpServerScope::Project) {
+                json_agent(&agent.path(root), agent, Some(p.id), &mut found);
+            }
         }
     }
     claude::plugin_servers(home, project, &mut found);
@@ -71,28 +46,20 @@ pub fn discover(home: &Path, project: Option<&Project>) -> Found {
     found
 }
 
-/// Cursor, Gemini CLI and Windsurf all keep a plain `mcpServers` object. Cursor is the
-/// only one of the three with a switch of its own (`disabled: true` inside the entry),
-/// which [`generic_json::parse_entry`] reads; for the other two the toggle is absent and
-/// Remove is the way to stop a server.
-fn json_agent(
-    path: &Path,
-    source: McpServerSource,
-    scope: McpServerScope,
-    project_id: Option<uuid::Uuid>,
-    can_toggle: bool,
-    found: &mut Found,
-) {
+/// One row of [`JSON_AGENTS`] (Cursor, Gemini CLI or Windsurf): a plain `mcpServers`
+/// object at `path`. Cursor's own switch (`disabled: true` inside the entry) is read by
+/// [`generic_json::parse_entry`]; the row's `can_toggle` says whether the agent has one.
+fn json_agent(path: &Path, agent: &JsonAgent, project_id: Option<uuid::Uuid>, found: &mut Found) {
     let Some(file) = generic_json::read_file(path, found) else { return };
     generic_json::collect(
         &file["mcpServers"],
-        source,
-        scope,
-        scope.as_str(),
+        agent.source,
+        agent.scope,
+        agent.scope.as_str(),
         path,
         project_id,
         None,
-        can_toggle,
+        agent.can_toggle,
         true,
         &|_| true,
         found,

@@ -852,6 +852,39 @@ mod tests {
         set_mcp_server_enabled(&paths, &db, None, "cursor:user:cursor-one", false, "t").unwrap();
     }
 
+    /// ARCH-13: for every generic JSON agent and scope, the file an Add writes to is the
+    /// file discovery lists from, and the listed entry carries the row's own switch
+    /// rule, so a new agent is one row in `JSON_AGENTS` rather than an arm in each.
+    #[test]
+    fn every_json_agent_row_is_added_where_discovery_reads_it() {
+        let db = Db::open_in_memory().unwrap();
+        let (_temp, paths, project) = fixture(&db);
+        for agent in generic_json::JSON_AGENTS {
+            let (scoped_project, base) = match agent.scope {
+                McpServerScope::Project => (Some(&project), PathBuf::from(&project.root_path)),
+                _ => (None, paths.agent_home().to_path_buf()),
+            };
+            let name = format!("arch13-{}", agent.source.as_str());
+            let input = NewMcpServer {
+                source: agent.source,
+                scope: agent.scope,
+                project_id: scoped_project.map(|p| p.id),
+                name: name.clone(),
+                transport: McpTransportInput::Stdio { command: "x".into(), args: vec![], env: BTreeMap::new() },
+            };
+            let added = add_mcp_server(&paths, &db, scoped_project, &input, "t").unwrap();
+            // `write` canonicalises its target, so the recorded file is the real path.
+            let expected = agent.path(&base).canonicalize().unwrap();
+            assert_eq!(added.file.as_deref(), expected.to_str(), "{name}");
+
+            let list = list_mcp_servers(paths.agent_home(), scoped_project);
+            let listed = entry(&list, &added.id);
+            assert_eq!(listed.file, added.file, "{name} is listed from the file it was written to");
+            assert_eq!(listed.can_toggle, agent.can_toggle, "{name}");
+            assert!(listed.can_remove, "{name}");
+        }
+    }
+
     /// Adding to a repository that has none of an agent's project files creates the one it
     /// needs, private from its first byte, and the answer names it so a client can say
     /// where the server went.
