@@ -65,7 +65,8 @@
 
 <span class="dbm-field">
 	{#if label}<label class="dbm-field__label" for={fid}>{label}</label>{/if}
-	<span class="box" class:disabled>
+	<!-- A label, so a click anywhere in the box focuses the text field with no script. -->
+	<label class="box" class:disabled for={fid}>
 		{#each value as tag (tag)}
 			<Badge tone="accent" mono class="tag">
 				{tag}
@@ -91,7 +92,7 @@
 			{onkeydown}
 			onblur={commit}
 		/>
-	</span>
+	</label>
 	{#if hint}<span class="dbm-field__hint">{hint}</span>{/if}
 </span>
 
@@ -151,7 +152,9 @@
 	}
 
 	input {
-		flex: 1;
+		/* A zero basis: the box sits on the badges' line whenever 80px remain, and grows
+		   to fill it, rather than wrapping under them at its intrinsic width. */
+		flex: 1 1 0;
 		min-width: 80px;
 		height: 20px;
 		border: none;
