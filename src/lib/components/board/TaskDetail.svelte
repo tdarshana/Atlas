@@ -921,9 +921,9 @@
 										class="child-row"
 										onclick={() => onopen?.(child.key)}
 									>
-										<KindIcon kind={child.kind} size={12} />
-										<code>{child.key}</code>
-										<span>{child.title}</span>
+										<KindIcon kind={child.kind} size={14} />
+										<code class="child-key">{child.key}</code>
+										<span class="child-title">{child.title}</span>
 										<span class="child-stage" style="background:{stageColor(child.stage)}">{child.stage}</span>
 									</button>
 								</li>
@@ -943,15 +943,6 @@
 						<p class="muted">Nothing has happened yet.</p>
 					{/if}
 				{:else}
-					{#if commentEvents.length > 0}
-						<ul class="events" data-testid="task-events">
-							{#each commentEvents as event (event.id)}
-								{@render eventRow(event)}
-							{/each}
-						</ul>
-					{:else}
-						<p class="muted">No comments yet.</p>
-					{/if}
 					<textarea
 						bind:value={comment}
 						class="area"
@@ -965,6 +956,15 @@
 							Comment
 						</Button>
 					</div>
+					{#if commentEvents.length > 0}
+						<ul class="events" data-testid="task-events">
+							{#each commentEvents as event (event.id)}
+								{@render eventRow(event)}
+							{/each}
+						</ul>
+					{:else}
+						<p class="muted">No comments yet.</p>
+					{/if}
 				{/if}
 				</div>
 			</section>
@@ -1149,10 +1149,17 @@
 		flex: 0 0 auto;
 	}
 
-	/* In the modal the tabs box keeps one height and scrolls inside, so the dialog's
-	   own height never depends on how long the history is. */
+	/* In the modal the grid fills the dialog and the tabs row takes whatever height is
+	   left, scrolling inside, so the dialog neither grows with a long history nor leaves
+	   dead space under a short one. */
+	.detail-modal .columns {
+		min-height: 100%;
+		grid-template-rows: auto auto minmax(0, 1fr);
+	}
+
 	.detail-modal .tabs {
-		height: 300px;
+		min-height: 0;
+		overflow: hidden;
 	}
 
 	.detail-modal .tab-body {
@@ -1215,7 +1222,14 @@
 	}
 
 	.area {
-		resize: none;
+		/* Height is the user's to drag; the box never scrolls sideways, long words wrap. */
+		resize: vertical;
+		width: 100%;
+		min-height: 48px;
+		box-sizing: border-box;
+		overflow-x: hidden;
+		overflow-y: auto;
+		overflow-wrap: anywhere;
 		background: var(--bg-base);
 		border: 1px solid var(--border-default);
 		border-radius: 3px;
@@ -1241,6 +1255,7 @@
 	   needs its scrollbar hidden, so that rule lives on its own dedicated class rather
 	   than on the shared one. */
 	.description-editor {
+		resize: none;
 		overflow: hidden;
 	}
 
@@ -1444,15 +1459,41 @@
 	.child-row {
 		display: flex;
 		align-items: center;
-		gap: 6px;
+		gap: 10px;
 		width: 100%;
-		padding: 0;
+		min-height: 32px;
+		padding: 4px 8px;
 		background: none;
 		border: 0;
+		border-bottom: 1px solid var(--border-subtle);
+		border-radius: 3px;
 		font: inherit;
 		color: inherit;
 		text-align: left;
 		cursor: pointer;
+	}
+
+	.child-row:hover {
+		background: var(--bg-raised);
+	}
+
+	.child-key {
+		flex: 0 0 auto;
+		min-width: 64px;
+		color: var(--text-secondary);
+	}
+
+	.child-title {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	/* The lozenge sits in its own right-hand column so the stages line up. */
+	.child-row .child-stage {
+		margin-left: auto;
 	}
 
 	.events li {
