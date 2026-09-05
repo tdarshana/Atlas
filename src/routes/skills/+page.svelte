@@ -145,6 +145,13 @@
 		width: 220px;
 	}
 
+	/* The source filter is one short word; without a width the select stretches to
+	   whatever the row leaves it. */
+	.title-row :global(.dbm-select-wrap) {
+		width: 160px;
+		flex: 0 0 160px;
+	}
+
 	.pane {
 		flex: 1;
 		min-height: 0;
@@ -158,6 +165,10 @@
 		min-height: 0;
 		display: flex;
 		gap: 12px;
+	}
+
+	.split > :global(.empty) {
+		flex: 1;
 	}
 
 	.hint {

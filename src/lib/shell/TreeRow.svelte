@@ -100,8 +100,12 @@
 	}
 
 	.meta {
+		flex: 0 0 auto;
 		font-family: var(--font-mono);
 		font-size: 11px;
 		color: var(--text-tertiary);
+		/* A long status such as "Not determined" shortens the label; it never wraps
+		   under it. */
+		white-space: nowrap;
 	}
 </style>

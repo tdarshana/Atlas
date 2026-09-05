@@ -408,9 +408,11 @@
 					{#if draft}
 						<Input label="Name" bind:value={draft.name} data-testid="persona-name" />
 						<Input label="Role" bind:value={draft.role} data-testid="persona-role" />
-						<Input label="Summary" bind:value={draft.summary} data-testid="persona-summary" />
+						<div class="full">
+							<Input label="Summary" bind:value={draft.summary} data-testid="persona-summary" />
+						</div>
 
-						<div class="field">
+						<div class="field full">
 							<div class="field-head">
 								<span>Instructions</span>
 								{#if !instructionsEditing}
@@ -459,7 +461,7 @@
 						{@render picker('practices', 'Practices', practiceOptions)}
 						{@render picker('mcp_servers', 'MCP servers', serverOptions)}
 
-						<div class="field">
+						<div class="field full">
 							<div class="field-head"><span>Models</span></div>
 							<div class="models" data-testid="persona-models">
 								{#each CASES as c (c)}
@@ -475,7 +477,7 @@
 							</div>
 						</div>
 
-						<div class="field">
+						<div class="field full">
 							<div class="field-head"><span>Access</span></div>
 							<div class="access">
 								<Select
@@ -511,15 +513,17 @@
 							</div>
 						</div>
 
-						<Input
-							label="Tags"
-							hint="Comma separated"
-							mono
-							bind:value={draft.tags}
-							data-testid="persona-tags"
-						/>
+						<div class="full">
+							<Input
+								label="Tags"
+								hint="Comma separated"
+								mono
+								bind:value={draft.tags}
+								data-testid="persona-tags"
+							/>
+						</div>
 
-						<div class="actions">
+						<div class="actions full">
 							<Button
 								size="sm"
 								variant="primary"
@@ -635,6 +639,12 @@
 		gap: 12px;
 	}
 
+	/* The empty state fills the pane like the table does, so the detail stays docked at
+	   the right edge instead of sitting beside a content-sized box. */
+	.split > :global(.empty) {
+		flex: 1;
+	}
+
 	/* The table is drawn here rather than through the ds Table so each row can carry a
 	   test id; the measurements match the ds Table's 28px header and rows. */
 	.table-wrap {
@@ -746,8 +756,9 @@
 
 	.detail {
 		position: relative;
-		width: 420px;
-		flex: 0 0 420px;
+		width: 640px;
+		flex: 0 0 640px;
+		max-width: 70%;
 		display: flex;
 		flex-direction: column;
 		min-height: 0;
@@ -773,14 +784,23 @@
 		white-space: nowrap;
 	}
 
+	/* Two columns: name beside role, the four pickers two by two, and the wide fields
+	   (summary, instructions, models, access, tags, the actions) spanning both, so the
+	   editor reads as a form rather than a single tall scroll. */
 	.detail-body {
 		flex: 1;
 		min-height: 0;
 		overflow-y: auto;
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+		align-content: start;
+		gap: 10px 14px;
 		padding: 12px;
+	}
+
+	.detail-body > .full,
+	.detail-body > :global(.bad) {
+		grid-column: 1 / -1;
 	}
 
 	.field {
@@ -854,9 +874,9 @@
 
 	.models {
 		display: grid;
-		grid-template-columns: 90px 1fr;
+		grid-template-columns: 80px minmax(0, 1fr) 80px minmax(0, 1fr);
 		align-items: center;
-		gap: 4px 8px;
+		gap: 4px 10px;
 	}
 
 	.model-label {
@@ -867,7 +887,7 @@
 
 	.access {
 		display: grid;
-		grid-template-columns: repeat(3, 1fr);
+		grid-template-columns: repeat(3, minmax(0, 1fr));
 		gap: 8px;
 	}
 

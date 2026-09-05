@@ -113,9 +113,6 @@
 			roster is what atlas sync exports.
 			<a href="/projects/{id}/agents" data-testid="roster-sync-link">Sync now</a>
 		</p>
-		<Button size="sm" data-testid="roster-add" onclick={() => (adding = true)}>
-			Add from library…
-		</Button>
 	</div>
 
 	{#if personas.roster.length === 0 && !personas.rosterError}
@@ -123,7 +120,9 @@
 			title="This project has no personas yet"
 			hint="Use Add from library… to put one on the roster."
 		>
-			<Button size="sm" onclick={() => (adding = true)}>Add from library…</Button>
+			<Button size="sm" data-testid="roster-add-empty" onclick={() => (adding = true)}>
+				Add from library…
+			</Button>
 		</EmptyState>
 	{:else}
 		<div class="table" role="grid" data-testid="roster-table">

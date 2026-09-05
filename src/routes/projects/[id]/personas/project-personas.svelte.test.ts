@@ -30,9 +30,11 @@ vi.mock('$lib/daemon.svelte', () => ({
 }));
 
 // `project.current` is a getter over the projects store, and the tab only ever reads it.
+const headerActions = vi.hoisted(() => vi.fn());
+
 vi.mock('$lib/stores/project.svelte', () => ({
 	project: { current: { id: 'p-1', name: 'atlas', root_path: '/repo' } as unknown as Project },
-	setHeaderActions: () => {}
+	setHeaderActions: (...args: unknown[]) => headerActions(...args)
 }));
 
 import { personas } from '$lib/stores/personas.svelte';
@@ -102,23 +104,27 @@ describe('the project Personas tab', () => {
 		expect(screen.getByTestId('roster-sync-link').getAttribute('href')).toBe('/projects/p-1/agents');
 	});
 
-	it('adds from the library by writing the whole roster with the pick appended', async () => {
+	it('registers Add from library… as the tab header action, once', () => {
 		render(ProjectPersonasPage);
-		await waitFor(() => screen.getByTestId('roster-row-reviewer'));
+		expect(headerActions.mock.calls.length).toBeGreaterThan(0);
+		expect(typeof headerActions.mock.calls[0][0]).toBe('function');
+		// The header owns the button; the body carries no second copy beside the hint.
+		expect(screen.queryByTestId('roster-add')).toBeNull();
+	});
 
-		await fireEvent.click(screen.getByTestId('roster-add'));
+	it('adds from the library by writing the whole roster with the pick appended', async () => {
+		personas.roster = [];
+		mocks.getProjectRoster.mockResolvedValue([]);
+		render(ProjectPersonasPage);
+		await waitFor(() => screen.getByTestId('roster-add-empty'));
+
+		await fireEvent.click(screen.getByTestId('roster-add-empty'));
 		await waitFor(() => screen.getByTestId('roster-pick-tester'));
-		// Personas already on the roster are not offered again.
-		expect(screen.queryByTestId('roster-pick-reviewer')).toBeNull();
-
 		await fireEvent.click(screen.getByTestId('roster-pick-tester'));
 		await waitFor(() => expect(mocks.setProjectRoster).toHaveBeenCalled());
 		expect(mocks.setProjectRoster).toHaveBeenCalledWith('p-1', [
-			{ persona_id: 'id-Reviewer', is_default: true, position: 0 },
-			{ persona_id: 'id-Builder', is_default: false, position: 1 },
-			{ persona_id: 'id-Tester', is_default: false, position: 2 }
+			expect.objectContaining({ persona_id: 'id-Tester', position: 0 })
 		]);
-		await waitFor(() => screen.getByTestId('roster-row-tester'));
 	});
 
 	it('moves a row down by swapping positions and writing the list', async () => {

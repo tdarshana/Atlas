@@ -303,10 +303,13 @@
 		color: var(--text-primary);
 	}
 
+	/* The document list carries four columns and the preview one page, so the list
+	   takes the larger share; at 1.4:1 the title and path columns showed a few
+	   characters each beside a mostly empty preview. */
 	.panes {
 		flex: 1;
 		display: grid;
-		grid-template-columns: 1.4fr 1fr;
+		grid-template-columns: minmax(0, 2fr) minmax(320px, 1fr);
 		gap: 12px;
 		min-height: 0;
 	}

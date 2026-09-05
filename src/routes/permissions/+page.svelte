@@ -466,7 +466,11 @@
 	.actions {
 		display: flex;
 		align-items: center;
+		justify-content: flex-end;
 		gap: 6px;
+		/* Wide enough for Request plus Open settings, so the status badge before it sits
+		   at the same x on every row whether or not the row offers Request. */
+		flex: 0 0 190px;
 	}
 
 	.plugin .grants {
