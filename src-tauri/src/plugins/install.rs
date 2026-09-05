@@ -14,6 +14,11 @@ use crate::scratch::ScratchDir;
 /// A downloaded archive over this size is refused rather than extracted.
 const MAX_ARCHIVE_BYTES: u64 = 20 * 1024 * 1024;
 
+/// The most a downloaded archive may decompress to, and the most entries it may hold.
+/// A webview plugin is HTML, scripts and a few assets; either limit is far past that.
+const MAX_UNPACKED_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES: usize = 10_000;
+
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Validates the manifest at `src`, copies `src` into `<plugins_dir>/<id>` (replacing an
@@ -149,8 +154,25 @@ fn download_capped(url: &str) -> Result<Vec<u8>, String> {
 }
 
 fn extract_tar_gz(bytes: &[u8], dest: &Path) -> Result<(), String> {
-    let decoder = flate2::read::GzDecoder::new(bytes);
-    tar::Archive::new(decoder).unpack(dest).map_err(|e| e.to_string())
+    let decoder = flate2::read::GzDecoder::new(bytes).take(MAX_UNPACKED_BYTES + 1);
+    let mut archive = tar::Archive::new(decoder);
+    let unpacked = (|| -> Result<(), String> {
+        let mut count = 0usize;
+        for entry in archive.entries().map_err(|e| e.to_string())? {
+            count += 1;
+            if count > MAX_ARCHIVE_ENTRIES {
+                return Err(format!("The archive holds more than {MAX_ARCHIVE_ENTRIES} entries."));
+            }
+            entry.map_err(|e| e.to_string())?.unpack_in(dest).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })();
+    // Checked before the unpack result: a stream cut off by the cap fails inside `tar`
+    // with an unexpected EOF, and the cap is the reason worth reporting.
+    if archive.into_inner().limit() == 0 {
+        return Err(format!("The archive expands to more than the {} MiB limit.", MAX_UNPACKED_BYTES / (1024 * 1024)));
+    }
+    unpacked
 }
 
 /// The one directory a freshly extracted GitHub archive holds at its top level (a repo
@@ -159,6 +181,12 @@ fn extract_tar_gz(bytes: &[u8], dest: &Path) -> Result<(), String> {
 fn single_top_level_dir(dir: &Path) -> Result<PathBuf, String> {
     let entries: Vec<PathBuf> =
         std::fs::read_dir(dir).map_err(|e| e.to_string())?.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+/// Extracts the archive into `dest`, stopping at [`MAX_UNPACKED_BYTES`] of decompressed
+/// data or [`MAX_ARCHIVE_ENTRIES`] entries. [`MAX_ARCHIVE_BYTES`] caps only the download,
+/// and gzip reaches roughly 1000:1 on repetitive data, so without these a 20 MiB archive
+/// could write about 20 GB into the OS temp dir before the scratch dir was dropped.
+/// Entries are unpacked one at a time with `unpack_in`, which refuses a path that would
+/// land outside `dest`, the same check `Archive::unpack` runs.
     match entries.as_slice() {
         [only] if only.is_dir() => Ok(only.clone()),
         _ => Err("The archive did not contain a single top-level directory.".to_string()),
@@ -405,6 +433,65 @@ mod tests {
         let (owner, repo, git_ref) = parse_github_url("https://github.com/acme/hello-world/tree/v2").unwrap();
         assert_eq!((owner.as_str(), repo.as_str(), git_ref.as_str()), ("acme", "hello-world", "v2"));
     }
+    /// A gzip stream holding one tar entry of `size` zero bytes under `hello-world-main/`.
+    /// Zeros compress at roughly 1000:1, so the archive stays small however large the
+    /// entry claims to be, which is exactly the shape a disk-filling plugin would take.
+    fn build_zero_filled_archive(size: u64) -> Vec<u8> {
+        let mut gz_bytes = Vec::new();
+        {
+            let encoder = flate2::write::GzEncoder::new(&mut gz_bytes, flate2::Compression::fast());
+            let mut builder = tar::Builder::new(encoder);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(size);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, "hello-world-main/big.bin", std::io::repeat(0).take(size)).unwrap();
+            builder.into_inner().unwrap().finish().unwrap();
+        }
+        gz_bytes
+    }
+
+    /// SEC-4 (ATL-298). The download cap is on the compressed bytes; the decompressed
+    /// stream had none, so a small archive could write gigabytes into the OS temp dir
+    /// before the scratch dir was dropped. Extraction stops at `MAX_UNPACKED_BYTES` and
+    /// says so in a plain sentence instead of an `ENOSPC` from `tar`.
+    #[test]
+    fn an_archive_that_expands_past_the_cap_is_refused() {
+        let dest = scratch_dir("too-big");
+        let err = extract_tar_gz(&build_zero_filled_archive(MAX_UNPACKED_BYTES + 1024 * 1024), &dest).unwrap_err();
+        assert!(err.contains("expands to more than"), "{err}");
+        assert!(!err.contains("No space left"), "{err}");
+
+        let fine = scratch_dir("fits");
+        extract_tar_gz(&build_zero_filled_archive(1024), &fine).unwrap();
+        assert_eq!(std::fs::metadata(fine.join("hello-world-main/big.bin")).unwrap().len(), 1024);
+    }
+
+    /// An archive of `count` empty files under `hello-world-main/`.
+    fn build_many_entries_archive(count: usize) -> Vec<u8> {
+        let mut gz_bytes = Vec::new();
+        {
+            let encoder = flate2::write::GzEncoder::new(&mut gz_bytes, flate2::Compression::fast());
+            let mut builder = tar::Builder::new(encoder);
+            for n in 0..count {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(0);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder.append_data(&mut header, format!("hello-world-main/f{n}"), std::io::empty()).unwrap();
+            }
+            builder.into_inner().unwrap().finish().unwrap();
+        }
+        gz_bytes
+    }
+
+    #[test]
+    fn an_archive_with_too_many_entries_is_refused() {
+        let dest = scratch_dir("too-many");
+        let err = extract_tar_gz(&build_many_entries_archive(MAX_ARCHIVE_ENTRIES + 1), &dest).unwrap_err();
+        assert!(err.contains("more than"), "{err}");
+    }
+
 
     #[test]
     fn parse_github_url_rejects_a_non_github_url() {
