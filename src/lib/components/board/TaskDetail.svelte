@@ -1154,9 +1154,8 @@
 
 	.title-text {
 		margin: 0;
-		/* Lines up with the description box's own text, inset by its padding below,
-		   and with the Assignee/Labels inputs, whose text sits the same 8px in. */
-		padding-left: 8px;
+		/* Flush with the field labels, the stage lozenge and the description box below. */
+		padding-left: 0;
 		font-size: 15px;
 		font-weight: 600;
 		line-height: 1.3;
