@@ -14,6 +14,10 @@ pub struct Db {
     /// Every write announces itself here (see `Change`); the daemon's event stream
     /// subscribes. A send with no subscriber is not an error.
     changes: broadcast::Sender<Change>,
+    /// How many times `with_conn` has run, so a test can pin the query count of a
+    /// hot path such as `SettingsRepo::get_all`.
+    #[cfg(test)]
+    conn_uses: std::sync::atomic::AtomicUsize,
 }
 
 const MIGRATIONS: &[(i64, &str)] = &[(1, r#"
@@ -214,7 +218,7 @@ fn rename_workflow_docs(c: &Connection) -> Result<()> {
 impl Db {
     pub fn open(path: &Path) -> Result<Db> {
         if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
-        let db = Db { conn: Mutex::new(Connection::open(path)?), changes: broadcast::channel(CHANGE_BUFFER).0 };
+        let db = Db { conn: Mutex::new(Connection::open(path)?), changes: broadcast::channel(CHANGE_BUFFER).0, #[cfg(test)] conn_uses: Default::default() };
         db.migrate()?;
         // A migration's DDL must never sit in the write-ahead log: DuckDB has refused
         // to replay a log holding `alter table ... add column` after an unclean stop,
@@ -229,7 +233,7 @@ impl Db {
         self.with_conn(|c| { c.execute_batch("checkpoint")?; Ok(()) })
     }
     pub fn open_in_memory() -> Result<Db> {
-        let db = Db { conn: Mutex::new(Connection::open_in_memory()?), changes: broadcast::channel(CHANGE_BUFFER).0 };
+        let db = Db { conn: Mutex::new(Connection::open_in_memory()?), changes: broadcast::channel(CHANGE_BUFFER).0, #[cfg(test)] conn_uses: Default::default() };
         db.migrate()?; Ok(db)
     }
     /// A receiver of every change written from now on.
@@ -243,9 +247,14 @@ impl Db {
     /// into a "poisoned lock" error. DuckDB itself is unharmed by a panic in the
     /// closure, so recovering the guard is safe.
     pub fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        #[cfg(test)]
+        self.conn_uses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let guard = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         f(&guard)
     }
+    /// The number of `with_conn` calls so far.
+    #[cfg(test)]
+    pub(crate) fn conn_uses(&self) -> usize { self.conn_uses.load(std::sync::atomic::Ordering::Relaxed) }
     pub fn schema_version(&self) -> Result<i64> {
         self.with_conn(|c| {
             let exists: i64 = c.query_row("select count(*) from information_schema.tables where table_name='schema_version'", [], |r| r.get(0))?;
@@ -255,7 +264,7 @@ impl Db {
     }
     #[cfg(test)]
     pub(crate) fn open_without_checkpoint(path: &Path) -> Result<Db> {
-        let db = Db { conn: Mutex::new(Connection::open(path)?), changes: broadcast::channel(CHANGE_BUFFER).0 };
+        let db = Db { conn: Mutex::new(Connection::open(path)?), changes: broadcast::channel(CHANGE_BUFFER).0, #[cfg(test)] conn_uses: Default::default() };
         db.migrate()?;
         Ok(db)
     }

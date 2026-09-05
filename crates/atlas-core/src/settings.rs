@@ -562,10 +562,22 @@ impl<'a> SettingsRepo<'a> {
     /// Every known key, present even when unset (as `Value::Null`); `extraction.api_key`
     /// is masked to `"***"` when it holds a non-empty value.
     pub fn get_all(&self) -> Result<Map<String, Value>> {
-        let mut out = Map::new();
-        for key in SETTING_KEYS {
-            out.insert((*key).to_string(), self.get_raw(key)?.unwrap_or(Value::Null));
-        }
+        // One scan of the table rather than one query per key: this runs on every
+        // MCP tool call. Keys not in `SETTING_KEYS` (left by a removed setting) are
+        // dropped, and unset ones are filled in as null.
+        let mut out: Map<String, Value> = SETTING_KEYS.iter().map(|k| ((*k).to_string(), Value::Null)).collect();
+        self.db.with_conn(|c| {
+            let mut st = c.prepare("select key, value::text from settings")?;
+            let mut rows = st.query([])?;
+            while let Some(r) = rows.next()? {
+                let key: String = r.get(0)?;
+                if let Some(slot) = out.get_mut(&key) {
+                    let text: String = r.get(1)?;
+                    *slot = serde_json::from_str(&text)?;
+                }
+            }
+            Ok(())
+        })?;
         if out.get(API_KEY).and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()) {
             out.insert(API_KEY.to_string(), Value::String(MASKED.to_string()));
         }
@@ -861,6 +873,24 @@ mod tests {
         repo.set_many(&values, "t").unwrap();
         assert_eq!(repo.get_all().unwrap().get(API_KEY), Some(&Value::String(MASKED.into())));
         assert_eq!(repo.get_raw(API_KEY).unwrap(), Some(Value::String("sk-real".into())));
+    }
+
+    /// PERF-9: `get_all` is read on every MCP tool call, so it must cost one query,
+    /// not one per key. A row for a key this build no longer knows (left by a removed
+    /// setting) stays out of the map.
+    #[test]
+    fn get_all_is_one_query_and_ignores_unknown_rows() {
+        let db = Db::open_in_memory().unwrap();
+        let repo = SettingsRepo::new(&db);
+        repo.set_many(&Map::from_iter([("extraction.model".to_string(), Value::String("x".into()))]), "t").unwrap();
+        db.with_conn(|c| Ok(c.execute("insert into settings values ('legacy.gone', '1')", [])?)).unwrap();
+
+        let before = db.conn_uses();
+        let all = repo.get_all().unwrap();
+        assert_eq!(db.conn_uses() - before, 1, "get_all should take the connection once");
+        assert_eq!(all.len(), SETTING_KEYS.len());
+        assert_eq!(all.get("extraction.model"), Some(&Value::String("x".into())));
+        assert!(!all.contains_key("legacy.gone"));
     }
 
     /// A masked value sent back through `set_many` (the shape a GET->edit->PUT round
