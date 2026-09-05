@@ -751,6 +751,7 @@ mod tests {
                 memories_pending: 3,
                 embedding: "off".into(),
                 port: Some(7433),
+                token_sha256: None,
             }),
             ..Default::default()
         };

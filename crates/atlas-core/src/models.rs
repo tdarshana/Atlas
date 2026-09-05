@@ -107,6 +107,9 @@ pub struct StatusReport {
     pub memories_pending: i64,
     pub embedding: String,
     pub port: Option<u16>,
+    /// Lower-case hex SHA-256 of the daemon token (SEC-5). Only the daemon sets it; a
+    /// local backend has no token and leaves it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub token_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, Default)]

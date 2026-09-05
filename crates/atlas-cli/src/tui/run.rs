@@ -20,8 +20,8 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 /// How often the loop wakes on its own. Nothing but a redraw depends on it.
 const TICK: Duration = Duration::from_millis(250);
 
-pub async fn run(port: u16) -> anyhow::Result<()> {
-    let mut client = RemoteBackend::new(port);
+pub async fn run(paths: &atlas_core::paths::AtlasPaths, port: u16) -> anyhow::Result<()> {
+    let mut client = RemoteBackend::new(paths, port);
     // Board routes read the actor from a header, so it belongs on the client.
     client.actor = ACTOR.to_string();
     let backend = Arc::new(client);

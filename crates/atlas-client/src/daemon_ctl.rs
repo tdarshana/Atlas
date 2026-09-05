@@ -4,8 +4,48 @@ use atlas_core::paths::AtlasPaths;
 
 pub fn daemon_info(paths: &AtlasPaths) -> Option<serde_json::Value> { std::fs::read_to_string(paths.daemon_file()).ok().and_then(|s| serde_json::from_str(&s).ok()) }
 
-pub async fn is_up(port: u16) -> bool {
-    reqwest::Client::builder().timeout(Duration::from_millis(500)).build().unwrap().get(format!("http://127.0.0.1:{port}/api/v1/status")).send().await.map(|r| r.status().is_success()).unwrap_or(false)
+/// What `daemon.json` says about the running daemon: where it listens and the secret
+/// every `/api/v1` request must carry (SEC-5). `token` is `None` for a file an older
+/// daemon wrote, which clients treat as no daemon at all.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct DaemonInfo {
+    pub port: u16,
+    #[serde(default)] pub token: Option<String>,
+}
+
+/// `daemon.json` parsed, or `None` when there is no file or it names no port.
+pub fn read_daemon_info(paths: &AtlasPaths) -> Option<DaemonInfo> {
+    std::fs::read_to_string(paths.daemon_file()).ok().and_then(|s| serde_json::from_str(&s).ok())
+}
+
+/// The daemon token from `daemon.json`, if the file has one.
+pub fn daemon_token(paths: &AtlasPaths) -> Option<String> { read_daemon_info(paths)?.token }
+
+/// The header the token travels in.
+pub const TOKEN_HEADER: &str = "X-Atlas-Token";
+
+/// Lower-case hex SHA-256 of `token`, the form the daemon's `status` reports it in.
+pub fn token_sha256(token: &str) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(token.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Whether atlasd, and not just something, answers on `port`: the token from
+/// `daemon.json` goes out in `X-Atlas-Token` and the answer must be a 2xx whose
+/// `token_sha256` is that token's hash. A 2xx without the hash is an impostor or an older
+/// daemon, and either way not one the caller may hand its data to; no token on disk means
+/// nothing to present, so the answer is "not up" and the caller spawns a fresh daemon.
+pub async fn is_up(paths: &AtlasPaths, port: u16) -> bool {
+    let Some(token) = daemon_token(paths) else { return false };
+    is_up_with(port, &token).await
+}
+
+async fn is_up_with(port: u16, token: &str) -> bool {
+    let Ok(client) = reqwest::Client::builder().timeout(Duration::from_millis(500)).build() else { return false };
+    let Ok(resp) = client.get(format!("http://127.0.0.1:{port}/api/v1/status")).header(TOKEN_HEADER, token).send().await else { return false };
+    if !resp.status().is_success() { return false; }
+    let Ok(body) = resp.json::<serde_json::Value>().await else { return false };
+    body["token_sha256"].as_str() == Some(token_sha256(token).as_str())
 }
 
 fn atlasd_path() -> PathBuf {
@@ -40,7 +80,7 @@ const LIVE_START_TIMEOUT: Duration = Duration::from_secs(10);
 async fn wait_for_daemon(paths: &AtlasPaths, port: u16, timeout: Duration, step: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
-        if is_up(port).await || daemon_info(paths).is_some() { return true; }
+        if is_up(paths, port).await || daemon_info(paths).is_some() { return true; }
         if Instant::now() >= deadline { return false; }
         tokio::time::sleep(step).await;
     }
@@ -76,10 +116,10 @@ fn rotate_log(paths: &AtlasPaths) -> std::io::Result<()> {
 }
 
 pub async fn ensure_daemon_with(paths: &AtlasPaths, port: u16, atlasd: Option<PathBuf>) -> anyhow::Result<u16> {
-    if is_up(port).await { return Ok(port); }
+    if is_up(paths, port).await { return Ok(port); }
     if needs_start_race_wait(paths) {
         wait_for_daemon(paths, port, START_RACE_TIMEOUT, START_RACE_STEP).await;
-        if is_up(port).await { return Ok(port); }
+        if is_up(paths, port).await { return Ok(port); }
     }
     // `daemon.json` lands before atlasd serves, so a live pid in it means a start is
     // in flight: wait for that port instead of spawning a competitor that would only
@@ -89,7 +129,7 @@ pub async fn ensure_daemon_with(paths: &AtlasPaths, port: u16, atlasd: Option<Pa
         if is_atlasd(pid) {
             let deadline = Instant::now() + LIVE_START_TIMEOUT;
             while Instant::now() < deadline {
-                if is_up(port).await { return Ok(port); }
+                if is_up(paths, port).await { return Ok(port); }
                 tokio::time::sleep(START_RACE_STEP).await;
             }
         }
@@ -109,7 +149,7 @@ pub async fn ensure_daemon_with(paths: &AtlasPaths, port: u16, atlasd: Option<Pa
         // Both signals, not just the port: `daemon.json` is written just before atlasd
         // starts serving (see its main), but a caller reading it right after this
         // returns (`daemon stop`, for one) must not race the write.
-        if is_up(port).await && daemon_info(paths).is_some() { return Ok(port); }
+        if is_up(paths, port).await && daemon_info(paths).is_some() { return Ok(port); }
         // An atlasd that dies on startup (port taken, DB locked, bad home) must not cost
         // the caller the full 30 s wait, so notice the dead child and report it at once.
         if let Some(status) = child.try_wait()? {
@@ -135,7 +175,7 @@ pub async fn stop_daemon(paths: &AtlasPaths) -> anyhow::Result<bool> {
     let Some(info) = daemon_info(paths) else { return Ok(false) };
     let stale = || { let _ = std::fs::remove_file(paths.daemon_file()); Ok(false) };
     let (Some(pid), Some(port)) = (info["pid"].as_u64(), info["port"].as_u64().and_then(|p| u16::try_from(p).ok())) else { return stale() };
-    if !is_up(port).await { return stale() }
+    if !is_up(paths, port).await { return stale() }
     #[cfg(unix)] {
         if !is_atlasd(pid) { return stale() }
         let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
@@ -156,6 +196,62 @@ pub async fn stop_daemon(paths: &AtlasPaths) -> anyhow::Result<bool> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// A one-shot HTTP server on an ephemeral port that answers every request with
+    /// `200` and `body`, standing in for whatever is listening where atlasd should be.
+    /// Records the request head so a test can see what the client sent.
+    fn stub_server(body: &'static str) -> (u16, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut head = [0u8; 4096];
+                let n = stream.read(&mut head).unwrap_or(0);
+                let _ = tx.send(String::from_utf8_lossy(&head[..n]).into_owned());
+                let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        (port, rx)
+    }
+
+    fn home_with_token(token: &str) -> (tempfile::TempDir, AtlasPaths) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AtlasPaths::at(dir.path().join("home"));
+        paths.ensure().unwrap();
+        std::fs::write(paths.daemon_file(), format!(r#"{{"pid":1,"port":1,"started_at":"x","token":"{token}"}}"#)).unwrap();
+        (dir, paths)
+    }
+
+    /// SEC-5: a 2xx on the port is not enough. `is_up` sends the token from `daemon.json`
+    /// and believes only an answer carrying that token's hash; a listener that says 200
+    /// without it (an impostor, or an older atlasd) is "not up", and so is a port behind a
+    /// `daemon.json` with no token to present.
+    #[tokio::test]
+    async fn is_up_trusts_only_an_answer_that_proves_the_token() {
+        let (_dir, paths) = home_with_token("secret-token");
+
+        let (impostor, seen) = stub_server(r#"{"version":"9.9.9","port":1}"#);
+        assert!(!is_up(&paths, impostor).await, "a 200 without token_sha256 must not count as atlasd");
+        let head = seen.recv().unwrap();
+        assert!(head.to_ascii_lowercase().contains("x-atlas-token: secret-token"), "the token was not sent: {head}");
+
+        let (wrong, _) = stub_server(r#"{"token_sha256":"0000"}"#);
+        assert!(!is_up(&paths, wrong).await, "a hash of some other token must not count");
+
+        // `token_sha256` is a static, so the expected body is built before the server.
+        let expected: &'static str = Box::leak(format!(r#"{{"token_sha256":"{}"}}"#, token_sha256("secret-token")).into_boxed_str());
+        let (real, _) = stub_server(expected);
+        assert!(is_up(&paths, real).await, "the right hash is the daemon");
+
+        let bare_dir = tempfile::tempdir().unwrap();
+        let bare_paths = AtlasPaths::at(bare_dir.path().join("home"));
+        bare_paths.ensure().unwrap();
+        std::fs::write(bare_paths.daemon_file(), r#"{"pid":1,"port":1,"started_at":"x"}"#).unwrap();
+        assert!(!is_up(&bare_paths, real).await, "no token on disk: nothing to present, so not up");
+    }
 
     /// The desktop app's sidecar depends on `ensure_daemon_with` spawning the path it is
     /// handed rather than searching for one, so point it at a fake atlasd in a temp dir and

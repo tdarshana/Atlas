@@ -1,5 +1,6 @@
 //! The board from the command line, against a real daemon.
 
+#[allow(dead_code)]
 mod common;
 
 use common::TestDaemon;

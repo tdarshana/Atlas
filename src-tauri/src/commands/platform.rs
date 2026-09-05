@@ -597,13 +597,12 @@ pub async fn vault_list(vault: tauri::State<'_, VaultState>) -> Result<Vec<Strin
     .await
 }
 
-/// The daemon's base API url, resolved fresh from `daemon.json` rather than cached: the
-/// port can change across a restart. Mirrors `notify_poller::base_url`.
-fn daemon_base_url() -> Result<String, String> {
-    let port = daemon_ctl::daemon_info(&AtlasPaths::discover())
-        .and_then(|v| v.get("port")?.as_u64())
-        .ok_or_else(|| "The daemon is not running.".to_string())?;
-    Ok(format!("http://127.0.0.1:{port}/api/v1"))
+/// The daemon's base API url and token (SEC-5), resolved fresh from `daemon.json` rather
+/// than cached: both change across a restart. Mirrors `notify_poller::daemon_target`.
+fn daemon_base_url() -> Result<(String, String), String> {
+    let info = daemon_ctl::read_daemon_info(&AtlasPaths::discover()).ok_or_else(|| "The daemon is not running.".to_string())?;
+    let token = info.token.ok_or_else(|| "The daemon wrote no token.".to_string())?;
+    Ok((format!("http://127.0.0.1:{}/api/v1", info.port), token))
 }
 
 /// Sends the vault's stored key for `scope` back to the daemon: `"global"` writes
@@ -623,8 +622,11 @@ pub async fn vault_reapply(vault: tauri::State<'_, VaultState>, scope: String) -
             .ok_or_else(|| format!("No key stored for '{scope}'."))?;
         String::from_utf8(raw).map_err(|e| e.to_string())?
     };
-    let base = daemon_base_url()?;
-    let http = reqwest::Client::builder().timeout(Duration::from_secs(5)).build().map_err(|e| e.to_string())?;
+    let (base, token) = daemon_base_url()?;
+    // The token rides on the client so all three requests below carry it.
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(daemon_ctl::TOKEN_HEADER, token.parse().map_err(|_| "The daemon token is malformed.".to_string())?);
+    let http = reqwest::Client::builder().timeout(Duration::from_secs(5)).default_headers(headers).build().map_err(|e| e.to_string())?;
     if scope == "global" {
         let resp = http
             .put(format!("{base}/settings"))

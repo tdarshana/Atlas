@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 mod common;
 
 use std::sync::Arc;
@@ -23,7 +24,7 @@ async fn perform_maps_effects_onto_the_backend() {
     let out = daemon.cmd().args(["daemon", "start"]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 
-    let backend = Arc::new(RemoteBackend::new(daemon.port));
+    let backend = Arc::new(RemoteBackend::new(&atlas_core::paths::AtlasPaths::at(daemon.home.path()), daemon.port));
     backend
         .remember(
             NewMemory {

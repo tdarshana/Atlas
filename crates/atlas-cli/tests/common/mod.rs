@@ -92,6 +92,20 @@ impl TestDaemon {
         self.kill_leftover();
     }
 
+    /// An HTTP client for the daemon this harness started, carrying the token its
+    /// `daemon.json` holds (SEC-5) the way the CLI itself does. Call it once the daemon
+    /// is up; before that there is no file and the client sends no token.
+    pub fn client(&self) -> reqwest::Client {
+        let mut headers = reqwest::header::HeaderMap::new();
+        let token = std::fs::read_to_string(self.home.path().join("daemon.json")).ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v["token"].as_str().map(str::to_string));
+        if let Some(value) = token.and_then(|t| t.parse().ok()) {
+            headers.insert("X-Atlas-Token", value);
+        }
+        reqwest::Client::builder().default_headers(headers).build().unwrap()
+    }
+
     /// The fallback for a daemon that `daemon stop` could not reach: signal the
     /// pid `daemon.json` names, but only once `ps` agrees it is still an atlasd.
     /// The file outlives a crash, so the pid in it may have been recycled.

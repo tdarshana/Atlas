@@ -10,6 +10,8 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+# SEC-5: `is_up` checks `status.token_sha256` against the token in `daemon.json`.
+sha2 = "0.10"
 async-trait.workspace = true
 reqwest.workspace = true
 chrono.workspace = true

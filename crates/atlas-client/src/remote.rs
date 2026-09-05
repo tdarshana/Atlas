@@ -52,14 +52,30 @@ impl RemoteBackend {
         *self.client.persona.lock().unwrap_or_else(|e| e.into_inner()) = slug;
     }
 
+    /// A client for the daemon on `port`, presenting the token `daemon.json` under
+    /// `paths` holds (SEC-5) on every request. Read once, here: the token lives as long
+    /// as the daemon that minted it, and a client outliving that daemon is talking to a
+    /// new one it must reconnect to anyway. No file or no token means no header, and the
+    /// daemon answers 401.
+    pub fn new(paths: &atlas_core::paths::AtlasPaths, port: u16) -> Self {
+        Self::with_token(port, crate::daemon_ctl::daemon_token(paths))
+    }
+
+    /// A client that sends `token` as it is given, for tests and for callers that read
+    /// `daemon.json` themselves.
+    ///
     /// A request deadline matters because `atlas ingest --hook-stdin` runs inside
     /// someone else's turn: a daemon that accepts the connection and then never
     /// answers (a lock it cannot take, a wedged worker) must not hold the turn open.
     /// 30 s is well past any healthy call and well short of a stall a user would sit
     /// through. `Client::builder` only fails on a bad TLS or resolver setup, which a
     /// loopback client has none of, so the default is a sound fallback.
-    pub fn new(port: u16) -> Self {
-        let inner = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_default();
+    pub fn with_token(port: u16, token: Option<String>) -> Self {
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(value) = token.as_deref().and_then(|t| t.parse().ok()) {
+            headers.insert(crate::daemon_ctl::TOKEN_HEADER, value);
+        }
+        let inner = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).default_headers(headers).build().unwrap_or_default();
         Self { base: format!("http://127.0.0.1:{port}/api/v1"), client: Http { inner, persona: Default::default() }, actor: "cli".into() }
     }
     async fn handle<T: serde::de::DeserializeOwned>(r: reqwest::Response) -> Result<T> {
@@ -764,7 +780,7 @@ mod tests {
     /// made before `set_persona` sees the change too.
     #[test]
     fn set_persona_stamps_every_later_request_until_cleared() {
-        let b = RemoteBackend::new(1);
+        let b = RemoteBackend::with_token(1, None);
         let twin = b.clone();
         let header = |req: reqwest::RequestBuilder| req.build().unwrap().headers().get("x-atlas-persona").map(|v| v.to_str().unwrap().to_string());
         assert_eq!(header(b.client.get("http://127.0.0.1:1/x")), None);

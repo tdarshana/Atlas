@@ -68,7 +68,7 @@ async fn ingest(args: IngestArgs, paths: &AtlasPaths, port: u16) -> anyhow::Resu
     // The daemon's working directory is not the caller's, so the root is resolved
     // here; an unknown root is mapped to global memories by the worker.
     let root = super::abs_path(args.project.or(cwd))?;
-    let backend = RemoteBackend::new(daemon_ctl::ensure_daemon(paths, port).await?);
+    let backend = RemoteBackend::new(paths, daemon_ctl::ensure_daemon(paths, port).await?);
     match backend.ingest_transcript(text, args.tool, Some(root)).await {
         Ok(id) => println!("queued job {id}"),
         // "Not configured" is the one failure worth naming plainly rather than as an

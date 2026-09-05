@@ -99,7 +99,19 @@ function query(params: Record<string, string | null | undefined>): string {
 }
 
 export class AtlasApi {
-	constructor(public baseUrl: string) {}
+	/** `token` is the daemon secret (SEC-5); every request goes out with it in
+	 * `X-Atlas-Token`. Empty means none is known, and the daemon will answer 401. */
+	constructor(
+		public baseUrl: string,
+		private token: string = ''
+	) {}
+
+	/** The headers every request starts from: `Accept`, plus the token when there is one. */
+	private headers(extra?: Record<string, string>): Record<string, string> {
+		const h: Record<string, string> = { Accept: 'application/json', ...extra };
+		if (this.token) h['X-Atlas-Token'] = this.token;
+		return h;
+	}
 
 	// ---- memories ----
 
@@ -559,7 +571,7 @@ export class AtlasApi {
 		try {
 			res = await fetch(`${this.baseUrl}/api/v1/extraction/test${query({ project_id: projectId })}`, {
 				method: 'POST',
-				headers: { Accept: 'application/json' }
+				headers: this.headers()
 			});
 		} catch (e) {
 			throw new ApiError(e instanceof Error ? e.message : String(e), 0);
@@ -716,7 +728,7 @@ export class AtlasApi {
 	private async text(method: string, path: string): Promise<string> {
 		let res: Response;
 		try {
-			res = await fetch(`${this.baseUrl}${path}`, { method });
+			res = await fetch(`${this.baseUrl}${path}`, { method, headers: this.headers() });
 		} catch (e) {
 			throw new ApiError(e instanceof Error ? e.message : String(e), 0);
 		}
@@ -731,7 +743,7 @@ export class AtlasApi {
 		body?: unknown,
 		extra?: Record<string, string>
 	): Promise<T> {
-		const headers: Record<string, string> = { Accept: 'application/json', ...extra };
+		const headers = this.headers(extra);
 		if (body !== undefined) headers['Content-Type'] = 'application/json';
 
 		let res: Response;

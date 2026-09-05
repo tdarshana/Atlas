@@ -59,17 +59,16 @@ pub fn spawn<R: Runtime>(app: AppHandle<R>) {
     });
 }
 
-/// The daemon's base API url, read fresh from `daemon.json` on every tick rather than
-/// cached: the port can change across a restart, and this is the same file the CLI and
-/// the `daemon_ensure` command already trust for it.
-fn base_url() -> Option<String> {
-    let info = daemon_ctl::daemon_info(&AtlasPaths::discover())?;
-    let port = info.get("port")?.as_u64()?;
-    Some(format!("http://127.0.0.1:{port}/api/v1"))
+/// The daemon's base API url and token (SEC-5), read fresh from `daemon.json` on every
+/// tick rather than cached: the port and the token both change across a restart, and
+/// this is the same file the CLI and the `daemon_ensure` command already trust for them.
+fn daemon_target() -> Option<(String, String)> {
+    let info = daemon_ctl::read_daemon_info(&AtlasPaths::discover())?;
+    Some((format!("http://127.0.0.1:{}/api/v1", info.port), info.token?))
 }
 
-async fn get_json(client: &reqwest::Client, url: &str) -> Option<serde_json::Value> {
-    let resp = client.get(url).send().await.ok()?;
+async fn get_json(client: &reqwest::Client, url: &str, token: &str) -> Option<serde_json::Value> {
+    let resp = client.get(url).header(daemon_ctl::TOKEN_HEADER, token).send().await.ok()?;
     if !resp.status().is_success() {
         return None;
     }
@@ -93,11 +92,11 @@ fn mark_unreachable<R: Runtime>(app: &AppHandle<R>, state: &mut State) {
 
 async fn tick<R: Runtime>(app: &AppHandle<R>, client: &reqwest::Client, state: &mut State) {
     let now = chrono::Utc::now();
-    let Some(base) = base_url() else {
+    let Some((base, token)) = daemon_target() else {
         mark_unreachable(app, state);
         return;
     };
-    let Some(settings) = get_json(client, &format!("{base}/settings")).await else {
+    let Some(settings) = get_json(client, &format!("{base}/settings"), &token).await else {
         mark_unreachable(app, state);
         return;
     };
@@ -113,7 +112,7 @@ async fn tick<R: Runtime>(app: &AppHandle<R>, client: &reqwest::Client, state: &
     state.notify_daemon_errors = flag("ui.notify.daemon_errors");
 
     if flag("ui.notify.review_pending") {
-        if let Some(status) = get_json(client, &format!("{base}/status")).await {
+        if let Some(status) = get_json(client, &format!("{base}/status"), &token).await {
             let pending = status.get("memories_pending").and_then(|v| v.as_i64()).unwrap_or(0);
             // `None` means this is the first successful read (of the app's life, or
             // since the toggle was last turned on): seed the baseline rather than
@@ -135,9 +134,9 @@ async fn tick<R: Runtime>(app: &AppHandle<R>, client: &reqwest::Client, state: &
     if flag("ui.notify.workflow_runs") {
         let since_rfc3339 = state.since.to_rfc3339();
         let url = format!("{base}/runs?since={}", urlencoding_light(&since_rfc3339));
-        if let Some(serde_json::Value::Array(runs)) = get_json(client, &url).await {
+        if let Some(serde_json::Value::Array(runs)) = get_json(client, &url, &token).await {
             if !runs.is_empty() {
-                let workflows = get_json(client, &format!("{base}/workflows")).await;
+                let workflows = get_json(client, &format!("{base}/workflows"), &token).await;
                 show(app, &workflow_runs_summary(&runs, workflows.as_ref()));
             }
             state.since = now;

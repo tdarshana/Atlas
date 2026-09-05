@@ -24,6 +24,10 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+# SEC-5: the daemon token is drawn from the OS and published as a SHA-256 in `status`.
+# Both versions are already in the lock file.
+getrandom = "0.3"
+sha2 = "0.10"
 
 [dev-dependencies]
 reqwest.workspace = true

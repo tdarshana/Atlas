@@ -154,16 +154,59 @@ fn is_loopback_origin(origin: &str) -> bool {
     match origin.strip_prefix("http://") { Some(rest) => !rest.contains('/') && is_loopback_host(rest), None => false }
 }
 
-/// The daemon has no authentication, so it must not be reachable from a web page that
-/// happens to be open in the user's browser: reject any cross-origin request, and any
-/// request whose `Host` is a name pointed at 127.0.0.1 from outside (DNS rebinding).
+/// The header every `/api/v1` request carries the daemon token in (SEC-5).
+pub const TOKEN_HEADER: &str = "x-atlas-token";
+
+/// 32 random bytes as lower-case hex: the secret `daemon.json` hands to clients.
+pub fn mint_token() -> anyhow::Result<String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("could not draw a daemon token: {e}"))?;
+    Ok(hex(&bytes))
+}
+
+/// Lower-case hex SHA-256 of `token`, the form `status` publishes so a client holding
+/// the token can check who is on the port without the token itself going over the wire
+/// twice.
+pub fn token_sha256(token: &str) -> String {
+    use sha2::Digest;
+    hex(&sha2::Sha256::digest(token.as_bytes()))
+}
+
+fn hex(bytes: &[u8]) -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() }
+
+/// The two routes a browser cannot put a header on: `EventSource` and `WebSocket` take
+/// a URL and nothing else, so these alone may carry the token as `?token=`.
+const QUERY_TOKEN_PATHS: &[&str] = &["/api/v1/events", "/api/v1/mcp/plugin-channel"];
+
+/// Whether `req` presents the daemon token: in `X-Atlas-Token`, or in `?token=` on one
+/// of `QUERY_TOKEN_PATHS`. A preflight passes without one, since a browser never puts
+/// the header on an `OPTIONS` and the CORS layer behind this guard answers it with
+/// nothing a handler would.
+fn token_ok(req: &Request, token: &str) -> bool {
+    if *req.method() == Method::OPTIONS { return true; }
+    if let Some(v) = req.headers().get(TOKEN_HEADER) { return v.to_str().is_ok_and(|v| v == token); }
+    if !QUERY_TOKEN_PATHS.contains(&req.uri().path()) { return false; }
+    req.uri().query().is_some_and(|q| q.split('&').any(|pair| pair.strip_prefix("token=") == Some(token)))
+}
+
+/// Two checks, in order. The token (SEC-5): every `/api/v1` route needs the secret from
+/// `daemon.json`, so a process that cannot read that file, whatever account or page it
+/// runs as, gets 401 before any handler or the origin logic below sees the request.
+/// `/mcp` is rmcp's own surface and is outside it.
+///
+/// Then the browser guard: the daemon must not be reachable from a web page that happens
+/// to be open in the user's browser, so reject any cross-origin request, and any request
+/// whose `Host` is a name pointed at 127.0.0.1 from outside (DNS rebinding).
 ///
 /// A loopback origin outside `CORS_ORIGINS` (a dev server on some other port) may use
 /// safe methods only. It never gets a CORS preflight approved, so the one unsafe request
 /// it can still produce is a simple one, such as an HTML form posted at a bodiless
 /// side-effect route, which the browser sends with no preflight and runs even though
 /// the page cannot read the answer.
-async fn guard(req: Request, next: Next) -> Response {
+async fn guard(State(s): State<AppState>, req: Request, next: Next) -> Response {
+    if req.uri().path().starts_with("/api/v1") && !token_ok(&req, &s.token) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "unauthorized"}))).into_response();
+    }
     let allowed = {
         let h = req.headers();
         let safe = matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
@@ -175,8 +218,8 @@ async fn guard(req: Request, next: Next) -> Response {
     if allowed { next.run(req).await } else { (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "forbidden origin"}))).into_response() }
 }
 
-/// Wrap a whole app, `/mcp` included, in the loopback guard.
-pub fn guard_loopback(app: Router) -> Router { app.layer(middleware::from_fn(guard)) }
+/// Wrap a whole app, `/mcp` included, in the token and loopback guard.
+pub fn guard_loopback(app: Router, state: AppState) -> Router { app.layer(middleware::from_fn_with_state(state, guard)) }
 
 /// The only origins allowed to *read* a response: the two the Tauri webview sends
 /// (`tauri://localhost` on WKWebView/wry, `http://tauri.localhost` on WebView2) and the
@@ -197,7 +240,7 @@ pub fn cors_layer() -> CorsLayer {
             origin.to_str().is_ok_and(is_cors_origin)
         }))
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE, Method::OPTIONS])
-        .allow_headers([header::CONTENT_TYPE, header::ACCEPT, header::HeaderName::from_static("x-atlas-actor")])
+        .allow_headers([header::CONTENT_TYPE, header::ACCEPT, header::HeaderName::from_static("x-atlas-actor"), header::HeaderName::from_static(TOKEN_HEADER)])
         .allow_credentials(false)
         .max_age(std::time::Duration::from_secs(600))
 }
@@ -445,7 +488,13 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn status(State(s): State<AppState>) -> Result<Json<StatusReport>, ApiError> { Ok(Json(s.backend.status().await?)) }
+/// `GET /api/v1/status`, plus `token_sha256` (SEC-5): the hash of the token in
+/// `daemon.json`, so a client that read the file can tell this daemon from an impostor.
+async fn status(State(s): State<AppState>) -> Result<Json<StatusReport>, ApiError> {
+    let mut report = s.backend.status().await?;
+    report.token_sha256 = Some(token_sha256(&s.token));
+    Ok(Json(report))
+}
 
 /// `GET /api/v1/events`: a server-sent event per write, as it lands, so a client keeps
 /// what it shows in step without polling. Each event is named by its entity (`task`,

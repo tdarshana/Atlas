@@ -19,7 +19,8 @@ import {
 import type { Manifest, Permission, PluginInfo, ToolContribution } from './types';
 
 vi.mock('$lib/daemon.svelte', () => ({
-	baseUrl: () => 'http://127.0.0.1:7433'
+	baseUrl: () => 'http://127.0.0.1:7433',
+	tokenQuery: (token?: string) => (token ? `?token=${token}` : '')
 }));
 
 const READY_COUNT: ToolContribution = {
@@ -133,6 +134,13 @@ afterEach(() => {
 describe('channelUrl', () => {
 	it('is the daemon base with the ws scheme and the channel path', () => {
 		expect(channelUrl('http://127.0.0.1:7433')).toBe('ws://127.0.0.1:7433/api/v1/mcp/plugin-channel');
+	});
+
+	// SEC-5: a WebSocket cannot carry a header, so the daemon token rides in the query.
+	it('carries the daemon token as a query parameter', () => {
+		expect(channelUrl('http://127.0.0.1:7433', 'secret')).toBe(
+			'ws://127.0.0.1:7433/api/v1/mcp/plugin-channel?token=secret'
+		);
 	});
 });
 

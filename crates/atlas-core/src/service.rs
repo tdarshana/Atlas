@@ -382,6 +382,7 @@ impl MemoryService {
             memories_pending: self.repo().count_pending()?,
             embedding: self.embedding_status(),
             port,
+            token_sha256: None,
         })
     }
 }

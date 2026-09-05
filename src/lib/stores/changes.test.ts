@@ -7,6 +7,7 @@ import type { Change } from '$lib/types';
 vi.mock('$lib/daemon.svelte', () => ({
 	daemon: { port: 7433, ready: true, error: null, logPath: '' },
 	baseUrl: () => 'http://127.0.0.1:7433',
+	tokenQuery: () => '?token=test-token',
 	api: () => ({}),
 	boot: async () => {}
 }));
@@ -77,7 +78,8 @@ describe('the change stream', () => {
 		connectChanges();
 		expect(FakeSource.instances).toHaveLength(1);
 		const source = FakeSource.instances[0];
-		expect(source.url).toBe('http://127.0.0.1:7433/api/v1/events');
+		// SEC-5: an EventSource cannot carry a header, so the token rides in the query.
+		expect(source.url).toBe('http://127.0.0.1:7433/api/v1/events?token=test-token');
 
 		source.onopen?.();
 		expect(changes.connected).toBe(true);

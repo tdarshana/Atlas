@@ -9,7 +9,7 @@
 // The socket itself is a parameter (`socketFactory`), which keeps the channel's logic
 // free of the network: a test passes a fake and drives open, message and close by hand.
 
-import { baseUrl } from '$lib/daemon.svelte';
+import { baseUrl, tokenQuery } from '$lib/daemon.svelte';
 import { activePlugins } from './contributions';
 import { holds } from './grants';
 import type { PluginInfo, ToolContribution } from './types';
@@ -86,9 +86,11 @@ export interface ToolChannel {
 const FIRST_RETRY_MS = 1000;
 const MAX_RETRY_MS = 30_000;
 
-/** The channel's own URL, from the daemon's HTTP base. */
-export function channelUrl(base: string = baseUrl()): string {
-	return `${base.replace(/^http/, 'ws')}/api/v1/mcp/plugin-channel`;
+/** The channel's own URL, from the daemon's HTTP base. The token rides in the query,
+ * since a `WebSocket` cannot carry a header (SEC-5); `token` defaults to the one the
+ * daemon store holds, and an empty one adds nothing. */
+export function channelUrl(base: string = baseUrl(), token?: string): string {
+	return `${base.replace(/^http/, 'ws')}/api/v1/mcp/plugin-channel${tokenQuery(token)}`;
 }
 
 /** The decls one plugin registers: its manifest's `contributes.tools`, with the schema a

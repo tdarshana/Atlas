@@ -4,7 +4,7 @@
 	// both connect snippets, restart the daemon, toggle a tool globally.
 	import { onMount } from 'svelte';
 	import { Badge, Button, Checkbox, Icon, Table, type TableColumn } from '$lib/ds';
-	import { daemon } from '$lib/daemon.svelte';
+	import { adopt, daemon, type DaemonHandle } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
 	import { relativeAge } from '$lib/format';
 	import { CLAUDE_SNIPPET, CODEX_SNIPPET, toolIcon, toolPluginId } from '$lib/mcp';
@@ -68,7 +68,8 @@
 		restarting = true;
 		try {
 			const { invoke } = await import('@tauri-apps/api/core');
-			await invoke('daemon_restart');
+			// A restarted daemon mints a new token, so every later call must carry that one.
+			adopt(await invoke<DaemonHandle>('daemon_restart'));
 			push('success', 'MCP server restarted');
 			await loadMcp();
 		} catch (e) {

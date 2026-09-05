@@ -58,6 +58,11 @@ export interface StatusReport {
 	memories_pending: number;
 	embedding: string;
 	port: number | null;
+	/**
+	 * Lower-case hex SHA-256 of the daemon token (SEC-5). Only the daemon sets it; a
+	 * local backend has no token and leaves it out.
+	 */
+	token_sha256?: string | null;
 }
 
 export type FrameworkKind = 'superpowers' | 'openspec' | 'speckit' | 'gsd';

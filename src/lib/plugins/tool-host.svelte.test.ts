@@ -10,6 +10,7 @@ vi.mock('$lib/daemon.svelte', () => ({
 	api: () => ({}),
 	daemon: { port: 7433, ready: true, error: null, logPath: '' },
 	baseUrl: () => 'http://127.0.0.1:7433',
+	tokenQuery: () => '?token=test-token',
 	boot: async () => {}
 }));
 

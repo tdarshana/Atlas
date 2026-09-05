@@ -77,7 +77,7 @@ enum DaemonCmd { Start, Stop, Status }
 
 /// Starts the daemon if it is not already up and returns a client for it.
 async fn backend(paths: &AtlasPaths, port: u16) -> anyhow::Result<RemoteBackend> {
-    Ok(RemoteBackend::new(daemon_ctl::ensure_daemon(paths, port).await?))
+    Ok(RemoteBackend::new(paths, daemon_ctl::ensure_daemon(paths, port).await?))
 }
 
 /// A client for the board commands, whose reads and writes are both recorded
@@ -122,13 +122,13 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Daemon { action: DaemonCmd::Start } => { let p = daemon_ctl::ensure_daemon(&paths, cli.port).await?; println!("atlasd running on http://127.0.0.1:{p}"); }
         Cmd::Daemon { action: DaemonCmd::Stop } => { println!("{}", if daemon_ctl::stop_daemon(&paths).await? { "stopped" } else { "not running" }); }
         Cmd::Daemon { action: DaemonCmd::Status } => {
-            if daemon_ctl::is_up(cli.port).await { let s = RemoteBackend::new(cli.port).status().await?; println!("{}", serde_json::to_string_pretty(&s)?); }
+            if daemon_ctl::is_up(&paths, cli.port).await { let s = RemoteBackend::new(&paths, cli.port).status().await?; println!("{}", serde_json::to_string_pretty(&s)?); }
             else { println!("atlasd is not running on port {}", cli.port); std::process::exit(1); }
         }
         Cmd::Mcp { action: Some(action) } => commands::mcp::run(action, &backend(&paths, cli.port).await?).await?,
         Cmd::Mcp { action: None } => {
             let port = daemon_ctl::ensure_daemon(&paths, cli.port).await?;
-            let remote = Arc::new(RemoteBackend::new(port));
+            let remote = Arc::new(RemoteBackend::new(&paths, port));
             // Counts this session's tool calls locally rather than reaching the daemon
             // on every one: the heartbeat task below reports the running total every
             // 60 s, which is precise enough for a status display and costs nothing on
@@ -219,7 +219,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Ingest(args) => commands::ingest::run(args, &paths, cli.port).await?,
         Cmd::Tui => {
             let port = daemon_ctl::ensure_daemon(&paths, cli.port).await?;
-            atlas_cli::tui::run(port).await?;
+            atlas_cli::tui::run(&paths, port).await?;
         }
     }
     Ok(())

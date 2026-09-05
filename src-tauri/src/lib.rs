@@ -39,18 +39,32 @@ fn sidecar_atlasd(app: &tauri::AppHandle) -> Option<PathBuf> {
     sidecar.exists().then_some(sidecar)
 }
 
-/// Start the daemon if it is not already up and return the port it answers on.
-/// This command is the app's only way to launch a process; the webview never
+/// What the webview needs to reach the daemon: the port it answers on and the token
+/// every `/api/v1` request must carry (SEC-5), read from `daemon.json` once the daemon
+/// is up. The webview cannot read that file itself, so this is how the token gets there.
+#[derive(serde::Serialize)]
+struct DaemonHandle {
+    port: u16,
+    token: String,
+}
+
+/// The daemon on `port` as `DaemonHandle`, or an error when `daemon.json` has no token
+/// (a daemon older than SEC-5, which `ensure_daemon_with` would not have accepted).
+fn daemon_handle(paths: &AtlasPaths, port: u16) -> Result<DaemonHandle, String> {
+    let token = daemon_ctl::daemon_token(paths).ok_or_else(|| "The daemon wrote no token.".to_string())?;
+    Ok(DaemonHandle { port, token })
+}
+
+/// Start the daemon if it is not already up and return the port it answers on and its
+/// token. This command is the app's only way to launch a process; the webview never
 /// shells out to `atlas` or `atlasd` itself.
 #[tauri::command]
-async fn daemon_ensure(app: tauri::AppHandle, port: Option<u16>) -> Result<u16, String> {
-    daemon_ctl::ensure_daemon_with(
-        &AtlasPaths::discover(),
-        port.unwrap_or(DEFAULT_PORT),
-        sidecar_atlasd(&app),
-    )
-    .await
-    .map_err(|e| e.to_string())
+async fn daemon_ensure(app: tauri::AppHandle, port: Option<u16>) -> Result<DaemonHandle, String> {
+    let paths = AtlasPaths::discover();
+    let port = daemon_ctl::ensure_daemon_with(&paths, port.unwrap_or(DEFAULT_PORT), sidecar_atlasd(&app))
+        .await
+        .map_err(|e| e.to_string())?;
+    daemon_handle(&paths, port)
 }
 
 /// The contents of `~/.atlas/daemon.json`, or None when no daemon has written one.
@@ -62,12 +76,13 @@ fn daemon_info() -> Option<serde_json::Value> {
 /// Restart the daemon: stop it the way `atlas daemon stop` does, then start it again
 /// through `daemon_ensure`. The Settings screen's MCP card offers this as `Restart`.
 #[tauri::command]
-async fn daemon_restart(app: tauri::AppHandle, port: Option<u16>) -> Result<u16, String> {
+async fn daemon_restart(app: tauri::AppHandle, port: Option<u16>) -> Result<DaemonHandle, String> {
     let paths = AtlasPaths::discover();
     daemon_ctl::stop_daemon(&paths).await.map_err(|e| e.to_string())?;
-    daemon_ctl::ensure_daemon_with(&paths, port.unwrap_or(DEFAULT_PORT), sidecar_atlasd(&app))
+    let port = daemon_ctl::ensure_daemon_with(&paths, port.unwrap_or(DEFAULT_PORT), sidecar_atlasd(&app))
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    daemon_handle(&paths, port)
 }
 
 /// Where to look when the daemon fails to start.
@@ -92,9 +107,10 @@ fn restore_global_shortcut_at_boot(app: tauri::AppHandle) {
         let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).build().unwrap_or_default();
         let deadline = tokio::time::Instant::now() + SHORTCUT_RESTORE_TIMEOUT;
         let settings = loop {
-            if let Some(port) = daemon_ctl::daemon_info(&AtlasPaths::discover()).and_then(|v| v.get("port")?.as_u64()) {
-                let base = format!("http://127.0.0.1:{port}/api/v1");
-                if let Ok(resp) = client.get(format!("{base}/settings")).send().await {
+            if let Some(info) = daemon_ctl::read_daemon_info(&AtlasPaths::discover()) {
+                let base = format!("http://127.0.0.1:{}/api/v1", info.port);
+                let token = info.token.unwrap_or_default();
+                if let Ok(resp) = client.get(format!("{base}/settings")).header(daemon_ctl::TOKEN_HEADER, token).send().await {
                     if resp.status().is_success() {
                         if let Ok(settings) = resp.json::<serde_json::Value>().await {
                             break Some(settings);

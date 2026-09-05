@@ -12,8 +12,26 @@ const READY_STEP: Duration = Duration::from_millis(100);
 
 fn ready_budget() -> String { format!("{}s", READY_ATTEMPTS as u128 * READY_STEP.as_millis() / 1000) }
 
-struct Daemon { child: Child, port: u16, _home: tempfile::TempDir }
+struct Daemon { child: Child, port: u16, token: String, _home: tempfile::TempDir }
 impl Drop for Daemon { fn drop(&mut self) { let _ = self.child.kill(); let _ = self.child.wait(); } }
+impl Daemon {
+    /// A client that presents this daemon's token (SEC-5) on every request, the way
+    /// every real client does; tests about the token itself build bare clients instead.
+    fn client(&self) -> reqwest::Client {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(TOKEN_HEADER, self.token.parse().unwrap());
+        reqwest::Client::builder().default_headers(headers).build().unwrap()
+    }
+}
+
+/// The header every `/api/v1` request carries (SEC-5).
+const TOKEN_HEADER: &str = "X-Atlas-Token";
+
+/// Lower-case hex SHA-256 of `token`, the form `status` reports it in.
+fn sha256_hex(token: &str) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(token.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
 
 async fn start() -> Daemon { start_with_env(&[]).await }
 
@@ -42,17 +60,18 @@ async fn start_with_env(env: &[(&str, &str)]) -> Daemon {
     // The wait has to cover a slow start under load, same budget as the readiness poll
     // below. A daemon that never writes the file fails here, where the reason is plain,
     // rather than as a "port unknown" error further down.
-    let mut port = None;
+    let mut found = None;
     for _ in 0..READY_ATTEMPTS {
         if let Ok(s) = std::fs::read_to_string(&daemon_json) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
-                if let Some(p) = v["port"].as_u64() { port = Some(p as u16); break; }
+                if let (Some(p), Some(t)) = (v["port"].as_u64(), v["token"].as_str()) { found = Some((p as u16, t.to_string())); break; }
             }
         }
         tokio::time::sleep(READY_STEP).await;
     }
-    let port = port.unwrap_or_else(|| panic!("daemon.json had no port within {}", ready_budget()));
-    let client = reqwest::Client::new();
+    let (port, token) = found.unwrap_or_else(|| panic!("daemon.json had no port and token within {}", ready_budget()));
+    let d = Daemon { child, port, token, _home: home };
+    let client = d.client();
     // A daemon that never answers fails here, where the reason is plain, rather than as
     // a connection error inside the test body.
     let mut up = false;
@@ -61,7 +80,57 @@ async fn start_with_env(env: &[(&str, &str)]) -> Daemon {
         tokio::time::sleep(READY_STEP).await;
     }
     assert!(up, "atlasd did not answer on port {port} within {}", ready_budget());
-    Daemon { child, port, _home: home }
+    d
+}
+
+/// SEC-5: the daemon and its clients share a secret. Every `/api/v1` route wants it in
+/// `X-Atlas-Token`; a missing or wrong one is 401 and never reaches a handler. `status`
+/// answers with the token's SHA-256 so a client can tell atlasd from an impostor on the
+/// port, and the two routes a browser cannot set headers on (`events`, the plugin
+/// channel) take `?token=` instead. `/mcp` is outside `/api/v1` and is not gated here.
+#[tokio::test]
+async fn every_api_route_requires_the_daemon_token() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let bare = reqwest::Client::new();
+
+    let missing = bare.get(format!("{base}/status")).send().await.unwrap();
+    assert_eq!(missing.status(), 401);
+    assert_eq!(missing.json::<serde_json::Value>().await.unwrap(), serde_json::json!({"error": "unauthorized"}));
+    let wrong = bare.get(format!("{base}/status")).header(TOKEN_HEADER, "not-the-token").send().await.unwrap();
+    assert_eq!(wrong.status(), 401);
+    // A write route is gated the same way, before any handler runs.
+    let write = bare.post(format!("{base}/memories")).json(&serde_json::json!({"scope":"global","kind":"fact","text":"x"})).send().await.unwrap();
+    assert_eq!(write.status(), 401);
+
+    let ok = bare.get(format!("{base}/status")).header(TOKEN_HEADER, &d.token).send().await.unwrap();
+    assert_eq!(ok.status(), 200);
+    let st: serde_json::Value = ok.json().await.unwrap();
+    assert_eq!(st["token_sha256"], sha256_hex(&d.token), "status proves the daemon holds the token");
+
+    let stream = bare.get(format!("{base}/events?token={}", d.token)).send().await.unwrap();
+    assert_eq!(stream.status(), 200, "events takes the token as a query parameter");
+    assert_eq!(bare.get(format!("{base}/events?token=wrong")).send().await.unwrap().status(), 401);
+    assert_eq!(bare.get(format!("{base}/events")).send().await.unwrap().status(), 401);
+    // The query form is for those two routes only.
+    assert_eq!(bare.get(format!("{base}/status?token={}", d.token)).send().await.unwrap().status(), 401);
+
+    // The token is not a CORS-safelisted header, so a preflight carries none; it must
+    // still be answered or the webview could never send the real request.
+    let preflight = bare.request(reqwest::Method::OPTIONS, format!("{base}/memories"))
+        .header("Origin", "tauri://localhost").header("Access-Control-Request-Method", "POST")
+        .header("Access-Control-Request-Headers", "x-atlas-token,content-type").send().await.unwrap();
+    assert_eq!(preflight.status(), 200);
+    let allowed = preflight.headers().get("access-control-allow-headers").unwrap().to_str().unwrap().to_ascii_lowercase();
+    assert!(allowed.contains("x-atlas-token"), "allow-headers: {allowed}");
+
+    // The file that carries the token is private to the user.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(d._home.path().join("daemon.json")).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "daemon.json mode {mode:o}");
+    }
 }
 
 /// Builds a small git-backed fixture project: a Next.js/React `package.json`, a README,
@@ -111,7 +180,7 @@ fn git(dir: &Path, args: &[&str]) {
 async fn json_api_round_trip() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let st: serde_json::Value = c.get(format!("{base}/status")).send().await.unwrap().json().await.unwrap();
     assert_eq!(st["memories_active"], 0);
     assert_eq!(st["port"], d.port);
@@ -159,7 +228,7 @@ async fn json_api_round_trip() {
 async fn status_reports_the_pending_memory_count() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     let st: serde_json::Value = c.get(format!("{base}/status")).send().await.unwrap().json().await.unwrap();
     assert_eq!(st["memories_pending"], 0, "{st}");
@@ -204,7 +273,7 @@ async fn mcp_over_http_lists_and_calls_tools() {
     let d = start().await;
     let url = format!("http://127.0.0.1:{}/mcp", d.port);
     let api = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let init = c.post(&url).header("Accept", "application/json, text/event-stream").header("Content-Type", "application/json")
         .json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}))
         .send().await.unwrap();
@@ -266,7 +335,7 @@ async fn mcp_status_reports_transports_counts_and_an_http_client_after_a_call() 
     let d = start().await;
     let url = format!("http://127.0.0.1:{}/mcp", d.port);
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     let status: serde_json::Value = c.get(format!("{base}/mcp/status")).send().await.unwrap().json().await.unwrap();
     assert_eq!(status["transports"]["stdio"]["command"], "atlas mcp", "{status}");
@@ -309,7 +378,7 @@ async fn mcp_status_reports_transports_counts_and_an_http_client_after_a_call() 
 async fn mcp_clients_route_registers_heartbeats_and_unregisters() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     let created: serde_json::Value = c.post(format!("{base}/mcp/clients"))
         .json(&serde_json::json!({"id": "test-id", "transport": "stdio", "client_name": "claude-code", "client_version": "1.0"}))
@@ -351,7 +420,7 @@ async fn mcp_clients_route_registers_heartbeats_and_unregisters() {
 async fn rejects_browser_origins_and_non_loopback_hosts() {
     let d = start().await;
     let status = format!("http://127.0.0.1:{}/api/v1/status", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     let cross = c.get(&status).header("Origin", "https://evil.example").send().await.unwrap();
     assert_eq!(cross.status(), 403);
@@ -383,7 +452,7 @@ async fn a_form_post_from_a_loopback_page_outside_the_app_is_refused() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
     let refresh = format!("{base}/projects/{}/refresh", uuid::Uuid::new_v4());
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     let form = c.post(&refresh).header("Origin", "http://localhost:3000")
         .header("Content-Type", "application/x-www-form-urlencoded").body("a=1").send().await.unwrap();
@@ -410,7 +479,7 @@ async fn a_form_post_from_a_loopback_page_outside_the_app_is_refused() {
 async fn accepts_tauri_webview_origins() {
     let d = start().await;
     let status = format!("http://127.0.0.1:{}/api/v1/status", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     for origin in ["tauri://localhost", "http://tauri.localhost", "http://localhost:1420"] {
         let r = c.get(&status).header("Origin", origin).send().await.unwrap();
         assert_eq!(r.status(), 200, "{origin} should be allowed");
@@ -426,7 +495,7 @@ async fn accepts_tauri_webview_origins() {
 async fn cors_headers_cover_allowed_and_reject_other_origins() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     let ok = c.get(format!("{base}/status")).header("Origin", "http://localhost:1420").send().await.unwrap();
     assert_eq!(ok.status(), 200);
@@ -466,7 +535,7 @@ async fn cors_headers_cover_allowed_and_reject_other_origins() {
 async fn settings_api_masks_the_key_and_validates_keys() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     let put: serde_json::Value = c.put(format!("{base}/settings")).json(&serde_json::json!({
         "extraction.enabled": true, "extraction.api_key": "sk-test", "extraction.model": "deepseek-chat",
@@ -500,7 +569,7 @@ async fn settings_api_masks_the_key_and_validates_keys() {
 async fn projects_can_be_deleted_without_losing_their_memories() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let repo = tempfile::tempdir().unwrap();
     fixture_repo(repo.path());
 
@@ -533,7 +602,7 @@ async fn projects_can_be_deleted_without_losing_their_memories() {
 async fn projects_agents_docs_and_sync() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let repo = tempfile::tempdir().unwrap();
     fixture_repo(repo.path());
 
@@ -605,7 +674,7 @@ async fn global_sync_honours_the_sync_home_override() {
     let home = tempfile::tempdir().unwrap();
     let d = start_with_env(&[("ATLAS_SYNC_HOME", home.path().to_str().unwrap())]).await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     let saved = c.post(format!("{base}/agents")).json(&serde_json::json!({"name":"reviewer","description":"Reviews PRs","instructions":"Be strict.","tools":["Read"],"tags":[]})).send().await.unwrap();
     assert_eq!(saved.status(), 201);
@@ -643,7 +712,7 @@ async fn transcript_hooks_follow_the_extraction_setting() {
     fixture_repo(repo.path());
     let d = start_with_env(&[("ATLAS_SYNC_HOME", home.path().to_str().unwrap())]).await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     // A project hook is per-machine, so it goes in the settings file Claude Code keeps
     // out of git, not the shared one a `git commit -a` would ship to the whole team.
     let claude_hook = repo.path().join(".claude/settings.local.json");
@@ -681,7 +750,7 @@ async fn project_sync_refuses_the_sync_home_override_too() {
     fixture_repo(sync_home.path());
     let d = start_with_env(&[("ATLAS_SYNC_HOME", sync_home.path().to_str().unwrap())]).await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     let refused = c.post(format!("{base}/sync")).json(&serde_json::json!({"root": sync_home.path(), "check_only": true})).send().await.unwrap();
     assert_eq!(refused.status(), 400, "the ATLAS_SYNC_HOME override must not double as a project root");
@@ -695,7 +764,7 @@ async fn project_sync_refuses_the_sync_home_override_too() {
 async fn sync_refuses_a_root_that_is_not_a_repository() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     let slash = c.post(format!("{base}/sync")).json(&serde_json::json!({"root": "/", "check_only": true})).send().await.unwrap();
     assert_eq!(slash.status(), 400, "the filesystem root is not a project root");
@@ -718,7 +787,7 @@ async fn sync_refuses_a_root_that_is_not_a_repository() {
 async fn pending_memories_can_be_listed_and_accepted() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let m: serde_json::Value = c.post(format!("{base}/memories")).json(&serde_json::json!({"scope":"global","kind":"insight","text":"the cache is warmed on boot","status":"pending"})).send().await.unwrap().json().await.unwrap();
     let id = m["id"].as_str().unwrap().to_string();
     assert_eq!(m["status"], "pending");
@@ -752,7 +821,7 @@ async fn pending_memories_can_be_listed_and_accepted() {
 async fn memories_can_be_listed_a_page_at_a_time() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     for i in 0..4 {
         let r = c.post(format!("{base}/memories")).json(&serde_json::json!({"scope":"global","kind":"fact","text":format!("fact {i}")})).send().await.unwrap();
         assert_eq!(r.status(), 201);
@@ -829,7 +898,7 @@ async fn ingest_extracts_candidates_and_skips_duplicates_on_replay() {
     let stub = stub_llm().await;
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     let put = c.put(format!("{base}/settings")).json(&serde_json::json!({
         "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub", "extraction.api_key": "k",
@@ -899,7 +968,7 @@ async fn ingest_extracts_candidates_and_skips_duplicates_on_replay() {
 async fn ingest_is_refused_while_extraction_is_disabled() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let transcript = serde_json::json!({"text": "user: we use bun\nassistant: noted", "source_tool": "test"});
 
     let refused = c.post(format!("{base}/ingest")).json(&transcript).send().await.unwrap();
@@ -924,7 +993,7 @@ async fn ingest_actor_comes_from_the_header_over_the_deprecated_body_field() {
     let stub = stub_llm().await;
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     c.put(format!("{base}/settings")).json(&serde_json::json!({
         "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub", "extraction.api_key": "k",
     })).send().await.unwrap();
@@ -961,7 +1030,7 @@ async fn ingest_refuses_a_transcript_over_the_size_cap() {
     let stub = stub_llm().await;
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let put = c.put(format!("{base}/settings")).json(&serde_json::json!({
         "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub",
     })).send().await.unwrap();
@@ -985,7 +1054,7 @@ async fn a_job_queued_before_extraction_was_disabled_fails_rather_than_hanging()
     let stub = stub_llm_with_delay(STUB_CANDIDATES, Duration::from_secs(2)).await;
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let put = c.put(format!("{base}/settings")).json(&serde_json::json!({
         "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub",
     })).send().await.unwrap();
@@ -1015,7 +1084,7 @@ async fn a_job_queued_before_extraction_was_disabled_fails_rather_than_hanging()
 async fn extraction_test_endpoint_checks_connectivity_and_reports_model_errors() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     let disabled = c.post(format!("{base}/extraction/test")).send().await.unwrap();
     assert_eq!(disabled.status(), 409);
@@ -1053,7 +1122,7 @@ async fn extraction_test_endpoint_checks_connectivity_and_reports_model_errors()
 async fn changing_the_base_url_clears_the_stored_key() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let put = |body: serde_json::Value| c.put(format!("{base}/settings")).json(&body).send();
 
     let configured: serde_json::Value = put(serde_json::json!({
@@ -1081,7 +1150,7 @@ async fn refresh_project_enqueues_a_summary_job_when_extraction_is_enabled() {
     let stub = stub_llm_with_reply("A Rust workspace.").await;
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let repo = tempfile::tempdir().unwrap();
     fixture_repo(repo.path());
 
@@ -1114,7 +1183,7 @@ async fn refresh_project_enqueues_a_summary_job_when_extraction_is_enabled() {
 async fn bad_query_strings_are_json_errors() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     let bad_project = c.get(format!("{base}/memories?project_id=nope")).send().await.unwrap();
     assert_eq!(bad_project.status(), 400);
@@ -1159,7 +1228,7 @@ fn looks_like_a_task_key(key: &str) -> bool {
 async fn board_tasks_ready_query_and_stage_moves() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     let created = c.post(format!("{base}/tasks")).header("X-Atlas-Actor", "alice").json(&serde_json::json!({"title": "the blocker"})).send().await.unwrap();
     assert_eq!(created.status(), 201);
@@ -1206,7 +1275,7 @@ async fn board_tasks_ready_query_and_stage_moves() {
 async fn board_list_flags_take_true_or_one_and_never_answer_400() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     let open: serde_json::Value = c.post(format!("{base}/tasks")).header("X-Atlas-Actor", "alice").json(&serde_json::json!({"title": "open"})).send().await.unwrap().json().await.unwrap();
     let closed: serde_json::Value = c.post(format!("{base}/tasks")).header("X-Atlas-Actor", "alice").json(&serde_json::json!({"title": "closed"})).send().await.unwrap().json().await.unwrap();
@@ -1234,7 +1303,7 @@ async fn board_list_flags_take_true_or_one_and_never_answer_400() {
 async fn brief_task_list_leaves_the_description_out() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     let created: serde_json::Value = c.post(format!("{base}/tasks")).header("X-Atlas-Actor", "alice")
         .json(&serde_json::json!({"title": "brief me", "description": "the whole story"}))
@@ -1264,7 +1333,7 @@ async fn brief_task_list_leaves_the_description_out() {
 async fn tasks_scope_global_keeps_just_the_project_less_tasks() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let dir = repo_free_tempdir();
     fixture_repo(dir.path());
 
@@ -1297,7 +1366,7 @@ async fn tasks_scope_global_keeps_just_the_project_less_tasks() {
 async fn task_counts_follows_the_same_scope_rules_as_task_list() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let dir = repo_free_tempdir();
     fixture_repo(dir.path());
 
@@ -1330,7 +1399,7 @@ async fn task_counts_follows_the_same_scope_rules_as_task_list() {
 async fn board_stale_update_claim_conflict_and_comment_events() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     let created: serde_json::Value = c.post(format!("{base}/tasks")).header("X-Atlas-Actor", "alice").json(&serde_json::json!({"title": "take this"})).send().await.unwrap().json().await.unwrap();
     let key = created["key"].as_str().unwrap().to_string();
@@ -1376,7 +1445,7 @@ async fn board_stale_update_claim_conflict_and_comment_events() {
 async fn board_stage_administration() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     let too_few = c.put(format!("{base}/board/stages")).header("X-Atlas-Actor", "alice")
         .json(&serde_json::json!({"stages": [{"name": "Only", "done": true}]})).send().await.unwrap();
@@ -1413,7 +1482,7 @@ async fn board_stage_administration() {
 async fn board_delete_actor_header_limit_and_loopback_guard() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     let created: serde_json::Value = c.post(format!("{base}/tasks")).json(&serde_json::json!({"title": "throwaway"})).send().await.unwrap().json().await.unwrap();
     let key = created["key"].as_str().unwrap().to_string();
@@ -1439,7 +1508,7 @@ async fn board_delete_actor_header_limit_and_loopback_guard() {
 async fn board_task_counts_cover_every_stage() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     c.post(format!("{base}/tasks")).json(&serde_json::json!({"title": "one"})).send().await.unwrap();
     c.post(format!("{base}/tasks")).json(&serde_json::json!({"title": "two"})).send().await.unwrap();
@@ -1460,7 +1529,7 @@ async fn board_task_counts_cover_every_stage() {
 async fn top_level_narrows_the_task_list_and_its_counts_to_parents() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     let parent: serde_json::Value = c.post(format!("{base}/tasks")).header("X-Atlas-Actor", "alice").json(&serde_json::json!({"title": "parent"})).send().await.unwrap().json().await.unwrap();
     let parent_key = parent["key"].as_str().unwrap().to_string();
@@ -1498,7 +1567,7 @@ async fn tasks_md_mirror_follows_the_board_setting() {
     fixture_repo(repo.path());
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     let sync_check = || c.post(format!("{base}/sync")).json(&serde_json::json!({"root": repo.path(), "check_only": true})).send();
     let rep: serde_json::Value = sync_check().await.unwrap().json().await.unwrap();
@@ -1525,7 +1594,7 @@ async fn global_search_finds_tasks_and_memories_and_validates_kinds() {
     fixture_repo(repo.path());
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     let p: serde_json::Value = c.post(format!("{base}/projects/connect")).json(&serde_json::json!({"root": repo.path()})).send().await.unwrap().json().await.unwrap();
     let pid = p["id"].as_str().unwrap().to_string();
@@ -1577,7 +1646,7 @@ async fn global_search_finds_tasks_and_memories_and_validates_kinds() {
 async fn project_patch_renames_the_board_key_and_validates_it() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let dir = repo_free_tempdir();
     fixture_repo(dir.path());
 
@@ -1615,7 +1684,7 @@ async fn project_patch_renames_the_board_key_and_validates_it() {
 async fn agent_access_is_stored_and_enforced() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let dir = repo_free_tempdir();
     fixture_repo(dir.path());
 
@@ -1673,7 +1742,7 @@ async fn project_mcp_route_reports_and_gates_a_project_override() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
     let url = format!("http://127.0.0.1:{}/mcp", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let dir = repo_free_tempdir();
     fixture_repo(dir.path());
 
@@ -1780,7 +1849,7 @@ async fn project_mcp_route_reports_and_gates_a_project_override() {
 async fn frameworks_routes_round_trip_400_and_gate_import() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let dir = repo_free_tempdir();
     git(dir.path(), &["init"]);
     std::fs::create_dir_all(dir.path().join("docs/superpowers/plans")).unwrap();
@@ -1853,7 +1922,7 @@ async fn frameworks_routes_round_trip_400_and_gate_import() {
 async fn project_extraction_override_masks_its_key_and_is_used_by_the_test_route() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let dir = repo_free_tempdir();
     fixture_repo(dir.path());
     let project_llm = stub_llm_with_reply("PROJECT").await;
@@ -1894,7 +1963,7 @@ async fn project_extraction_override_masks_its_key_and_is_used_by_the_test_route
 async fn project_log_merges_sources_and_exports_json_lines() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let dir = repo_free_tempdir();
     fixture_repo(dir.path());
 
@@ -1959,7 +2028,7 @@ async fn project_log_merges_sources_and_exports_json_lines() {
 async fn ingest_resolves_the_project_from_a_subdirectory_for_both_the_gate_and_the_worker() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let dir = repo_free_tempdir();
     fixture_repo(dir.path());
     let subdir = dir.path().join("src");
@@ -2010,7 +2079,7 @@ async fn ingest_resolves_the_project_from_a_subdirectory_for_both_the_gate_and_t
 async fn memories_can_be_listed_for_one_project_only() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let dir = repo_free_tempdir();
     fixture_repo(dir.path());
 
@@ -2054,7 +2123,7 @@ async fn memories_can_be_listed_for_one_project_only() {
 async fn memory_facets_counts_active_memories_scoped_like_the_list_route() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let dir = repo_free_tempdir();
     fixture_repo(dir.path());
 
@@ -2093,7 +2162,7 @@ async fn memory_facets_counts_active_memories_scoped_like_the_list_route() {
 async fn require_review_holds_back_extracted_memories() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let dir = repo_free_tempdir();
     fixture_repo(dir.path());
 
@@ -2162,7 +2231,7 @@ async fn require_review_holds_back_extracted_memories() {
 async fn agent_access_defaults_are_inherited_and_overridable_per_project() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let dir = repo_free_tempdir();
     fixture_repo(dir.path());
 
@@ -2224,7 +2293,7 @@ async fn agent_access_defaults_are_inherited_and_overridable_per_project() {
 async fn memory_search_can_be_narrowed_to_one_project() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let dir = repo_free_tempdir();
     fixture_repo(dir.path());
 
@@ -2329,7 +2398,7 @@ async fn workflow_run_executes_two_actions_and_succeeds() {
     let stub = stub_llm_with_reply("step done").await;
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let put = c.put(format!("{base}/settings")).json(&serde_json::json!({
         "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub", "extraction.api_key": "k",
     })).send().await.unwrap();
@@ -2393,7 +2462,7 @@ async fn workflow_actions_run_on_the_agents_model_hint_when_it_has_one() {
     let (stub, models) = stub_llm_recording_models("step done").await;
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let put = c.put(format!("{base}/settings")).json(&serde_json::json!({
         "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub", "extraction.api_key": "k",
     })).send().await.unwrap();
@@ -2429,7 +2498,7 @@ async fn all_runs_route_lists_runs_finished_after_since() {
     let stub = stub_llm_with_reply("step done").await;
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     c.put(format!("{base}/settings")).json(&serde_json::json!({
         "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub", "extraction.api_key": "k",
     })).send().await.unwrap();
@@ -2480,7 +2549,7 @@ async fn workflow_output_proposes_a_pending_memory_and_files_a_task() {
     let stub = stub_llm_with_reply(reply).await;
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     c.put(format!("{base}/settings")).json(&serde_json::json!({
         "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub", "extraction.api_key": "k",
     })).send().await.unwrap();
@@ -2517,7 +2586,7 @@ async fn workflow_output_proposes_a_pending_memory_and_files_a_task() {
 async fn workflow_run_fails_with_an_err_line_when_extraction_is_disabled() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let workflow = create_workflow(&c, &base, "no-model", &["do the thing"], false, false).await;
     let wid = workflow["id"].as_str().unwrap();
 
@@ -2541,7 +2610,7 @@ async fn a_second_run_of_the_same_workflow_while_one_is_pending_is_a_conflict() 
     let stub = stub_llm_with_delay("slow reply", Duration::from_secs(2)).await;
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     c.put(format!("{base}/settings")).json(&serde_json::json!({
         "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub", "extraction.api_key": "k",
     })).send().await.unwrap();
@@ -2565,7 +2634,7 @@ async fn cancelling_a_queued_run_is_skipped_by_the_worker() {
     let stub = stub_llm_with_delay("slow reply", Duration::from_secs(2)).await;
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     c.put(format!("{base}/settings")).json(&serde_json::json!({
         "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub", "extraction.api_key": "k",
     })).send().await.unwrap();
@@ -2604,7 +2673,7 @@ async fn cancelling_during_the_last_step_still_ends_the_run_cancelled() {
     let stub = stub_llm_with_delay("slow reply", Duration::from_secs(2)).await;
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     c.put(format!("{base}/settings")).json(&serde_json::json!({
         "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub", "extraction.api_key": "k",
     })).send().await.unwrap();
@@ -2652,7 +2721,7 @@ async fn mcp_workflow_tools_run_and_report_status() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
     let url = format!("http://127.0.0.1:{}/mcp", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     c.put(format!("{base}/settings")).json(&serde_json::json!({
         "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub", "extraction.api_key": "k",
     })).send().await.unwrap();
@@ -2704,7 +2773,7 @@ async fn mcp_list_and_get_workflow_read_the_workflow_repo() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
     let url = format!("http://127.0.0.1:{}/mcp", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let workflow = create_workflow(&c, &base, "repo-backed", &["one", "two"], false, false).await;
     let wname = workflow["name"].as_str().unwrap().to_string();
 
@@ -2739,7 +2808,7 @@ async fn mcp_list_and_get_workflow_read_the_workflow_repo() {
 async fn status_stays_responsive_under_concurrent_load() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     // Seed a few memories so the concurrent searches below have something to score.
     for i in 0..20 {
@@ -2751,8 +2820,9 @@ async fn status_stays_responsive_under_concurrent_load() {
 
     // A large batch of writes, running in the background while the probes below run.
     let write_base = base.clone();
+    let write_client = d.client();
     let writer = tokio::spawn(async move {
-        let c = reqwest::Client::new();
+        let c = write_client;
         for i in 0..200 {
             let r = c.post(format!("{write_base}/memories"))
                 .json(&serde_json::json!({"scope":"global","kind":"fact","text": format!("bulk memory {i} about the atlas daemon and its duckdb file")}))
@@ -2765,8 +2835,9 @@ async fn status_stays_responsive_under_concurrent_load() {
     let mut searchers = Vec::new();
     for _ in 0..20 {
         let search_base = base.clone();
+        let search_client = d.client();
         searchers.push(tokio::spawn(async move {
-            let c = reqwest::Client::new();
+            let c = search_client;
             let r = c.post(format!("{search_base}/memories/search")).json(&serde_json::json!({"query":"bun duckdb"})).send().await.unwrap();
             assert_eq!(r.status(), 200);
         }));
@@ -2805,11 +2876,11 @@ async fn status_stays_responsive_under_concurrent_load() {
 /// frame with `answer` (which sees the frame and returns the reply body). The join
 /// handle finishes when the socket closes.
 async fn plugin_app(
-    port: u16,
+    d: &Daemon,
     answer: impl Fn(serde_json::Value) -> serde_json::Value + Send + 'static,
 ) -> (tokio::task::JoinHandle<()>, tokio::sync::oneshot::Sender<()>) {
     use futures_util::{SinkExt, StreamExt};
-    let url = format!("ws://127.0.0.1:{port}/api/v1/mcp/plugin-channel");
+    let url = format!("ws://127.0.0.1:{}/api/v1/mcp/plugin-channel?token={}", d.port, d.token);
     let (mut socket, _) = tokio_tungstenite::connect_async(&url).await.expect("plugin channel refused the upgrade");
     let (close_tx, mut close_rx) = tokio::sync::oneshot::channel::<()>();
     let handle = tokio::spawn(async move {
@@ -2839,7 +2910,7 @@ async fn plugin_app(
 async fn plugin_channel_refuses_foreign_loopback_origins() {
     use tokio_tungstenite::tungstenite::{ClientRequestBuilder, Error};
     let d = start().await;
-    let uri: tokio_tungstenite::tungstenite::http::Uri = format!("ws://127.0.0.1:{}/api/v1/mcp/plugin-channel", d.port).parse().unwrap();
+    let uri: tokio_tungstenite::tungstenite::http::Uri = format!("ws://127.0.0.1:{}/api/v1/mcp/plugin-channel?token={}", d.port, d.token).parse().unwrap();
 
     let foreign = ClientRequestBuilder::new(uri.clone()).with_header("Origin", "http://localhost:8888");
     match tokio_tungstenite::connect_async(foreign).await {
@@ -2869,7 +2940,7 @@ async fn plugin_tools_are_registered_listed_called_and_dropped_with_the_socket()
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
     let url = format!("http://127.0.0.1:{}/mcp", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     let registered = c.put(format!("{base}/mcp/plugin-tools/hello-world")).json(&serde_json::json!({
         "tools": [{
@@ -2914,7 +2985,7 @@ async fn plugin_tools_are_registered_listed_called_and_dropped_with_the_socket()
     let listed: Vec<serde_json::Value> = c.get(format!("{base}/mcp/plugin-tools")).send().await.unwrap().json().await.unwrap();
     assert_eq!(listed.len(), 1, "a refused registration changed the registry: {listed:?}");
 
-    let (app, close_app) = plugin_app(d.port, |request| {
+    let (app, close_app) = plugin_app(&d, |request| {
         assert_eq!(request["plugin_id"], "hello-world", "{request}");
         assert_eq!(request["tool"], "count", "{request}");
         assert_eq!(request["args"]["of"], "sheep", "the caller's arguments reach the app: {request}");
@@ -2982,7 +3053,7 @@ async fn plugin_tools_are_registered_listed_called_and_dropped_with_the_socket()
 async fn a_plugin_error_and_the_call_route_both_carry_the_plugins_answer() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     let registered = c.put(format!("{base}/mcp/plugin-tools/hello-world")).json(&serde_json::json!({
         "tools": [
@@ -2992,7 +3063,7 @@ async fn a_plugin_error_and_the_call_route_both_carry_the_plugins_answer() {
     })).send().await.unwrap();
     assert_eq!(registered.status(), 204);
 
-    let (app, close_app) = plugin_app(d.port, |request| {
+    let (app, close_app) = plugin_app(&d, |request| {
         if request["tool"] == "bad_tool" {
             serde_json::json!({"id": request["id"], "ok": false, "error": "the plugin said no"})
         } else {
@@ -3019,7 +3090,7 @@ async fn a_plugin_error_and_the_call_route_both_carry_the_plugins_answer() {
 
     // A second connection replaces the first, and the daemon hangs the first one up
     // rather than leaving its task parked until that client notices.
-    let (second_app, close_second) = plugin_app(d.port, |request| serde_json::json!({"id": request["id"], "ok": true, "result": {}})).await;
+    let (second_app, close_second) = plugin_app(&d, |request| serde_json::json!({"id": request["id"], "ok": true, "result": {}})).await;
     let closed = tokio::time::timeout(Duration::from_secs(5), app).await;
     assert!(closed.is_ok(), "the replaced connection was still open 5s after being replaced");
     closed.unwrap().unwrap();
@@ -3063,7 +3134,7 @@ async fn skills_list_edit_and_gate_per_project() {
 
     let d = start_with_env(&[("ATLAS_SYNC_HOME", sync_home.path().to_str().unwrap())]).await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     let repo = repo_free_tempdir();
     fixture_repo(repo.path());
@@ -3200,7 +3271,7 @@ async fn mcp_servers_list_check_toggle_add_and_remove() {
 
     let d = start_with_env(&[("ATLAS_SYNC_HOME", sync_home.path().to_str().unwrap())]).await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
 
     // The global listing: every agent's user level, the plugin's server and Atlas.
     let list: serde_json::Value = c.get(format!("{base}/mcp/servers")).send().await.unwrap().json().await.unwrap();
@@ -3363,7 +3434,7 @@ async fn the_event_stream_announces_a_task_write() {
     use futures_util::StreamExt;
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let stream = c.get(format!("{base}/events")).send().await.unwrap();
     assert_eq!(stream.status(), 200);
     assert!(stream.headers().get("content-type").unwrap().to_str().unwrap().starts_with("text/event-stream"));
@@ -3401,7 +3472,7 @@ async fn personas_routes_roster_task_persona_and_events() {
     use futures_util::StreamExt;
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     let stream = c.get(format!("{base}/events")).send().await.unwrap();
     let mut body = stream.bytes_stream();
 
@@ -3522,7 +3593,7 @@ async fn personas_routes_roster_task_persona_and_events() {
 async fn a_persona_header_gates_writes_and_lands_in_the_detail() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     for (name, access) in [("Careful", serde_json::json!({"memory_write": "review"})), ("Locked", serde_json::json!({"task_move": "deny"})), ("Open", serde_json::json!({}))] {
         let r = c.post(format!("{base}/personas")).json(&serde_json::json!({"name": name, "access": access})).send().await.unwrap();
         assert_eq!(r.status(), 201, "{name}");
@@ -3592,7 +3663,7 @@ async fn a_persona_header_gates_writes_and_lands_in_the_detail() {
 async fn a_terminate_signal_stops_the_daemon_and_checkpoints_the_log() {
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
-    let c = reqwest::Client::new();
+    let c = d.client();
     // A change stream that never hangs up on its own.
     let stream = c.get(format!("{base}/events")).send().await.unwrap();
     assert_eq!(stream.status(), 200);

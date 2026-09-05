@@ -53,7 +53,7 @@ async fn stdio_shim_registers_with_the_daemon_and_appears_in_mcp_status() {
     .unwrap();
     let client = ().serve(transport).await.unwrap();
 
-    let http = reqwest::Client::new();
+    let http = daemon.client();
     let clients = poll_clients(&http, daemon.port, false).await;
     assert_eq!(clients.len(), 1, "{clients:?}");
     assert_eq!(clients[0]["transport"], "stdio", "{clients:?}");

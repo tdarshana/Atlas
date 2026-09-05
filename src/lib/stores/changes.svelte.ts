@@ -4,7 +4,7 @@
 // subscribe and refresh themselves. Polling stays only as the fallback for the seconds
 // the stream is down: the browser reconnects an EventSource on its own.
 
-import { baseUrl } from '$lib/daemon.svelte';
+import { baseUrl, tokenQuery } from '$lib/daemon.svelte';
 import type { Change } from '$lib/types';
 
 export const changes = $state({
@@ -56,7 +56,8 @@ function onEvent(e: MessageEvent<string>): void {
 /** Opens the stream (once). Safe to call again; a second call is a no-op. */
 export function connectChanges(): void {
 	if (source || typeof EventSource === 'undefined') return;
-	source = new EventSource(`${baseUrl()}/api/v1/events`);
+	// The token goes in the query: an `EventSource` cannot carry a header (SEC-5).
+	source = new EventSource(`${baseUrl()}/api/v1/events${tokenQuery()}`);
 	source.onopen = () => {
 		changes.connected = true;
 	};

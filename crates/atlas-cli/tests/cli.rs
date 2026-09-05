@@ -294,7 +294,7 @@ fn persona_list_show_and_project_roster_via_the_cli() {
 
     let base = format!("http://127.0.0.1:{}/api/v1", daemon.port);
     tokio::runtime::Runtime::new().unwrap().block_on(async {
-        let c = reqwest::Client::new();
+        let c = daemon.client();
         for (name, role) in [("Mobile Developer", "Builds the app"), ("Security Reviewer", "Reads every diff")] {
             let r = c.post(format!("{base}/personas")).json(&serde_json::json!({"name": name, "role": role, "summary": "One paragraph.", "skills": ["plugin:gone/gone/gone"]})).send().await.unwrap();
             assert_eq!(r.status(), 201, "{name}");
@@ -357,7 +357,7 @@ fn workflow_list_and_run_via_the_cli() {
         ],
     });
     tokio::runtime::Runtime::new().unwrap().block_on(async {
-        let c = reqwest::Client::new();
+        let c = daemon.client();
         let r = c
             .post(format!("{base}/workflows"))
             .json(&serde_json::json!({"name": "cli-release", "trigger": {"kind": "manual"}, "graph": graph, "enabled": true}))
@@ -413,7 +413,7 @@ fn workflow_run_wait_times_out_rather_than_hanging_forever() {
         ],
     });
     tokio::runtime::Runtime::new().unwrap().block_on(async {
-        let c = reqwest::Client::new();
+        let c = daemon.client();
         let put = c
             .put(format!("{base}/settings"))
             .json(&serde_json::json!({"extraction.enabled": true, "extraction.base_url": format!("http://{stub_addr}"), "extraction.model": "stub"}))

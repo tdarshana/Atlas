@@ -72,7 +72,8 @@ async fn main() -> anyhow::Result<()> {
     let backend = Arc::new(backend.with_plugin_tool_host(plugin_tools.clone()));
     let mcp_clients = Arc::new(mcp_clients::ClientRegistry::new());
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let state = AppState { backend: backend.clone(), mcp_clients: mcp_clients.clone(), plugin_tools, shutdown: shutdown_rx };
+    let token: Arc<str> = http::mint_token()?.into();
+    let state = AppState { backend: backend.clone(), mcp_clients: mcp_clients.clone(), plugin_tools, shutdown: shutdown_rx, token: token.clone() };
 
     // One worker, in this process: it drains the `jobs` table the API writes into,
     // and it is the only consumer, so a job is never claimed twice.
@@ -103,10 +104,12 @@ async fn main() -> anyhow::Result<()> {
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default(),
     );
-    let app = http::guard_loopback(http::router(state).nest_service("/mcp", mcp).layer(http::cors_layer()));
+    let app = http::guard_loopback(http::router(state.clone()).nest_service("/mcp", mcp).layer(http::cors_layer()), state);
 
-    let info = serde_json::json!({ "pid": std::process::id(), "port": addr.port(), "started_at": chrono::Utc::now().to_rfc3339() });
-    std::fs::write(paths.daemon_file(), serde_json::to_string_pretty(&info)?)?;
+    // The token travels in this file, so it is the user's alone: created (or replaced)
+    // with mode 0600 rather than the process umask.
+    let info = serde_json::json!({ "pid": std::process::id(), "port": addr.port(), "started_at": chrono::Utc::now().to_rfc3339(), "token": &*token });
+    write_private(&paths.daemon_file(), serde_json::to_string_pretty(&info)?.as_bytes())?;
     tracing::info!("atlasd listening on http://{addr} (db {})", paths.db_path().display());
 
     let daemon_file = paths.daemon_file();
@@ -135,6 +138,19 @@ async fn main() -> anyhow::Result<()> {
     }).await?;
     finish(&backend, &daemon_file);
     Ok(())
+}
+
+/// Writes `bytes` to `path` readable by the owner only. An existing file is replaced
+/// rather than reopened, so a `daemon.json` an older daemon left at the umask's mode
+/// does not keep that mode.
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let _ = std::fs::remove_file(path);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    { use std::os::unix::fs::OpenOptionsExt; opts.mode(0o600); }
+    opts.open(path)?.write_all(bytes)
 }
 
 /// The last thing the daemon does: fold the write-ahead log into the database file

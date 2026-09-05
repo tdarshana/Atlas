@@ -27,6 +27,26 @@ afterEach(() => {
 const api = () => new AtlasApi('http://127.0.0.1:7433');
 
 describe('AtlasApi', () => {
+	// SEC-5: the daemon refuses any `/api/v1` request without its token, so the client
+	// sends it on every kind of request it makes, and none when it has none to send.
+	it('sends the daemon token as X-Atlas-Token on every request', async () => {
+		const calls = stubFetch([{ status: 200, body: {} }, { status: 200, body: [] }, { status: 200, body: '' }]);
+		const withToken = new AtlasApi('http://127.0.0.1:7433', 'secret-token');
+
+		await withToken.status();
+		await withToken.search({ query: 'x', limit: 1, kinds: [], tags: [] });
+		await withToken.projectLogExport('p1');
+
+		expect(calls).toHaveLength(3);
+		for (const call of calls) {
+			expect(new Headers(call.init.headers).get('x-atlas-token')).toBe('secret-token');
+		}
+
+		const bare = stubFetch([{ status: 200, body: {} }]);
+		await api().status();
+		expect(new Headers(bare[0].init.headers).get('x-atlas-token')).toBeNull();
+	});
+
 	it('posts a search to /api/v1/memories/search with the query as the JSON body', async () => {
 		const calls = stubFetch([{ status: 200, body: [] }]);
 		const q = { query: 'hello', limit: 5, kinds: ['fact' as const], tags: [] };
