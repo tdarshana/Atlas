@@ -78,7 +78,9 @@
 
 <span class="dbm-field">
 	{#if label}<label class="dbm-field__label" for={uid}>{label}</label>{/if}
-	<span class="wrap" bind:this={root}>
+	<!-- Inline on purpose: the menu anchors to this span, and the scoped rule was seen
+	     losing to the field's own layout in the app. -->
+	<span class="wrap" style="position:relative" bind:this={root}>
 		<button
 			type="button"
 			id={uid}
