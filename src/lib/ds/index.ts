@@ -8,9 +8,11 @@ export { default as Icon } from './Icon.svelte';
 export { default as IconButton } from './IconButton.svelte';
 export { default as Input } from './Input.svelte';
 export { default as KeyHint, resolvePlatform, comboKeys } from './KeyHint.svelte';
+export { default as MultiSelect } from './MultiSelect.svelte';
 export { default as Select } from './Select.svelte';
 export { default as Skeleton } from './Skeleton.svelte';
 export { default as Table } from './Table.svelte';
+export { default as TagInput } from './TagInput.svelte';
 export { default as Tooltip } from './Tooltip.svelte';
 
 export type { Platform } from './KeyHint.svelte';

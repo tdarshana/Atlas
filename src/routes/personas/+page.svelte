@@ -3,7 +3,7 @@
 	// and the side panel's tag narrow the table client-side; a row opens the persona in
 	// the panel on the right, which edits a local copy and writes it back with Save.
 	import { onMount, untrack } from 'svelte';
-	import { Button, Checkbox, Icon, IconButton, Input, Select } from '$lib/ds';
+	import { Button, Icon, IconButton, Input, MultiSelect, Select, TagInput } from '$lib/ds';
 	import { api } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
 	import { relativeAge } from '$lib/format';
@@ -21,9 +21,9 @@
 	} from '$lib/stores/personas.svelte';
 	import type { Case, Persona, PersonaAccess, PersonaPatch, PersonaRule } from '$lib/types';
 	import { autogrow } from '$lib/ui/autogrow';
-	import Dialog from '$lib/ui/Dialog.svelte';
 	import EmptyState from '$lib/ui/EmptyState.svelte';
 	import MarkdownView from '$lib/ui/MarkdownView.svelte';
+	import Textarea from '$lib/ui/Textarea.svelte';
 	import { push } from '$lib/ui/toasts.svelte';
 
 	const CASES: Case[] = ['plan', 'implement', 'review', 'test', 'document', 'default'];
@@ -45,7 +45,7 @@
 		mcp_servers: string[];
 		access: PersonaAccess;
 		models: Record<Case, string>;
-		tags: string;
+		tags: string[];
 	}
 
 	interface PickOption {
@@ -66,7 +66,7 @@
 			mcp_servers: [],
 			access: { memory_write: 'allow', task_move: 'allow', workflow_trigger: 'allow' },
 			models: { plan: '', implement: '', review: '', test: '', document: '', default: '' },
-			tags: ''
+			tags: []
 		};
 	}
 
@@ -85,7 +85,7 @@
 			mcp_servers: [...p.mcp_servers],
 			access: { ...p.access },
 			models,
-			tags: p.tags.join(', ')
+			tags: [...p.tags]
 		};
 	}
 
@@ -106,10 +106,7 @@
 			mcp_servers: [...d.mcp_servers],
 			access: { ...d.access },
 			models,
-			tags: d.tags
-				.split(',')
-				.map((t) => t.trim())
-				.filter(Boolean)
+			tags: [...d.tags]
 		};
 	}
 
@@ -124,12 +121,6 @@
 	let workflowOptions = $state<PickOption[]>([]);
 	let practiceOptions = $state<PickOption[]>([]);
 	let serverOptions = $state<PickOption[]>([]);
-	let pickerQuery = $state<Record<ListKey, string>>({
-		skills: '',
-		workflows: '',
-		practices: '',
-		mcp_servers: ''
-	});
 	let pickersLoaded = false;
 
 	const rows = $derived.by(() => {
@@ -206,22 +197,8 @@
 		if (failed.length > 0) push('error', `Could not load ${failed.join(', ')}`);
 	}
 
-	/** The list's rows: a stored value the list no longer names is kept, labelled by
-	 * the value itself, so nothing silently drops off the persona. */
-	function pickerRows(options: PickOption[], chosen: string[], query: string): PickOption[] {
-		const q = query.trim().toLowerCase();
-		const known = new Set(options.map((o) => o.value));
-		const orphans = chosen.filter((v) => !known.has(v)).map((v) => ({ value: v, label: v }));
-		return [...orphans, ...options].filter(
-			(o) => q === '' || o.label.toLowerCase().includes(q) || o.value.toLowerCase().includes(q)
-		);
-	}
-
-	function toggle(key: ListKey, value: string, on: boolean): void {
-		if (!draft) return;
-		const list = draft[key];
-		if (on && !list.includes(value)) list.push(value);
-		if (!on) draft[key] = list.filter((v) => v !== value);
+	function setList(key: ListKey, values: string[]): void {
+		if (draft) draft[key] = values;
 	}
 
 	function open(p: Persona): void {
@@ -251,6 +228,13 @@
 
 	function beginInstructions(): void {
 		instructionsEditing = true;
+	}
+
+	/** Attached to the create dialog: `showModal()` is the only way to get the top layer. */
+	function showModal(el: HTMLDialogElement): void {
+		if (!el.open) el.showModal();
+		// The dialog would otherwise land focus on the close button and ring it.
+		el.querySelector<HTMLInputElement>('[data-testid="persona-name"]')?.focus();
 	}
 
 	/** Attached to the editor so it takes focus the moment it is drawn. */
@@ -392,60 +376,64 @@
 		{/if}
 
 		{#if showDetail}
-			<aside class="detail" aria-label="Persona detail" data-testid="persona-detail">
-				<header>
-					<span class="name" data-testid="persona-detail-name">
-						{draft ? draft.name || 'New persona' : 'Persona'}
-					</span>
-					<span class="spacer"></span>
-					<IconButton
-						icon="x"
-						label="Close persona detail"
-						onclick={close}
-						data-testid="persona-detail-close"
-					/>
-				</header>
-
-				<div class="detail-body">
-					{#if personas.openError}
-						<p class="bad" role="alert" data-testid="persona-detail-error">{personas.openError}</p>
-					{/if}
-					{#if draft}
-						{@render form(false)}
-					{:else if personas.openLoading}
-						<span class="hint">Loading…</span>
-					{/if}
-				</div>
-			</aside>
+			{@render panel()}
 		{/if}
 	</div>
 </div>
 
 <!-- A persona not yet created is drafted in a modal rather than the docked panel; once
-     saved it has an id and the panel takes over. -->
-<Dialog open={creating} title="New persona" onclose={close}>
-	{#if creating}
-		<div class="dialog-form" data-testid="persona-create">
-			{@render form(true)}
-		</div>
-	{/if}
-	{#snippet footer()}
-		{#if creating}
-			<Button onclick={close}>Cancel</Button>
-			<Button variant="primary" disabled={!canSave} onclick={save} data-testid="persona-save">
-				{saving ? 'Saving…' : 'Save'}
-			</Button>
-		{/if}
-	{/snippet}
-</Dialog>
+     saved it has an id and the panel takes over. As on the board, the dialog is bare and
+     the panel brings its own chrome. -->
+{#if creating}
+	<dialog
+		{@attach showModal}
+		class="detail-modal"
+		data-testid="persona-create"
+		onclose={close}
+		onclick={(e) => {
+			if (e.target === e.currentTarget) close();
+		}}
+	>
+		{@render panel()}
+	</dialog>
+{/if}
 
-{#snippet form(inDialog: boolean)}
+{#snippet panel()}
+	<aside class="detail" aria-label="Persona detail" data-testid="persona-detail">
+		<header>
+			<span class="name" data-testid="persona-detail-name">
+				{draft ? draft.name || 'New persona' : 'Persona'}
+			</span>
+			<span class="spacer"></span>
+			<IconButton
+				icon="x"
+				label="Close persona detail"
+				onclick={close}
+				data-testid="persona-detail-close"
+			/>
+		</header>
+
+		<div class="detail-body">
+			{#if personas.openError}
+				<p class="bad" role="alert" data-testid="persona-detail-error">{personas.openError}</p>
+			{/if}
+			{#if draft}
+				{@render form()}
+			{:else if personas.openLoading}
+				<span class="hint">Loading…</span>
+			{/if}
+		</div>
+	</aside>
+{/snippet}
+
+{#snippet form()}
 	{#if draft}
 		<Input label="Name" bind:value={draft.name} data-testid="persona-name" />
 		<Input label="Role" bind:value={draft.role} data-testid="persona-role" />
-		<div class="full">
-			<Input label="Summary" bind:value={draft.summary} data-testid="persona-summary" />
-		</div>
+		<span class="dbm-field full">
+			<label class="dbm-field__label" for="persona-summary">Summary</label>
+			<Textarea id="persona-summary" bind:value={draft.summary} rows={2} data-testid="persona-summary" />
+		</span>
 
 		<div class="field full">
 			<div class="field-head">
@@ -549,16 +537,16 @@
 		</div>
 
 		<div class="full">
-			<Input
+			<TagInput
 				label="Tags"
-				hint="Comma separated"
-				mono
-				bind:value={draft.tags}
-				data-testid="persona-tags"
+				value={draft.tags}
+				onchange={(v) => {
+					if (draft) draft.tags = v;
+				}}
+				testId="persona-tags"
 			/>
 		</div>
 
-		{#if !inDialog}
 		<div class="actions full">
 			<Button
 				size="sm"
@@ -597,41 +585,23 @@
 				{/if}
 			{/if}
 		</div>
-		{/if}
 	{/if}
 {/snippet}
 
 {#snippet picker(key: ListKey, label: string, options: PickOption[])}
 	{#if draft}
-		{@const chosen = draft[key]}
-		{@const list = pickerRows(options, chosen, pickerQuery[key])}
-		<div class="field">
-			<div class="field-head">
-				<span>{label}</span>
-				<span class="hint">{chosen.length} selected</span>
-			</div>
-			<Input
-				placeholder="Filter {label.toLowerCase()}"
-				aria-label="Filter {label.toLowerCase()}"
-				icon="search"
-				bind:value={pickerQuery[key]}
-				data-testid="persona-pick-{key}-search"
-			/>
-			<div class="pick-list" role="group" aria-label={label} data-testid="persona-pick-{key}">
-				{#each list as row (row.value)}
-					<Checkbox
-						label={row.label}
-						checked={chosen.includes(row.value)}
-						onchange={(e) => toggle(key, row.value, e.currentTarget.checked)}
-						data-testid="persona-pick-{key}-{row.value}"
-					/>
-				{:else}
-					<span class="hint">Nothing to pick.</span>
-				{/each}
-			</div>
-		</div>
+		<MultiSelect
+			{label}
+			{options}
+			value={draft[key]}
+			placeholder="Select {label.toLowerCase()}"
+			onchange={(v) => setList(key, v)}
+			testId="persona-pick-{key}"
+		/>
 	{/if}
 {/snippet}
+
+
 
 <style>
 	.title-row {
@@ -829,15 +799,6 @@
 		padding: 12px;
 	}
 
-	/* The modal keeps the panel's two-by-two grid at the shared dialog width, with the
-	   board's field spacing. */
-	.dialog-form {
-		display: grid;
-		grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-		gap: var(--space-3);
-	}
-
-	.dialog-form > .full,
 	.detail-body > .full,
 	.detail-body > :global(.bad) {
 		grid-column: 1 / -1;
@@ -888,6 +849,36 @@
 		outline-offset: 2px;
 	}
 
+	/* The create modal mirrors the board's task detail modal: a bare dialog around the
+	   same panel at the same size. */
+	.detail-modal {
+		padding: 0;
+		border: 0;
+		background: transparent;
+		overflow: visible;
+	}
+
+	.detail-modal::backdrop {
+		background: rgb(0 0 0 / 0.45);
+	}
+
+	/* In the modal Save sits at the bottom right, as a dialog's primary action does. */
+	.detail-modal .actions {
+		justify-content: flex-end;
+	}
+
+	.detail-modal .actions > .spacer {
+		display: none;
+	}
+
+	.detail-modal .detail {
+		width: min(820px, 92vw);
+		max-width: none;
+		height: auto;
+		max-height: min(80vh, 920px);
+		overflow: hidden;
+	}
+
 	/* Same reasoning as the task detail: MarkdownView caps its embedded body, and this
 	   panel scrolls as a whole instead, so the cap is lifted with a more specific rule. */
 	.instructions-display :global(.body.embedded) {
@@ -901,16 +892,6 @@
 		margin-top: 0;
 	}
 
-	.pick-list {
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-		max-height: 140px;
-		overflow-y: auto;
-		padding: 4px 6px;
-		border: 1px solid var(--border-subtle);
-		border-radius: 3px;
-	}
 
 	.models {
 		display: grid;

@@ -118,11 +118,14 @@ describe('the Personas view', () => {
 		await fireEvent.click(screen.getByTestId('persona-new'));
 
 		await waitFor(() => screen.getByTestId('persona-create'));
-		const dialog = screen.getByTestId('dialog') as HTMLDialogElement;
+		const dialog = screen.getByTestId('persona-create') as HTMLDialogElement;
 		expect(dialog.open).toBe(true);
-		expect(screen.queryByTestId('persona-detail')).toBeNull();
+		expect(dialog.querySelector('[data-testid="persona-detail"]')).toBeTruthy();
+		expect(document.querySelector('.split [data-testid="persona-detail"]')).toBeNull();
 		expect(screen.getAllByTestId('persona-save')).toHaveLength(1);
 		expect(screen.queryByTestId('persona-delete')).toBeNull();
+		expect(screen.getByTestId('persona-pick-skills').tagName).toBe('BUTTON');
+		expect(screen.getByTestId('persona-summary').tagName).toBe('TEXTAREA');
 	});
 
 	it('asks before deleting and only writes on confirm', async () => {
