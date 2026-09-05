@@ -72,6 +72,7 @@ import Square from '@lucide/svelte/icons/square';
 import Tag from '@lucide/svelte/icons/tag';
 import Terminal from '@lucide/svelte/icons/terminal';
 import Trash2 from '@lucide/svelte/icons/trash-2';
+import UserRound from '@lucide/svelte/icons/user-round';
 import Users from '@lucide/svelte/icons/users';
 import WandSparkles from '@lucide/svelte/icons/wand-sparkles';
 import X from '@lucide/svelte/icons/x';
@@ -142,6 +143,7 @@ export const icons = {
 	copy: Copy,
 	'refresh-cw': RefreshCw,
 	'trash-2': Trash2,
+	'user-round': UserRound,
 	users: Users,
 	pencil: Pencil,
 	'message-square': MessageSquare,

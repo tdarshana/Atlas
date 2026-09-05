@@ -645,6 +645,7 @@
 								void run('Task claimed', () => claim(task.key));
 							}}
 						>
+							<Icon name="user-round" size={13} />
 							Claim (assign to me)
 						</button>
 						<button
@@ -657,6 +658,7 @@
 								confirming = true;
 							}}
 						>
+							<Icon name="trash-2" size={13} />
 							Delete…
 						</button>
 					</div>
