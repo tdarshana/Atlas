@@ -209,6 +209,11 @@
 		flex: 1;
 		min-height: 0;
 		overflow-y: auto;
+		/* The list reaches into the lane's right padding and pads itself by the scrollbar's
+		   10px, so the bar (an overlay on macOS, no gutter of its own) sits over empty
+		   space instead of the cards' right border. */
+		margin-right: -8px;
+		padding-right: 10px;
 	}
 
 	.empty {
