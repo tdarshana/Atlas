@@ -367,6 +367,36 @@ async fn rejects_browser_origins_and_non_loopback_hosts() {
     }
 }
 
+/// SEC-2 (ATL-296). A page on another loopback port can submit a plain HTML form at a
+/// bodiless side-effect route: the browser sends it with no preflight, and CORS only keeps
+/// the page from reading the answer, not the request from running. Such an origin may use
+/// safe methods only (the request above still passes); any other method from it is
+/// refused before a handler runs. The app's own origins and clients that send no
+/// `Origin` reach the handler as before.
+#[tokio::test]
+async fn a_form_post_from_a_loopback_page_outside_the_app_is_refused() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let refresh = format!("{base}/projects/{}/refresh", uuid::Uuid::new_v4());
+    let c = reqwest::Client::new();
+
+    let form = c.post(&refresh).header("Origin", "http://localhost:3000")
+        .header("Content-Type", "application/x-www-form-urlencoded").body("a=1").send().await.unwrap();
+    assert_eq!(form.status(), 403, "a simple form post from another loopback page must not run");
+    let body: serde_json::Value = form.json().await.unwrap();
+    assert_eq!(body["error"], "forbidden origin");
+
+    let get = c.get(format!("{base}/status")).header("Origin", "http://localhost:3000").send().await.unwrap();
+    assert_eq!(get.status(), 200, "a safe method from that page still passes the guard");
+
+    // The webview and a non-browser client get past the guard to the handler, which
+    // answers 404 for a project that does not exist.
+    let webview = c.post(&refresh).header("Origin", "tauri://localhost").send().await.unwrap();
+    assert_eq!(webview.status(), 404, "the app's own origin reaches the handler");
+    let cli = c.post(&refresh).send().await.unwrap();
+    assert_eq!(cli.status(), 404, "a client with no Origin reaches the handler");
+}
+
 /// The Tauri desktop app's webview sends one of these fixed origins depending on
 /// platform (WKWebView/wry: `tauri://localhost`; WebView2: `http://tauri.localhost`),
 /// plus its dev server origin `http://localhost:1420`. None of them may be rejected as

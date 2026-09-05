@@ -155,10 +155,17 @@ fn is_loopback_origin(origin: &str) -> bool {
 /// The daemon has no authentication, so it must not be reachable from a web page that
 /// happens to be open in the user's browser: reject any cross-origin request, and any
 /// request whose `Host` is a name pointed at 127.0.0.1 from outside (DNS rebinding).
+///
+/// A loopback origin outside `CORS_ORIGINS` (a dev server on some other port) may use
+/// safe methods only. It never gets a CORS preflight approved, so the one unsafe request
+/// it can still produce is a simple one, such as an HTML form posted at a bodiless
+/// side-effect route, which the browser sends with no preflight and runs even though
+/// the page cannot read the answer.
 async fn guard(req: Request, next: Next) -> Response {
     let allowed = {
         let h = req.headers();
-        let origin_ok = h.get(header::ORIGIN).is_none_or(|v| v.to_str().is_ok_and(is_loopback_origin));
+        let safe = matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
+        let origin_ok = h.get(header::ORIGIN).is_none_or(|v| v.to_str().is_ok_and(|o| is_cors_origin(o) || (safe && is_loopback_origin(o))));
         // An absent Host is HTTP/2 or HTTP/1.0, where the authority never came from a browser.
         let host_ok = h.get(header::HOST).is_none_or(|v| v.to_str().is_ok_and(is_loopback_host));
         origin_ok && host_ok
