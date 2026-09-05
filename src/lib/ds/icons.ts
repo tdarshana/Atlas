@@ -9,7 +9,13 @@ import ArrowRight from '@lucide/svelte/icons/arrow-right';
 import ArrowUp from '@lucide/svelte/icons/arrow-up';
 import Bell from '@lucide/svelte/icons/bell';
 import BookOpen from '@lucide/svelte/icons/book-open';
+import Bookmark from '@lucide/svelte/icons/bookmark';
 import Bot from '@lucide/svelte/icons/bot';
+import Bug from '@lucide/svelte/icons/bug';
+import CornerLeftUp from '@lucide/svelte/icons/corner-left-up';
+import Lightbulb from '@lucide/svelte/icons/lightbulb';
+import SquareArrowUp from '@lucide/svelte/icons/square-arrow-up';
+import Wrench from '@lucide/svelte/icons/wrench';
 import CornerDownRight from '@lucide/svelte/icons/corner-down-right';
 import Braces from '@lucide/svelte/icons/braces';
 import Check from '@lucide/svelte/icons/check';
@@ -79,6 +85,12 @@ export const icons = {
 	database: Database,
 	braces: Braces,
 	bot: Bot,
+	bookmark: Bookmark,
+	bug: Bug,
+	'corner-left-up': CornerLeftUp,
+	lightbulb: Lightbulb,
+	'square-arrow-up': SquareArrowUp,
+	wrench: Wrench,
 	'book-open': BookOpen,
 	'git-branch': GitBranch,
 	'corner-down-right': CornerDownRight,

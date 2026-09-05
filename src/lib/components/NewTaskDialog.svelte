@@ -6,6 +6,7 @@
 	import { errorMessage } from '$lib/errors';
 	import { personas } from '$lib/stores/personas.svelte';
 	import type { TaskKind, TaskPriority, Uuid } from '$lib/types';
+	import { KIND_OPTIONS } from '$lib/components/board/kind';
 	import Dialog from '$lib/ui/Dialog.svelte';
 	import Textarea from '$lib/ui/Textarea.svelte';
 	import { push } from '$lib/platform/toasts.svelte';
@@ -27,10 +28,7 @@
 	// out after the task is created.
 	const target = $derived(projectName ? `Project: ${projectName}` : 'Global board');
 
-	const kindOptions = (['task', 'bug', 'feature', 'chore'] as TaskKind[]).map((k) => ({
-		value: k,
-		label: k
-	}));
+	const kindOptions = KIND_OPTIONS;
 	const priorityOptions = (['low', 'medium', 'high', 'urgent'] as TaskPriority[]).map((p) => ({
 		value: p,
 		label: p

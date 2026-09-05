@@ -472,7 +472,7 @@ fn is_zero(n: &usize) -> bool {
 // Board (Phase 6)
 // ---------------------------------------------------------------------------
 
-str_enum!(TaskKind { Task => "task", Bug => "bug", Feature => "feature", Chore => "chore" });
+str_enum!(TaskKind { Task => "task", Bug => "bug", Feature => "feature", Chore => "chore", Epic => "epic", FeatureRequest => "feature_request" });
 str_enum!(TaskPriority { Low => "low", Medium => "medium", High => "high", Urgent => "urgent" });
 
 /// One column of the board. `done` marks the terminal columns: moving into one

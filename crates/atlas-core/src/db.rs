@@ -197,6 +197,34 @@ alter table tasks add column if not exists persona_id uuid;
 -- filter `task_events` on `task_id`, and the table grows one row per task write with
 -- nothing pruning it. `if not exists`, the same shape as migration 10.
 create index if not exists task_events_task_id_idx on task_events (task_id);
+"#), (13, r#"
+-- Task kinds grow (epic, feature_request; ATL-365). DuckDB cannot drop a check
+-- constraint, so the table is rebuilt without the kind check: `TaskKind` validates
+-- every write, which a text check only duplicated. Column list spelled out on both
+-- sides so the copy does not depend on the order later migrations appended columns.
+create table tasks_v13 (
+  id uuid primary key,
+  key text not null unique,
+  project_id uuid,
+  seq bigint not null,
+  title text not null,
+  description text not null default '',
+  stage text not null,
+  kind text not null,
+  priority text not null check (priority in ('low','medium','high','urgent')),
+  assignee text,
+  labels json not null default '[]',
+  parent_id uuid,
+  created_by text not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  closed_at timestamptz,
+  source_ref json,
+  persona_id uuid);
+insert into tasks_v13 (id, key, project_id, seq, title, description, stage, kind, priority, assignee, labels, parent_id, created_by, created_at, updated_at, closed_at, source_ref, persona_id)
+  select id, key, project_id, seq, title, description, stage, kind, priority, assignee, labels, parent_id, created_by, created_at, updated_at, closed_at, source_ref, persona_id from tasks;
+drop table tasks;
+alter table tasks_v13 rename to tasks;
 "#)];
 
 /// Moves the Markdown workflow documents aside so migration 6 can give the name
@@ -317,7 +345,7 @@ mod tests {
     #[test]
     fn migrate_creates_tables_and_is_idempotent() {
         let db = Db::open_in_memory().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 12);
+        assert_eq!(db.schema_version().unwrap(), 13);
         let n: i64 = db.with_conn(|c| Ok(c.query_row(
             "select count(*) from information_schema.tables where table_name in ('memories','memory_embeddings','audit','settings','projects','agents','practices','workflow_docs','sync_targets','jobs','tasks','task_blockers','task_events','board_counters','workflows','workflow_runs','workflow_steps','skills','personas','project_personas')",
             [], |r| r.get(0))?)).unwrap();
@@ -328,7 +356,7 @@ mod tests {
             [], |r| r.get(0))?)).unwrap();
         assert_eq!(cols, 6);
         db.migrate().unwrap(); // second run is a no-op
-        assert_eq!(db.schema_version().unwrap(), 12);
+        assert_eq!(db.schema_version().unwrap(), 13);
     }
 
     /// Migration 6 renames the Markdown doc table out of the way and puts the real
@@ -371,7 +399,7 @@ mod tests {
         .unwrap();
         assert_eq!(db.schema_version().unwrap(), 4);
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 12);
+        assert_eq!(db.schema_version().unwrap(), 13);
     }
 
     /// A database stamped 3 by the build that shipped migration 3 without
@@ -388,7 +416,7 @@ mod tests {
         assert_eq!(db.schema_version().unwrap(), 3);
 
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 12);
+        assert_eq!(db.schema_version().unwrap(), 13);
         let n: i64 = db
             .with_conn(|c| {
                 Ok(c.query_row("select count(*) from information_schema.tables where table_name = 'board_counters'", [], |r| r.get(0))?)
@@ -409,7 +437,7 @@ mod tests {
         .unwrap();
         assert_eq!(db.schema_version().unwrap(), 7);
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 12);
+        assert_eq!(db.schema_version().unwrap(), 13);
         let n: i64 = db
             .with_conn(|c| {
                 Ok(c.query_row(
@@ -435,7 +463,7 @@ mod tests {
         .unwrap();
         assert_eq!(db.schema_version().unwrap(), 8);
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 12);
+        assert_eq!(db.schema_version().unwrap(), 13);
         let n: i64 = db
             .with_conn(|c| {
                 Ok(c.query_row(
@@ -474,10 +502,62 @@ mod tests {
         .unwrap();
         assert_eq!(db.schema_version().unwrap(), 11);
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 12);
+        assert_eq!(db.schema_version().unwrap(), 13);
         assert_eq!(index_count(&db, "task_events", "task_events_task_id_idx"), 1);
         db.migrate().unwrap();
         assert_eq!(index_count(&db, "task_events", "task_events_task_id_idx"), 1, "a replay is a no-op");
+    }
+
+    /// ATL-365: migration 13 rebuilds `tasks` without the kind check so `epic` and
+    /// `feature_request` can be stored. A v12 database with the old check and a row in
+    /// it comes through with the row intact and the new kinds accepted.
+    #[test]
+    fn migration_13_rebuilds_tasks_without_the_kind_check_on_a_v12_database() {
+        let db = Db::open_in_memory().unwrap();
+        db.with_conn(|c| {
+            c.execute_batch(
+                "insert into tasks (id, key, project_id, seq, title, stage, kind, priority, created_by) \
+                 values ('11111111-1111-1111-1111-111111111111', 'ATL-1', null, 1, 'first', 'Backlog', 'epic', 'low', 'test');",
+            )?;
+            Ok(())
+        })
+        .expect("a fresh database accepts the new kinds");
+        // Back to the v12 shape: the old table with the old check, holding one row.
+        db.with_conn(|c| {
+            c.execute_batch(
+                "create table tasks_v12 (id uuid primary key, key text not null unique, project_id uuid, seq bigint not null, \
+                 title text not null, description text not null default '', stage text not null, \
+                 kind text not null check (kind in ('task','bug','feature','chore')), \
+                 priority text not null check (priority in ('low','medium','high','urgent')), assignee text, \
+                 labels json not null default '[]', parent_id uuid, created_by text not null, \
+                 created_at timestamptz not null default now(), updated_at timestamptz not null default now(), \
+                 closed_at timestamptz, source_ref json, persona_id uuid); \
+                 insert into tasks_v12 select id, key, project_id, seq, title, description, stage, 'task', priority, assignee, labels, parent_id, created_by, created_at, updated_at, closed_at, source_ref, persona_id from tasks; \
+                 drop table tasks; alter table tasks_v12 rename to tasks; \
+                 delete from schema_version where version >= 13;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(db.schema_version().unwrap(), 12);
+        let refused = db.with_conn(|c| {
+            c.execute_batch("insert into tasks (id, key, seq, title, stage, kind, priority, created_by) values ('22222222-2222-2222-2222-222222222222', 'ATL-2', 2, 'x', 'Backlog', 'epic', 'low', 'test');")?;
+            Ok(())
+        });
+        assert!(refused.is_err(), "the v12 check refuses epic");
+        db.migrate().unwrap();
+        assert_eq!(db.schema_version().unwrap(), 13);
+        let (count, title): (i64, String) = db
+            .with_conn(|c| Ok(c.query_row("select count(*), min(title) from tasks", [], |r| Ok((r.get(0)?, r.get(1)?)))?))
+            .unwrap();
+        assert_eq!((count, title.as_str()), (1, "first"), "the row survives the rebuild");
+        db.with_conn(|c| {
+            c.execute_batch("insert into tasks (id, key, seq, title, stage, kind, priority, created_by) values ('22222222-2222-2222-2222-222222222222', 'ATL-2', 2, 'x', 'Backlog', 'feature_request', 'low', 'test');")?;
+            Ok(())
+        })
+        .expect("the rebuilt table accepts feature_request");
+        db.migrate().unwrap();
+        assert_eq!(db.schema_version().unwrap(), 13, "a replay is a no-op");
     }
 
     /// Migration 10 adds the `jobs(status)` index with `if not exists`: a fresh
@@ -495,7 +575,7 @@ mod tests {
         assert_eq!(db.schema_version().unwrap(), 9);
         assert_eq!(jobs_status_index_count(&db), 0);
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 12);
+        assert_eq!(db.schema_version().unwrap(), 13);
         assert_eq!(jobs_status_index_count(&db), 1);
 
         // Replaying over a database that already has the index is a no-op.
@@ -505,7 +585,7 @@ mod tests {
         })
         .unwrap();
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 12);
+        assert_eq!(db.schema_version().unwrap(), 13);
         assert_eq!(jobs_status_index_count(&db), 1);
     }
 
@@ -534,7 +614,7 @@ mod tests {
         assert_eq!(db.schema_version().unwrap(), 10);
         assert_eq!(persona_object_count(&db), 0);
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 12);
+        assert_eq!(db.schema_version().unwrap(), 13);
         assert_eq!(persona_object_count(&db), 3);
 
         db.with_conn(|c| {
@@ -543,7 +623,7 @@ mod tests {
         })
         .unwrap();
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 12);
+        assert_eq!(db.schema_version().unwrap(), 13);
         assert_eq!(persona_object_count(&db), 3);
     }
 

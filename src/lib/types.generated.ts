@@ -349,7 +349,7 @@ export interface SyncReport {
 	deleted?: number;
 }
 
-export type TaskKind = 'task' | 'bug' | 'feature' | 'chore';
+export type TaskKind = 'task' | 'bug' | 'feature' | 'chore' | 'epic' | 'feature_request';
 
 export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent';
 

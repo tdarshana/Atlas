@@ -80,10 +80,10 @@
 		onback
 	}: Props = $props();
 
-	const KINDS: TaskKind[] = ['task', 'bug', 'feature', 'chore'];
+	import { KIND_OPTIONS } from './kind';
 	const PRIORITIES: TaskPriority[] = ['low', 'medium', 'high', 'urgent'];
 
-	const kindOptions = KINDS.map((k) => ({ value: k, label: k }));
+	const kindOptions = KIND_OPTIONS;
 	const priorityOptions = PRIORITIES.map((p) => ({ value: p, label: p }));
 	const stageOptions = $derived(stages.map((s) => ({ value: s.name, label: s.name })));
 	const personaOptions = $derived([

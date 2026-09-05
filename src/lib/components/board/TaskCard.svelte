@@ -6,6 +6,8 @@
 	// line above the title the way Jira draws one; that line opens the parent instead.
 	import { Badge, Icon, Select } from '$lib/ds';
 	import type { SelectOption } from '$lib/ds';
+	import { kindMeta } from './kind';
+	import KindIcon from './KindIcon.svelte';
 	import { personaRole } from '$lib/stores/personas.svelte';
 	import type { Task } from '$lib/types';
 	import { priorityTone } from './card';
@@ -74,7 +76,7 @@
 			onclick={openParent}
 			onkeydown={(e) => e.stopPropagation()}
 		>
-			<Icon name="corner-down-right" size={12} />
+			<KindIcon subtask size={12} />
 			<span class="parent-key">{task.parent_key}</span>
 			{#if task.parent_title}<span class="parent-title">{task.parent_title}</span>{/if}
 		</button>
@@ -83,7 +85,10 @@
 	<div class="title">{task.title}</div>
 
 	<div class="tags">
-		<Badge mono>{task.kind}</Badge>
+		<span class="kind" data-testid="kind-{task.key}">
+			<KindIcon kind={task.kind} />
+			<span>{kindMeta(task.kind).label}</span>
+		</span>
 		{#if task.persona_slug}
 			<Badge tone="accent" icon="users" data-testid="persona-chip-{task.key}">
 				{personaRole(task.persona_slug, task.persona_name ?? task.persona_slug)}
@@ -213,6 +218,14 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+	}
+
+	.kind {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		font-size: 11px;
+		color: var(--text-secondary);
 	}
 
 	.tags {
