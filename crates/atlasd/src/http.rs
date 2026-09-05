@@ -454,13 +454,18 @@ async fn status(State(s): State<AppState>) -> Result<Json<StatusReport>, ApiErro
 async fn events(State(s): State<AppState>) -> axum::response::Sse<impl tokio_stream::Stream<Item = std::result::Result<axum::response::sse::Event, std::convert::Infallible>>> {
     use axum::response::sse::{Event, KeepAlive, Sse};
     use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
-    use tokio_stream::{wrappers::BroadcastStream, StreamExt};
-    let stream = BroadcastStream::new(s.backend.db.subscribe()).map(|item| {
-        Ok(match item {
+    use tokio_stream::wrappers::{BroadcastStream, WatchStream};
+    use tokio_stream::StreamExt;
+    let changes = BroadcastStream::new(s.backend.db.subscribe()).map(|item| {
+        Some(match item {
             Ok(change) => Event::default().event(change.entity.clone()).json_data(&change).unwrap_or_else(|_| Event::default().event("lagged").data("")),
             Err(BroadcastStreamRecvError::Lagged(n)) => Event::default().event("lagged").data(n.to_string()),
         })
     });
+    // The stream ends when the daemon stops: a `None` from the shutdown flag closes
+    // it, so the graceful shutdown is not held open by a client that never hangs up.
+    let stopping = WatchStream::from_changes(s.shutdown.clone()).filter_map(|stopping| if stopping { Some(None) } else { None });
+    let stream = changes.merge(stopping).take_while(Option::is_some).map(|e| Ok(e.expect("filtered above")));
     Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
 }
 async fn create_memory(State(s): State<AppState>, ApiQuery(q): ApiQuery<ActorQ>, PersonaHeader(persona): PersonaHeader, ApiJson(m): ApiJson<NewMemory>) -> Result<(StatusCode, Json<Memory>), ApiError> {
@@ -1118,7 +1123,8 @@ async fn plugin_channel(State(s): State<AppState>, headers: HeaderMap, upgrade: 
     if !plugin_channel_origin_ok(&headers) {
         return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "forbidden origin"}))).into_response();
     }
-    upgrade.on_upgrade(move |socket| s.plugin_tools.clone().serve(socket))
+    let shutdown = s.shutdown.clone();
+    upgrade.on_upgrade(move |socket| s.plugin_tools.clone().serve(socket, shutdown))
 }
 
 #[cfg(test)]

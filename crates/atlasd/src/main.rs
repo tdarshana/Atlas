@@ -71,7 +71,8 @@ async fn main() -> anyhow::Result<()> {
     let plugin_tools = Arc::new(plugin_tools::PluginToolChannel::new());
     let backend = Arc::new(backend.with_plugin_tool_host(plugin_tools.clone()));
     let mcp_clients = Arc::new(mcp_clients::ClientRegistry::new());
-    let state = AppState { backend: backend.clone(), mcp_clients: mcp_clients.clone(), plugin_tools };
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let state = AppState { backend: backend.clone(), mcp_clients: mcp_clients.clone(), plugin_tools, shutdown: shutdown_rx };
 
     // One worker, in this process: it drains the `jobs` table the API writes into,
     // and it is the only consumer, so a job is never claimed twice.
@@ -109,6 +110,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("atlasd listening on http://{addr} (db {})", paths.db_path().display());
 
     let daemon_file = paths.daemon_file();
+    let watchdog_backend = backend.clone();
+    let watchdog_file = daemon_file.clone();
     axum::serve(listener, app).with_graceful_shutdown(async move {
         let ctrl_c = tokio::signal::ctrl_c();
         #[cfg(unix)]
@@ -118,7 +121,28 @@ async fn main() -> anyhow::Result<()> {
         }
         #[cfg(not(unix))]
         { let _ = ctrl_c.await; }
-        let _ = std::fs::remove_file(&daemon_file);
+        tracing::info!("atlasd stopping");
+        // End every long-lived response so the graceful wait below can finish, then
+        // give it a bounded time: a client that never hangs up must not keep the
+        // process alive, and the checkpoint below is what a clean stop is for.
+        let _ = shutdown_tx.send(true);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tracing::warn!("connections still open after 5s; checkpointing and exiting");
+            finish(&watchdog_backend, &watchdog_file);
+            std::process::exit(0);
+        });
     }).await?;
+    finish(&backend, &daemon_file);
     Ok(())
+}
+
+/// The last thing the daemon does: fold the write-ahead log into the database file
+/// so the next start never has to replay it, and take down `daemon.json`.
+fn finish(backend: &LocalBackend, daemon_file: &std::path::Path) {
+    match backend.db.checkpoint() {
+        Ok(()) => tracing::info!("checkpointed"),
+        Err(e) => tracing::warn!("checkpoint on shutdown failed: {e}"),
+    }
+    let _ = std::fs::remove_file(daemon_file);
 }

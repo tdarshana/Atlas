@@ -101,7 +101,7 @@ impl PluginToolChannel {
     /// first, whose pending calls fail rather than hanging until their own timeout: two
     /// desktop windows both opening the channel is a user's doing, not an error, and the
     /// newest one is the live app.
-    pub async fn serve(self: Arc<Self>, mut socket: WebSocket) {
+    pub async fn serve(self: Arc<Self>, mut socket: WebSocket, mut shutdown: tokio::sync::watch::Receiver<bool>) {
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
         let (out, mut rx) = mpsc::unbounded_channel::<String>();
         let replaced = self.lock().socket.replace(Socket { generation, out });
@@ -117,6 +117,9 @@ impl PluginToolChannel {
 
         loop {
             tokio::select! {
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() { break; }
+                }
                 frame = rx.recv() => match frame {
                     Some(text) => {
                         if socket.send(Message::Text(text.into())).await.is_err() { break; }

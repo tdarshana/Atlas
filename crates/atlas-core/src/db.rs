@@ -210,7 +210,18 @@ impl Db {
     pub fn open(path: &Path) -> Result<Db> {
         if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
         let db = Db { conn: Mutex::new(Connection::open(path)?), changes: broadcast::channel(CHANGE_BUFFER).0 };
-        db.migrate()?; Ok(db)
+        db.migrate()?;
+        // A migration's DDL must never sit in the write-ahead log: DuckDB has refused
+        // to replay a log holding `alter table ... add column` after an unclean stop,
+        // which lost every write since the previous checkpoint. Folding the migration
+        // into the file at once means a crash right after start still reopens.
+        db.checkpoint()?;
+        Ok(db)
+    }
+    /// Folds the write-ahead log into the database file. Called after migrations and
+    /// on shutdown; cheap when there is nothing to fold.
+    pub fn checkpoint(&self) -> Result<()> {
+        self.with_conn(|c| { c.execute_batch("checkpoint")?; Ok(()) })
     }
     pub fn open_in_memory() -> Result<Db> {
         let db = Db { conn: Mutex::new(Connection::open_in_memory()?), changes: broadcast::channel(CHANGE_BUFFER).0 };
@@ -237,6 +248,12 @@ impl Db {
             Ok(c.query_row("select coalesce(max(version),0) from schema_version", [], |r| r.get(0))?)
         })
     }
+    #[cfg(test)]
+    pub(crate) fn open_without_checkpoint(path: &Path) -> Result<Db> {
+        let db = Db { conn: Mutex::new(Connection::open(path)?), changes: broadcast::channel(CHANGE_BUFFER).0 };
+        db.migrate()?;
+        Ok(db)
+    }
     pub fn migrate(&self) -> Result<()> {
         let current = self.schema_version()?;
         self.with_conn(|c| {
@@ -253,6 +270,36 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wal_len(path: &std::path::Path) -> u64 {
+        let wal = path.with_extension("duckdb.wal");
+        std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// `open` leaves no migration in the write-ahead log: a fresh database is
+    /// checkpointed the moment its migrations ran, so a crash right after start
+    /// reopens cleanly, whereas migrating alone leaves the DDL in the log.
+    #[test]
+    fn open_checkpoints_the_migrations_out_of_the_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = dir.path().join("raw.duckdb");
+        {
+            let _db = Db::open_without_checkpoint(&raw).unwrap();
+            assert!(wal_len(&raw) > 0, "migrations alone leave the log populated");
+        }
+        let clean = dir.path().join("clean.duckdb");
+        {
+            let db = Db::open(&clean).unwrap();
+            assert_eq!(wal_len(&clean), 0, "open folded the migrations into the file");
+            db.with_conn(|c| { c.execute("insert into projects (id, name, root_path) values (?, ?, ?)", duckdb::params![uuid::Uuid::new_v4().to_string(), "p", "/tmp/p"])?; Ok(()) }).unwrap();
+            assert!(wal_len(&clean) > 0, "a write after open lands in the log");
+            db.checkpoint().unwrap();
+            assert_eq!(wal_len(&clean), 0, "checkpoint folds it in");
+        }
+        let again = Db::open(&clean).unwrap();
+        let n: i64 = again.with_conn(|c| Ok(c.query_row("select count(*) from projects", [], |r| r.get(0))?)).unwrap();
+        assert_eq!(n, 1);
+    }
     #[test]
     fn migrate_creates_tables_and_is_idempotent() {
         let db = Db::open_in_memory().unwrap();

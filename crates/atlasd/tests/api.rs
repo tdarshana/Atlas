@@ -3515,3 +3515,49 @@ async fn a_persona_header_gates_writes_and_lands_in_the_detail() {
     let last = detail["events"].as_array().unwrap().iter().rfind(|e| e["kind"] == "moved").unwrap();
     assert!(last["detail"].get("persona").is_none(), "no persona, no field: {last}");
 }
+
+// ---- clean stop (ATL-345) ----
+
+/// A terminate signal stops the daemon within seconds even while a change stream is
+/// open, the stop checkpoints the write-ahead log into the database file, and the
+/// file reopens with everything that was written. This is the path `atlas daemon stop`
+/// and the desktop's own stop take; without it an unclean stop left a log DuckDB could
+/// not replay.
+#[tokio::test]
+async fn a_terminate_signal_stops_the_daemon_and_checkpoints_the_log() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    // A change stream that never hangs up on its own.
+    let stream = c.get(format!("{base}/events")).send().await.unwrap();
+    assert_eq!(stream.status(), 200);
+    let created: serde_json::Value = c
+        .post(format!("{base}/tasks"))
+        .json(&serde_json::json!({"title": "survives the stop"}))
+        .send().await.unwrap().json().await.unwrap();
+    let key = created["key"].as_str().unwrap().to_string();
+
+    let pid = d.child.id();
+    let status = Command::new("kill").arg(pid.to_string()).status().unwrap();
+    assert!(status.success());
+    let mut d = d;
+    let mut exited = None;
+    for _ in 0..100 {
+        if let Some(s) = d.child.try_wait().unwrap() { exited = Some(s); break; }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let exited = exited.expect("the daemon exited within ten seconds of SIGTERM");
+    assert!(exited.success(), "clean exit: {exited:?}");
+    drop(stream);
+
+    let home = d._home.path().to_path_buf();
+    let db_path = home.join("atlas.duckdb");
+    let wal = std::fs::metadata(home.join("atlas.duckdb.wal")).map(|m| m.len()).unwrap_or(0);
+    assert_eq!(wal, 0, "the stop folded the log into the file");
+    assert!(!home.join("daemon.json").exists(), "daemon.json is taken down");
+    let db = atlas_core::db::Db::open(&db_path).unwrap();
+    let found: i64 = db
+        .with_conn(|c| Ok(c.query_row("select count(*) from tasks where key = ?", [&key], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(found, 1, "{key} survived the stop and reopen");
+}
