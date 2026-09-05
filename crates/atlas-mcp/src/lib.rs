@@ -1256,6 +1256,73 @@ pub async fn disabled_tool_names<B: StatusBackend>(backend: &B) -> atlas_core::R
     Ok(names)
 }
 
+/// One tool as the MCP server exposes it, built-in or plugin, with the two gates a call
+/// meets reported separately: the global `mcp.disabled_tools` list, then (when a
+/// project is given) that project's own `mcp_disabled_tools` override. `enabled_here`
+/// is what a call actually gets; without a project it equals `enabled_globally`. The
+/// desktop's badges need both, since a tool can be enabled globally and disabled here.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ToolRow {
+    pub name: String,
+    pub description: String,
+    /// A short, comma-joined summary of arguments, `*` marking a required one: the
+    /// hand-written one from [`TOOL_TABLE`] for a built-in, the schema's own property
+    /// names for a plugin's, since a plugin declares a JSON Schema instead.
+    pub args: String,
+    pub scope: ToolScope,
+    pub enabled_globally: bool,
+    /// Actually callable here: enabled globally and not in the project's own override.
+    pub enabled_here: bool,
+    /// `builtin`, or `plugin:<id>` for a tool a plugin contributed.
+    pub source: String,
+}
+
+/// Every tool the MCP server exposes and whether each is on, from one project's point
+/// of view or (with `None`) the global one. Plugin tools are listed under the same MCP
+/// names a client sees and gated by the same two lists as a built-in. This is the one
+/// place the question is answered: `GET /api/v1/mcp/status` and
+/// `GET /api/v1/projects/{id}/mcp` render these rows, and [`AtlasMcp`]'s `tools/list`
+/// and `tools/call` hide and refuse exactly the rows this leaves off, so the HTTP
+/// layer and the router cannot drift apart.
+pub fn effective_tools(disabled_globally: &std::collections::HashSet<String>, project: Option<&Project>, plugin_decls: &[PluginToolDecl]) -> Vec<ToolRow> {
+    let disabled_here: std::collections::HashSet<&str> = project.map(|p| p.mcp_disabled_tools.iter().map(String::as_str).collect()).unwrap_or_default();
+    let gates = |name: &str| {
+        let enabled_globally = !disabled_globally.contains(name);
+        (enabled_globally, enabled_globally && !disabled_here.contains(name))
+    };
+    let mut rows: Vec<ToolRow> = TOOL_TABLE.iter()
+        .map(|m| {
+            let (enabled_globally, enabled_here) = gates(m.name);
+            ToolRow { name: m.name.into(), description: m.description.into(), args: m.args.into(), scope: m.scope, enabled_globally, enabled_here, source: "builtin".into() }
+        })
+        .collect();
+    rows.extend(plugin_decls.iter().map(|d| {
+        let name = plugin_tool_name(&d.plugin_id, &d.name);
+        let (enabled_globally, enabled_here) = gates(&name);
+        ToolRow {
+            args: plugin_args_summary(&d.args),
+            name,
+            description: d.description.clone(),
+            scope: match d.scope { PluginToolScope::Read => ToolScope::Read, PluginToolScope::Write => ToolScope::Write },
+            enabled_globally,
+            enabled_here,
+            source: format!("plugin:{}", d.plugin_id),
+        }
+    }));
+    rows
+}
+
+/// A plugin tool's `args` column: the JSON Schema's own property names, joined, with a
+/// `*` on the required ones.
+fn plugin_args_summary(args: &serde_json::Value) -> String {
+    let required: Vec<&str> = args.get("required").and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
+    args.get("properties").and_then(|v| v.as_object())
+        .map(|p| p.keys().map(|k| if required.contains(&k.as_str()) { format!("{k}*") } else { k.clone() }).collect::<Vec<_>>().join(", "))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "none".into())
+}
+
 /// The three `atlas://projects/{name}/...` resources one project owns: its context,
 /// its practices, and its board. Shared by `resources_for` (every project) and
 /// `resources_for_project` (Task MCP-A's `GET /api/v1/projects/{id}/mcp`, one project).
@@ -1355,12 +1422,14 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
         // `mcp.disabled_tools` hides one exactly the way it hides a built-in. A backend
         // with no plugins behind it answers with an empty list, which is every backend
         // but the daemon's and the shim's.
+        let decls = self.backend.plugin_tools().await.map_err(err)?;
         let mut tools = self.tool_router.list_all();
-        tools.extend(self.backend.plugin_tools().await.map_err(err)?.iter().map(plugin_tool));
+        tools.extend(decls.iter().map(plugin_tool));
+        let off: std::collections::HashSet<String> = effective_tools(&disabled, None, &decls).into_iter().filter(|r| !r.enabled_here).map(|r| r.name).collect();
         // The session persona's `tools` list, when it has one, narrows the effective
         // list further; the always-visible set stays whatever it says.
         let hidden = self.persona_hidden_tools(tools.iter().map(|t| t.name.to_string())).await?;
-        let tools = tools.into_iter().filter(|t| !disabled.contains(t.name.as_ref()) && !hidden.contains(t.name.as_ref())).collect();
+        let tools = tools.into_iter().filter(|t| !off.contains(t.name.as_ref()) && !hidden.contains(t.name.as_ref())).collect();
         Ok(ListToolsResult {
             result_type: Some(ResultType::COMPLETE),
             tools,
@@ -1373,16 +1442,14 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
 
     async fn call_tool(&self, request: CallToolRequestParams, context: RequestContext<RoleServer>) -> Result<CallToolResponse, McpError> {
         let disabled = self.disabled_tools().await?;
-        if disabled.contains(request.name.as_ref()) {
-            return Err(McpError::method_not_found::<CallToolRequestMethod>());
-        }
         // A tool the session persona hides from `tools/list` is refused here too.
         if !self.persona_hidden_tools(std::iter::once(request.name.to_string())).await?.is_empty() {
             return Err(McpError::method_not_found::<CallToolRequestMethod>());
         }
-        // Project-level gating (Task MCP-A), on top of the global list just checked.
-        // `tools/list` cannot do this: it has no call in hand to resolve a project
-        // from, so a project's own overrides only ever take effect here, at call time.
+        // Both gates, global then project (Task MCP-A), answered by the same
+        // `effective_tools` the HTTP layer renders. `tools/list` can only apply the
+        // global one: it has no call in hand to resolve a project from, so a project's
+        // own overrides only ever take effect here, at call time.
         // The project comes from the same precedence every other tool follows: this
         // call's own `project_root` argument, then `ATLAS_PROJECT_ROOT`, then the root
         // this server was started in; a call that resolves none is never gated by a
@@ -1395,10 +1462,9 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
         // tool's own logic to surface if it needs one.
         let project_root = request.arguments.as_ref().and_then(|a| a.get("project_root")).and_then(|v| v.as_str()).map(PathBuf::from);
         let project = self.resolve_project_for_gating(project_root).await.unwrap_or(None);
-        if let Some(p) = &project {
-            if p.mcp_disabled_tools.iter().any(|t| t == request.name.as_ref()) {
-                return Err(McpError::method_not_found::<CallToolRequestMethod>());
-            }
+        let decls = self.backend.plugin_tools().await.map_err(err)?;
+        if effective_tools(&disabled, project.as_ref(), &decls).iter().any(|r| r.name == request.name.as_ref() && !r.enabled_here) {
+            return Err(McpError::method_not_found::<CallToolRequestMethod>());
         }
         if let Some(hook) = &self.on_tool_call {
             // The streamable HTTP transport injects the raw `http::request::Parts` into
@@ -1423,7 +1489,6 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
             // an app that has just disconnected has no decls left, and the backend is
             // the one that can tell "the plugin is not running" from "that plugin
             // declares no such tool".
-            let decls = self.backend.plugin_tools().await.map_err(err)?;
             let plugin_id = decls.iter()
                 .find(|d| d.name == name && d.plugin_id.replace('-', "_") == underscored_id)
                 .map(|d| d.plugin_id.clone())
@@ -1645,6 +1710,49 @@ mod tests {
 
         client.cancel().await.unwrap();
         handle.await.unwrap();
+    }
+
+    /// ARCH-8: the one computation both the HTTP tool tables and the router's gating
+    /// read. A built-in and a plugin tool each report the global gate and the project
+    /// gate separately, in `TOOL_TABLE` order then plugin order, with the plugin's
+    /// `args` summarised from its schema.
+    #[tokio::test]
+    async fn effective_tools_reports_both_gates_for_builtin_and_plugin_tools() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap();
+        let project = backend.connect_project(repo.path().to_path_buf(), "t").await.unwrap();
+        let project = backend
+            .update_project(project.id, ProjectPatch { mcp_disabled_tools: Some(vec!["memory_list".into(), "plugin__acme_tools__count".into()]), ..Default::default() }, "t")
+            .await
+            .unwrap();
+        let disabled: std::collections::HashSet<String> = ["memory_forget".to_string()].into();
+        let decls = vec![
+            PluginToolDecl { plugin_id: "acme-tools".into(), name: "count".into(), description: "Counts.".into(), args: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}), scope: PluginToolScope::Read },
+            PluginToolDecl { plugin_id: "acme-tools".into(), name: "touch".into(), description: "Touches.".into(), args: serde_json::json!({"type": "object"}), scope: PluginToolScope::Write },
+        ];
+
+        let rows = effective_tools(&disabled, Some(&project), &decls);
+        assert_eq!(rows.len(), TOOL_TABLE.len() + 2);
+        let row = |name: &str| rows.iter().find(|r| r.name == name).unwrap_or_else(|| panic!("no row {name}"));
+        assert_eq!((row("memory_forget").enabled_globally, row("memory_forget").enabled_here), (false, false), "globally off is off here too");
+        assert_eq!((row("memory_list").enabled_globally, row("memory_list").enabled_here), (true, false), "only this project switched it off");
+        assert_eq!((row("memory_search").enabled_globally, row("memory_search").enabled_here), (true, true));
+        assert_eq!(row("memory_search").source, "builtin");
+        let count = row("plugin__acme_tools__count");
+        assert_eq!((count.enabled_globally, count.enabled_here), (true, false));
+        assert_eq!(count.args, "path*, limit", "schema property names in schema order, required starred");
+        assert_eq!(count.scope, ToolScope::Read);
+        assert_eq!(count.source, "plugin:acme-tools");
+        let touch = row("plugin__acme_tools__touch");
+        assert_eq!(touch.args, "none");
+        assert_eq!(touch.scope, ToolScope::Write);
+        assert!(touch.enabled_here);
+
+        // Without a project the second gate is the first one.
+        let global = effective_tools(&disabled, None, &decls);
+        assert!(global.iter().all(|r| r.enabled_here == r.enabled_globally), "{global:?}");
+        assert!(global.iter().find(|r| r.name == "memory_list").unwrap().enabled_here);
     }
 
     /// Task MCP-A: a project's own `mcp_disabled_tools` refuses a tool only for calls

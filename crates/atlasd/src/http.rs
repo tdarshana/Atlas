@@ -1,6 +1,6 @@
 use axum::{body::Bytes, extract::{FromRequest, FromRequestParts, Path, Query, Request, State}, http::{header, request::Parts, HeaderMap, Method, StatusCode}, middleware::{self, Next}, response::{IntoResponse, Response}, routing::{delete, get, post, put}, Json, Router};
 use atlas_core::{backend::{StatusBackend, MemoryBackend, ProjectBackend, LibraryBackend, JobBackend, BoardBackend, WorkflowBackend, SearchBackend, SkillBackend, McpBackend, PersonaBackend}, jobs::Job, models::*, search::global::{SearchKind, SearchQuery, SearchResult, DEFAULT_LIMIT}, AtlasError};
-use atlas_mcp::{ToolScope, TOOL_TABLE};
+use atlas_mcp::{ToolRow, ToolScope};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -246,19 +246,9 @@ pub fn cors_layer() -> CorsLayer {
 /// Task MCP-A: `GET /api/v1/projects/{id}/mcp`'s tool row. Unlike `McpToolRow`'s single
 /// `enabled`, this project view carries the two flags separately, since a tool can be
 /// enabled globally and disabled here, or (with `mcp.disabled_tools` naming it) the
-/// other way, and the desktop's badges need to tell those apart.
-#[derive(Serialize)] pub struct ProjectMcpToolRow {
-    pub name: String,
-    pub description: String,
-    pub args: String,
-    pub scope: ToolScope,
-    pub enabled_globally: bool,
-    /// Actually callable here: enabled globally and not in this project's own override.
-    pub enabled_here: bool,
-    /// `builtin`, or `plugin:<id>` for a tool a plugin contributed. Read the same way as
-    /// [`McpToolRow::source`].
-    pub source: String,
-}
+/// other way, and the desktop's badges need to tell those apart. It is exactly the row
+/// `atlas_mcp::effective_tools` computes, the same computation the router gates on.
+pub type ProjectMcpToolRow = ToolRow;
 #[derive(Serialize)] pub struct ProjectMcpConnect {
     pub stdio: McpStdioTransport,
     pub http: McpHttpTransport,
@@ -959,42 +949,16 @@ async fn unregister_mcp_client(State(s): State<AppState>, ApiPath(id): ApiPath<S
 
 /// `GET /api/v1/mcp/status`: everything the desktop Settings card (Task 3) and `atlas
 /// mcp status` need to render the MCP server. The tools table, resources and prompts
-/// come from the same sources the router itself uses (`atlas_mcp::{TOOL_TABLE,
+/// come from the same sources the router itself uses (`atlas_mcp::{effective_tools,
 /// disabled_tool_names, resources_for, prompts_for}`), not a count hand-maintained
-/// here, so the two cannot drift.
-/// A plugin tool's `args` column: the JSON Schema's own property names, joined, with a
-/// `*` on the required ones. A plugin declares a schema rather than the hand-written
-/// summary `TOOL_TABLE` carries, so both MCP routes render it the same way from here.
-fn plugin_args_summary(args: &serde_json::Value) -> String {
-    let required: Vec<&str> = args.get("required").and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
-    args.get("properties").and_then(|v| v.as_object())
-        .map(|p| p.keys().map(|k| if required.contains(&k.as_str()) { format!("{k}*") } else { k.clone() }).collect::<Vec<_>>().join(", "))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "none".into())
-}
-
+/// here, so the two cannot drift. Plugin tools are listed under the same MCP names a
+/// client sees and gated by the same `mcp.disabled_tools` list.
 async fn mcp_status(State(s): State<AppState>) -> Result<Json<McpStatusReport>, ApiError> {
     let disabled = atlas_mcp::disabled_tool_names(&*s.backend).await?;
-    let mut tools: Vec<McpToolRow> = TOOL_TABLE.iter()
-        .map(|m| McpToolRow { name: m.name.into(), description: m.description.into(), args: m.args.into(), scope: m.scope, enabled: !disabled.contains(m.name), source: "builtin".into() })
+    let tools: Vec<McpToolRow> = atlas_mcp::effective_tools(&disabled, None, &s.plugin_tools.list())
+        .into_iter()
+        .map(|r| McpToolRow { name: r.name, description: r.description, args: r.args, scope: r.scope, enabled: r.enabled_globally, source: r.source })
         .collect();
-    // Plugin tools are listed under the same MCP names a client sees and gated by the
-    // same `mcp.disabled_tools` list. `args` is the schema's own property names, joined,
-    // since a plugin declares a JSON Schema rather than the hand-written summary
-    // `TOOL_TABLE` carries.
-    tools.extend(s.plugin_tools.list().into_iter().map(|d| {
-        let name = atlas_mcp::plugin_tool_name(&d.plugin_id, &d.name);
-        let args = plugin_args_summary(&d.args);
-        McpToolRow {
-            enabled: !disabled.contains(&name),
-            name,
-            description: d.description,
-            args,
-            scope: match d.scope { PluginToolScope::Read => ToolScope::Read, PluginToolScope::Write => ToolScope::Write },
-            source: format!("plugin:{}", d.plugin_id),
-        }
-    }));
     let resources = atlas_mcp::resources_for(&*s.backend).await?;
     let prompts = atlas_mcp::prompts_for(&*s.backend).await?;
     let clients = s.mcp_clients.live();
@@ -1020,36 +984,11 @@ async fn mcp_status(State(s): State<AppState>) -> Result<Json<McpStatusReport>, 
 async fn project_mcp(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Result<Json<ProjectMcpReport>, ApiError> {
     let project = s.backend.get_project(id).await?;
     let disabled_globally = atlas_mcp::disabled_tool_names(&*s.backend).await?;
-    let disabled_here: std::collections::HashSet<&str> = project.mcp_disabled_tools.iter().map(String::as_str).collect();
-    let mut tools: Vec<ProjectMcpToolRow> = TOOL_TABLE.iter()
-        .map(|m| {
-            let enabled_globally = !disabled_globally.contains(m.name);
-            ProjectMcpToolRow {
-                name: m.name.into(), description: m.description.into(), args: m.args.into(), scope: m.scope,
-                enabled_globally,
-                enabled_here: enabled_globally && !disabled_here.contains(m.name),
-                source: "builtin".into(),
-            }
-        })
-        .collect();
     // Plugin tools belong on this tab for the same reason they belong on the global one:
     // both gates apply to them (`plugin__<id>__<name>` is what `mcp.disabled_tools` and a
     // project's override both name), and without them the desktop's `Plugin` badge on the
     // project tab never lights.
-    tools.extend(s.plugin_tools.list().into_iter().map(|d| {
-        let name = atlas_mcp::plugin_tool_name(&d.plugin_id, &d.name);
-        let enabled_globally = !disabled_globally.contains(&name);
-        let enabled_here = enabled_globally && !disabled_here.contains(name.as_str());
-        ProjectMcpToolRow {
-            args: plugin_args_summary(&d.args),
-            name,
-            description: d.description,
-            scope: match d.scope { PluginToolScope::Read => ToolScope::Read, PluginToolScope::Write => ToolScope::Write },
-            enabled_globally,
-            enabled_here,
-            source: format!("plugin:{}", d.plugin_id),
-        }
-    }));
+    let tools = atlas_mcp::effective_tools(&disabled_globally, Some(&project), &s.plugin_tools.list());
     let resources = atlas_mcp::resources_for_project(&project);
     let prompts = atlas_mcp::prompts_for(&*s.backend).await?;
     let clients = s.mcp_clients.live().into_iter().filter(|c| c.last_project_id == Some(id)).collect();
