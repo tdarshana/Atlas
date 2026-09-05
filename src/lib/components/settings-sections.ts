@@ -9,6 +9,7 @@ export interface SettingsSection {
 
 export const SETTINGS_SECTIONS: SettingsSection[] = [
 	{ id: 'daemon', label: 'Daemon' },
+	{ id: 'cli', label: 'Command line' },
 	{ id: 'extraction', label: 'Extraction' },
 	{ id: 'board-stages', label: 'Board stages' },
 	{ id: 'appearance', label: 'Appearance' },

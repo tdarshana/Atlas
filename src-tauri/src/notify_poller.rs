@@ -72,9 +72,9 @@ pub fn spawn<R: Runtime>(app: AppHandle<R>) {
 /// A client for the daemon `daemon.json` names, with its token (SEC-5), read fresh on
 /// every tick rather than cached: the port and the token both change across a restart,
 /// and this is the same file the CLI and the `daemon_ensure` command already trust.
-fn backend() -> Option<RemoteBackend> {
+fn backend() -> Option<(RemoteBackend, u16)> {
     let info = daemon_ctl::read_daemon_info(&AtlasPaths::discover())?;
-    Some(RemoteBackend::with_token(info.port, Some(info.token?)))
+    Some((RemoteBackend::with_token(info.port, Some(info.token?)), info.port))
 }
 
 fn show<R: Runtime>(app: &AppHandle<R>, body: &str) {
@@ -84,6 +84,7 @@ fn show<R: Runtime>(app: &AppHandle<R>, body: &str) {
 /// Marks the daemon unreachable and, on the transition into that state, notifies with
 /// whatever `ui.notify.daemon_errors` was last known to be.
 fn mark_unreachable<R: Runtime>(app: &AppHandle<R>, state: &mut State) {
+    crate::tray::set_running(app, None);
     if !state.was_unreachable {
         if state.notify_daemon_errors {
             show(app, "The daemon is unreachable");
@@ -94,7 +95,7 @@ fn mark_unreachable<R: Runtime>(app: &AppHandle<R>, state: &mut State) {
 
 async fn tick<R: Runtime>(app: &AppHandle<R>, state: &mut State) {
     let now = chrono::Utc::now();
-    let Some(daemon) = backend() else {
+    let Some((daemon, port)) = backend() else {
         mark_unreachable(app, state);
         return;
     };
@@ -102,6 +103,7 @@ async fn tick<R: Runtime>(app: &AppHandle<R>, state: &mut State) {
         mark_unreachable(app, state);
         return;
     };
+    crate::tray::set_running(app, Some(port));
 
     if state.was_unreachable {
         if state.notify_daemon_errors {

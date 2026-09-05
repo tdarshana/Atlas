@@ -55,6 +55,7 @@
 		/>
 	</div>
 	<span class="hint">Both are set when the daemon starts and are shown here for reference.</span>
+	<span class="hint">The daemon keeps running after Atlas closes, for the TUI and <code>atlas mcp</code>; the menu bar item shows it and can stop it.</span>
 	<Checkbox
 		label="Start Atlas at login"
 		checked={autostart}

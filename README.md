@@ -20,6 +20,10 @@ Atlas gives Claude Code, Codex, Claude, DeepSeek and OpenRouter based agents one
 
 ## Install
 
+Open the dmg from the releases page, drag Atlas to Applications and launch it. The app starts the daemon and keeps it running in the background after the window closes; the menu bar item shows its state. Then in Settings, Command line, click **Install command line tool** to get the `atlas` command (CLI, TUI and the `atlas mcp` server) on your PATH.
+
+From source instead:
+
     cargo install --path crates/atlas-cli --locked
     cargo install --path crates/atlasd --locked
 
@@ -63,7 +67,7 @@ To package it:
 
     CI=true bun run tauri build
 
-That builds the `atlasd` sidecar in release mode, stages it, and writes `atlas.app` and a `.dmg` under `target/release/bundle`. `CI=true` skips the disk image's Finder styling step, which otherwise needs an Automation grant for the terminal.
+That builds the `atlasd` and `atlas` sidecars in release mode, stages them, and writes `atlas.app` and a `.dmg` under `target/release/bundle`. `CI=true` skips the disk image's Finder styling step, which otherwise needs an Automation grant for the terminal.
 
 ## Layout
 

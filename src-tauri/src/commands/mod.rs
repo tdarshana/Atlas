@@ -2,6 +2,7 @@
 // so `lib.rs`'s `generate_handler!` list and the tests keep their names.
 
 pub mod about;
+pub mod cli;
 pub mod notify;
 pub mod permissions;
 pub mod platform;
@@ -10,6 +11,7 @@ pub mod vault;
 pub mod window;
 
 pub use about::{about_info, about_menu_refresh, log_dir, open_log_folder};
+pub use cli::{cli_install, cli_status};
 #[cfg(target_os = "macos")]
 pub use about::install_app_menu;
 pub use notify::{notification_permission, notification_request_permission, notify};

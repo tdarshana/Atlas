@@ -17,6 +17,7 @@
 	import About from '$lib/components/settings/About.svelte';
 	import Appearance from '$lib/components/settings/Appearance.svelte';
 	import BoardStages from '$lib/components/settings/BoardStages.svelte';
+	import Cli from '$lib/components/settings/Cli.svelte';
 	import Daemon from '$lib/components/settings/Daemon.svelte';
 	import McpServers from '$lib/components/settings/McpServers.svelte';
 	import Notifications from '$lib/components/settings/Notifications.svelte';
@@ -77,6 +78,7 @@
 
 	// The sections `reload` refreshes, in the order they used to load.
 	let daemonSection = $state.raw<Daemon>();
+	let cliSection = $state.raw<Cli>();
 	let boardStages = $state.raw<BoardStages>();
 	let appearance = $state.raw<Appearance>();
 	let mcpServers = $state.raw<McpServers>();
@@ -135,6 +137,7 @@
 		await boardStages?.refresh();
 		await mcpServers?.refresh();
 		await daemonSection?.refresh();
+		await cliSection?.refresh();
 		await about?.refresh();
 		await vaultSection?.refresh();
 		await notifications?.refresh();
@@ -186,6 +189,7 @@
 {:else}
 	<div class="pane" data-testid="settings-form">
 		<Daemon bind:this={daemonSection} />
+		<Cli bind:this={cliSection} />
 
 		<SettingsCard id="extraction" title="Extraction">
 			{#snippet head()}

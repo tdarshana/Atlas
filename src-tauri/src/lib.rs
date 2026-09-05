@@ -9,12 +9,14 @@ use tauri_plugin_positioner::{Position, WindowExt};
 
 mod commands;
 mod notify_poller;
+mod tray;
 mod plugins;
 mod scratch;
 
 use atlas_client::remote::RemoteBackend;
 use atlas_core::backend::StatusBackend;
 use commands::{
+    cli_install, cli_status,
     about_info, about_menu_refresh, app_exit, app_relaunch, autostart_get, autostart_set, clipboard_write,
     install_shortcut, log_dir, notification_permission, notification_request_permission, notify,
     open_log_folder, shortcut_set, ui_state_all, ui_state_get, ui_state_set, update_check,
@@ -28,17 +30,14 @@ use plugins::{
     plugin_frame_nonce, plugin_set_enabled, plugin_set_permissions, plugin_uninstall, plugins_list, FrameNonces,
 };
 
-const DEFAULT_PORT: u16 = 7433;
+pub(crate) const DEFAULT_PORT: u16 = 7433;
 const MAX_LOG_FILE_SIZE: u128 = 5 * 1024 * 1024;
 
 /// The `atlasd` bundled as a Tauri sidecar, which the bundler places next to the app
-/// binary. Absent under `tauri dev` and in any build made without
-/// `scripts/prepare-sidecar.sh`, in which case the daemon is looked up as usual.
+/// binary. Absent in any build made without `scripts/prepare-sidecar.sh`, in which case
+/// the daemon is looked up as usual.
 fn sidecar_atlasd(app: &tauri::AppHandle) -> Option<PathBuf> {
-    // `EXE_SUFFIX` is "" everywhere but Windows, where the bundled sidecar is `atlasd.exe`.
-    let name = format!("atlasd{}", std::env::consts::EXE_SUFFIX);
-    let sidecar = tauri::process::current_binary(&app.env()).ok()?.with_file_name(name);
-    sidecar.exists().then_some(sidecar)
+    commands::cli::sidecar_bin(app, "atlasd")
 }
 
 /// What the webview needs to reach the daemon: the port it answers on and the token
@@ -66,6 +65,7 @@ async fn daemon_ensure(app: tauri::AppHandle, port: Option<u16>) -> Result<Daemo
     let port = daemon_ctl::ensure_daemon_with(&paths, port.unwrap_or(DEFAULT_PORT), sidecar_atlasd(&app))
         .await
         .map_err(|e| e.to_string())?;
+    tray::set_running(&app, Some(port));
     daemon_handle(&paths, port)
 }
 
@@ -81,9 +81,11 @@ fn daemon_info() -> Option<serde_json::Value> {
 async fn daemon_restart(app: tauri::AppHandle, port: Option<u16>) -> Result<DaemonHandle, String> {
     let paths = AtlasPaths::discover();
     daemon_ctl::stop_daemon(&paths).await.map_err(|e| e.to_string())?;
+    tray::set_running(&app, None);
     let port = daemon_ctl::ensure_daemon_with(&paths, port.unwrap_or(DEFAULT_PORT), sidecar_atlasd(&app))
         .await
         .map_err(|e| e.to_string())?;
+    tray::set_running(&app, Some(port));
     daemon_handle(&paths, port)
 }
 
@@ -138,11 +140,7 @@ pub fn run() {
         // Docs require this be the first plugin registered: it has to see every other
         // plugin's state as not yet set up when a second launch hands off to it.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            tray::show_main(app);
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -185,6 +183,17 @@ pub fn run() {
         .manage(FrameNonces::default())
         .manage(VaultState::default())
         .manage(UpdateState::default())
+        .manage(tray::TrayState::<tauri::Wry>::default())
+        // Closing the window keeps Atlas in the menu bar: the daemon it started keeps
+        // serving the TUI and `atlas mcp`, and the tray shows that. Quit is on the tray.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    tray::hide_main(window.app_handle());
+                }
+            }
+        })
         // macOS keeps its own chrome under the overlay title bar; Windows and Linux draw
         // none, so the webview's title bar is the only one there.
         .setup(|app| {
@@ -219,6 +228,10 @@ pub fn run() {
             if let Err(e) = commands::install_app_menu(app.handle(), None) {
                 log::warn!("app menu not installed: {e}");
             }
+            // The menu bar item: daemon state, reopen, start or stop, quit.
+            if let Err(e) = tray::install(app.handle()) {
+                log::warn!("tray not installed: {e}");
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -244,6 +257,8 @@ pub fn run() {
             about_info,
             about_menu_refresh,
             open_log_folder,
+            cli_status,
+            cli_install,
             vault_status,
             vault_set_passphrase,
             vault_unlock,

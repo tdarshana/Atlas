@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Build atlasd in release mode and stage it as the Tauri sidecar the bundler expects:
-# src-tauri/binaries/atlasd-<target triple>. `tauri.conf.json` runs this as part of
+# Build atlasd and atlas in release mode and stage them as the Tauri sidecars the
+# bundler expects: src-tauri/binaries/atlasd-<target triple> and atlas-<target triple>.
+# The app runs atlasd as the daemon; it ships atlas (CLI, TUI, `atlas mcp`) so the dmg
+# is the only install, and Settings > Command line links /usr/local/bin/atlas to it. `tauri.conf.json` runs this as part of
 # beforeBuildCommand, so `bun run tauri build` works with no separate step; running it
 # by hand first is still fine, since a second run does nothing.
 #
@@ -37,7 +39,7 @@ fi
 # fresh binary stages silently.
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
-build_args=(--release -p atlasd --manifest-path "$root/Cargo.toml")
+build_args=(--release -p atlasd -p atlas-cli --manifest-path "$root/Cargo.toml")
 target_dir="$root/target/release"
 if [ -n "${1:-}" ]; then
   build_args+=(--target "$triple")
@@ -57,17 +59,17 @@ case "$triple" in
   *-pc-windows-*) ext=".exe" ;;
 esac
 
-src="$target_dir/atlasd$ext"
 dest_dir="$root/src-tauri/binaries"
-dest="$dest_dir/atlasd-$triple$ext"
-
-# Nothing to do when the staged sidecar is already this binary, so a repeated run neither
-# rewrites it nor claims to have staged anything.
-if [ -f "$dest" ] && cmp -s "$src" "$dest"; then
-  exit 0
-fi
-
 mkdir -p "$dest_dir"
-cp "$src" "$dest"
-chmod +x "$dest"
-echo "staged $dest"
+for bin in atlasd atlas; do
+  src="$target_dir/$bin$ext"
+  dest="$dest_dir/$bin-$triple$ext"
+  # Nothing to do when the staged sidecar is already this binary, so a repeated run
+  # neither rewrites it nor claims to have staged anything.
+  if [ -f "$dest" ] && cmp -s "$src" "$dest"; then
+    continue
+  fi
+  cp "$src" "$dest"
+  chmod +x "$dest"
+  echo "staged $dest"
+done

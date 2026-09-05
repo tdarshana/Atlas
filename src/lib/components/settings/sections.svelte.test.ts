@@ -29,6 +29,7 @@ vi.mock('$lib/daemon.svelte', () => {
 import About from './About.svelte';
 import Appearance from './Appearance.svelte';
 import BoardStages from './BoardStages.svelte';
+import Cli from './Cli.svelte';
 import Daemon from './Daemon.svelte';
 import Diagnostics from './Diagnostics.svelte';
 import McpServers from './McpServers.svelte';
@@ -47,6 +48,13 @@ describe('settings sections', () => {
 		const { getByTestId } = render(Daemon);
 		expect(getByTestId('settings-port')).not.toBeNull();
 		expect(getByTestId('settings-section-daemon')).not.toBeNull();
+	});
+
+	it('Cli shows the state line and the install button', () => {
+		const { getByTestId } = render(Cli);
+		expect(getByTestId('settings-section-cli')).toBeTruthy();
+		expect(getByTestId('settings-cli-state').textContent).toContain('Checking');
+		expect((getByTestId('settings-cli-install') as HTMLButtonElement).disabled).toBe(true);
 	});
 
 	it('BoardStages renders its card', () => {
