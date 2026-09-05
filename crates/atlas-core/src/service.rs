@@ -215,8 +215,9 @@ impl MemoryService {
         scope: Option<MemoryScope>,
         project_id: Option<Uuid>,
         only: MemoryScopeFilter,
+        page: MemoryPage,
     ) -> Result<Vec<Memory>> {
-        self.repo().list_by_status_scoped(status, scope, project_id, only)
+        self.repo().list_by_status_scoped(status, scope, project_id, only, page)
     }
 
     /// Kind and tag counts, plus the total, over active memories; `project_id` read the
@@ -253,7 +254,7 @@ impl MemoryService {
     }
 
     pub fn recall(&self, q: &RecallQuery) -> Result<Vec<RecallHit>> {
-        let candidates = self.repo().list_by_status_scoped(MemoryStatus::Active, q.scope, q.project_id, q.list_scope)?;
+        let candidates = self.repo().list_by_status_scoped(MemoryStatus::Active, q.scope, q.project_id, q.list_scope, MemoryPage::default())?;
         let candidates: Vec<Memory> = candidates.into_iter().filter(|m| {
             (q.kinds.is_empty() || q.kinds.contains(&m.kind)) && (q.tags.is_empty() || q.tags.iter().any(|t| m.tags.contains(t)))
         }).collect();

@@ -53,6 +53,16 @@ export interface RecallHit {
 export type MemoryListScope = 'all' | 'project_only' | 'global_only';
 
 /**
+ * A window over `GET /memories`: up to `limit` rows after skipping `offset`, in the
+ * route's own newest-first order. Neither set is the whole set. The daemon caps
+ * `limit` at 1000.
+ */
+export interface MemoryPage {
+	limit?: number;
+	offset?: number;
+}
+
+/**
  * Kind and tag counts, plus the total, over the active memories `GET
  * /memories/facets` was asked about, `project_id`/`scope` read the same way `GET
  * /memories` reads them.

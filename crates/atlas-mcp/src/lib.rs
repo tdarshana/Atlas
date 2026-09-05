@@ -810,7 +810,7 @@ impl<B: Backend> AtlasMcp<B> {
             query, limit: 20, scope: None, list_scope: MemoryScopeFilter::All, project_id: Some(project.id), kinds: vec![], tags: vec![],
         }).await?;
         let seen: std::collections::HashSet<Uuid> = memories.iter().map(|h| h.memory.id).collect();
-        let recent = self.backend.list_memories(MemoryStatus::Active, Some(project.id), MemoryScopeFilter::ProjectOnly).await?;
+        let recent = self.backend.list_memories(MemoryStatus::Active, Some(project.id), MemoryScopeFilter::ProjectOnly, MemoryPage::default()).await?;
         memories.extend(recent.into_iter().filter(|m| !seen.contains(&m.id)).take(10).map(|memory| RecallHit { memory, score: 0.0 }));
         // The skills that actually apply here, the same filter `LocalBackend::project_context`
         // uses, so both readings of a project's context agree.
@@ -856,7 +856,13 @@ impl<B: Backend> AtlasMcp<B> {
     async fn memory_list(&self, Parameters(a): Parameters<MemoryListArgs>) -> Result<CallToolResult, McpError> {
         let mut kinds = vec![]; for k in a.kinds.unwrap_or_default() { kinds.push(k.parse::<MemoryKind>().map_err(err)?); }
         let project_id = self.scope_id(a.project_id, a.project_root).await?;
-        let mut memories = self.backend.list_memories(MemoryStatus::Active, project_id, MemoryScopeFilter::All).await.map_err(err)?;
+        let limit = a.limit.unwrap_or(50);
+        // Kind, tag and since are applied here after the fetch, so with one of them set
+        // the fetch has to stay unbounded; with none, the backend pages and nothing is
+        // moved only to be cut.
+        let filtered = !kinds.is_empty() || a.tags.as_ref().is_some_and(|t| !t.is_empty()) || a.since.is_some();
+        let page = if filtered { MemoryPage::default() } else { MemoryPage { limit: Some(limit), offset: None } };
+        let mut memories = self.backend.list_memories(MemoryStatus::Active, project_id, MemoryScopeFilter::All, page).await.map_err(err)?;
         if !kinds.is_empty() {
             memories.retain(|m| kinds.contains(&m.kind));
         }
@@ -868,7 +874,7 @@ impl<B: Backend> AtlasMcp<B> {
         if let Some(since) = a.since {
             memories.retain(|m| m.created_at >= since);
         }
-        memories.truncate(a.limit.unwrap_or(50));
+        memories.truncate(limit);
         json_result(&memories)
     }
 
@@ -1336,7 +1342,7 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
             }
             (skill.body, MARKDOWN)
         } else if uri == MEMORIES_RECENT {
-            let mut memories = self.backend.list_memories(MemoryStatus::Active, None, MemoryScopeFilter::All).await.map_err(err)?;
+            let mut memories = self.backend.list_memories(MemoryStatus::Active, None, MemoryScopeFilter::All, MemoryPage::default()).await.map_err(err)?;
             memories.truncate(MEMORIES_RECENT_LIMIT);
             (memories_recent_markdown(&memories), MARKDOWN)
         } else if let Some(rest) = uri.strip_prefix(PROJECTS) {
@@ -1678,7 +1684,7 @@ mod tests {
             project_id: None, project_root: None, source_agent: None,
         })).await.unwrap();
 
-        let stored = backend.list_memories(MemoryStatus::Active, None, MemoryScopeFilter::All).await.unwrap();
+        let stored = backend.list_memories(MemoryStatus::Active, None, MemoryScopeFilter::All, MemoryPage::default()).await.unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].scope, MemoryScope::Project);
         assert_eq!(stored[0].project_id, Some(connected.id), "the seeded root should have scoped the memory to the connected project");
@@ -1717,7 +1723,7 @@ mod tests {
             text: "bun is the runtime".into(), kind: None, tags: None, scope: None,
             project_id: None, project_root: None, source_agent: None,
         })).await.unwrap();
-        let stored = backend.list_memories(MemoryStatus::Active, None, MemoryScopeFilter::All).await.unwrap();
+        let stored = backend.list_memories(MemoryStatus::Active, None, MemoryScopeFilter::All, MemoryPage::default()).await.unwrap();
         assert_eq!(stored[0].scope, MemoryScope::Global);
         assert!(stored[0].project_id.is_none());
         assert!(backend.list_projects().await.unwrap().is_empty(), "a global remember connected a project");
@@ -1773,6 +1779,33 @@ mod tests {
         let by_since = s.memory_list(Parameters(MemoryListArgs { kinds: None, tags: None, project_id: None, project_root: None, since: Some(future), limit: None })).await.unwrap();
         let by_since: Vec<Memory> = serde_json::from_str(&text_of(&by_since)).unwrap();
         assert!(by_since.is_empty(), "{by_since:?}");
+    }
+
+    /// `memory_list` hands its `limit` to the backend as the page size, so the daemon
+    /// sends back that many newest rows rather than the whole set. A kind, tag or since
+    /// filter is applied after the fetch, so with one of those the fetch stays unbounded
+    /// and `limit` cuts the filtered rows.
+    #[tokio::test]
+    async fn memory_list_passes_its_limit_down() {
+        let home = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::open(&AtlasPaths::at(home.path()), None, false).unwrap());
+        let s = AtlasMcp::new(backend.clone()).with_env_project_root(false);
+        for i in 0..3 {
+            let kind = if i == 1 { "decision" } else { "fact" };
+            s.memory_remember(Parameters(MemoryRememberArgs { text: format!("memory {i}"), kind: Some(kind.into()), tags: None, scope: None, project_id: None, project_root: None, source_agent: None })).await.unwrap();
+        }
+        let all = backend.list_memories(MemoryStatus::Active, None, MemoryScopeFilter::All, MemoryPage::default()).await.unwrap();
+        assert_eq!(all.len(), 3);
+
+        let two = s.memory_list(Parameters(MemoryListArgs { kinds: None, tags: None, project_id: None, project_root: None, since: None, limit: Some(2) })).await.unwrap();
+        let two: Vec<Memory> = serde_json::from_str(&text_of(&two)).unwrap();
+        assert_eq!(two.iter().map(|m| m.id).collect::<Vec<_>>(), all[..2].iter().map(|m| m.id).collect::<Vec<_>>(), "the two newest");
+
+        let one_fact = s.memory_list(Parameters(MemoryListArgs { kinds: Some(vec!["fact".into()]), tags: None, project_id: None, project_root: None, since: None, limit: Some(1) })).await.unwrap();
+        let one_fact: Vec<Memory> = serde_json::from_str(&text_of(&one_fact)).unwrap();
+        assert_eq!(one_fact.len(), 1);
+        assert_eq!(one_fact[0].kind, MemoryKind::Fact);
+        assert_eq!(one_fact[0].id, all[0].id, "filtering first, then the limit, keeps the newest fact");
     }
 
     /// `memory_review` accepts a pending memory into active use, or rejects it; an
@@ -2353,7 +2386,7 @@ mod tests {
             project_id: None, project_root: Some(repo.path().to_path_buf()), source_agent: None,
         })).await.unwrap();
 
-        let stored = backend.list_memories(MemoryStatus::Active, None, MemoryScopeFilter::All).await.unwrap();
+        let stored = backend.list_memories(MemoryStatus::Active, None, MemoryScopeFilter::All, MemoryPage::default()).await.unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].project_id, Some(connected.id), "a known project should still resolve with project_connect disabled");
     }

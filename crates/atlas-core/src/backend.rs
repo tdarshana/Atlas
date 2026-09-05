@@ -96,8 +96,9 @@ pub trait Backend: Send + Sync + 'static {
     async fn get_memory(&self, id: Uuid) -> Result<Memory>;
     /// `scope` decides how `project_id` is read: `All` widens to that project plus the
     /// global memories, `ProjectOnly` keeps only the project's own rows. `ProjectOnly`
-    /// without a `project_id` is `Invalid`: there is no project to narrow to.
-    async fn list_memories(&self, status: MemoryStatus, project_id: Option<Uuid>, scope: MemoryScopeFilter) -> Result<Vec<Memory>>;
+    /// without a `project_id` is `Invalid`: there is no project to narrow to. `page`
+    /// windows the newest-first list; `MemoryPage::default()` is the whole set.
+    async fn list_memories(&self, status: MemoryStatus, project_id: Option<Uuid>, scope: MemoryScopeFilter, page: MemoryPage) -> Result<Vec<Memory>>;
     /// Kind and tag counts, plus the total, over active memories, `project_id` read the
     /// same way [`list_memories`](Self::list_memories) reads it.
     async fn memory_facets(&self, project_id: Option<Uuid>, scope: MemoryScopeFilter) -> Result<MemoryFacets>;
@@ -460,10 +461,10 @@ impl Backend for LocalBackend {
         let memories = self.memories.clone();
         self.blocking(move || memories.get(id)).await
     }
-    async fn list_memories(&self, status: MemoryStatus, project_id: Option<Uuid>, scope: MemoryScopeFilter) -> Result<Vec<Memory>> {
+    async fn list_memories(&self, status: MemoryStatus, project_id: Option<Uuid>, scope: MemoryScopeFilter, page: MemoryPage) -> Result<Vec<Memory>> {
         check_scope(project_id, scope)?;
         let memories = self.memories.clone();
-        self.blocking(move || memories.list_scoped(status, None, project_id, scope)).await
+        self.blocking(move || memories.list_scoped(status, None, project_id, scope, page)).await
     }
     async fn memory_facets(&self, project_id: Option<Uuid>, scope: MemoryScopeFilter) -> Result<MemoryFacets> {
         check_scope(project_id, scope)?;

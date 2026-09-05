@@ -169,7 +169,7 @@ pub fn import_decisions(memories: &MemoryRepo, project: &Project, kind: Framewor
 
     let mut existing_texts: HashSet<String> = HashSet::new();
     for status in [MemoryStatus::Active, MemoryStatus::Pending, MemoryStatus::Rejected, MemoryStatus::Superseded] {
-        for m in memories.list_by_status_scoped(status, None, Some(project.id), MemoryScopeFilter::ProjectOnly)? {
+        for m in memories.list_by_status_scoped(status, None, Some(project.id), MemoryScopeFilter::ProjectOnly, MemoryPage::default())? {
             if m.tags.iter().any(|t| t == kind.as_str()) {
                 existing_texts.insert(m.text);
             }
@@ -480,7 +480,7 @@ mod tests {
         let first = import_decisions(&memories, &project, FrameworkKind::Superpowers, "test").unwrap();
         assert!(first.created > 0, "the fixture should have importable decisions: {first:?}");
 
-        let pending = memories.list_by_status_scoped(MemoryStatus::Pending, None, Some(project.id), MemoryScopeFilter::ProjectOnly).unwrap();
+        let pending = memories.list_by_status_scoped(MemoryStatus::Pending, None, Some(project.id), MemoryScopeFilter::ProjectOnly, MemoryPage::default()).unwrap();
         assert_eq!(pending.len(), first.created);
         assert!(pending.iter().all(|m| m.kind == MemoryKind::Decision));
         assert!(pending.iter().all(|m| m.tags.contains(&"superpowers".to_string()) && m.tags.contains(&"import".to_string())));

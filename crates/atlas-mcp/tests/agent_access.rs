@@ -131,10 +131,10 @@ async fn require_review_lands_an_mcp_memory_as_pending() {
     assert!(!stored.is_error.unwrap_or(false), "{stored:?}");
     client.cancel().await.unwrap();
 
-    let pending = backend.list_memories(MemoryStatus::Pending, Some(project.id), MemoryScopeFilter::All).await.unwrap();
+    let pending = backend.list_memories(MemoryStatus::Pending, Some(project.id), MemoryScopeFilter::All, MemoryPage::default()).await.unwrap();
     assert_eq!(pending.len(), 1, "{pending:?}");
     assert_eq!(pending[0].text, "the deploy target is fly.io");
-    assert!(backend.list_memories(MemoryStatus::Active, Some(project.id), MemoryScopeFilter::All).await.unwrap().is_empty());
+    assert!(backend.list_memories(MemoryStatus::Active, Some(project.id), MemoryScopeFilter::All, MemoryPage::default()).await.unwrap().is_empty());
 }
 
 /// `memory_writers` is the same allow-list for the memory path, and the CLI is exempt

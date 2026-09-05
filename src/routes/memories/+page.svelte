@@ -18,6 +18,7 @@
 		followMemoryChanges,
 		forgetMemory,
 		loadMemories,
+		loadMore,
 		memories,
 		scheduleLoad,
 		toggleKind
@@ -161,8 +162,12 @@
 		}
 	});
 
+	// With a further page to fetch the count shown is the loaded part; the facets
+	// total (the same scope, every kind) says how many there are altogether.
 	$effect(() => {
-		setStatusItems({ right: [{ text: plural(memories.hits.length, 'memory', 'memories') }] });
+		const shown = plural(memories.hits.length, 'memory', 'memories');
+		const text = memories.hasMore ? `${shown} of ${memories.facets.total}` : shown;
+		setStatusItems({ right: [{ text }] });
 	});
 </script>
 
@@ -258,6 +263,13 @@
 					</div>
 				{/snippet}
 			</Table>
+			{#if memories.hasMore}
+				<div class="more">
+					<Button size="sm" onclick={() => loadMore()} disabled={memories.loading} data-testid="memories-more">
+						Show more
+					</Button>
+				</div>
+			{/if}
 		{/if}
 	</div>
 
@@ -411,6 +423,13 @@
 		display: flex;
 		flex-direction: column;
 		overflow: hidden;
+	}
+
+	.more {
+		flex: 0 0 auto;
+		display: flex;
+		justify-content: center;
+		padding: 8px 0;
 	}
 
 	.panel-detail {

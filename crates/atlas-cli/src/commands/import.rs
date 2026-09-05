@@ -48,7 +48,7 @@ pub async fn run(dir: PathBuf, backend: &RemoteBackend) -> anyhow::Result<()> {
     // which also dedupes repeats within the file.
     let mut seen = HashSet::new();
     for status in super::export::STATUSES {
-        seen.extend(backend.list_memories(status, None, atlas_core::models::MemoryScopeFilter::All).await?.iter().map(|m| normalize(&m.text)));
+        seen.extend(backend.list_memories(status, None, atlas_core::models::MemoryScopeFilter::All, atlas_core::models::MemoryPage::default()).await?.iter().map(|m| normalize(&m.text)));
     }
     let (mut imported, mut skipped) = (0usize, 0usize);
     let path = dir.join("memories.jsonl");

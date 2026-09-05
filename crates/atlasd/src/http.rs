@@ -169,7 +169,7 @@ pub fn cors_layer() -> CorsLayer {
 #[derive(Deserialize)] pub struct RootBody { pub root: std::path::PathBuf }
 #[derive(Deserialize)] pub struct StatusBody { pub status: String }
 #[derive(Deserialize)] pub struct ProjectQ { pub project_id: Option<Uuid> }
-#[derive(Deserialize)] pub struct ListMemoriesQ { pub status: Option<String>, pub project_id: Option<Uuid>, pub scope: Option<String> }
+#[derive(Deserialize)] pub struct ListMemoriesQ { pub status: Option<String>, pub project_id: Option<Uuid>, pub scope: Option<String>, pub limit: Option<usize>, pub offset: Option<usize> }
 #[derive(Deserialize)] pub struct MemoryFacetsQ { pub project_id: Option<Uuid>, pub scope: Option<String> }
 #[derive(Deserialize)] pub struct LogQ {
     #[serde(default)] pub source: Option<String>,
@@ -432,7 +432,10 @@ async fn list_memories(State(s): State<AppState>, ApiQuery(q): ApiQuery<ListMemo
     // same reading applies to `?scope=`, which defaults to the widening `all`.
     let status = match q.status.as_deref().filter(|v| !v.is_empty()) { Some(v) => v.parse()?, None => MemoryStatus::Active };
     let scope = match q.scope.as_deref().filter(|v| !v.is_empty()) { Some(v) => v.parse()?, None => MemoryScopeFilter::All };
-    Ok(Json(s.backend.list_memories(status, q.project_id, scope).await?))
+    // `limit` is capped at `MemoryPage::MAX_LIMIT` on the way down; neither given is the
+    // whole set, which is what every caller got before the two existed.
+    let page = MemoryPage { limit: q.limit, offset: q.offset };
+    Ok(Json(s.backend.list_memories(status, q.project_id, scope, page).await?))
 }
 /// Kind and tag counts, plus the total, over active memories, filtered the same way
 /// `GET /memories` filters `project_id`: a bare `project_id` widens to that project plus

@@ -23,6 +23,7 @@ import type {
 	Memory,
 	MemoryFacets,
 	MemoryListScope,
+	MemoryPage,
 	MemoryStatus,
 	NewAgent,
 	NewDoc,
@@ -102,16 +103,24 @@ export class AtlasApi {
 
 	/**
 	 * `scope: 'project_only'` (paired with `projectId`) narrows to that project's own
-	 * memories, dropping the global ones a bare `project_id` still widens in.
+	 * memories, dropping the global ones a bare `project_id` still widens in. `page`
+	 * windows the newest-first list; without it the whole set comes back.
 	 */
 	listMemories(
 		status?: MemoryStatus,
 		projectId?: Uuid | null,
-		scope?: MemoryListScope
+		scope?: MemoryListScope,
+		page?: MemoryPage
 	): Promise<Memory[]> {
 		return this.req(
 			'GET',
-			`/api/v1/memories${query({ status, project_id: projectId, scope })}`
+			`/api/v1/memories${query({
+				status,
+				project_id: projectId,
+				scope,
+				limit: page?.limit?.toString(),
+				offset: page?.offset?.toString()
+			})}`
 		);
 	}
 

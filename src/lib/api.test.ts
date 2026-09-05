@@ -94,6 +94,16 @@ describe('AtlasApi', () => {
 		expect(calls[0].init.method ?? 'GET').toBe('GET');
 	});
 
+	it('encodes limit and offset on GET /api/v1/memories, offset 0 included', async () => {
+		const calls = stubFetch([{ status: 200, body: [] }, { status: 200, body: [] }]);
+
+		await api().listMemories('active', null, undefined, { limit: 200, offset: 0 });
+		expect(calls[0].url).toBe('http://127.0.0.1:7433/api/v1/memories?status=active&limit=200&offset=0');
+
+		await api().listMemories('active', undefined, undefined, { limit: 10 });
+		expect(calls[1].url).toBe('http://127.0.0.1:7433/api/v1/memories?status=active&limit=10');
+	});
+
 	it('resolves testExtraction with the ok:false body on a 400 connectivity failure', async () => {
 		stubFetch([{ status: 400, body: { ok: false, error: 'model call failed' } }]);
 

@@ -14,6 +14,8 @@ export type ScopeFilter = 'all' | 'global' | 'project';
 
 export const SEARCH_DEBOUNCE_MS = 300;
 export const SEARCH_LIMIT = 50;
+/** Rows per `GET /memories` page when there is no query. */
+export const PAGE_SIZE = 200;
 
 /** Every `MemoryKind`, in the order the filter chips show them. */
 export const MEMORY_KINDS: MemoryKind[] = ['fact', 'decision', 'preference', 'insight', 'todo'];
@@ -44,6 +46,11 @@ export const memories = $state({
 	 * `board.detail`/`board.detailError` keep a task's own load failure off the list.
 	 */
 	facetsError: null as string | null,
+	/**
+	 * True while the list (not a search) has a further page: the last page fetched was
+	 * full. `loadMore` appends the next one; `facets.total` says how many there are.
+	 */
+	hasMore: false,
 	loading: false,
 	error: null as string | null,
 	/** Set only for a connection failure, so the error state can point at the log. */
@@ -57,6 +64,9 @@ export const memories = $state({
  * later one, so a load writes state only while it is still the newest.
  */
 let generation = 0;
+
+/** Rows fetched so far in list mode, page by page: the next page's offset. */
+let fetched = 0;
 
 /** The project filter, or null when it does not apply. */
 function activeProjectId(): Uuid | null {
@@ -130,9 +140,16 @@ export async function loadMemories(): Promise<void> {
 			});
 			scored = true;
 		} else {
-			const rows = await api().listMemories('active', projectId);
+			const rows = await api().listMemories('active', projectId, undefined, {
+				limit: PAGE_SIZE,
+				offset: 0
+			});
 			hits = rows.map((memory) => ({ memory, score: 0 }));
 			scored = false;
+			if (g === generation) {
+				fetched = rows.length;
+				memories.hasMore = rows.length === PAGE_SIZE;
+			}
 		}
 		// A facets failure on its own must not blank a row list that loaded fine, so it
 		// is caught here rather than joining the outer catch below: `facets` keeps
@@ -142,6 +159,7 @@ export async function loadMemories(): Promise<void> {
 			return null;
 		});
 		if (g !== generation) return;
+		if (scored) memories.hasMore = false;
 		memories.all = hits.filter(inScope);
 		memories.scored = scored;
 		if (facets) {
@@ -157,7 +175,36 @@ export async function loadMemories(): Promise<void> {
 		memories.hits = [];
 		memories.facets = EMPTY_FACETS;
 		memories.facetsError = null;
+		memories.hasMore = false;
 		memories.selected = null;
+		memories.error = errorMessage(e);
+		memories.errorLogPath = errorLogPath(e);
+	} finally {
+		if (g === generation) memories.loading = false;
+	}
+}
+
+/**
+ * Fetches the next `PAGE_SIZE` rows of the list and appends them. Nothing to do in
+ * search mode or once the last page has landed. A load that starts meanwhile wins:
+ * its rows replace the list and this page is dropped.
+ */
+export async function loadMore(): Promise<void> {
+	if (!memories.hasMore || memories.loading || memories.query.trim()) return;
+	const g = generation;
+	memories.loading = true;
+	try {
+		const rows = await api().listMemories('active', activeProjectId(), undefined, {
+			limit: PAGE_SIZE,
+			offset: fetched
+		});
+		if (g !== generation) return;
+		fetched += rows.length;
+		memories.hasMore = rows.length === PAGE_SIZE;
+		memories.all.push(...rows.map((memory) => ({ memory, score: 0 })).filter(inScope));
+		applyKinds();
+	} catch (e) {
+		if (g !== generation) return;
 		memories.error = errorMessage(e);
 		memories.errorLogPath = errorLogPath(e);
 	} finally {

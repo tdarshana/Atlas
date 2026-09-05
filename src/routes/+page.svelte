@@ -74,15 +74,14 @@
 		loading = true;
 		try {
 			const client = api();
+			// The route lists newest first, so asking for `RECENT` rows is the whole card.
 			const [active, projectList, agentList] = await Promise.all([
-				client.listMemories('active'),
+				client.listMemories('active', undefined, undefined, { limit: RECENT }),
 				client.listProjects(),
 				client.listAgents()
 			]);
 			counts = { projects: projectList.length, agents: agentList.length };
-			recent = [...active]
-				.sort((a, b) => b.created_at.localeCompare(a.created_at))
-				.slice(0, RECENT);
+			recent = active;
 			error = null;
 			loadErrorLogPath = null;
 		} catch (e) {

@@ -22,7 +22,7 @@ pub async fn run(dir: PathBuf, force: bool, backend: &RemoteBackend) -> anyhow::
     let mut memories = String::new();
     let mut memory_count = 0usize;
     for status in STATUSES {
-        for memory in backend.list_memories(status, None, atlas_core::models::MemoryScopeFilter::All).await? {
+        for memory in backend.list_memories(status, None, atlas_core::models::MemoryScopeFilter::All, atlas_core::models::MemoryPage::default()).await? {
             memories.push_str(&serde_json::to_string(&memory)?);
             memories.push('\n');
             memory_count += 1;

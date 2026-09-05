@@ -24,7 +24,7 @@ async fn run(effect: Effect, backend: Arc<RemoteBackend>, cwd: PathBuf) -> atlas
     match effect {
         Effect::Recall(query) if query.is_empty() => {
             let hits = backend
-                .list_memories(MemoryStatus::Active, None, atlas_core::models::MemoryScopeFilter::All)
+                .list_memories(MemoryStatus::Active, None, atlas_core::models::MemoryScopeFilter::All, atlas_core::models::MemoryPage::default())
                 .await?
                 .into_iter()
                 .map(|memory| RecallHit { memory, score: 0.0 })
@@ -50,7 +50,7 @@ async fn run(effect: Effect, backend: Arc<RemoteBackend>, cwd: PathBuf) -> atlas
             Ok(Action::SyncDone(report))
         }
         Effect::ListDocs(kind) => Ok(Action::DocsLoaded(kind, backend.list_docs(kind, None).await?)),
-        Effect::ListPending => Ok(Action::PendingLoaded(backend.list_memories(MemoryStatus::Pending, None, atlas_core::models::MemoryScopeFilter::All).await?)),
+        Effect::ListPending => Ok(Action::PendingLoaded(backend.list_memories(MemoryStatus::Pending, None, atlas_core::models::MemoryScopeFilter::All, atlas_core::models::MemoryPage::default()).await?)),
         Effect::LoadBoard(project_id) => {
             let stages = backend.board_stages(project_id).await?.stages;
             let tasks = backend.list_tasks(TaskFilter { project_id, ..Default::default() }).await?;

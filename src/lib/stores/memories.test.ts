@@ -15,7 +15,14 @@ vi.mock('$lib/daemon.svelte', () => ({
 	boot: async () => {}
 }));
 
-import { clearKinds, loadMemories, memories, toggleKind } from './memories.svelte';
+import {
+	PAGE_SIZE,
+	clearKinds,
+	loadMemories,
+	loadMore,
+	memories,
+	toggleKind
+} from './memories.svelte';
 
 function memory(id: string, kind: MemoryKind): Memory {
 	return {
@@ -51,6 +58,7 @@ beforeEach(() => {
 	memories.hits = [];
 	memories.selected = null;
 	memories.facetsError = null;
+	memories.hasMore = false;
 });
 
 describe('memories store', () => {
@@ -112,6 +120,65 @@ describe('memories store', () => {
 		memories.facetsError = 'stale error';
 		await loadMemories();
 		expect(memories.facetsError).toBeNull();
+	});
+
+	it('lists the first page only, and asks for the next one by offset', async () => {
+		const page = Array.from({ length: PAGE_SIZE }, (_, i) => memory(`p${i}`, 'fact'));
+		mocks.listMemories.mockResolvedValueOnce(page);
+		mocks.listMemories.mockResolvedValueOnce([memory('last', 'fact')]);
+
+		await loadMemories();
+		expect(mocks.listMemories).toHaveBeenCalledWith('active', null, undefined, {
+			limit: PAGE_SIZE,
+			offset: 0
+		});
+		expect(memories.all).toHaveLength(PAGE_SIZE);
+		expect(memories.hasMore).toBe(true);
+
+		await loadMore();
+		expect(mocks.listMemories).toHaveBeenLastCalledWith('active', null, undefined, {
+			limit: PAGE_SIZE,
+			offset: PAGE_SIZE
+		});
+		expect(memories.all).toHaveLength(PAGE_SIZE + 1);
+		expect(memories.hits).toHaveLength(PAGE_SIZE + 1);
+		expect(memories.all[PAGE_SIZE].memory.id).toBe('last');
+		// A short page is the end of the list.
+		expect(memories.hasMore).toBe(false);
+	});
+
+	it('appends the next page under the kind filter without a second request', async () => {
+		const page = Array.from({ length: PAGE_SIZE }, (_, i) =>
+			memory(`p${i}`, i % 2 ? 'fact' : 'decision')
+		);
+		mocks.listMemories.mockResolvedValueOnce(page);
+		mocks.listMemories.mockResolvedValueOnce([memory('x', 'fact'), memory('y', 'decision')]);
+
+		await loadMemories();
+		toggleKind('fact');
+		await loadMore();
+
+		expect(mocks.listMemories).toHaveBeenCalledTimes(2);
+		expect(memories.all).toHaveLength(PAGE_SIZE + 2);
+		expect(memories.hits.every((h) => h.memory.kind === 'fact')).toBe(true);
+		expect(memories.hits.map((h) => h.memory.id)).toContain('x');
+		expect(memories.hits.map((h) => h.memory.id)).not.toContain('y');
+	});
+
+	it('has no more pages after a short first page, and loadMore then costs nothing', async () => {
+		await loadMemories();
+		expect(memories.hasMore).toBe(false);
+		await loadMore();
+		expect(mocks.listMemories).toHaveBeenCalledTimes(1);
+	});
+
+	it('does not page a search: the search route has its own limit', async () => {
+		mocks.search.mockResolvedValue(rows.map((m) => ({ memory: m, score: 1 })));
+		memories.query = 'duck';
+		await loadMemories();
+		expect(memories.hasMore).toBe(false);
+		await loadMore();
+		expect(mocks.listMemories).not.toHaveBeenCalled();
 	});
 
 	it('never sends the kind filter to the search route', async () => {

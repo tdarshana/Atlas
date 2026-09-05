@@ -222,10 +222,12 @@ impl Backend for RemoteBackend {
     }
     async fn forget(&self, id: Uuid, reason: Option<String>, actor: &str) -> Result<Memory> { Self::handle(self.client.post(format!("{}/memories/{id}/forget?actor={actor}", self.base)).json(&serde_json::json!({"reason": reason})).send().await.map_err(Self::net)?).await }
     async fn get_memory(&self, id: Uuid) -> Result<Memory> { Self::handle(self.client.get(format!("{}/memories/{id}", self.base)).send().await.map_err(Self::net)?).await }
-    async fn list_memories(&self, status: MemoryStatus, project_id: Option<Uuid>, scope: MemoryScopeFilter) -> Result<Vec<Memory>> {
+    async fn list_memories(&self, status: MemoryStatus, project_id: Option<Uuid>, scope: MemoryScopeFilter, page: MemoryPage) -> Result<Vec<Memory>> {
         atlas_core::backend::check_scope(project_id, scope)?;
         let project = project_id.map(|p| format!("&project_id={p}")).unwrap_or_default();
-        Self::handle(self.client.get(format!("{}/memories?status={status}&scope={scope}{project}", self.base)).send().await.map_err(Self::net)?).await
+        let limit = page.limit.map(|l| format!("&limit={l}")).unwrap_or_default();
+        let offset = page.offset.map(|o| format!("&offset={o}")).unwrap_or_default();
+        Self::handle(self.client.get(format!("{}/memories?status={status}&scope={scope}{project}{limit}{offset}", self.base)).send().await.map_err(Self::net)?).await
     }
     async fn set_memory_status(&self, id: Uuid, status: MemoryStatus, actor: &str) -> Result<Memory> {
         Self::handle(self.client.post(format!("{}/memories/{id}/status?actor={actor}", self.base)).json(&serde_json::json!({"status": status})).send().await.map_err(Self::net)?).await

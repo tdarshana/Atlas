@@ -711,6 +711,36 @@ async fn pending_memories_can_be_listed_and_accepted() {
     assert_eq!(c.post(format!("{base}/memories/{id}/status")).json(&serde_json::json!({"status":"bogus"})).send().await.unwrap().status(), 400);
 }
 
+/// `GET /memories` takes `limit` and `offset`, windowing the newest-first list; without
+/// them the whole set comes back as before, and `limit` is capped at 1000.
+#[tokio::test]
+async fn memories_can_be_listed_a_page_at_a_time() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    for i in 0..4 {
+        let r = c.post(format!("{base}/memories")).json(&serde_json::json!({"scope":"global","kind":"fact","text":format!("fact {i}")})).send().await.unwrap();
+        assert_eq!(r.status(), 201);
+    }
+    let all: serde_json::Value = c.get(format!("{base}/memories?status=active")).send().await.unwrap().json().await.unwrap();
+    let all = all.as_array().unwrap();
+    assert_eq!(all.len(), 4);
+
+    let page: serde_json::Value = c.get(format!("{base}/memories?status=active&limit=2&offset=1")).send().await.unwrap().json().await.unwrap();
+    let page = page.as_array().unwrap();
+    assert_eq!(page.len(), 2);
+    assert_eq!(page[0]["id"], all[1]["id"]);
+    assert_eq!(page[1]["id"], all[2]["id"]);
+
+    let first: serde_json::Value = c.get(format!("{base}/memories?limit=1")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(first.as_array().unwrap().len(), 1);
+    assert_eq!(first[0]["id"], all[0]["id"]);
+
+    let capped: serde_json::Value = c.get(format!("{base}/memories?limit=99999")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(capped.as_array().unwrap().len(), 4, "an oversized limit is capped, not refused");
+    assert_eq!(c.get(format!("{base}/memories?limit=two")).send().await.unwrap().status(), 400);
+}
+
 /// What the stub model returns for any prompt: the two candidates the ingest tests
 /// expect, neither confident enough to clear the default auto-accept bar of 1.0.
 const STUB_CANDIDATES: &str = r#"[{"text":"the project uses bun","kind":"fact","tags":["tooling"],"confidence":0.9},{"text":"deploy target is fly.io","kind":"decision","tags":["infra"],"confidence":0.7}]"#;

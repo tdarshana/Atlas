@@ -2,7 +2,7 @@ use crate::db::Db;
 use crate::models::*;
 use crate::{AtlasError, Result};
 use chrono::{DateTime, Utc};
-use duckdb::types::Type;
+use duckdb::types::{Type, Value};
 use duckdb::{params, Row};
 use uuid::Uuid;
 
@@ -119,24 +119,26 @@ impl<'a> MemoryRepo<'a> {
     /// Newest first. `project_id` widens rather than narrows: it matches that
     /// project's memories plus every global one, as `list_active` does.
     pub fn list_by_status(&self, status: MemoryStatus, scope: Option<MemoryScope>, project_id: Option<Uuid>) -> Result<Vec<Memory>> {
-        self.list_by_status_scoped(status, scope, project_id, MemoryScopeFilter::All)
+        self.list_by_status_scoped(status, scope, project_id, MemoryScopeFilter::All, MemoryPage::default())
     }
 
     /// [`list_by_status`](Self::list_by_status) with a say in how `project_id` is read:
     /// `All` widens to that project plus the global memories, `ProjectOnly` keeps just
     /// the rows that belong to the project. With no `project_id` the two agree, since
-    /// there is no project to narrow to.
+    /// there is no project to narrow to. `page` windows the newest-first result;
+    /// `MemoryPage::default()` is the whole set.
     pub fn list_by_status_scoped(
         &self,
         status: MemoryStatus,
         scope: Option<MemoryScope>,
         project_id: Option<Uuid>,
         only: MemoryScopeFilter,
+        page: MemoryPage,
     ) -> Result<Vec<Memory>> {
         self.db.with_conn(|c| {
             let mut sql = format!("select {} from memories where status = ?", select_cols());
-            let mut args: Vec<String> = vec![status.as_str().to_string()];
-            if let Some(s) = scope { sql.push_str(" and scope = ?"); args.push(s.as_str().to_string()); }
+            let mut args: Vec<Value> = vec![Value::Text(status.as_str().to_string())];
+            if let Some(s) = scope { sql.push_str(" and scope = ?"); args.push(Value::Text(s.as_str().to_string())); }
             if only == MemoryScopeFilter::GlobalOnly {
                 sql.push_str(" and scope = 'global'");
             } else if let Some(p) = project_id {
@@ -145,9 +147,12 @@ impl<'a> MemoryRepo<'a> {
                     MemoryScopeFilter::ProjectOnly => sql.push_str(" and project_id = ?"),
                     MemoryScopeFilter::GlobalOnly => unreachable!("handled above"),
                 }
-                args.push(p.to_string());
+                args.push(Value::Text(p.to_string()));
             }
             sql.push_str(" order by created_at desc");
+            // Bound, never formatted in: the numbers come off the wire.
+            if let Some(l) = page.limit() { sql.push_str(" limit ?"); args.push(Value::BigInt(l as i64)); }
+            if let Some(o) = page.offset { sql.push_str(" offset ?"); args.push(Value::BigInt(i64::try_from(o).unwrap_or(i64::MAX))); }
             let mut st = c.prepare(&sql)?;
             let rows = st.query_map(duckdb::params_from_iter(args.iter()), row_to_memory)?;
             Ok(rows.collect::<duckdb::Result<Vec<_>>>()?)
@@ -315,6 +320,41 @@ mod tests {
         let audits: i64 = db.with_conn(|c| Ok(c.query_row("select count(*) from audit", [], |r| r.get(0))?)).unwrap();
         assert_eq!(audits, 3);
     }
+    /// `limit` and `offset` window the listing in its own `created_at desc` order, so
+    /// a page is a slice of the unbounded list; an omitted page is the whole list.
+    #[test]
+    fn list_pages_in_created_at_desc_order() {
+        let db = Db::open_in_memory().unwrap();
+        let repo = MemoryRepo::new(&db);
+        for i in 0..5 { repo.insert(&mem(&format!("memory {i}"), MemoryScope::Global), "test").unwrap(); }
+        let all = repo.list_by_status_scoped(MemoryStatus::Active, None, None, MemoryScopeFilter::All, MemoryPage::default()).unwrap();
+        assert_eq!(all.len(), 5);
+        assert!(all.windows(2).all(|w| w[0].created_at >= w[1].created_at), "newest first");
+        let ids = |v: &[Memory]| v.iter().map(|m| m.id).collect::<Vec<_>>();
+
+        let first = repo.list_by_status_scoped(MemoryStatus::Active, None, None, MemoryScopeFilter::All, MemoryPage { limit: Some(2), offset: None }).unwrap();
+        assert_eq!(ids(&first), ids(&all[..2]));
+        let second = repo.list_by_status_scoped(MemoryStatus::Active, None, None, MemoryScopeFilter::All, MemoryPage { limit: Some(2), offset: Some(2) }).unwrap();
+        assert_eq!(ids(&second), ids(&all[2..4]));
+        let tail = repo.list_by_status_scoped(MemoryStatus::Active, None, None, MemoryScopeFilter::All, MemoryPage { limit: None, offset: Some(4) }).unwrap();
+        assert_eq!(ids(&tail), ids(&all[4..]));
+        let past_end = repo.list_by_status_scoped(MemoryStatus::Active, None, None, MemoryScopeFilter::All, MemoryPage { limit: Some(2), offset: Some(9) }).unwrap();
+        assert!(past_end.is_empty());
+    }
+
+    /// A caller cannot ask for more than `MemoryPage::MAX_LIMIT` rows at once.
+    #[test]
+    fn list_limit_is_capped() {
+        assert_eq!(MemoryPage { limit: Some(5000), offset: None }.limit(), Some(MemoryPage::MAX_LIMIT));
+        assert_eq!(MemoryPage { limit: Some(7), offset: None }.limit(), Some(7));
+        assert_eq!(MemoryPage::default().limit(), None);
+        let db = Db::open_in_memory().unwrap();
+        let repo = MemoryRepo::new(&db);
+        repo.insert(&mem("one", MemoryScope::Global), "test").unwrap();
+        let rows = repo.list_by_status_scoped(MemoryStatus::Active, None, None, MemoryScopeFilter::All, MemoryPage { limit: Some(usize::MAX), offset: None }).unwrap();
+        assert_eq!(rows.len(), 1, "an oversized limit still lists, capped");
+    }
+
     #[test]
     fn facets_count_kinds_tags_and_total_over_active_memories() {
         let db = Db::open_in_memory().unwrap();

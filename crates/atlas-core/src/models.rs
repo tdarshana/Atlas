@@ -39,6 +39,20 @@ str_enum!(MemoryStatus { Active => "active", Pending => "pending", Rejected => "
 // default would have to be threaded through the macro for one use.
 str_enum!(MemoryScopeFilter { All => "all", ProjectOnly => "project_only", GlobalOnly => "global_only" });
 
+/// A window over a memory listing: up to `limit` rows after skipping `offset`, in the
+/// listing's own newest-first order. Both unset is the whole set, which is what every
+/// caller got before paging existed, so a caller that has no reason to page keeps
+/// `MemoryPage::default()`. A `limit` above `MAX_LIMIT` is read as `MAX_LIMIT`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MemoryPage { pub limit: Option<usize>, pub offset: Option<usize> }
+
+impl MemoryPage {
+    /// The most rows one listing hands back, however large the `limit` asked for.
+    pub const MAX_LIMIT: usize = 1000;
+    /// The `limit` to apply, capped at [`MAX_LIMIT`](Self::MAX_LIMIT); `None` is unbounded.
+    pub fn limit(self) -> Option<usize> { self.limit.map(|l| l.min(Self::MAX_LIMIT)) }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NewMemory {
     pub scope: MemoryScope,
