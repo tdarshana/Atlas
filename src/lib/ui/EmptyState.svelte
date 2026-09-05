@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
 	import Icon from '$lib/ds/Icon.svelte';
+	import type { IconName } from '$lib/ds/icons';
 
 	interface Props {
 		title: string;
@@ -8,14 +9,16 @@
 		hint?: string;
 		/** Optional call to action, e.g. a Button. */
 		children?: Snippet;
+		/** The glyph above the title; `info` unless the caller names one. */
+		icon?: IconName;
 		class?: string;
 	}
 
-	let { title, hint, children, class: klass = '' }: Props = $props();
+	let { title, hint, children, icon = 'info', class: klass = '' }: Props = $props();
 </script>
 
 <div class="empty {klass}" data-testid="empty-state">
-	<Icon name="info" size={24} color="var(--text-tertiary)" />
+	<Icon name={icon} size={24} color="var(--text-tertiary)" />
 	<p class="line">{title}{#if hint}<span class="hint"> · {hint}</span>{/if}</p>
 	{@render children?.()}
 </div>

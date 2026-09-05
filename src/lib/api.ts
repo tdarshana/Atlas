@@ -37,14 +37,29 @@ export class ApiError extends Error {
 /** Plural route segment for a doc kind: practice -> practices. */
 const docPath = (kind: DocKind) => (kind === 'practice' ? 'practices' : 'workflows');
 
+/** Asks the host for the daemon's current token after a 401; `null` when it cannot. */
+export type Reauth = () => Promise<string | null>;
+
 export class AtlasApi extends GeneratedApi {
 	/** `token` is the daemon secret (SEC-5); every request goes out with it in
-	 * `X-Atlas-Token`. Empty means none is known, and the daemon will answer 401. */
+	 * `X-Atlas-Token`. Empty means none is known, and the daemon will answer 401.
+	 * `reauth` runs once on a 401 (the daemon restarted and minted a new token) and the
+	 * request is retried with what it returns. */
 	constructor(
 		public baseUrl: string,
-		private token: string = ''
+		private token: string = '',
+		private reauth?: Reauth
 	) {
 		super();
+	}
+
+	/** True when a 401 was answered with a fresh token, so the caller should retry once. */
+	private async refreshed(res: Response, retried: boolean): Promise<boolean> {
+		if (res.status !== 401 || retried || !this.reauth) return false;
+		const next = await this.reauth();
+		if (!next) return false;
+		this.token = next;
+		return true;
 	}
 
 	/** The headers every request starts from: `Accept`, plus the token when there is one. */
@@ -150,13 +165,14 @@ export class AtlasApi extends GeneratedApi {
 	 * A route whose body is not JSON. The log export is JSONL, which `JSON.parse` would
 	 * choke on, so it comes back as the text it is.
 	 */
-	protected async text(method: string, path: string): Promise<string> {
+	protected async text(method: string, path: string, retried = false): Promise<string> {
 		let res: Response;
 		try {
 			res = await fetch(`${this.baseUrl}${path}`, { method, headers: this.headers() });
 		} catch (e) {
 			throw new ApiError(e instanceof Error ? e.message : String(e), 0);
 		}
+		if (await this.refreshed(res, retried)) return this.text(method, path, true);
 		const body = await res.text();
 		if (!res.ok) throw new ApiError(errorMessage(body, res), res.status);
 		return body;
@@ -166,7 +182,8 @@ export class AtlasApi extends GeneratedApi {
 		method: string,
 		path: string,
 		body?: unknown,
-		extra?: Record<string, string>
+		extra?: Record<string, string>,
+		retried = false
 	): Promise<T> {
 		const headers = this.headers(extra);
 		if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -182,6 +199,7 @@ export class AtlasApi extends GeneratedApi {
 			// A transport failure has no status; 0 tells callers to offer the log path.
 			throw new ApiError(e instanceof Error ? e.message : String(e), 0);
 		}
+		if (await this.refreshed(res, retried)) return this.req<T>(method, path, body, extra, true);
 
 		const text = await res.text();
 		if (!res.ok) throw new ApiError(errorMessage(text, res), res.status);

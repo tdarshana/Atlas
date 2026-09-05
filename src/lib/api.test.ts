@@ -47,6 +47,27 @@ describe('AtlasApi', () => {
 		expect(new Headers(bare[0].init.headers).get('x-atlas-token')).toBeNull();
 	});
 
+	it('asks for a new token once on a 401 and retries with it', async () => {
+		const calls = stubFetch([{ status: 401, body: { error: 'unauthorized' } }, { status: 200, body: { ok: true } }]);
+		let asked = 0;
+		const client = new AtlasApi('http://127.0.0.1:7433', 'stale', async () => {
+			asked++;
+			return 'fresh';
+		});
+		await client.status();
+		expect(asked).toBe(1);
+		expect(calls).toHaveLength(2);
+		expect(new Headers(calls[0].init.headers).get('x-atlas-token')).toBe('stale');
+		expect(new Headers(calls[1].init.headers).get('x-atlas-token')).toBe('fresh');
+
+		// A second 401 after the refresh is an error, not a loop; no refresh means no retry.
+		stubFetch([{ status: 401, body: { error: 'unauthorized' } }, { status: 401, body: { error: 'unauthorized' } }]);
+		await expect(client.status()).rejects.toMatchObject({ status: 401 });
+		const noReauth = stubFetch([{ status: 401, body: { error: 'unauthorized' } }]);
+		await expect(new AtlasApi('http://127.0.0.1:7433', 'stale').status()).rejects.toMatchObject({ status: 401 });
+		expect(noReauth).toHaveLength(1);
+	});
+
 	it('posts a search to /api/v1/memories/search with the query as the JSON body', async () => {
 		const calls = stubFetch([{ status: 200, body: [] }]);
 		const q = { query: 'hello', limit: 5, kinds: ['fact' as const], tags: [] };

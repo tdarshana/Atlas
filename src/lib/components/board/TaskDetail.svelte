@@ -35,6 +35,7 @@
 	import type { Stage, TaskDetail, TaskEvent, TaskKind, TaskPriority } from '$lib/types';
 	import { autogrow } from '$lib/ui/autogrow';
 	import Dialog from '$lib/ui/Dialog.svelte';
+	import EmptyState from '$lib/ui/EmptyState.svelte';
 	import MarkdownView from '$lib/ui/MarkdownView.svelte';
 	import ResizeBar from '$lib/ui/ResizeBar.svelte';
 	import { push } from '$lib/platform/toasts.svelte';
@@ -1067,7 +1068,7 @@
 							{/each}
 						</ul>
 					{:else}
-						<p class="muted">No subtasks.</p>
+						<EmptyState icon="list-checks" title="No subtasks" class="tab-empty" />
 					{/if}
 				{:else if detailTab() === 'activity'}
 					{#if activityEvents.length > 0}
@@ -1077,7 +1078,7 @@
 							{/each}
 						</ul>
 					{:else}
-						<p class="muted">Nothing has happened yet.</p>
+						<EmptyState icon="list-clock" title="No history yet" class="tab-empty" />
 					{/if}
 				{:else}
 					<textarea
@@ -1100,7 +1101,7 @@
 							{/each}
 						</ul>
 					{:else}
-						<p class="muted">No comments yet.</p>
+						<EmptyState icon="message-square" title="No comments yet" class="tab-empty" />
 					{/if}
 				{/if}
 				</div>
@@ -1284,6 +1285,13 @@
 	   would otherwise be squeezed to a sliver). */
 	.tab-body > :global(*) {
 		flex: 0 0 auto;
+	}
+
+	/* An empty tab centres its notice in whatever room the box has. */
+	.tab-body > :global(.tab-empty) {
+		flex: 1 1 auto;
+		justify-content: center;
+		min-height: 120px;
 	}
 
 	/* In the modal the grid fills the dialog and the tabs row takes whatever height is

@@ -9,7 +9,8 @@ vi.mock('$lib/daemon.svelte', () => ({
 	baseUrl: () => 'http://127.0.0.1:7433',
 	tokenQuery: () => '?token=test-token',
 	api: () => ({}),
-	boot: async () => {}
+	boot: async () => {},
+	reauth: async () => null
 }));
 
 import { changes, connectChanges, disconnectChanges, dispatch, onChange } from './changes.svelte';

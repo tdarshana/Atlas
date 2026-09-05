@@ -4,7 +4,7 @@
 // subscribe and refresh themselves. Polling stays only as the fallback for the seconds
 // the stream is down: the browser reconnects an EventSource on its own.
 
-import { baseUrl, tokenQuery } from '$lib/daemon.svelte';
+import { baseUrl, reauth, tokenQuery } from '$lib/daemon.svelte';
 import type { Change } from '$lib/types';
 
 export const changes = $state({
@@ -63,6 +63,15 @@ export function connectChanges(): void {
 	};
 	source.onerror = () => {
 		changes.connected = false;
+		// The browser retries an EventSource by itself, but with the same URL: after a
+		// daemon restart the token in that URL is stale and every retry is a 401. Ask the
+		// host for the current token and, when it changed, reopen the stream with it.
+		void reauth().then((token) => {
+			if (token && source) {
+				disconnectChanges();
+				connectChanges();
+			}
+		});
 	};
 	for (const entity of ENTITIES) {
 		if (entity === 'lagged') {
