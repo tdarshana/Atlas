@@ -1192,6 +1192,36 @@ async fn board_list_flags_take_true_or_one_and_never_answer_400() {
     assert_eq!(keys, vec![open["key"].as_str().unwrap()]);
 }
 
+/// PERF-5 (ATL-307): `GET /tasks?brief=1` is the board's listing. Its rows carry an
+/// empty `description` and no `source_ref`, and `GET /tasks/{key}` still answers
+/// with the full task.
+#[tokio::test]
+async fn brief_task_list_leaves_the_description_out() {
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+
+    let created: serde_json::Value = c.post(format!("{base}/tasks")).header("X-Atlas-Actor", "alice")
+        .json(&serde_json::json!({"title": "brief me", "description": "the whole story"}))
+        .send().await.unwrap().json().await.unwrap();
+    let key = created["key"].as_str().unwrap().to_string();
+
+    let full: serde_json::Value = c.get(format!("{base}/tasks")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(full[0]["description"], "the whole story", "{full}");
+
+    for query in ["brief=1", "brief=true"] {
+        let r = c.get(format!("{base}/tasks?{query}")).send().await.unwrap();
+        assert_eq!(r.status(), 200, "{query}");
+        let brief: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(brief[0]["key"], key, "{query}: {brief}");
+        assert_eq!(brief[0]["description"], "", "{query}: {brief}");
+        assert!(brief[0]["source_ref"].is_null(), "{query}: {brief}");
+    }
+
+    let detail: serde_json::Value = c.get(format!("{base}/tasks/{key}")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(detail["task"]["description"], "the whole story", "{detail}");
+}
+
 /// `scope=global` is the literal global board: tasks with no project at all, not a
 /// bare `project_id`-less request, which leaves every project's tasks in. It is
 /// refused alongside `project_id`.

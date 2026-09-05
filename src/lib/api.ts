@@ -583,7 +583,8 @@ export class AtlasApi {
 				ready: filter.ready ? 'true' : null,
 				q: filter.query,
 				include_done: filter.include_done ? 'true' : null,
-				top_level: filter.top_level === undefined ? null : filter.top_level ? 'true' : 'false'
+				top_level: filter.top_level === undefined ? null : filter.top_level ? 'true' : 'false',
+				brief: filter.brief ? 'true' : null
 			})}`
 		);
 	}

@@ -212,47 +212,127 @@ describe('the board follows the daemon', () => {
 		]);
 	});
 
-	it('re-lists a moment after a task change on the stream, once per burst, and reloads the open detail when it is touched', async () => {
+	it('asks for the brief list: the board never shows a description (PERF-5, ATL-307)', async () => {
+		mocks.boardStages.mockResolvedValue({ stages: STAGES, overridden: false });
+		mocks.listTasks.mockResolvedValue([]);
+		await refresh();
+		expect(mocks.listTasks).toHaveBeenLastCalledWith(expect.objectContaining({ brief: true }));
+	});
+
+	it('patches the one task a lone change names, re-lists a burst, and reloads the open detail when it is touched', async () => {
 		vi.useFakeTimers();
 		try {
+			const listed = () => [task('ATL-1', 'Backlog'), task('ATL-2', 'Backlog'), task('ATL-9', 'Backlog')];
+			board.tasks = listed();
 			mocks.boardStages.mockResolvedValue({ stages: STAGES, overridden: false });
-			mocks.listTasks.mockResolvedValue([]);
-			mocks.getTask.mockResolvedValue({ task: task('ATL-1', 'Backlog'), children: [task('ATL-2', 'Backlog')], events: [] });
+			mocks.listTasks.mockImplementation(async () => listed());
+			mocks.getTask.mockImplementation(async (key: string) => ({
+				task: task(key, 'In Progress'),
+				children: key === 'ATL-1' ? [task('ATL-2', 'Done')] : [],
+				events: []
+			}));
 			const lists = () => mocks.listTasks.mock.calls.length;
 			const gets = () => mocks.getTask.mock.calls.length;
 			const stop = startBoardPolling(60_000);
 			const before = lists();
+			const g = gets();
+			const change = (key: string | null, id = `id-${key}`) => ({ entity: 'task', action: 'moved', id, key, project_id: null, at: '' });
 
-			const change = (id: string) => ({ entity: 'task', action: 'moved', id, key: null, project_id: null, at: '' });
-			dispatch(change('id-ATL-9'));
-			dispatch(change('id-ATL-9'));
-			dispatch(change('id-ATL-9'));
+			// A lone change (however many times it repeats) costs one GET of that task
+			// and no re-list; the row takes what the daemon has.
+			dispatch(change('ATL-9'));
+			dispatch(change('ATL-9'));
+			dispatch(change('ATL-9'));
+			expect(gets()).toBe(g);
+			await vi.advanceTimersByTimeAsync(200);
 			expect(lists()).toBe(before);
+			expect(gets()).toBe(g + 1);
+			expect(mocks.getTask).toHaveBeenLastCalledWith('ATL-9');
+			expect(board.tasks.map((t) => [t.key, t.stage])).toEqual([
+				['ATL-1', 'Backlog'],
+				['ATL-2', 'Backlog'],
+				['ATL-9', 'In Progress']
+			]);
+
+			// A burst naming two tasks re-lists once instead.
+			dispatch(change('ATL-1'));
+			dispatch(change('ATL-2'));
 			await vi.advanceTimersByTimeAsync(200);
 			expect(lists()).toBe(before + 1);
-
-			// With ATL-1 open, a change to its subtask ATL-2 reloads the detail as well.
-			openTask('ATL-1');
-			await vi.advanceTimersByTimeAsync(0);
-			const g = gets();
-			dispatch(change('id-ATL-2'));
-			await vi.advanceTimersByTimeAsync(200);
-			expect(lists()).toBe(before + 2);
 			expect(gets()).toBe(g + 1);
 
-			// A change elsewhere re-lists but leaves the detail alone.
-			dispatch(change('id-ATL-9'));
+			// A task the board does not hold (a create) and a change with no key re-list.
+			dispatch(change('ATL-5'));
+			await vi.advanceTimersByTimeAsync(200);
+			expect(lists()).toBe(before + 2);
+			dispatch(change(null, 'id-ATL-9'));
 			await vi.advanceTimersByTimeAsync(200);
 			expect(lists()).toBe(before + 3);
 			expect(gets()).toBe(g + 1);
+
+			// With ATL-1 open, a change to its subtask ATL-2 reloads the detail, which
+			// already folds the subtask's row in, so that is the only request.
+			openTask('ATL-1');
+			await vi.advanceTimersByTimeAsync(0);
+			const opened = gets();
+			dispatch(change('ATL-2'));
+			await vi.advanceTimersByTimeAsync(200);
+			expect(lists()).toBe(before + 3);
+			expect(gets()).toBe(opened + 1);
+			expect(mocks.getTask).toHaveBeenLastCalledWith('ATL-1');
+			expect(board.tasks.find((t) => t.key === 'ATL-2')?.stage).toBe('Done');
+
+			// A change elsewhere patches its own row and leaves the detail alone.
+			dispatch(change('ATL-9'));
+			await vi.advanceTimersByTimeAsync(200);
+			expect(gets()).toBe(opened + 2);
+			expect(mocks.getTask).toHaveBeenLastCalledWith('ATL-9');
+
+			// Dropped events mean a wholesale refresh.
+			dispatch({ entity: 'lagged', action: 'lagged', id: null, key: null, project_id: null, at: '' });
+			await vi.advanceTimersByTimeAsync(0);
+			expect(lists()).toBe(before + 4);
 
 			stop();
 			closeTask();
-			dispatch(change('id-ATL-9'));
+			dispatch(change('ATL-9'));
 			await vi.advanceTimersByTimeAsync(200);
-			expect(lists()).toBe(before + 3);
+			expect(lists()).toBe(before + 4);
+			expect(gets()).toBe(opened + 2);
 		} finally {
 			vi.useRealTimers();
+		}
+	});
+
+	it('re-lists instead of patching while a text filter is on, and drops a patched task that a hidden-done board no longer shows', async () => {
+		vi.useFakeTimers();
+		try {
+			board.tasks = [task('ATL-1', 'Backlog'), task('ATL-2', 'Backlog')];
+			mocks.boardStages.mockResolvedValue({ stages: STAGES, overridden: false });
+			mocks.listTasks.mockResolvedValue([task('ATL-1', 'Backlog'), task('ATL-2', 'Backlog')]);
+			mocks.getTask.mockImplementation(async (key: string) => ({ task: task(key, 'Done'), children: [], events: [] }));
+			const lists = () => mocks.listTasks.mock.calls.length;
+			const stop = startBoardPolling(60_000);
+			const change = (key: string) => ({ entity: 'task', action: 'moved', id: `id-${key}`, key, project_id: null, at: '' });
+
+			board.filters.query = 'widget';
+			const before = lists();
+			dispatch(change('ATL-1'));
+			await vi.advanceTimersByTimeAsync(200);
+			expect(lists()).toBe(before + 1);
+			expect(mocks.getTask).not.toHaveBeenCalled();
+
+			board.filters.query = '';
+			board.filters.hideDone = true;
+			dispatch(change('ATL-2'));
+			await vi.advanceTimersByTimeAsync(200);
+			expect(lists()).toBe(before + 1);
+			expect(board.tasks.map((t) => t.key)).toEqual(['ATL-1']);
+
+			stop();
+		} finally {
+			vi.useRealTimers();
+			board.filters.hideDone = false;
 		}
 	});
 

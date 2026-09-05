@@ -425,6 +425,8 @@ export async function refresh(): Promise<void> {
 				assignee: assignee.trim() || null,
 				query: trimmedQuery || null,
 				include_done: !hideDone,
+				// No card shows a description, so the list leaves it out (PERF-5).
+				brief: true,
 				// Subtasks are cards of their own unless hidden, and a search must still
 				// find them, so the top-level narrowing applies only to an unsearched board.
 				top_level: hideSubtasks && !trimmedQuery ? true : undefined
@@ -518,20 +520,46 @@ function absorb(detail: TaskDetail | null): void {
 /** How often the board re-lists itself while it is on screen, as the fallback for the
  * seconds the change stream is down. The stream is what keeps it live. */
 export const BOARD_POLL_MS = 30_000;
-/** How long the board waits after a change before re-listing, so a burst of writes
- * (an import, an agent moving several tasks) costs one request. */
+/** How long the board waits after a change before acting on it, so a burst of writes
+ * (an import, an agent moving several tasks) costs one re-list and a lone change
+ * costs one GET of that task. */
 export const CHANGE_DEBOUNCE_MS = 150;
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let changeTimer: ReturnType<typeof setTimeout> | null = null;
+/** The keys named by the changes waiting on `changeTimer`, plus whether one arrived
+ * without a key, and whether one touched the open task. */
+const pendingKeys = new Set<string>();
+let pendingKeyless = false;
+let pendingTouchesOpen = false;
+
+/**
+ * Replaces one row with what the daemon holds for the task, folding its subtasks in
+ * the way a loaded detail does. The row is dropped instead when the task is gone or
+ * when a hidden-done board no longer shows its stage; any other failure re-lists.
+ */
+async function patchRow(key: string): Promise<void> {
+	try {
+		const detail = await api().getTask(key);
+		const done = board.stages.some((s) => s.done && s.name === detail.task.stage);
+		if (board.filters.hideDone && done) board.tasks = board.tasks.filter((t) => t.key !== key);
+		else absorb(detail);
+	} catch (e) {
+		if (e instanceof ApiError && e.status === 404) board.tasks = board.tasks.filter((t) => t.key !== key);
+		else await refresh();
+	}
+}
 
 /**
  * Keeps the columns in step with the daemon. The change stream is the live path: a
- * `task` change re-lists the board a moment later and, when the change touches the
- * open task or one of its subtasks, reloads the detail too. A re-list every
- * `intervalMs` while the window is visible and one on each return to the window are
- * the fallback. Columns are the stage, so a task moved by an agent over MCP or by the
- * CLI has to move on screen without a reload. Returns the stop function.
+ * moment after a `task` change the board fetches the one task a lone change names and
+ * patches its row, or re-lists when a burst names several tasks, a change has no key,
+ * the task is not on the board, or a text filter is on. A change that touches the
+ * open task or one of its subtasks reloads the detail too, which folds those rows in
+ * on its own. A re-list every `intervalMs` while the window is visible and one on
+ * each return to the window are the fallback. Columns are the stage, so a task moved
+ * by an agent over MCP or by the CLI has to move on screen without a reload. Returns
+ * the stop function.
  */
 export function startBoardPolling(intervalMs = BOARD_POLL_MS): () => void {
 	stopBoardPolling();
@@ -548,14 +576,34 @@ export function startBoardPolling(intervalMs = BOARD_POLL_MS): () => void {
 	}
 	const unsubscribe = onChange('task', (change) => {
 		const open = board.detail;
-		const touchesOpen =
+		if (
 			open !== null &&
-			(change.id === open.task.id || change.id === open.task.parent_id || open.children.some((c) => c.id === change.id));
+			(change.id === open.task.id || change.id === open.task.parent_id || open.children.some((c) => c.id === change.id))
+		) {
+			pendingTouchesOpen = true;
+		}
+		if (change.key) pendingKeys.add(change.key);
+		else pendingKeyless = true;
 		if (changeTimer !== null) clearTimeout(changeTimer);
 		changeTimer = setTimeout(() => {
 			changeTimer = null;
-			void refresh();
-			if (touchesOpen && board.selected) void loadDetail(board.selected);
+			const keys = [...pendingKeys];
+			const lone = keys.length === 1 && !pendingKeyless ? keys[0] : null;
+			const touchesOpen = pendingTouchesOpen;
+			pendingKeys.clear();
+			pendingKeyless = false;
+			pendingTouchesOpen = false;
+			const reloadKey = touchesOpen ? board.selected : null;
+			if (reloadKey) void loadDetail(reloadKey);
+			if (lone === null || board.filters.query.trim() || board.filters.assignee.trim()) {
+				void refresh();
+			} else if (reloadKey && (lone === reloadKey || board.detail?.children.some((c) => c.key === lone))) {
+				// The detail reload above already folds this row in.
+			} else if (board.tasks.some((t) => t.key === lone)) {
+				void patchRow(lone);
+			} else {
+				void refresh();
+			}
 		}, CHANGE_DEBOUNCE_MS);
 	});
 	const unsubscribeLag = onChange('lagged', () => void refresh());
@@ -565,6 +613,9 @@ export function startBoardPolling(intervalMs = BOARD_POLL_MS): () => void {
 		unsubscribeLag();
 		if (changeTimer !== null) clearTimeout(changeTimer);
 		changeTimer = null;
+		pendingKeys.clear();
+		pendingKeyless = false;
+		pendingTouchesOpen = false;
 		if (typeof window !== 'undefined') {
 			window.removeEventListener('focus', onFocus);
 			document.removeEventListener('visibilitychange', onFocus);

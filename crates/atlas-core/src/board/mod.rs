@@ -49,10 +49,25 @@ pub const STAGES_SETTING: &str = "board.stages";
 /// Settings key for the optional `TASKS.md` mirror, read by `atlas sync`.
 pub const MIRROR_SETTING: &str = "board.mirror_tasks_md";
 
-const TASK_COLS: &str = "id::text, key, project_id::text, seq, title, description, stage, kind, priority, \
-     assignee, labels::text, parent_id::text, created_by, epoch_us(created_at), epoch_us(updated_at), epoch_us(closed_at), source_ref::text, \
-     (select p.key from tasks p where p.id = tasks.parent_id), (select p.title from tasks p where p.id = tasks.parent_id), \
-     persona_id::text, (select q.name from personas q where q.id = tasks.persona_id), (select q.slug from personas q where q.id = tasks.persona_id)";
+/// The task row's columns in `row_to_task`'s order, with the `description` and
+/// `source_ref` expressions left to the caller so a brief listing can swap them for
+/// empty values without a second column order to keep in step.
+macro_rules! task_cols {
+    ($description:literal, $source_ref:literal) => {
+        concat!(
+            "id::text, key, project_id::text, seq, title, ", $description, ", stage, kind, priority, \
+             assignee, labels::text, parent_id::text, created_by, epoch_us(created_at), epoch_us(updated_at), epoch_us(closed_at), ", $source_ref, ", \
+             (select p.key from tasks p where p.id = tasks.parent_id), (select p.title from tasks p where p.id = tasks.parent_id), \
+             persona_id::text, (select q.name from personas q where q.id = tasks.persona_id), (select q.slug from personas q where q.id = tasks.persona_id)"
+        )
+    };
+}
+
+const TASK_COLS: &str = task_cols!("description", "source_ref::text");
+/// `TASK_COLS` with an empty description and no source ref, for `TaskFilter::brief`
+/// (PERF-5, ATL-307): the bytes never leave the database rather than being read and
+/// dropped.
+const BRIEF_TASK_COLS: &str = task_cols!("''", "null::text");
 
 const EVENT_COLS: &str = "id::text, task_id::text, actor, kind, body, detail::text, epoch_us(created_at)";
 
@@ -494,7 +509,8 @@ impl TaskRepo {
     /// decorated, because both depend on the stage list rather than on the row.
     pub fn list(&self, f: &TaskFilter) -> Result<Vec<Task>> {
         self.db.with_conn(|c| {
-            let mut sql = format!("select {TASK_COLS} from tasks where 1 = 1");
+            let cols = if f.brief { BRIEF_TASK_COLS } else { TASK_COLS };
+            let mut sql = format!("select {cols} from tasks where 1 = 1");
             let mut args: Vec<String> = Vec::new();
             if let Some(p) = f.project_id {
                 sql.push_str(" and project_id = ?");

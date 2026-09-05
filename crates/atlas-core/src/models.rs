@@ -626,6 +626,10 @@ pub struct TaskFilter {
     #[serde(default)] pub top_level: Option<bool>,
     /// Keep only tasks done as this persona, by id or slug.
     #[serde(default)] pub persona: Option<String>,
+    /// Leave `description` empty and `source_ref` off each row. For a listing that
+    /// shows neither (the board), where the description is most of the bytes; `get`
+    /// still answers with the full task. The filters, `query` included, are unchanged.
+    #[serde(default)] pub brief: bool,
 }
 
 // ---- workflows ----

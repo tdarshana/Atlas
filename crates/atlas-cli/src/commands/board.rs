@@ -157,6 +157,7 @@ pub async fn run_task(cmd: TaskCmd, backend: &RemoteBackend) -> anyhow::Result<(
                 global_only: target.is_none(),
                 top_level: None,
                 persona: None,
+                brief: false,
             };
             let tasks = backend.list_tasks(filter).await?;
             let rows: Vec<Vec<String>> = tasks

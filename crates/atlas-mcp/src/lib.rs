@@ -702,6 +702,7 @@ impl<B: Backend> AtlasMcp<B> {
             global_only,
             top_level: None,
             persona: None,
+            brief: false,
         };
         json_result(&self.backend.list_tasks(filter).await.map_err(board_err)?)
     }

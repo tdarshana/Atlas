@@ -1081,6 +1081,12 @@ export interface TaskFilter {
 	top_level?: boolean | null;
 	/** Keep only tasks done as this persona, by id or slug. */
 	persona?: string | null;
+	/**
+	 * Leave `description` empty and `source_ref` off each row. For a listing that
+	 * shows neither (the board), where the description is most of the bytes; `get`
+	 * still answers with the full task. The filters, `query` included, are unchanged.
+	 */
+	brief?: boolean;
 }
 
 export interface NewWorkflow {

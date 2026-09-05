@@ -305,6 +305,9 @@ fn query_flag_opt<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result
     #[serde(default, deserialize_with = "query_flag_opt")] pub top_level: Option<bool>,
     /// Keep only tasks done as this persona, by id or slug. Empty is no filter.
     #[serde(default)] pub persona: Option<String>,
+    /// `true` or `1` leaves `description` empty and `source_ref` off each row; the
+    /// board's listing (PERF-5, ATL-307).
+    #[serde(default, deserialize_with = "query_flag")] pub brief: bool,
 }
 #[derive(Deserialize)] pub struct MoveBody { pub stage: String, #[serde(default)] pub expected_updated_at: Option<DateTime<Utc>> }
 #[derive(Deserialize)] pub struct CommentBody { pub body: String }
@@ -675,7 +678,7 @@ fn task_global_only(scope: Option<&str>, project_id: Option<Uuid>) -> Result<boo
 }
 async fn list_tasks(State(s): State<AppState>, ApiQuery(q): ApiQuery<TaskListQ>) -> Result<Json<Vec<Task>>, ApiError> {
     let global_only = task_global_only(q.scope.as_deref(), q.project_id)?;
-    let f = TaskFilter { project_id: q.project_id, stage: q.stage, assignee: q.assignee, ready: q.ready, query: q.q, include_done: q.include_done, global_only, top_level: q.top_level, persona: q.persona.filter(|p| !p.trim().is_empty()) };
+    let f = TaskFilter { project_id: q.project_id, stage: q.stage, assignee: q.assignee, ready: q.ready, query: q.q, include_done: q.include_done, global_only, top_level: q.top_level, persona: q.persona.filter(|p| !p.trim().is_empty()), brief: q.brief };
     Ok(Json(s.backend.list_tasks(f).await?))
 }
 async fn create_task(State(s): State<AppState>, Actor(actor, _): Actor, ApiJson(t): ApiJson<NewTask>) -> Result<(StatusCode, Json<Task>), ApiError> {

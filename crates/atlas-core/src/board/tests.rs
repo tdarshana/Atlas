@@ -1038,3 +1038,33 @@ fn source_ref_index_maps_a_projects_refs_to_their_tasks() {
     let global = repo.source_ref_index(None).unwrap();
     assert_eq!(global.values().map(|t| t.title.as_str()).collect::<Vec<_>>(), vec!["global"]);
 }
+
+// -- brief listings ----------------------------------------------------------
+
+/// PERF-5 (ATL-307): a `brief` listing leaves `description` empty and `source_ref`
+/// off, because no board card shows either and the description is most of the
+/// bytes; everything else on the row, and the filters, are the same as the full
+/// listing.
+#[test]
+fn a_brief_list_leaves_the_description_and_source_ref_out() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    let sref = SourceRef { framework: FrameworkKind::Gsd, path: "plans/a.md".into(), anchor: "Step 1".into() };
+    let t = repo
+        .create(&NewTask { description: Some("a long description".into()), source_ref: Some(sref.clone()), ..new_task(Some(p.id), "brief me") }, "t")
+        .unwrap();
+    repo.create(&NewTask { description: Some("hidden".into()), ..new_task(Some(p.id), "the other") }, "t").unwrap();
+
+    let full = repo.list(&TaskFilter { project_id: Some(p.id), ..Default::default() }).unwrap();
+    assert_eq!(full[0].description, "a long description");
+    assert_eq!(full[0].source_ref, Some(sref));
+
+    let brief = repo.list(&TaskFilter { project_id: Some(p.id), brief: true, ..Default::default() }).unwrap();
+    assert_eq!(brief.iter().map(|t| t.key.as_str()).collect::<Vec<_>>(), full.iter().map(|t| t.key.as_str()).collect::<Vec<_>>());
+    assert!(brief.iter().all(|t| t.description.is_empty() && t.source_ref.is_none()), "{brief:?}");
+    assert_eq!((brief[0].id, &brief[0].title, &brief[0].stage, brief[0].ready), (t.id, &t.title, &t.stage, t.ready));
+
+    // The text filter still searches the description; only the row leaves it out.
+    let found = repo.list(&TaskFilter { project_id: Some(p.id), brief: true, query: Some("hidden".into()), ..Default::default() }).unwrap();
+    assert_eq!(found.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), vec!["the other"]);
+}

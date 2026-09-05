@@ -446,6 +446,7 @@ impl BoardBackend for RemoteBackend {
         if f.include_done { parts.push("include_done=true".into()); }
         if f.global_only { parts.push("scope=global".into()); }
         if let Some(tl) = f.top_level { parts.push(format!("top_level={tl}")); }
+        if f.brief { parts.push("brief=true".into()); }
         let q = if parts.is_empty() { String::new() } else { format!("?{}", parts.join("&")) };
         Self::handle(self.client.get(format!("{}/tasks{q}", self.base)).header("X-Atlas-Actor", &self.actor).send().await.map_err(Self::net)?).await
     }
