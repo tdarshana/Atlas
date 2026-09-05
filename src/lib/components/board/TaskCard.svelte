@@ -137,9 +137,13 @@
 		border-color: var(--accent);
 	}
 
+	/* A 1px ring on the border's own edge, matching the selected border rather than the
+	   thick outward ring: the card can sit flush against the lane's scroll box (and does
+	   after the modal detail closes and hands focus back to it), where an outward ring
+	   is clipped on three sides. */
 	.card:focus-visible {
-		outline: var(--focus-ring-width) solid var(--focus-ring);
-		outline-offset: 1px;
+		outline: 1px solid var(--focus-ring);
+		outline-offset: -1px;
 	}
 
 	.top {
