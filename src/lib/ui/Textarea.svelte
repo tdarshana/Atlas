@@ -33,11 +33,6 @@
 		border-color: var(--border-strong);
 	}
 
-	.textarea:focus {
-		border-color: var(--accent);
-		outline: var(--focus-ring-width) solid var(--focus-ring);
-		outline-offset: 0;
-	}
 
 	.textarea:disabled {
 		opacity: 0.5;

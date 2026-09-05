@@ -1370,11 +1370,6 @@
 		padding: 6px 8px;
 	}
 
-	.area:focus {
-		border-color: var(--accent);
-		outline: var(--focus-ring-width) solid var(--focus-ring);
-		outline-offset: 0;
-	}
 
 	.mono-hint::placeholder {
 		font-family: var(--font-mono);

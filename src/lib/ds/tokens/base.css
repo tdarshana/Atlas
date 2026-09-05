@@ -5,6 +5,8 @@ body{margin:0;background:var(--bg-base);color:var(--text-primary);font:var(--typ
 a{color:var(--accent);text-decoration:none}
 a:hover{color:var(--accent-hover);text-decoration:underline}
 :focus-visible{outline:var(--focus-ring-width) solid var(--focus-ring);outline-offset:var(--focus-ring-offset)}
+/* A text area shows its caret; it wears no focus ring or accent border anywhere in the app. */
+textarea:focus,textarea:focus-visible{outline:none;border-color:var(--border-default)}
 code,kbd,pre,samp{font-family:var(--font-mono)}
 ::selection{background:var(--accent-muted);color:var(--text-primary)}
 ::-webkit-scrollbar{width:10px;height:10px}
