@@ -57,3 +57,129 @@ impl AtlasPaths {
     pub fn log_file(&self) -> PathBuf { self.home.join("atlasd.log") }
     pub fn ensure(&self) -> std::io::Result<()> { std::fs::create_dir_all(&self.home)?; std::fs::create_dir_all(self.models_dir()) }
 }
+
+/// One Claude Code plugin installed under
+/// `<home>/.claude/plugins/cache/<marketplace>/<plugin>/<version>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledPlugin {
+    pub marketplace: String,
+    pub name: String,
+    /// The version directory with the newest modification time.
+    pub version_dir: PathBuf,
+}
+
+impl InstalledPlugin {
+    /// `<marketplace>/<plugin>`, the label a plugin's skills and MCP servers carry.
+    pub fn label(&self) -> String { format!("{}/{}", self.marketplace, self.name) }
+}
+
+/// Every plugin installed under `home`'s Claude Code plugin cache, in marketplace then
+/// plugin name order, each at the version directory with the newest modification time.
+/// Directories whose name ends in `.clone` or starts with `temp_` are a half-finished
+/// install and are skipped; a plugin with no other version is not listed. An absent
+/// cache is silent, since most machines have none; anything else that cannot be read
+/// is a warning. Skill discovery and MCP server discovery both walk the cache through
+/// here, so the version-picking rule lives in one place.
+pub fn installed_plugins(home: &Path, warnings: &mut Vec<String>) -> Vec<InstalledPlugin> {
+    let cache = home.join(".claude/plugins/cache");
+    let mut out = Vec::new();
+    let Some(marketplaces) = read_dirs(&cache, warnings) else { return out };
+    for marketplace in marketplaces {
+        let Some(plugins) = read_dirs(&marketplace, warnings) else { continue };
+        for plugin in plugins {
+            let Some(versions) = read_dirs(&plugin, warnings) else { continue };
+            let newest = versions
+                .into_iter()
+                .filter(|v| !is_scratch_dir(v))
+                .filter_map(|v| std::fs::metadata(&v).ok().and_then(|m| m.modified().ok()).map(|t| (t, v)))
+                .max_by_key(|(t, _)| *t)
+                .map(|(_, v)| v);
+            let Some(version_dir) = newest else { continue };
+            out.push(InstalledPlugin { marketplace: name_of(&marketplace), name: name_of(&plugin), version_dir });
+        }
+    }
+    out
+}
+
+/// The subdirectories of `path`, sorted, or `None` when it holds none to offer. A path
+/// that is simply not there is silent; anything else, a directory the daemon may not
+/// traverse in particular, is a warning, so an unreadable root does not look identical
+/// to an absent one.
+fn read_dirs(path: &Path, warnings: &mut Vec<String>) -> Option<Vec<PathBuf>> {
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            warnings.push(format!("{}: {e}", path.display()));
+            return None;
+        }
+    };
+    let mut out: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(e) if e.path().is_dir() => out.push(e.path()),
+            Ok(_) => {}
+            Err(e) => warnings.push(format!("{}: {e}", path.display())),
+        }
+    }
+    out.sort();
+    Some(out)
+}
+
+fn is_scratch_dir(path: &Path) -> bool {
+    let name = name_of(path);
+    name.ends_with(".clone") || name.starts_with("temp_")
+}
+
+fn name_of(path: &Path) -> String {
+    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn set_dir_mtime(dir: &Path, when: std::time::SystemTime) {
+        std::fs::File::open(dir).unwrap().set_modified(when).unwrap();
+    }
+
+    /// The one walk both skill and MCP server discovery use: sorted by marketplace and
+    /// plugin, the newest version directory wins, scratch directories are not versions,
+    /// and a plugin with only scratch directories is not installed.
+    #[test]
+    fn installed_plugins_picks_the_newest_real_version_of_each_plugin() {
+        let home = tempfile::tempdir().unwrap();
+        let cache = home.path().join(".claude/plugins/cache");
+        let tools = cache.join("acme/tools");
+        for v in ["aaaa1111", "bbbb2222", "cccc3333.clone", "temp_dddd"] {
+            std::fs::create_dir_all(tools.join(v)).unwrap();
+        }
+        let now = std::time::SystemTime::now();
+        set_dir_mtime(&tools.join("aaaa1111"), now - std::time::Duration::from_secs(600));
+        set_dir_mtime(&tools.join("bbbb2222"), now);
+        // A newer scratch directory must not beat the real version.
+        set_dir_mtime(&tools.join("cccc3333.clone"), now + std::time::Duration::from_secs(600));
+        std::fs::create_dir_all(cache.join("acme/aardvark/v1")).unwrap();
+        std::fs::create_dir_all(cache.join("zeta/only-scratch/temp_x")).unwrap();
+        // A stray file at the plugin level is not a plugin.
+        std::fs::write(cache.join("acme/README"), "not a plugin").unwrap();
+
+        let mut warnings = Vec::new();
+        let found = installed_plugins(home.path(), &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let labels: Vec<String> = found.iter().map(InstalledPlugin::label).collect();
+        assert_eq!(labels, vec!["acme/aardvark", "acme/tools"], "{labels:?}");
+        assert_eq!(found[1].marketplace, "acme");
+        assert_eq!(found[1].name, "tools");
+        assert_eq!(found[1].version_dir, tools.join("bbbb2222"));
+    }
+
+    /// Most machines have no plugin cache, and that is not worth a warning.
+    #[test]
+    fn a_missing_cache_is_empty_and_silent() {
+        let home = tempfile::tempdir().unwrap();
+        let mut warnings = Vec::new();
+        assert!(installed_plugins(home.path(), &mut warnings).is_empty());
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+}

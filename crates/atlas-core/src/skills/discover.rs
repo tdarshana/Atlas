@@ -22,6 +22,7 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::models::{MemoryScope, SkillSource, SkillSummary};
+use crate::paths::installed_plugins;
 use crate::{AtlasError, Result};
 
 use super::frontmatter;
@@ -75,7 +76,12 @@ pub fn discover_global_in(home: &Path) -> Found {
     // from third parties.
     scan_root(&home.join(".claude/skills"), SkillSource::ClaudeUser, MemoryScope::Global, None, None, Some(home), &mut found);
     scan_root(&home.join(".codex/skills"), SkillSource::CodexUser, MemoryScope::Global, None, None, Some(home), &mut found);
-    scan_plugins(&home.join(".claude/plugins/cache"), &mut found);
+    // The newest installed version of each plugin, the same walk MCP server discovery
+    // uses; a plugin cache's contents come from third parties, so its roots keep the
+    // strict fence.
+    for plugin in installed_plugins(home, &mut found.warnings) {
+        scan_root(&plugin.version_dir.join("skills"), SkillSource::Plugin, MemoryScope::Global, None, Some(plugin.label()), None, &mut found);
+    }
     found
 }
 
@@ -86,28 +92,6 @@ pub fn discover_project(root: &Path, project_id: Uuid) -> Found {
     scan_root(&root.join(".claude/skills"), SkillSource::ClaudeProject, MemoryScope::Project, Some(project_id), None, None, &mut found);
     scan_root(&root.join(".codex/skills"), SkillSource::CodexProject, MemoryScope::Project, Some(project_id), None, None, &mut found);
     found
-}
-
-/// Every `<marketplace>/<plugin>` under the plugin cache, each at the version directory
-/// with the newest modification time. Directories whose name ends in `.clone` or starts
-/// with `temp_` are a half-finished install, and are skipped.
-fn scan_plugins(cache: &Path, found: &mut Found) {
-    let Some(marketplaces) = read_dirs(cache, found) else { return };
-    for marketplace in marketplaces {
-        let Some(plugins) = read_dirs(&marketplace, found) else { continue };
-        for plugin in plugins {
-            let Some(versions) = read_dirs(&plugin, found) else { continue };
-            let newest = versions
-                .into_iter()
-                .filter(|v| !is_scratch_dir(v))
-                .filter_map(|v| modified(&v).map(|t| (t, v)))
-                .max_by_key(|(t, _)| *t)
-                .map(|(_, v)| v);
-            let Some(version) = newest else { continue };
-            let label = format!("{}/{}", name_of(&marketplace), name_of(&plugin));
-            scan_root(&version.join("skills"), SkillSource::Plugin, MemoryScope::Global, None, Some(label), None, found);
-        }
-    }
 }
 
 /// Reads every skill directly under `root`. A root that is not there is not a warning:
@@ -376,11 +360,6 @@ fn read_dirs(path: &Path, found: &mut Found) -> Option<Vec<PathBuf>> {
     }
     out.sort();
     Some(out)
-}
-
-fn is_scratch_dir(path: &Path) -> bool {
-    let name = name_of(path);
-    name.ends_with(".clone") || name.starts_with("temp_")
 }
 
 fn name_of(path: &Path) -> String {

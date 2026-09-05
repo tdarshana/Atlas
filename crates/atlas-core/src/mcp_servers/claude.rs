@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::paths::installed_plugins;
+
 use crate::models::{McpServerScope, McpServerSource, Project};
 
 use super::generic_json;
@@ -120,38 +122,25 @@ pub fn plugin_servers(home: &Path, project: Option<&Project>, found: &mut Found)
             .unwrap_or_default(),
         None => HashSet::new(),
     };
-    let cache = home.join(".claude/plugins/cache");
-    let Some(marketplaces) = read_dirs(&cache, found) else { return };
-    for marketplace in marketplaces {
-        let Some(plugins) = read_dirs(&marketplace, found) else { continue };
-        for plugin in plugins {
-            let Some(versions) = read_dirs(&plugin, found) else { continue };
-            let newest = versions
-                .into_iter()
-                .filter(|v| !is_scratch_dir(v))
-                .filter_map(|v| std::fs::metadata(&v).ok().and_then(|m| m.modified().ok()).map(|t| (t, v)))
-                .max_by_key(|(t, _)| *t)
-                .map(|(_, v)| v);
-            let Some(version) = newest else { continue };
-            let label = format!("{}/{}", name_of(&marketplace), name_of(&plugin));
-            let path = version.join(".mcp.json");
-            let Some(file) = generic_json::read_file(&path, found) else { continue };
-            // Claude Code keys `enabledPlugins` the other way round from the cache tree.
-            let on = enabled.contains(&format!("{}@{}", name_of(&plugin), name_of(&marketplace)));
-            generic_json::collect(
-                &file["mcpServers"],
-                McpServerSource::Plugin,
-                McpServerScope::Plugin,
-                &label,
-                &path,
-                None,
-                Some(&label),
-                on && project.is_some(),
-                false,
-                &|name| on && !disabled.contains(&plugin_switch_key(&label, name)),
-                found,
-            );
-        }
+    for plugin in installed_plugins(home, &mut found.warnings) {
+        let label = plugin.label();
+        let path = plugin.version_dir.join(".mcp.json");
+        let Some(file) = generic_json::read_file(&path, found) else { continue };
+        // Claude Code keys `enabledPlugins` the other way round from the cache tree.
+        let on = enabled.contains(&format!("{}@{}", plugin.name, plugin.marketplace));
+        generic_json::collect(
+            &file["mcpServers"],
+            McpServerSource::Plugin,
+            McpServerScope::Plugin,
+            &label,
+            &path,
+            None,
+            Some(&label),
+            on && project.is_some(),
+            false,
+            &|name| on && !disabled.contains(&plugin_switch_key(&label, name)),
+            found,
+        );
     }
 }
 
@@ -177,29 +166,4 @@ fn names(value: Option<&Value>) -> HashSet<String> {
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
         .unwrap_or_default()
-}
-
-/// The subdirectories of `path`, or `None` when it holds none to offer. An absent path is
-/// silent, since most machines have no plugin cache; anything else is a warning.
-fn read_dirs(path: &Path, found: &mut Found) -> Option<Vec<PathBuf>> {
-    let entries = match std::fs::read_dir(path) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(e) => {
-            found.warnings.push(format!("{}: {e}", path.display()));
-            return None;
-        }
-    };
-    let mut out: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
-    out.sort();
-    Some(out)
-}
-
-fn is_scratch_dir(path: &Path) -> bool {
-    let name = name_of(path);
-    name.ends_with(".clone") || name.starts_with("temp_")
-}
-
-fn name_of(path: &Path) -> String {
-    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
