@@ -29,8 +29,14 @@ trap 'rm -rf "$work"' EXIT
 git clone -q --no-local --branch main "$root" "$work/atlas"
 cd "$work/atlas"
 
+# Strip the working notes from every commit, and publish under the GitHub handle and
+# its noreply address rather than a personal name or mailbox (GitHub still attributes
+# the commits to the account through the noreply address).
+handle="${ATLAS_PUBLISH_HANDLE:-tdarshana}"
 git filter-repo --quiet --force --invert-paths \
-  --path docs --path references --path .superpowers --path .vscode
+  --path docs --path references --path .superpowers --path .vscode \
+  --name-callback "return b'$handle'" \
+  --email-callback "return b'$handle@users.noreply.github.com'"
 
 git remote add origin "$remote_url"
 git fetch -q origin main || true
