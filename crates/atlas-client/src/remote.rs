@@ -1,4 +1,4 @@
-use atlas_core::{backend::{StatusBackend, MemoryBackend, ProjectBackend, LibraryBackend, JobBackend, BoardBackend, WorkflowBackend, SearchBackend, SkillBackend, McpBackend}, jobs::Job, models::*, search::global::{SearchQuery, SearchResult}, AtlasError, Result};
+use atlas_core::{backend::{StatusBackend, MemoryBackend, ProjectBackend, LibraryBackend, JobBackend, BoardBackend, WorkflowBackend, SearchBackend, SkillBackend, McpBackend, PersonaBackend}, jobs::Job, models::*, search::global::{SearchQuery, SearchResult}, AtlasError, Result};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -131,6 +131,19 @@ impl RemoteBackend {
     /// slashes between its marketplace, plugin and skill names, and those have to stay
     /// structural for the daemon's wildcard route (`{*id}`) to read them back, while
     /// everything within a part is percent-encoded.
+    /// `/personas/<id or slug>` with `id_or_slug` as one encoded segment, plus any query pairs.
+    fn persona_url(base: &str, id_or_slug: &str, pairs: &[(&str, String)]) -> Result<reqwest::Url> {
+        let mut url = reqwest::Url::parse(&format!("{base}/personas")).map_err(|e| AtlasError::Other(e.to_string()))?;
+        url.path_segments_mut().map_err(|_| AtlasError::Other("the daemon base URL cannot be a base".into()))?.push(id_or_slug);
+        {
+            let mut q = url.query_pairs_mut();
+            for (k, v) in pairs {
+                q.append_pair(k, v);
+            }
+        }
+        Ok(url)
+    }
+
     fn skill_url(base: &str, id: &str, project_id: Option<Uuid>) -> Result<reqwest::Url> {
         let mut url = reqwest::Url::parse(&format!("{base}/skills")).map_err(|e| AtlasError::Other(e.to_string()))?;
         {
@@ -571,6 +584,43 @@ impl SkillBackend for RemoteBackend {
                 .json(&serde_json::json!({"disabled": ids})).send().await.map_err(Self::net)?,
         )
         .await
+    }
+}
+
+#[async_trait::async_trait]
+impl PersonaBackend for RemoteBackend {
+    async fn list_personas(&self) -> Result<Vec<Persona>> {
+        Self::handle(self.client.get(format!("{}/personas", self.base)).send().await.map_err(Self::net)?).await
+    }
+    /// A slug or a name can carry characters a path segment cannot, so it goes through
+    /// the URL encoder rather than string interpolation.
+    async fn get_persona(&self, id_or_slug: &str) -> Result<Persona> {
+        let url = Self::persona_url(&self.base, id_or_slug, &[])?;
+        Self::handle(self.client.get(url).send().await.map_err(Self::net)?).await
+    }
+    async fn create_persona(&self, p: NewPersona, actor: &str) -> Result<Persona> {
+        Self::handle(self.client.post(format!("{}/personas", self.base)).header("X-Atlas-Actor", actor).json(&p).send().await.map_err(Self::net)?).await
+    }
+    async fn update_persona(&self, id: Uuid, patch: PersonaUpdate, actor: &str) -> Result<Persona> {
+        Self::handle(self.client.put(format!("{}/personas/{id}", self.base)).header("X-Atlas-Actor", actor).json(&patch).send().await.map_err(Self::net)?).await
+    }
+    async fn delete_persona(&self, id: Uuid, actor: &str) -> Result<()> {
+        Self::handle_empty(self.client.delete(format!("{}/personas/{id}", self.base)).header("X-Atlas-Actor", actor).send().await.map_err(Self::net)?).await
+    }
+    async fn project_roster(&self, project_id: Uuid) -> Result<Vec<RosterRow>> {
+        Self::handle(self.client.get(format!("{}/projects/{project_id}/personas", self.base)).send().await.map_err(Self::net)?).await
+    }
+    async fn set_project_roster(&self, project_id: Uuid, entries: Vec<RosterEntry>, actor: &str) -> Result<Vec<RosterRow>> {
+        Self::handle(
+            self.client.put(format!("{}/projects/{project_id}/personas", self.base)).header("X-Atlas-Actor", actor).json(&entries).send().await.map_err(Self::net)?,
+        )
+        .await
+    }
+    async fn resolve_persona(&self, id_or_slug: &str, project_id: Option<Uuid>) -> Result<PersonaBundle> {
+        let pairs: Vec<(&str, String)> = project_id.map(|p| ("project_id", p.to_string())).into_iter().collect();
+        let mut url = Self::persona_url(&self.base, id_or_slug, &pairs)?;
+        url.path_segments_mut().map_err(|_| AtlasError::Other("the daemon base URL cannot be a base".into()))?.push("bundle");
+        Self::handle(self.client.get(url).send().await.map_err(Self::net)?).await
     }
 }
 

@@ -1,5 +1,5 @@
 use axum::{body::Bytes, extract::{FromRequest, FromRequestParts, Path, Query, Request, State}, http::{header, request::Parts, HeaderMap, Method, StatusCode}, middleware::{self, Next}, response::{IntoResponse, Response}, routing::{delete, get, post, put}, Json, Router};
-use atlas_core::{backend::{StatusBackend, MemoryBackend, ProjectBackend, LibraryBackend, JobBackend, BoardBackend, WorkflowBackend, SearchBackend, SkillBackend, McpBackend}, jobs::Job, models::*, search::global::{SearchKind, SearchQuery, SearchResult, DEFAULT_LIMIT}, AtlasError};
+use atlas_core::{backend::{StatusBackend, MemoryBackend, ProjectBackend, LibraryBackend, JobBackend, BoardBackend, WorkflowBackend, SearchBackend, SkillBackend, McpBackend, PersonaBackend}, jobs::Job, models::*, search::global::{SearchKind, SearchQuery, SearchResult, DEFAULT_LIMIT}, AtlasError};
 use atlas_mcp::{ToolScope, TOOL_TABLE};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -274,6 +274,8 @@ fn query_flag_opt<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result
     /// `Some(true)` keeps only parent-less tasks, `Some(false)` only subtasks, `None`
     /// (an absent query value) applies no filter.
     #[serde(default, deserialize_with = "query_flag_opt")] pub top_level: Option<bool>,
+    /// Keep only tasks done as this persona, by id or slug. Empty is no filter.
+    #[serde(default)] pub persona: Option<String>,
 }
 #[derive(Deserialize)] pub struct MoveBody { pub stage: String, #[serde(default)] pub expected_updated_at: Option<DateTime<Utc>> }
 #[derive(Deserialize)] pub struct CommentBody { pub body: String }
@@ -302,6 +304,10 @@ fn query_flag_opt<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result
 #[derive(Deserialize)] pub struct SkillsQ { #[serde(default)] pub project_id: Option<Uuid> }
 #[derive(Deserialize)] pub struct SkillBodyBody { pub body: String }
 #[derive(Deserialize)] pub struct SkillsDisabledBody { pub disabled: Vec<String> }
+
+// ---- personas (Phase 17) ----
+
+#[derive(Deserialize)] pub struct PersonaBundleQ { #[serde(default)] pub project_id: Option<Uuid> }
 
 // ---- the agents' MCP servers (Phase 16) ----
 
@@ -381,6 +387,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/skills", get(list_skills).post(create_skill))
         .route("/api/v1/skills/{*id}", get(get_skill).put(put_skill_body).patch(patch_skill).delete(delete_skill))
         .route("/api/v1/projects/{id}/skills", put(put_project_skills))
+        .route("/api/v1/personas", get(list_personas).post(create_persona))
+        .route("/api/v1/personas/{id}", get(get_persona).put(put_persona).delete(delete_persona))
+        .route("/api/v1/personas/{id}/bundle", get(persona_bundle))
+        .route("/api/v1/projects/{id}/personas", get(project_roster).put(put_project_roster))
         .route("/api/v1/search", get(global_search))
         .route("/api/v1/mcp/status", get(mcp_status))
         .route("/api/v1/mcp/clients", post(register_mcp_client))
@@ -631,7 +641,7 @@ fn task_global_only(scope: Option<&str>, project_id: Option<Uuid>) -> Result<boo
 }
 async fn list_tasks(State(s): State<AppState>, ApiQuery(q): ApiQuery<TaskListQ>) -> Result<Json<Vec<Task>>, ApiError> {
     let global_only = task_global_only(q.scope.as_deref(), q.project_id)?;
-    let f = TaskFilter { project_id: q.project_id, stage: q.stage, assignee: q.assignee, ready: q.ready, query: q.q, include_done: q.include_done, global_only, top_level: q.top_level };
+    let f = TaskFilter { project_id: q.project_id, stage: q.stage, assignee: q.assignee, ready: q.ready, query: q.q, include_done: q.include_done, global_only, top_level: q.top_level, persona: q.persona.filter(|p| !p.trim().is_empty()) };
     Ok(Json(s.backend.list_tasks(f).await?))
 }
 async fn create_task(State(s): State<AppState>, Actor(actor): Actor, ApiJson(t): ApiJson<NewTask>) -> Result<(StatusCode, Json<Task>), ApiError> {
@@ -739,6 +749,38 @@ async fn delete_skill(State(s): State<AppState>, ApiPath(id): ApiPath<String>, A
 /// `PUT /projects/{id}/mcp/tools` takes for tool names.
 async fn put_project_skills(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor): Actor, ApiJson(b): ApiJson<SkillsDisabledBody>) -> Result<Json<Project>, ApiError> {
     Ok(Json(s.backend.set_project_skills_disabled(id, b.disabled, &actor).await?))
+}
+
+// ---- personas (Phase 17) ----
+
+async fn list_personas(State(s): State<AppState>) -> Result<Json<Vec<Persona>>, ApiError> {
+    Ok(Json(s.backend.list_personas().await?))
+}
+async fn create_persona(State(s): State<AppState>, Actor(actor): Actor, ApiJson(p): ApiJson<NewPersona>) -> Result<(StatusCode, Json<Persona>), ApiError> {
+    Ok((StatusCode::CREATED, Json(s.backend.create_persona(p, &actor).await?)))
+}
+/// `{id}` is an id, a slug or a name here; the two writes below take the id alone.
+async fn get_persona(State(s): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Json<Persona>, ApiError> {
+    Ok(Json(s.backend.get_persona(&id).await?))
+}
+async fn put_persona(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor): Actor, ApiJson(p): ApiJson<PersonaUpdate>) -> Result<Json<Persona>, ApiError> {
+    Ok(Json(s.backend.update_persona(id, p, &actor).await?))
+}
+async fn delete_persona(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor): Actor) -> Result<StatusCode, ApiError> {
+    s.backend.delete_persona(id, &actor).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+/// The persona with its references resolved in the scope of `?project_id=`; a
+/// reference that no longer resolves is a warning in the body, not a failure.
+async fn persona_bundle(State(s): State<AppState>, ApiPath(id): ApiPath<String>, ApiQuery(q): ApiQuery<PersonaBundleQ>) -> Result<Json<PersonaBundle>, ApiError> {
+    Ok(Json(s.backend.resolve_persona(&id, q.project_id).await?))
+}
+async fn project_roster(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> Result<Json<Vec<RosterRow>>, ApiError> {
+    Ok(Json(s.backend.project_roster(id).await?))
+}
+/// Replaces the roster wholesale: the body is the full list of entries, `[]` clears it.
+async fn put_project_roster(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>, Actor(actor): Actor, ApiJson(entries): ApiJson<Vec<RosterEntry>>) -> Result<Json<Vec<RosterRow>>, ApiError> {
+    Ok(Json(s.backend.set_project_roster(id, entries, &actor).await?))
 }
 
 // ---- the agents' MCP servers (Phase 16) ----

@@ -15,6 +15,7 @@
 export * from './types.generated';
 
 import type {
+	Case,
 	Edge,
 	McpToolInfo,
 	McpTransport,
@@ -23,6 +24,7 @@ import type {
 	MemoryScopeFilter,
 	Node,
 	NodeData,
+	PersonaUpdate,
 	Position,
 	ProjectAccess,
 	SearchQuery,
@@ -64,6 +66,10 @@ export type McpCheckTool = McpToolInfo;
 /** `PATCH /api/v1/skills/{id}`, native skills only. */
 export type SkillPatch = SkillUpdate;
 export type SkillScope = MemoryScope;
+/** `PUT /api/v1/personas/{id}`. */
+export type PersonaPatch = PersonaUpdate;
+/** The case a persona's `models` map is keyed by. */
+export type PersonaCase = Case;
 /** Query string for `GET /api/v1/search`. `project_id` takes one project, not a list. */
 export type GlobalSearchQuery = SearchQuery;
 
