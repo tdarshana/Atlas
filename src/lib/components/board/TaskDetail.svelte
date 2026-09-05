@@ -876,7 +876,10 @@
 					testid="task-detail-side-resize"
 				/>
 				<div class="field">
-					<span class="dbm-field__label">Status</span>
+					<div class="field-head status-head">
+						<span class="dbm-field__label">Status</span>
+						{#if saving}<span class="muted saving" data-testid="task-saving">Saving…</span>{/if}
+					</div>
 					<span class="menu-host" data-menu>
 						<button
 							type="button"
@@ -962,7 +965,6 @@
 					onblur={autosave}
 					onkeydown={onTextKeydown}
 				/>
-				{#if saving}<span class="muted saving">Saving…</span>{/if}
 			</aside>
 
 			<section class="full">
@@ -1474,6 +1476,10 @@
 	.readiness {
 		display: inline-flex;
 		margin-top: 6px;
+	}
+
+	.status-head {
+		justify-content: space-between;
 	}
 
 	.saving {
