@@ -533,6 +533,18 @@ export interface TaskFilter {
 	top_level?: boolean;
 }
 
+/** One write the daemon has just made, as `GET /api/v1/events` announces it. */
+export interface Change {
+	/** `task`, `memory`, `project`, `agent`, ... or `lagged` when events were dropped. */
+	entity: string;
+	action: string;
+	id: Uuid | null;
+	/** The task key, when the change is to a task. */
+	key: string | null;
+	project_id: Uuid | null;
+	at: string;
+}
+
 /** One row of `GET /tasks/counts`; every stage appears, including empty ones. */
 export interface StageCount {
 	stage: string;

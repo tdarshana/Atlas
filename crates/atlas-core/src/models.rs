@@ -1049,6 +1049,24 @@ pub struct NewMcpServer {
     pub transport: McpTransportInput,
 }
 
+/// One write the daemon has just made, published on `GET /api/v1/events` the moment
+/// it lands, so a client can refresh what it shows without polling. Every board write
+/// records a task event and every other write an audit row, and those two writers are
+/// where a change is published from, so nothing that reaches the database is missed.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Change {
+    /// What kind of row changed: `task`, `memory`, `project`, `agent`, and so on, as the
+    /// audit row or task event names it.
+    pub entity: String,
+    /// What happened, as the writer names it: `created`, `moved`, `insert`, `set_status`.
+    pub action: String,
+    pub id: Option<Uuid>,
+    /// The task key, when the change is to a task.
+    pub key: Option<String>,
+    pub project_id: Option<Uuid>,
+    pub at: DateTime<Utc>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

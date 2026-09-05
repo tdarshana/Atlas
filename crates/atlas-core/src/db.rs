@@ -1,9 +1,20 @@
 use std::path::Path;
 use std::sync::Mutex;
 use duckdb::Connection;
+use tokio::sync::broadcast;
+use crate::models::Change;
 use crate::Result;
 
-pub struct Db { conn: Mutex<Connection> }
+/// How many changes a slow subscriber may fall behind before it is told it lagged;
+/// a lagged subscriber refreshes wholesale, so nothing is lost, only coalesced.
+const CHANGE_BUFFER: usize = 256;
+
+pub struct Db {
+    conn: Mutex<Connection>,
+    /// Every write announces itself here (see `Change`); the daemon's event stream
+    /// subscribes. A send with no subscriber is not an error.
+    changes: broadcast::Sender<Change>,
+}
 
 const MIGRATIONS: &[(i64, &str)] = &[(1, r#"
 create table if not exists schema_version (version bigint not null);
@@ -174,13 +185,19 @@ fn rename_workflow_docs(c: &Connection) -> Result<()> {
 impl Db {
     pub fn open(path: &Path) -> Result<Db> {
         if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
-        let db = Db { conn: Mutex::new(Connection::open(path)?) };
+        let db = Db { conn: Mutex::new(Connection::open(path)?), changes: broadcast::channel(CHANGE_BUFFER).0 };
         db.migrate()?; Ok(db)
     }
     pub fn open_in_memory() -> Result<Db> {
-        let db = Db { conn: Mutex::new(Connection::open_in_memory()?) };
+        let db = Db { conn: Mutex::new(Connection::open_in_memory()?), changes: broadcast::channel(CHANGE_BUFFER).0 };
         db.migrate()?; Ok(db)
     }
+    /// A receiver of every change written from now on.
+    pub fn subscribe(&self) -> broadcast::Receiver<Change> { self.changes.subscribe() }
+    /// Announces a write. Called by the two writers every write goes through (task
+    /// events and audit rows), while the connection is still held, so a subscriber
+    /// that reads back on hearing it waits for the write to be visible.
+    pub fn notify(&self, change: Change) { let _ = self.changes.send(change); }
     /// Poison-tolerant, like the lock accessors in `MemoryService`: a panic raised
     /// while the connection was held must not turn every later query in the daemon
     /// into a "poisoned lock" error. DuckDB itself is unharmed by a panic in the

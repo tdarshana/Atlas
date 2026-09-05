@@ -3,6 +3,7 @@
 // `scored` says whether the score column means anything.
 
 import { api } from '$lib/daemon.svelte';
+import { onChange } from './changes.svelte';
 import { errorLogPath, errorMessage } from '$lib/errors';
 import type { Memory, MemoryFacets, MemoryKind, MemoryListScope, RecallHit, Uuid } from '$lib/types';
 
@@ -165,6 +166,20 @@ export async function loadMemories(): Promise<void> {
 }
 
 let timer: ReturnType<typeof setTimeout> | null = null;
+
+/** Reloads the list a moment after any memory changes on the daemon, so a memory an
+ * agent just remembered or forgot shows without a reload. Returns the unsubscribe. */
+export function followMemoryChanges(): () => void {
+	const stop = onChange('memory', () => scheduleLoad(CHANGE_DEBOUNCE_MS));
+	const stopLag = onChange('lagged', () => scheduleLoad(CHANGE_DEBOUNCE_MS));
+	return () => {
+		stop();
+		stopLag();
+	};
+}
+
+/** How long the list waits after a change before reloading, so a burst costs one request. */
+export const CHANGE_DEBOUNCE_MS = 150;
 
 /** Coalesces keystrokes into one request. */
 export function scheduleLoad(delayMs = SEARCH_DEBOUNCE_MS): void {

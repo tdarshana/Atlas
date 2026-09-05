@@ -269,6 +269,7 @@ impl<'a> MemoryRepo<'a> {
         self.db.with_conn(|c| {
             c.execute("insert into audit (id, actor, action, entity, entity_id, detail) values (?, ?, ?, ?, ?, ?::json)",
                 params![Uuid::new_v4().to_string(), actor, action, entity, entity_id.map(|e| e.to_string()), detail.to_string()])?;
+            self.db.notify(Change { entity: entity.into(), action: action.into(), id: entity_id, key: None, project_id: None, at: Utc::now() });
             Ok(())
         })
     }
@@ -282,6 +283,21 @@ mod tests {
         NewMemory { scope, project_id: None, kind: MemoryKind::Fact, text: text.into(), tags: vec!["t1".into()],
             source_agent: Some("test".into()), source_tool: None, confidence: 1.0, status: MemoryStatus::Active }
     }
+    /// Every audit row announces a change on the database's bus, entity and action as
+    /// the row names them, so a client hears about memories (and every other audited
+    /// write) the moment they land.
+    #[test]
+    fn an_audited_write_announces_a_change() {
+        let db = Db::open_in_memory().unwrap();
+        let repo = MemoryRepo::new(&db);
+        let mut rx = db.subscribe();
+        let a = repo.insert(&mem("announce", MemoryScope::Global), "test").unwrap();
+        let change = rx.try_recv().unwrap();
+        assert_eq!((change.entity.as_str(), change.action.as_str(), change.id), ("memory", "insert", Some(a.id)));
+        repo.set_status(a.id, MemoryStatus::Rejected, "test").unwrap();
+        assert_eq!(rx.try_recv().unwrap().action, "set_status");
+    }
+
     #[test]
     fn insert_get_list_supersede() {
         let db = Db::open_in_memory().unwrap();

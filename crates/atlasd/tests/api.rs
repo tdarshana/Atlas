@@ -3171,3 +3171,38 @@ async fn mcp_servers_list_check_toggle_add_and_remove() {
     assert!(!body.contains("SECRET-DO-NOT-LEAK"), "the error body quoted the broken line: {body}");
     assert!(body.contains("line 3"), "{body}");
 }
+
+// ---- change stream (live sync) ----
+
+/// `GET /api/v1/events` announces a write as it lands: a task created over the JSON
+/// API arrives on an open stream as a `task` event carrying the key, before any poll.
+#[tokio::test]
+async fn the_event_stream_announces_a_task_write() {
+    use futures_util::StreamExt;
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    let stream = c.get(format!("{base}/events")).send().await.unwrap();
+    assert_eq!(stream.status(), 200);
+    assert!(stream.headers().get("content-type").unwrap().to_str().unwrap().starts_with("text/event-stream"));
+    let mut body = stream.bytes_stream();
+
+    let created: serde_json::Value = c
+        .post(format!("{base}/tasks"))
+        .json(&serde_json::json!({"title": "announce me"}))
+        .send().await.unwrap().json().await.unwrap();
+    let key = created["key"].as_str().unwrap().to_string();
+
+    let mut seen = String::new();
+    let heard = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(chunk) = body.next().await {
+            seen.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
+            if seen.contains("event: task") && seen.contains(&format!("\"key\":\"{key}\"")) { return true; }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false);
+    assert!(heard, "no task event for {key} on the stream; saw: {seen}");
+    assert!(seen.contains("\"action\":\"created\""), "{seen}");
+}

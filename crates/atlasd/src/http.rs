@@ -332,6 +332,7 @@ const DEFAULT_ALL_RUNS_LIMIT: usize = 50;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/status", get(status))
+        .route("/api/v1/events", get(events))
         .route("/api/v1/memories", post(create_memory).get(list_memories))
         .route("/api/v1/memories/facets", get(memory_facets))
         .route("/api/v1/memories/search", post(search))
@@ -404,6 +405,25 @@ pub fn router(state: AppState) -> Router {
 }
 
 async fn status(State(s): State<AppState>) -> Result<Json<StatusReport>, ApiError> { Ok(Json(s.backend.status().await?)) }
+
+/// `GET /api/v1/events`: a server-sent event per write, as it lands, so a client keeps
+/// what it shows in step without polling. Each event is named by its entity (`task`,
+/// `memory`, ...) and carries the `Change` as JSON. A subscriber that falls more than
+/// the buffer behind gets a `lagged` event instead of the changes it missed and should
+/// refresh wholesale. A comment frame every fifteen seconds keeps the connection open
+/// through proxies and lets the client notice a dead daemon.
+async fn events(State(s): State<AppState>) -> axum::response::Sse<impl tokio_stream::Stream<Item = std::result::Result<axum::response::sse::Event, std::convert::Infallible>>> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+    use tokio_stream::{wrappers::BroadcastStream, StreamExt};
+    let stream = BroadcastStream::new(s.backend.db.subscribe()).map(|item| {
+        Ok(match item {
+            Ok(change) => Event::default().event(change.entity.clone()).json_data(&change).unwrap_or_else(|_| Event::default().event("lagged").data("")),
+            Err(BroadcastStreamRecvError::Lagged(n)) => Event::default().event("lagged").data(n.to_string()),
+        })
+    });
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+}
 async fn create_memory(State(s): State<AppState>, ApiQuery(q): ApiQuery<ActorQ>, ApiJson(m): ApiJson<NewMemory>) -> Result<(StatusCode, Json<Memory>), ApiError> {
     Ok((StatusCode::CREATED, Json(s.backend.remember(m, actor(&q)).await?)))
 }

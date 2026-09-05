@@ -6,7 +6,8 @@
 	import { page } from '$app/state';
 	import '../app.css';
 	import { boot, daemon } from '$lib/daemon.svelte';
-	import { startStatusPolling } from '$lib/stores/status.svelte';
+	import { refreshStatus, startStatusPolling } from '$lib/stores/status.svelte';
+	import { connectChanges, onChange } from '$lib/stores/changes.svelte';
 	import { loadSettings, settings } from '$lib/stores/settings.svelte';
 	import { UI_THEME_KEY } from '$lib/types';
 	import Button from '$lib/ui/Button.svelte';
@@ -43,6 +44,14 @@
 	$effect(() => {
 		if (!daemon.ready) return;
 		return startStatusPolling();
+	});
+
+	// The change stream is what keeps every view live; polling is the fallback. The
+	// status line follows the stream too, so the memory count moves as agents write.
+	$effect(() => {
+		if (!daemon.ready) return;
+		connectChanges();
+		return onChange('memory', () => void refreshStatus());
 	});
 
 	// The daemon holds the shared theme, so read it once the daemon is up and reconcile.

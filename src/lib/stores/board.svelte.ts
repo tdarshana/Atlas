@@ -4,6 +4,7 @@
 
 import { ApiError } from '$lib/api';
 import { api } from '$lib/daemon.svelte';
+import { onChange } from './changes.svelte';
 import { errorLogPath, errorMessage } from '$lib/errors';
 import { persistSet } from '$lib/shell/persist';
 import type { Stage, Task, TaskDetail, Uuid } from '$lib/types';
@@ -512,16 +513,23 @@ function absorb(detail: TaskDetail | null): void {
 	}
 }
 
-/** How often the board re-lists itself while it is on screen. */
-export const BOARD_POLL_MS = 10_000;
+/** How often the board re-lists itself while it is on screen, as the fallback for the
+ * seconds the change stream is down. The stream is what keeps it live. */
+export const BOARD_POLL_MS = 30_000;
+/** How long the board waits after a change before re-listing, so a burst of writes
+ * (an import, an agent moving several tasks) costs one request. */
+export const CHANGE_DEBOUNCE_MS = 150;
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
+let changeTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
- * Keeps the columns in step with the daemon: a re-list every `intervalMs` while the
- * window is visible, and one on each return to the window. Columns are the stage, so
- * a task moved by an agent over MCP or by the CLI has to move on screen without a
- * reload. Returns the stop function.
+ * Keeps the columns in step with the daemon. The change stream is the live path: a
+ * `task` change re-lists the board a moment later and, when the change touches the
+ * open task or one of its subtasks, reloads the detail too. A re-list every
+ * `intervalMs` while the window is visible and one on each return to the window are
+ * the fallback. Columns are the stage, so a task moved by an agent over MCP or by the
+ * CLI has to move on screen without a reload. Returns the stop function.
  */
 export function startBoardPolling(intervalMs = BOARD_POLL_MS): () => void {
 	stopBoardPolling();
@@ -536,8 +544,25 @@ export function startBoardPolling(intervalMs = BOARD_POLL_MS): () => void {
 		window.addEventListener('focus', onFocus);
 		document.addEventListener('visibilitychange', onFocus);
 	}
+	const unsubscribe = onChange('task', (change) => {
+		const open = board.detail;
+		const touchesOpen =
+			open !== null &&
+			(change.id === open.task.id || change.id === open.task.parent_id || open.children.some((c) => c.id === change.id));
+		if (changeTimer !== null) clearTimeout(changeTimer);
+		changeTimer = setTimeout(() => {
+			changeTimer = null;
+			void refresh();
+			if (touchesOpen && board.selected) void loadDetail(board.selected);
+		}, CHANGE_DEBOUNCE_MS);
+	});
+	const unsubscribeLag = onChange('lagged', () => void refresh());
 	return () => {
 		stopBoardPolling();
+		unsubscribe();
+		unsubscribeLag();
+		if (changeTimer !== null) clearTimeout(changeTimer);
+		changeTimer = null;
 		if (typeof window !== 'undefined') {
 			window.removeEventListener('focus', onFocus);
 			document.removeEventListener('visibilitychange', onFocus);

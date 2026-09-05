@@ -619,6 +619,13 @@ impl TaskRepo {
             "insert into task_events (id, task_id, actor, kind, body, detail) values (?, ?, ?, ?, ?, ?::json)",
             params![id.to_string(), task_id.to_string(), actor, kind, body, detail.map(|d| d.to_string())],
         )?;
+        let (key, project_id) = c
+            .query_row("select key, project_id::text from tasks where id = ?", params![task_id.to_string()], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })
+            .map(|(k, p)| (Some(k), p.and_then(|p| Uuid::parse_str(&p).ok())))
+            .unwrap_or((None, None));
+        self.db.notify(Change { entity: "task".into(), action: kind.into(), id: Some(task_id), key, project_id, at: Utc::now() });
         let mut st = c.prepare(&format!("select {EVENT_COLS} from task_events where id = ?"))?;
         let mut rows = st.query(params![id.to_string()])?;
         match rows.next()? {

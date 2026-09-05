@@ -15,6 +15,7 @@
 	import {
 		MEMORY_KINDS,
 		cancelLoad,
+		followMemoryChanges,
 		forgetMemory,
 		loadMemories,
 		memories,
@@ -111,7 +112,11 @@
 		void loadProjects();
 		void loadMemories();
 		// A pending debounce would fire a request for a screen that is gone.
-		return cancelLoad;
+		const unfollow = followMemoryChanges();
+		return () => {
+			cancelLoad();
+			unfollow();
+		};
 	});
 
 	// `?id=<uuid>` (from the command palette, or a link elsewhere) selects that memory even

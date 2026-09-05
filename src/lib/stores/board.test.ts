@@ -20,6 +20,7 @@ vi.mock('$lib/daemon.svelte', () => ({
 }));
 
 import { backTask, board, closeTask, deriveColumns, loadDetail, move, openTask, refresh, stageRenames, startBoardPolling, validateStages } from './board.svelte';
+import { dispatch } from './changes.svelte';
 
 const STAGES: Stage[] = [
 	{ name: 'Backlog', done: false },
@@ -208,6 +209,50 @@ describe('the board follows the daemon', () => {
 			['ATL-2', 'Done'],
 			['ATL-3', 'Backlog']
 		]);
+	});
+
+	it('re-lists a moment after a task change on the stream, once per burst, and reloads the open detail when it is touched', async () => {
+		vi.useFakeTimers();
+		try {
+			mocks.boardStages.mockResolvedValue({ stages: STAGES, overridden: false });
+			mocks.listTasks.mockResolvedValue([]);
+			mocks.getTask.mockResolvedValue({ task: task('ATL-1', 'Backlog'), children: [task('ATL-2', 'Backlog')], events: [] });
+			const lists = () => mocks.listTasks.mock.calls.length;
+			const gets = () => mocks.getTask.mock.calls.length;
+			const stop = startBoardPolling(60_000);
+			const before = lists();
+
+			const change = (id: string) => ({ entity: 'task', action: 'moved', id, key: null, project_id: null, at: '' });
+			dispatch(change('id-ATL-9'));
+			dispatch(change('id-ATL-9'));
+			dispatch(change('id-ATL-9'));
+			expect(lists()).toBe(before);
+			await vi.advanceTimersByTimeAsync(200);
+			expect(lists()).toBe(before + 1);
+
+			// With ATL-1 open, a change to its subtask ATL-2 reloads the detail as well.
+			openTask('ATL-1');
+			await vi.advanceTimersByTimeAsync(0);
+			const g = gets();
+			dispatch(change('id-ATL-2'));
+			await vi.advanceTimersByTimeAsync(200);
+			expect(lists()).toBe(before + 2);
+			expect(gets()).toBe(g + 1);
+
+			// A change elsewhere re-lists but leaves the detail alone.
+			dispatch(change('id-ATL-9'));
+			await vi.advanceTimersByTimeAsync(200);
+			expect(lists()).toBe(before + 3);
+			expect(gets()).toBe(g + 1);
+
+			stop();
+			closeTask();
+			dispatch(change('id-ATL-9'));
+			await vi.advanceTimersByTimeAsync(200);
+			expect(lists()).toBe(before + 3);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it('re-lists on the interval and on focus, and stops when told', async () => {

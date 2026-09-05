@@ -321,6 +321,24 @@ fn a_parent_with_an_open_child_is_not_ready_and_says_why() {
     assert_eq!(after.subtasks_done, 1, "the child moved to a done stage");
 }
 
+/// Every task write announces itself on the database's change bus with the task's
+/// key and project, so the daemon's event stream can tell a client what moved.
+#[test]
+fn a_task_write_announces_a_change_with_its_key_and_project() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    let mut rx = db.subscribe();
+    let t = repo.create(&new_task(Some(p.id), "announce me"), "t").unwrap();
+    let created = rx.try_recv().unwrap();
+    assert_eq!((created.entity.as_str(), created.action.as_str()), ("task", "created"));
+    assert_eq!((created.id, created.key.as_deref(), created.project_id), (Some(t.id), Some(t.key.as_str()), Some(p.id)));
+
+    repo.move_stage(&t.key, "Done", None, "t").unwrap();
+    let moved = rx.try_recv().unwrap();
+    assert_eq!((moved.action.as_str(), moved.key.as_deref()), ("moved", Some(t.key.as_str())));
+    assert!(rx.try_recv().is_err(), "nothing else was announced");
+}
+
 /// A subtask row names its parent by key and title wherever it is read (a listing,
 /// a single get, the parent's children), and a top-level row names none.
 #[test]
