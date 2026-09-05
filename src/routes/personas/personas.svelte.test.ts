@@ -112,6 +112,19 @@ describe('the Personas view', () => {
 		expect(screen.getByTestId('persona-save')).toBeTruthy();
 	});
 
+	it('drafts a new persona in a modal, not the docked panel', async () => {
+		render(PersonasPage);
+		await waitFor(() => screen.getByTestId('persona-row-reviewer'));
+		await fireEvent.click(screen.getByTestId('persona-new'));
+
+		await waitFor(() => screen.getByTestId('persona-create'));
+		const dialog = screen.getByTestId('dialog') as HTMLDialogElement;
+		expect(dialog.open).toBe(true);
+		expect(screen.queryByTestId('persona-detail')).toBeNull();
+		expect(screen.getAllByTestId('persona-save')).toHaveLength(1);
+		expect(screen.queryByTestId('persona-delete')).toBeNull();
+	});
+
 	it('asks before deleting and only writes on confirm', async () => {
 		render(PersonasPage);
 		await waitFor(() => screen.getByTestId('persona-row-reviewer'));

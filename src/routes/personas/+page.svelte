@@ -21,6 +21,7 @@
 	} from '$lib/stores/personas.svelte';
 	import type { Case, Persona, PersonaAccess, PersonaPatch, PersonaRule } from '$lib/types';
 	import { autogrow } from '$lib/ui/autogrow';
+	import Dialog from '$lib/ui/Dialog.svelte';
 	import EmptyState from '$lib/ui/EmptyState.svelte';
 	import MarkdownView from '$lib/ui/MarkdownView.svelte';
 	import { push } from '$lib/ui/toasts.svelte';
@@ -144,7 +145,11 @@
 		return out;
 	});
 
-	const showDetail = $derived(draft !== null || personas.openLoading || !!personas.openError);
+	/** A draft without an id is drafted in the modal; everything else docks on the right. */
+	const creating = $derived(draft !== null && draft.id === null);
+	const showDetail = $derived(
+		(draft !== null && !creating) || personas.openLoading || !!personas.openError
+	);
 	const canSave = $derived(!!draft && draft.name.trim() !== '' && !saving);
 
 	onMount(() => {
@@ -406,161 +411,7 @@
 						<p class="bad" role="alert" data-testid="persona-detail-error">{personas.openError}</p>
 					{/if}
 					{#if draft}
-						<Input label="Name" bind:value={draft.name} data-testid="persona-name" />
-						<Input label="Role" bind:value={draft.role} data-testid="persona-role" />
-						<div class="full">
-							<Input label="Summary" bind:value={draft.summary} data-testid="persona-summary" />
-						</div>
-
-						<div class="field full">
-							<div class="field-head">
-								<span>Instructions</span>
-								{#if !instructionsEditing}
-									<IconButton
-										size="sm"
-										icon="pencil"
-										label="Edit instructions"
-										data-testid="persona-instructions-edit"
-										onclick={beginInstructions}
-									/>
-								{/if}
-							</div>
-							{#if instructionsEditing}
-								<textarea
-									{@attach focusOnMount}
-									bind:value={draft.instructions}
-									use:autogrow
-									class="area instructions-editor"
-									rows="4"
-									placeholder="No instructions"
-									aria-label="Instructions"
-									data-testid="persona-instructions"
-									onkeydown={onInstructionsKeydown}
-									onblur={() => (instructionsEditing = false)}
-								></textarea>
-							{:else}
-								<div
-									class="instructions-display"
-									role="button"
-									tabindex="0"
-									data-testid="persona-instructions-text"
-									onclick={onInstructionsDisplayClick}
-									onkeydown={onInstructionsDisplayKeydown}
-								>
-									<MarkdownView
-										source={draft.instructions}
-										showHeader={false}
-										emptyText="No instructions"
-									/>
-								</div>
-							{/if}
-						</div>
-
-						{@render picker('skills', 'Skills', skillOptions)}
-						{@render picker('workflows', 'Workflows', workflowOptions)}
-						{@render picker('practices', 'Practices', practiceOptions)}
-						{@render picker('mcp_servers', 'MCP servers', serverOptions)}
-
-						<div class="field full">
-							<div class="field-head"><span>Models</span></div>
-							<div class="models" data-testid="persona-models">
-								{#each CASES as c (c)}
-									<label class="model-label" for="persona-model-{c}">{c}</label>
-									<Input
-										id="persona-model-{c}"
-										mono
-										placeholder="inherit"
-										bind:value={draft.models[c]}
-										data-testid="persona-model-{c}"
-									/>
-								{/each}
-							</div>
-						</div>
-
-						<div class="field full">
-							<div class="field-head"><span>Access</span></div>
-							<div class="access">
-								<Select
-									size="sm"
-									label="Memory write"
-									options={MEMORY_RULES}
-									value={draft.access.memory_write}
-									onchange={(e) => {
-										if (draft) draft.access.memory_write = e.currentTarget.value as PersonaRule;
-									}}
-									data-testid="persona-access-memory_write"
-								/>
-								<Select
-									size="sm"
-									label="Task move"
-									options={MOVE_RULES}
-									value={draft.access.task_move}
-									onchange={(e) => {
-										if (draft) draft.access.task_move = e.currentTarget.value as PersonaRule;
-									}}
-									data-testid="persona-access-task_move"
-								/>
-								<Select
-									size="sm"
-									label="Workflow trigger"
-									options={MOVE_RULES}
-									value={draft.access.workflow_trigger}
-									onchange={(e) => {
-										if (draft) draft.access.workflow_trigger = e.currentTarget.value as PersonaRule;
-									}}
-									data-testid="persona-access-workflow_trigger"
-								/>
-							</div>
-						</div>
-
-						<div class="full">
-							<Input
-								label="Tags"
-								hint="Comma separated"
-								mono
-								bind:value={draft.tags}
-								data-testid="persona-tags"
-							/>
-						</div>
-
-						<div class="actions full">
-							<Button
-								size="sm"
-								variant="primary"
-								disabled={!canSave}
-								onclick={save}
-								data-testid="persona-save"
-							>
-								{saving ? 'Saving…' : 'Save'}
-							</Button>
-							<span class="spacer"></span>
-							{#if draft.id !== null}
-								{#if confirming}
-									<span class="hint">Delete this persona?</span>
-									<Button
-										size="sm"
-										variant="danger"
-										disabled={saving}
-										onclick={confirmDelete}
-										data-testid="persona-delete-confirm"
-									>
-										{saving ? 'Deleting…' : 'Delete'}
-									</Button>
-									<Button size="sm" variant="ghost" onclick={() => (confirming = false)}>
-										Keep
-									</Button>
-								{:else}
-									<Button
-										size="sm"
-										variant="ghost"
-										onclick={() => (confirming = true)}
-										data-testid="persona-delete"
-									>
-										Delete…
-									</Button>
-								{/if}
-							{/if}
-						</div>
+						{@render form(false)}
 					{:else if personas.openLoading}
 						<span class="hint">Loading…</span>
 					{/if}
@@ -569,6 +420,192 @@
 		{/if}
 	</div>
 </div>
+
+<!-- A persona not yet created is drafted in a modal rather than the docked panel; once
+     saved it has an id and the panel takes over. -->
+<Dialog open={creating} title="New persona" onclose={close} class="persona-dialog">
+	{#if creating}
+		<div class="detail-body" data-testid="persona-create">
+			{@render form(true)}
+		</div>
+	{/if}
+	{#snippet footer()}
+		{#if creating}
+			<Button size="sm" variant="ghost" onclick={close}>Cancel</Button>
+			<Button
+				size="sm"
+				variant="primary"
+				disabled={!canSave}
+				onclick={save}
+				data-testid="persona-save"
+			>
+				{saving ? 'Saving…' : 'Save'}
+			</Button>
+		{/if}
+	{/snippet}
+</Dialog>
+
+{#snippet form(inDialog: boolean)}
+	{#if draft}
+		<Input label="Name" bind:value={draft.name} data-testid="persona-name" />
+		<Input label="Role" bind:value={draft.role} data-testid="persona-role" />
+		<div class="full">
+			<Input label="Summary" bind:value={draft.summary} data-testid="persona-summary" />
+		</div>
+
+		<div class="field full">
+			<div class="field-head">
+				<span>Instructions</span>
+				{#if !instructionsEditing}
+					<IconButton
+						size="sm"
+						icon="pencil"
+						label="Edit instructions"
+						data-testid="persona-instructions-edit"
+						onclick={beginInstructions}
+					/>
+				{/if}
+			</div>
+			{#if instructionsEditing}
+				<textarea
+					{@attach focusOnMount}
+					bind:value={draft.instructions}
+					use:autogrow
+					class="area instructions-editor"
+					rows="4"
+					placeholder="No instructions"
+					aria-label="Instructions"
+					data-testid="persona-instructions"
+					onkeydown={onInstructionsKeydown}
+					onblur={() => (instructionsEditing = false)}
+				></textarea>
+			{:else}
+				<div
+					class="instructions-display"
+					role="button"
+					tabindex="0"
+					data-testid="persona-instructions-text"
+					onclick={onInstructionsDisplayClick}
+					onkeydown={onInstructionsDisplayKeydown}
+				>
+					<MarkdownView
+						source={draft.instructions}
+						showHeader={false}
+						emptyText="No instructions"
+					/>
+				</div>
+			{/if}
+		</div>
+
+		{@render picker('skills', 'Skills', skillOptions)}
+		{@render picker('workflows', 'Workflows', workflowOptions)}
+		{@render picker('practices', 'Practices', practiceOptions)}
+		{@render picker('mcp_servers', 'MCP servers', serverOptions)}
+
+		<div class="field full">
+			<div class="field-head"><span>Models</span></div>
+			<div class="models" data-testid="persona-models">
+				{#each CASES as c (c)}
+					<label class="model-label" for="persona-model-{c}">{c}</label>
+					<Input
+						id="persona-model-{c}"
+						mono
+						placeholder="inherit"
+						bind:value={draft.models[c]}
+						data-testid="persona-model-{c}"
+					/>
+				{/each}
+			</div>
+		</div>
+
+		<div class="field full">
+			<div class="field-head"><span>Access</span></div>
+			<div class="access">
+				<Select
+					size="sm"
+					label="Memory write"
+					options={MEMORY_RULES}
+					value={draft.access.memory_write}
+					onchange={(e) => {
+						if (draft) draft.access.memory_write = e.currentTarget.value as PersonaRule;
+					}}
+					data-testid="persona-access-memory_write"
+				/>
+				<Select
+					size="sm"
+					label="Task move"
+					options={MOVE_RULES}
+					value={draft.access.task_move}
+					onchange={(e) => {
+						if (draft) draft.access.task_move = e.currentTarget.value as PersonaRule;
+					}}
+					data-testid="persona-access-task_move"
+				/>
+				<Select
+					size="sm"
+					label="Workflow trigger"
+					options={MOVE_RULES}
+					value={draft.access.workflow_trigger}
+					onchange={(e) => {
+						if (draft) draft.access.workflow_trigger = e.currentTarget.value as PersonaRule;
+					}}
+					data-testid="persona-access-workflow_trigger"
+				/>
+			</div>
+		</div>
+
+		<div class="full">
+			<Input
+				label="Tags"
+				hint="Comma separated"
+				mono
+				bind:value={draft.tags}
+				data-testid="persona-tags"
+			/>
+		</div>
+
+		{#if !inDialog}
+		<div class="actions full">
+			<Button
+				size="sm"
+				variant="primary"
+				disabled={!canSave}
+				onclick={save}
+				data-testid="persona-save"
+			>
+				{saving ? 'Saving…' : 'Save'}
+			</Button>
+			<span class="spacer"></span>
+			{#if draft.id !== null}
+				{#if confirming}
+					<span class="hint">Delete this persona?</span>
+					<Button
+						size="sm"
+						variant="danger"
+						disabled={saving}
+						onclick={confirmDelete}
+						data-testid="persona-delete-confirm"
+					>
+						{saving ? 'Deleting…' : 'Delete'}
+					</Button>
+					<Button size="sm" variant="ghost" onclick={() => (confirming = false)}>
+						Keep
+					</Button>
+				{:else}
+					<Button
+						size="sm"
+						variant="ghost"
+						onclick={() => (confirming = true)}
+						data-testid="persona-delete"
+					>
+						Delete…
+					</Button>
+				{/if}
+			{/if}
+		</div>
+		{/if}
+	{/if}
+{/snippet}
 
 {#snippet picker(key: ListKey, label: string, options: PickOption[])}
 	{#if draft}
@@ -796,6 +833,15 @@
 		align-content: start;
 		gap: 10px 14px;
 		padding: 12px;
+	}
+
+	:global(.dialog.persona-dialog) {
+		width: min(760px, calc(100vw / var(--ui-zoom, 1) - 32px));
+	}
+
+	:global(.persona-dialog) .detail-body {
+		padding: 0;
+		overflow: visible;
 	}
 
 	.detail-body > .full,
