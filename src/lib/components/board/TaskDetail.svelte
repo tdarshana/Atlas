@@ -622,13 +622,6 @@
 		     said the wrong thing about a parent whose only holdup is its own children, and
 		     about a task that is simply closed. Blockers first, then open subtasks, then
 		     nothing at all. -->
-		{#if task && !task.ready && task.open_blockers > 0}
-			<Badge tone="danger" title={task.blocked_reason ?? 'Not ready'}>blocked</Badge>
-		{:else if task && !task.ready && task.subtasks_total > task.subtasks_done}
-			<Badge tone="warning" title={task.blocked_reason ?? 'Not ready'}>
-				waiting on subtasks
-			</Badge>
-		{/if}
 		<span class="spacer"></span>
 		{#if task}
 			<span class="menu-host" data-menu>
@@ -741,25 +734,38 @@
 					</div>
 				{:else}
 					<div class="title-display">
-						<span class="title-key" data-testid="task-detail-key">
-							<KindIcon kind={task.kind} />
-							<code class="key">{task.key}</code>
-							<IconButton
-								size="sm"
-								icon={keyCopied ? 'check' : 'copy'}
-								label="Copy task key"
-								data-testid="task-copy-key"
-								onclick={copyKey}
-							/>
-						</span>
-						<button
-							type="button"
+						<!-- A div, not a button: the key inside carries its own copy button, and a
+						     button may not nest in a button. Enter and Space still open the editor. -->
+						<div
 							class="title-hit"
-							data-testid="task-title-text"
+							role="button"
+							tabindex="0"
+							data-testid="task-title-hit"
 							onclick={beginTitleEdit}
+							onkeydown={onEditableKeydown(beginTitleEdit)}
 						>
-							<h2 class="title-text">{title}</h2>
-						</button>
+							<h2 class="title-text">
+								<span class="title-key" data-testid="task-detail-key">
+									<KindIcon kind={task.kind} size={16} />
+									<code class="key">{task.key}</code>
+									<button
+										type="button"
+										class="copy-overlay"
+										aria-label="Copy task key"
+										title="Copy task key"
+										data-testid="task-copy-key"
+										onclick={(e) => {
+											e.stopPropagation();
+											void copyKey();
+										}}
+										onkeydown={(e) => e.stopPropagation()}
+									>
+										<Icon name={keyCopied ? 'check' : 'copy'} size={12} />
+									</button>
+								</span>
+								<span data-testid="task-title-text">{title}</span>
+							</h2>
+						</div>
 						<IconButton
 							size="sm"
 							icon="pencil"
@@ -768,6 +774,15 @@
 							onclick={beginTitleEdit}
 						/>
 					</div>
+				{/if}
+				{#if !task.ready && task.open_blockers > 0}
+					<span class="readiness">
+						<Badge tone="danger" title={task.blocked_reason ?? 'Not ready'}>blocked</Badge>
+					</span>
+				{:else if !task.ready && task.subtasks_total > task.subtasks_done}
+					<span class="readiness">
+						<Badge tone="warning" title={task.blocked_reason ?? 'Not ready'}>waiting on subtasks</Badge>
+					</span>
 				{/if}
 			</div>
 
@@ -1410,27 +1425,47 @@
 		border-radius: 2px;
 	}
 
-	/* The key leads the title line; its copy button appears on hover. */
+	/* The key is part of the heading's text, at the heading's size, so it wraps with the
+	   title as one line. Hovering it reveals a copy control laid over the key. */
 	.title-key {
+		position: relative;
 		display: inline-flex;
 		align-items: center;
 		gap: 6px;
-		flex: 0 0 auto;
-		height: 24px;
+		margin-right: 8px;
+		vertical-align: -1px;
 	}
 
 	.title-key .key {
+		font-family: var(--font-mono);
+		font-size: inherit;
+		font-weight: 600;
 		color: var(--text-secondary);
 	}
 
-	.title-key :global(.dbm-iconbtn) {
+	.copy-overlay {
+		position: absolute;
+		inset: -2px -4px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		border: 0;
+		border-radius: 3px;
+		background: var(--bg-overlay);
+		color: var(--text-primary);
 		opacity: 0;
+		cursor: pointer;
 		transition: opacity 120ms;
 	}
 
-	.title-key:hover :global(.dbm-iconbtn),
-	.title-key :global(.dbm-iconbtn:focus-visible) {
-		opacity: 1;
+	.title-key:hover .copy-overlay,
+	.copy-overlay:focus-visible {
+		opacity: 0.94;
+	}
+
+	.readiness {
+		display: inline-flex;
+		margin-top: 6px;
 	}
 
 	.saving {
