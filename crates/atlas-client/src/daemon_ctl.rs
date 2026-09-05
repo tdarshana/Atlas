@@ -57,6 +57,24 @@ fn needs_start_race_wait(paths: &AtlasPaths) -> bool {
     daemon_info(paths).is_some()
 }
 
+/// The size past which a start moves `atlasd.log` aside instead of appending to it.
+/// The same cap the desktop app puts on its own log.
+const LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
+
+/// Moves `atlasd.log` to `atlasd.log.1` (replacing any older one) once it is over
+/// [`LOG_ROTATE_BYTES`], so a daemon that repeats a warning on every boot or tick
+/// cannot grow the file without bound. Called before each spawn, which is the only
+/// point where nothing has the file open.
+fn rotate_log(paths: &AtlasPaths) -> std::io::Result<()> {
+    let log = paths.log_file();
+    match std::fs::metadata(&log) {
+        Ok(meta) if meta.len() > LOG_ROTATE_BYTES => std::fs::rename(&log, log.with_extension("log.1")),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 pub async fn ensure_daemon_with(paths: &AtlasPaths, port: u16, atlasd: Option<PathBuf>) -> anyhow::Result<u16> {
     if is_up(port).await { return Ok(port); }
     if needs_start_race_wait(paths) {
@@ -77,6 +95,7 @@ pub async fn ensure_daemon_with(paths: &AtlasPaths, port: u16, atlasd: Option<Pa
         }
     }
     paths.ensure()?;
+    rotate_log(paths)?;
     let bin = atlasd.unwrap_or_else(atlasd_path);
     let log = std::fs::OpenOptions::new().create(true).append(true).open(paths.log_file())?;
     let mut cmd = std::process::Command::new(&bin);
@@ -166,6 +185,31 @@ mod tests {
         let ran = std::fs::read_to_string(&marker).expect("the fake atlasd never ran");
         assert!(ran.contains(fake.to_str().unwrap()), "a different binary ran: {ran}");
         assert!(ran.contains(&format!("--port {port}")), "the fake did not get the port: {ran}");
+    }
+
+    /// PERF-13: the log is appended by every start, so a start that finds it over the
+    /// cap moves it aside to `atlasd.log.1` (replacing any older one) and lets the new
+    /// daemon begin a fresh file; one under the cap is left alone.
+    #[test]
+    fn rotate_log_moves_an_oversized_log_aside_and_keeps_a_small_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AtlasPaths::at(dir.path().join("home"));
+        paths.ensure().unwrap();
+        let previous = paths.log_file().with_extension("log.1");
+
+        rotate_log(&paths).unwrap();
+        assert!(!paths.log_file().exists() && !previous.exists(), "nothing to rotate");
+
+        std::fs::write(paths.log_file(), "small").unwrap();
+        rotate_log(&paths).unwrap();
+        assert_eq!(std::fs::read_to_string(paths.log_file()).unwrap(), "small");
+        assert!(!previous.exists());
+
+        std::fs::write(&previous, "older").unwrap();
+        std::fs::write(paths.log_file(), vec![b'x'; LOG_ROTATE_BYTES as usize + 1]).unwrap();
+        rotate_log(&paths).unwrap();
+        assert!(!paths.log_file().exists(), "the oversized log should have moved aside");
+        assert_eq!(std::fs::metadata(&previous).unwrap().len(), LOG_ROTATE_BYTES + 1, "the oversized log replaces the older one");
     }
 
     /// L5: `ensure_daemon_with`'s pre-spawn wait is worth paying only when
