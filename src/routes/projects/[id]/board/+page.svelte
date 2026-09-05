@@ -28,6 +28,7 @@
 		move,
 		openTask,
 		backTask,
+		startBoardPolling,
 		refresh,
 		reload,
 		scheduleRefresh,
@@ -169,8 +170,12 @@
 
 	onMount(() => {
 		void loadProjects();
+		const stopPolling = startBoardPolling();
 		// A pending debounce would fire a request for a screen that is gone.
-		return cancelRefresh;
+		return () => {
+			cancelRefresh();
+			stopPolling();
+		};
 	});
 </script>
 

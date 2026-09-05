@@ -19,7 +19,7 @@ vi.mock('$lib/daemon.svelte', () => ({
 	boot: async () => {}
 }));
 
-import { backTask, board, closeTask, deriveColumns, move, openTask, refresh, stageRenames, validateStages } from './board.svelte';
+import { backTask, board, closeTask, deriveColumns, loadDetail, move, openTask, refresh, stageRenames, startBoardPolling, validateStages } from './board.svelte';
 
 const STAGES: Stage[] = [
 	{ name: 'Backlog', done: false },
@@ -189,6 +189,52 @@ describe('refresh', () => {
 		expect(call.top_level).toBeUndefined();
 		expect(call.query).toBe('widget');
 		board.filters.hideSubtasks = false;
+	});
+});
+
+describe('the board follows the daemon', () => {
+	it('folds a loaded detail into the list so the card and its subtasks take the stage the panel shows', async () => {
+		board.tasks = [task('ATL-1', 'Backlog'), task('ATL-2', 'Backlog'), task('ATL-3', 'Backlog')];
+		mocks.getTask.mockResolvedValue({
+			task: task('ATL-1', 'In Progress'),
+			children: [task('ATL-2', 'Done'), task('ATL-9', 'Done')],
+			events: []
+		});
+
+		await loadDetail('ATL-1');
+
+		expect(board.tasks.map((t) => [t.key, t.stage])).toEqual([
+			['ATL-1', 'In Progress'],
+			['ATL-2', 'Done'],
+			['ATL-3', 'Backlog']
+		]);
+	});
+
+	it('re-lists on the interval and on focus, and stops when told', async () => {
+		vi.useFakeTimers();
+		try {
+			mocks.boardStages.mockResolvedValue({ stages: STAGES, overridden: false });
+			mocks.listTasks.mockResolvedValue([]);
+			const before = mocks.listTasks.mock.calls.length;
+
+			const stop = startBoardPolling(1000);
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(mocks.listTasks.mock.calls.length).toBe(before + 1);
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(mocks.listTasks.mock.calls.length).toBe(before + 2);
+
+			if (typeof window !== 'undefined') {
+				window.dispatchEvent(new Event('focus'));
+				await vi.advanceTimersByTimeAsync(0);
+				expect(mocks.listTasks.mock.calls.length).toBe(before + 3);
+			}
+
+			stop();
+			await vi.advanceTimersByTimeAsync(5000);
+			expect(mocks.listTasks.mock.calls.length).toBe(typeof window !== 'undefined' ? before + 3 : before + 2);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
 

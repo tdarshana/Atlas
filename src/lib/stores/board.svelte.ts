@@ -488,12 +488,67 @@ export async function loadDetail(key: string): Promise<void> {
 		if (g !== detailGeneration) return;
 		board.detail = detail;
 		board.detailError = null;
+		absorb(detail);
 	} catch (e) {
 		if (g !== detailGeneration) return;
 		board.detail = null;
 		board.detailError = errorMessage(e);
 	} finally {
 		if (g === detailGeneration) board.detailLoading = false;
+	}
+}
+
+/**
+ * Folds a freshly loaded detail into the list, so the card of the task on screen and
+ * the cards of its subtasks show the daemon's stage the moment the panel does. A stage
+ * can change from outside the board (an agent claiming a task over MCP, the CLI), and
+ * until the next re-list the column would otherwise disagree with the panel.
+ */
+function absorb(detail: TaskDetail | null): void {
+	if (!detail) return;
+	for (const fresh of [detail.task, ...detail.children]) {
+		const i = board.tasks.findIndex((t) => t.id === fresh.id);
+		if (i >= 0) board.tasks[i] = fresh;
+	}
+}
+
+/** How often the board re-lists itself while it is on screen. */
+export const BOARD_POLL_MS = 10_000;
+
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Keeps the columns in step with the daemon: a re-list every `intervalMs` while the
+ * window is visible, and one on each return to the window. Columns are the stage, so
+ * a task moved by an agent over MCP or by the CLI has to move on screen without a
+ * reload. Returns the stop function.
+ */
+export function startBoardPolling(intervalMs = BOARD_POLL_MS): () => void {
+	stopBoardPolling();
+	const visible = () => typeof document === 'undefined' || !document.hidden;
+	const onFocus = () => {
+		if (visible()) void refresh();
+	};
+	pollTimer = setInterval(() => {
+		if (visible()) void refresh();
+	}, intervalMs);
+	if (typeof window !== 'undefined') {
+		window.addEventListener('focus', onFocus);
+		document.addEventListener('visibilitychange', onFocus);
+	}
+	return () => {
+		stopBoardPolling();
+		if (typeof window !== 'undefined') {
+			window.removeEventListener('focus', onFocus);
+			document.removeEventListener('visibilitychange', onFocus);
+		}
+	};
+}
+
+export function stopBoardPolling(): void {
+	if (pollTimer !== null) {
+		clearInterval(pollTimer);
+		pollTimer = null;
 	}
 }
 

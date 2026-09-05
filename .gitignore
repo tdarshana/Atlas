@@ -14,3 +14,7 @@ references/**/uploads/
 references/**/.thumbnail
 references/**/.DS_Store
 .playwright-mcp/
+
+# Agent worktrees
+.claude/worktrees/
+.tmp*/
