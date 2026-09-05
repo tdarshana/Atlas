@@ -222,9 +222,7 @@ mod tests {
     use crate::projects::ProjectRepo;
     use std::sync::{Arc, Mutex};
 
-    fn fixtures_dir(name: &str) -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/frameworks").join(name)
-    }
+    use super::super::adapter::fixtures_dir;
 
     /// A project row pointed at one of the frameworks fixtures under `tests/fixtures`,
     /// with a copy of the fixture in a tempdir so a test can freely add/read files

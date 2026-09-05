@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 
-use super::adapter::{mtime, read_doc_file, read_doc_prefix, read_within_root, rel, root_instruction_files, FrameworkAdapter};
-use super::md::{checkboxes, first_heading, section_bullets};
+use super::adapter::{doc_at, md_files, read_doc_file, read_within_root, rel, root_instruction_files, FrameworkAdapter};
+use super::md::{checkboxes, section_bullets};
 use crate::models::{FrameworkDoc, FrameworkDocType, FrameworkInventory, FrameworkKind, ImportedDecision, ImportedTask, SourceRef};
 use crate::Result;
 
@@ -49,7 +49,7 @@ impl FrameworkAdapter for OpenspecAdapter {
     fn documents(&self, root: &Path) -> Vec<FrameworkDoc> {
         let mut out = vec![];
         for path in md_files(&root.join(SPECS_DIR)) {
-            out.push(self.doc_at(root, &path, FrameworkDocType::Spec));
+            out.push(doc_at(self.kind(), root, &path, FrameworkDocType::Spec));
         }
         for change_dir in change_dirs(root) {
             for (file, doc_type) in [
@@ -59,7 +59,7 @@ impl FrameworkAdapter for OpenspecAdapter {
             ] {
                 let path = change_dir.join(file);
                 if path.is_file() {
-                    out.push(self.doc_at(root, &path, doc_type));
+                    out.push(doc_at(self.kind(), root, &path, doc_type));
                 }
             }
         }
@@ -119,27 +119,6 @@ impl FrameworkAdapter for OpenspecAdapter {
     }
 }
 
-impl OpenspecAdapter {
-    fn doc_at(&self, root: &Path, path: &Path, doc_type: FrameworkDocType) -> FrameworkDoc {
-        let text = read_doc_prefix(path).unwrap_or_default();
-        let title = first_heading(&text).unwrap_or_else(|| file_stem(path));
-        FrameworkDoc { kind: self.kind(), path: rel(root, path), title, doc_type, updated_at: mtime(path) }
-    }
-}
-
-/// `*.md` files directly under `dir` (no recursion). Empty if `dir` doesn't exist.
-/// Metadata only: never opens a file.
-fn md_files(dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return vec![] };
-    let mut out: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "md"))
-        .collect();
-    out.sort();
-    out
-}
-
 /// `openspec/changes/*`: one listing of the `changes` directory. Metadata only.
 fn change_dirs(root: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(root.join(CHANGES_DIR)) else { return vec![] };
@@ -148,16 +127,13 @@ fn change_dirs(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-fn file_stem(path: &Path) -> String {
-    path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::adapter::fixtures_dir;
 
     fn fixture() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/frameworks/openspec")
+        fixtures_dir("openspec")
     }
 
     #[test]

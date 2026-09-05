@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 
-use super::adapter::{mtime, read_doc_file, read_doc_prefix, read_within_root, rel, root_instruction_files, FrameworkAdapter};
-use super::md::{checkboxes, clean_step_title, first_heading, ruling_lines, Checkbox};
+use super::adapter::{doc_at, md_files, read_doc_file, read_within_root, rel, root_instruction_files, FrameworkAdapter};
+use super::md::{checkboxes, clean_step_title, ruling_lines, Checkbox};
 use crate::models::{FrameworkDoc, FrameworkDocType, FrameworkInventory, FrameworkKind, ImportedDecision, ImportedTask, SourceRef};
 use crate::Result;
 
@@ -44,11 +44,11 @@ impl FrameworkAdapter for SuperpowersAdapter {
                 // `PLANS_DIR`: the convention some Superpowers projects use for a
                 // standalone decision ledger that isn't a `.superpowers/sdd/*/progress.md`.
                 let doc_type = if dir == PLANS_DIR && is_ledger_filename(&path) { FrameworkDocType::Ledger } else { doc_type };
-                out.push(self.doc_at(root, &path, doc_type));
+                out.push(doc_at(self.kind(), root, &path, doc_type));
             }
         }
         for path in ledger_files(root) {
-            out.push(self.doc_at(root, &path, FrameworkDocType::Ledger));
+            out.push(doc_at(self.kind(), root, &path, FrameworkDocType::Ledger));
         }
         out
     }
@@ -134,14 +134,6 @@ impl FrameworkAdapter for SuperpowersAdapter {
     }
 }
 
-impl SuperpowersAdapter {
-    fn doc_at(&self, root: &Path, path: &Path, doc_type: FrameworkDocType) -> FrameworkDoc {
-        let text = read_doc_prefix(path).unwrap_or_default();
-        let title = first_heading(&text).unwrap_or_else(|| file_stem(path));
-        FrameworkDoc { kind: self.kind(), path: rel(root, path), title, doc_type, updated_at: mtime(path) }
-    }
-}
-
 /// Whether `path`'s file name ends `.ledger.md`, the convention a standalone
 /// decision ledger under `PLANS_DIR` uses to mark itself as one rather than a
 /// plan.
@@ -201,19 +193,6 @@ fn line_marks_complete(line: &str) -> bool {
     false
 }
 
-/// `*.md` files directly under `dir` (no recursion). Empty if `dir` doesn't exist.
-/// Metadata only (`read_dir` plus `is_file`/extension checks): never opens a file.
-fn md_files(dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return vec![] };
-    let mut out: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "md"))
-        .collect();
-    out.sort();
-    out
-}
-
 /// `.superpowers/sdd/*/progress.md`: one listing of the `sdd` directory, then one
 /// existence check per subdirectory. Metadata only, never opens a file.
 fn ledger_files(root: &Path) -> Vec<PathBuf> {
@@ -229,16 +208,13 @@ fn ledger_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-fn file_stem(path: &Path) -> String {
-    path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::adapter::fixtures_dir;
 
     fn fixture() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/frameworks/superpowers")
+        fixtures_dir("superpowers")
     }
 
     #[test]

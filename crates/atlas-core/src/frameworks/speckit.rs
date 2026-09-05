@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 
-use super::adapter::{mtime, read_doc_file, read_doc_prefix, read_within_root, rel, root_instruction_files, FrameworkAdapter};
-use super::md::{checkboxes, first_heading, section_bullets};
+use super::adapter::{doc_at, read_doc_file, read_within_root, rel, root_instruction_files, FrameworkAdapter};
+use super::md::{checkboxes, section_bullets};
 use crate::models::{FrameworkDoc, FrameworkDocType, FrameworkInventory, FrameworkKind, ImportedDecision, ImportedTask, SourceRef};
 use crate::Result;
 
@@ -52,7 +52,7 @@ impl FrameworkAdapter for SpeckitAdapter {
             for (file, doc_type) in [("spec.md", FrameworkDocType::Spec), ("plan.md", FrameworkDocType::Plan), ("tasks.md", FrameworkDocType::Tasks)] {
                 let path = feature_dir.join(file);
                 if path.is_file() {
-                    out.push(self.doc_at(root, &path, doc_type));
+                    out.push(doc_at(self.kind(), root, &path, doc_type));
                 }
             }
         }
@@ -118,14 +118,6 @@ impl FrameworkAdapter for SpeckitAdapter {
     }
 }
 
-impl SpeckitAdapter {
-    fn doc_at(&self, root: &Path, path: &Path, doc_type: FrameworkDocType) -> FrameworkDoc {
-        let text = read_doc_prefix(path).unwrap_or_default();
-        let title = first_heading(&text).unwrap_or_else(|| file_stem(path));
-        FrameworkDoc { kind: self.kind(), path: rel(root, path), title, doc_type, updated_at: mtime(path) }
-    }
-}
-
 /// `specs/*`: one listing of the `specs` directory. Metadata only, never opens a
 /// file.
 fn feature_dirs(root: &Path) -> Vec<PathBuf> {
@@ -135,16 +127,13 @@ fn feature_dirs(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-fn file_stem(path: &Path) -> String {
-    path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::adapter::fixtures_dir;
 
     fn fixture() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/frameworks/speckit")
+        fixtures_dir("speckit")
     }
 
     #[test]

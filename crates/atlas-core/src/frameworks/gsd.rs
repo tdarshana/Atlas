@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 
-use super::adapter::{mtime, read_doc_file, read_doc_prefix, read_within_root, rel, FrameworkAdapter};
-use super::md::{checkboxes, first_heading, section_bullets};
+use super::adapter::{doc_at, read_doc_file, read_within_root, rel, FrameworkAdapter};
+use super::md::{checkboxes, section_bullets};
 use crate::models::{FrameworkDoc, FrameworkDocType, FrameworkInventory, FrameworkKind, ImportedDecision, ImportedTask, SourceRef};
 use crate::Result;
 
@@ -51,19 +51,19 @@ impl FrameworkAdapter for GsdAdapter {
         for (file, doc_type) in [("PROJECT.md", FrameworkDocType::Summary), ("ROADMAP.md", FrameworkDocType::Roadmap)] {
             let path = planning.join(file);
             if path.is_file() {
-                out.push(self.doc_at(root, &path, doc_type));
+                out.push(doc_at(self.kind(), root, &path, doc_type));
             }
         }
         for phase_dir in phase_dirs(root) {
             for (file, doc_type) in [("PLAN.md", FrameworkDocType::Plan), ("SUMMARY.md", FrameworkDocType::Summary)] {
                 let path = phase_dir.join(file);
                 if path.is_file() {
-                    out.push(self.doc_at(root, &path, doc_type));
+                    out.push(doc_at(self.kind(), root, &path, doc_type));
                 }
             }
         }
         for path in todo_files(root) {
-            out.push(self.doc_at(root, &path, FrameworkDocType::Todo));
+            out.push(doc_at(self.kind(), root, &path, FrameworkDocType::Todo));
         }
         out
     }
@@ -118,14 +118,6 @@ impl FrameworkAdapter for GsdAdapter {
     }
 }
 
-impl GsdAdapter {
-    fn doc_at(&self, root: &Path, path: &Path, doc_type: FrameworkDocType) -> FrameworkDoc {
-        let text = read_doc_prefix(path).unwrap_or_default();
-        let title = first_heading(&text).unwrap_or_else(|| file_stem(path));
-        FrameworkDoc { kind: self.kind(), path: rel(root, path), title, doc_type, updated_at: mtime(path) }
-    }
-}
-
 /// `.planning/phases/*`: one listing of the `phases` directory. Metadata only.
 fn phase_dirs(root: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(root.join(PLANNING_DIR).join("phases")) else { return vec![] };
@@ -152,16 +144,13 @@ fn todo_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-fn file_stem(path: &Path) -> String {
-    path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::adapter::fixtures_dir;
 
     fn fixture() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/frameworks/gsd")
+        fixtures_dir("gsd")
     }
 
     #[test]

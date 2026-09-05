@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 
-use crate::models::{FrameworkDoc, FrameworkInventory, FrameworkKind, ImportedDecision, ImportedTask};
+use super::md::first_heading;
+use crate::models::{FrameworkDoc, FrameworkDocType, FrameworkInventory, FrameworkKind, ImportedDecision, ImportedTask};
 use crate::{AtlasError, Result};
 
 /// Reads and detects one planning framework's files inside a connected project.
@@ -145,9 +146,65 @@ pub(crate) fn root_instruction_files(root: &Path) -> Vec<PathBuf> {
     ["CLAUDE.md", "AGENTS.md"].iter().map(|f| root.join(f)).filter(|p| p.is_file()).collect()
 }
 
+/// One document as `documents()` lists it: the title is the first heading in at
+/// most [`TITLE_READ_CAP`] bytes of the file, falling back to the file's stem. Shared
+/// by every adapter so a listing reads each document the same way and only once.
+pub(crate) fn doc_at(kind: FrameworkKind, root: &Path, path: &Path, doc_type: FrameworkDocType) -> FrameworkDoc {
+    let text = read_doc_prefix(path).unwrap_or_default();
+    let title = first_heading(&text).unwrap_or_else(|| file_stem(path));
+    FrameworkDoc { kind, path: rel(root, path), title, doc_type, updated_at: mtime(path) }
+}
+
+/// The file name without its extension, lossily, or empty for a path with none.
+pub(crate) fn file_stem(path: &Path) -> String {
+    path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+}
+
+/// `*.md` files directly under `dir` (no recursion), sorted. Empty if `dir` doesn't
+/// exist. Metadata only: never opens a file.
+pub(crate) fn md_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return vec![] };
+    let mut out: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "md"))
+        .collect();
+    out.sort();
+    out
+}
+
+/// `tests/fixtures/frameworks/<name>`, the checked-in project each adapter's tests
+/// and the import tests read.
+#[cfg(test)]
+pub(crate) fn fixtures_dir(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/frameworks").join(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ARCH-14: the helpers every adapter used to carry a copy of, pinned once.
+    #[test]
+    fn shared_helpers_list_sorted_md_files_and_title_a_doc_by_heading_or_stem() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("b-titled.md"), "# The title\n\nBody.\n").unwrap();
+        std::fs::write(dir.path().join("a-plain.md"), "no heading here\n").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "not markdown").unwrap();
+        std::fs::create_dir(dir.path().join("sub.md")).unwrap();
+
+        let files = md_files(dir.path());
+        assert_eq!(files, vec![dir.path().join("a-plain.md"), dir.path().join("b-titled.md")], "sorted, files only, `.md` only");
+        assert!(md_files(&dir.path().join("missing")).is_empty());
+
+        assert_eq!(file_stem(&files[1]), "b-titled");
+        assert_eq!(file_stem(Path::new("/")), "");
+
+        let titled = doc_at(FrameworkKind::Gsd, dir.path(), &files[1], FrameworkDocType::Spec);
+        assert_eq!((titled.title.as_str(), titled.path.as_str(), titled.kind, titled.doc_type), ("The title", "b-titled.md", FrameworkKind::Gsd, FrameworkDocType::Spec));
+        let plain = doc_at(FrameworkKind::Gsd, dir.path(), &files[0], FrameworkDocType::Spec);
+        assert_eq!(plain.title, "a-plain", "no heading falls back to the stem");
+    }
 
     #[test]
     fn reads_a_file_inside_the_root() {

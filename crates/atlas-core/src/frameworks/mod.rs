@@ -37,12 +37,8 @@ pub fn detect_all(root: &Path) -> Vec<FrameworkInventory> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::adapter::fixtures_dir;
     use crate::models::FrameworkKind;
-    use std::path::PathBuf;
-
-    fn fixtures_dir(name: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/frameworks").join(name)
-    }
 
     #[test]
     fn detects_all_four_fixtures() {
