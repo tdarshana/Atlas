@@ -108,7 +108,7 @@
 	{#if updateError === 'updates are not configured'}
 		<span class="hint">
 			See <a
-				href="https://github.com/DarshanaWT/atlas/blob/main/docs/usage.md#desktop-platform"
+				href="https://github.com/tdarshana/Atlas#desktop-app"
 				target="_blank"
 				rel="noreferrer">docs/usage.md, Desktop platform</a
 			> for the manual signing key steps.
