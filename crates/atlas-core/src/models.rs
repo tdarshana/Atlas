@@ -483,10 +483,11 @@ pub struct Task {
     #[serde(default)] pub parent_title: Option<String>,
     /// The persona this task is done as, read with the row the way `parent_key` is,
     /// so a card can show the role without a second lookup. All three are `None` for
-    /// a task with no persona.
-    #[serde(default)] pub persona_id: Option<Uuid>,
-    #[serde(default)] pub persona_name: Option<String>,
-    #[serde(default)] pub persona_slug: Option<String>,
+    /// a task with no persona, and left off the wire then, so a task JSON written
+    /// before personas existed still reads as one.
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub persona_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub persona_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub persona_slug: Option<String>,
     pub created_by: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

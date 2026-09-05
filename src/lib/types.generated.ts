@@ -371,11 +371,12 @@ export interface Task {
 	/**
 	 * The persona this task is done as, read with the row the way `parent_key` is,
 	 * so a card can show the role without a second lookup. All three are `None` for
-	 * a task with no persona.
+	 * a task with no persona, and left off the wire then, so a task JSON written
+	 * before personas existed still reads as one.
 	 */
-	persona_id: Uuid | null;
-	persona_name: string | null;
-	persona_slug: string | null;
+	persona_id?: Uuid | null;
+	persona_name?: string | null;
+	persona_slug?: string | null;
 	created_by: string;
 	created_at: Timestamp;
 	updated_at: Timestamp;
