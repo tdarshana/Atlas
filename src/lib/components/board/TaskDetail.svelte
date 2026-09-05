@@ -127,6 +127,9 @@
 	/** Tasks in this project matching what is typed in the blocker box, newest first. */
 	let blockerHits = $state<Task[]>([]);
 	let blockerOpen = $state(false);
+	/** The highlighted hit: the first one as soon as the list loads, then wherever the
+	 * arrow keys or the pointer move it. Enter adds it. */
+	let blockerActive = $state(0);
 	let blockerTimer: ReturnType<typeof setTimeout> | undefined;
 	let blockerGeneration = 0;
 	let comment = $state('');
@@ -496,6 +499,7 @@
 				.filter((t) => !taken.has(t.key))
 				.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
 				.slice(0, 8);
+			blockerActive = 0;
 			blockerOpen = blockerHits.length > 0;
 		} catch {
 			blockerHits = [];
@@ -509,14 +513,30 @@
 	}
 
 	function onBlockerKey(event: KeyboardEvent) {
+		const listing = blockerOpen && blockerHits.length > 0;
 		if (event.key === 'Escape' && blockerOpen) {
 			event.stopPropagation();
 			blockerOpen = false;
+		} else if (event.key === 'ArrowDown' && listing) {
+			event.preventDefault();
+			moveBlockerActive(1);
+		} else if (event.key === 'ArrowUp' && listing) {
+			event.preventDefault();
+			moveBlockerActive(-1);
 		} else if (event.key === 'Enter') {
 			event.preventDefault();
-			if (blockerOpen && blockerHits.length > 0) addBlocker(blockerHits[0].key);
+			if (listing) addBlocker(blockerHits[blockerActive]?.key ?? blockerHits[0].key);
 			else addBlocker();
 		}
+	}
+
+	/** Steps the highlight, wrapping at both ends, and keeps it in view. */
+	function moveBlockerActive(step: number) {
+		const n = blockerHits.length;
+		blockerActive = (blockerActive + step + n) % n;
+		const row = document.querySelector(`[data-testid="task-blocker-hit-${blockerHits[blockerActive].key}"]`);
+		// jsdom has no scrollIntoView, so the tests run without it.
+		if (row && typeof row.scrollIntoView === 'function') row.scrollIntoView({ block: 'nearest' });
 	}
 
 	function removeBlocker(key: string) {
@@ -1072,13 +1092,15 @@
 						/>
 						{#if blockerOpen}
 							<div class="dbm-menu blocker-menu" role="listbox" data-testid="task-blocker-menu">
-								{#each blockerHits as hit (hit.key)}
+								{#each blockerHits as hit, i (hit.key)}
 									<button
 										type="button"
 										class="dbm-menu__item blocker-hit"
+										class:active={i === blockerActive}
 										role="option"
-										aria-selected="false"
+										aria-selected={i === blockerActive}
 										data-testid="task-blocker-hit-{hit.key}"
+										onpointerenter={() => (blockerActive = i)}
 										onclick={() => addBlocker(hit.key)}
 									>
 										<KindIcon kind={hit.kind} size={14} />
@@ -1773,6 +1795,14 @@
 		gap: 8px;
 		width: 100%;
 		text-align: left;
+	}
+
+	/* One highlight for the keyboard's row and the pointer's row: hovering moves the
+	   highlight rather than painting a second one. */
+	.blocker-hit.active,
+	.blocker-hit:hover {
+		background: var(--bg-active);
+		color: var(--text-primary);
 	}
 
 	.hit-key {

@@ -501,11 +501,36 @@ describe('TaskDetail blocker search', () => {
 		// Newest first, and the task itself is never offered.
 		const keys = getAllByRole('option').map((o) => o.querySelector('code')?.textContent);
 		expect(keys).toEqual(['ATL-9', 'ATL-3']);
+		// The first hit is selected on arrival; the arrow keys move the selection, wrapping.
+		expect(getByTestId('task-blocker-hit-ATL-9').getAttribute('aria-selected')).toBe('true');
+		await fireEvent.keyDown(box, { key: 'ArrowDown' });
+		expect(getByTestId('task-blocker-hit-ATL-3').getAttribute('aria-selected')).toBe('true');
+		await fireEvent.keyDown(box, { key: 'ArrowDown' });
+		expect(getByTestId('task-blocker-hit-ATL-9').getAttribute('aria-selected')).toBe('true');
+		await fireEvent.keyDown(box, { key: 'ArrowUp' });
+		expect(getByTestId('task-blocker-hit-ATL-3').getAttribute('aria-selected')).toBe('true');
+		// Hovering a row selects it too.
+		await fireEvent.pointerEnter(getByTestId('task-blocker-hit-ATL-9'));
+		expect(getByTestId('task-blocker-hit-ATL-9').getAttribute('aria-selected')).toBe('true');
 
 		await fireEvent.click(getByTestId('task-blocker-hit-ATL-9'));
 		await waitFor(() => expect(mocks.setTaskBlockers).toHaveBeenCalledWith('ATL-1', ['ATL-9']));
 		expect(queryByTestId('task-blocker-menu')).toBeNull();
 		expect(box.value).toBe('');
+	});
+
+	it('adds the arrowed-to hit on Enter', async () => {
+		const older = { ...task('ATL-3'), title: 'Older daemon fix', created_at: '2026-09-01T10:00:00Z' };
+		const newer = { ...task('ATL-9'), title: 'Newer daemon fix', created_at: '2026-09-05T10:00:00Z' };
+		mocks.listTasks.mockResolvedValue([older, newer]);
+		mocks.setTaskBlockers.mockResolvedValue({ ...task('ATL-1'), blocked_by: ['ATL-3'] });
+		const { getByTestId, queryByTestId } = open();
+		const box = getByTestId('task-blocker-key') as HTMLInputElement;
+		await fireEvent.input(box, { target: { value: 'daemon' } });
+		await waitFor(() => expect(queryByTestId('task-blocker-menu')).not.toBeNull());
+		await fireEvent.keyDown(box, { key: 'ArrowDown' });
+		await fireEvent.keyDown(box, { key: 'Enter' });
+		await waitFor(() => expect(mocks.setTaskBlockers).toHaveBeenCalledWith('ATL-1', ['ATL-3']));
 	});
 });
 
