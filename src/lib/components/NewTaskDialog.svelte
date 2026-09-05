@@ -1,7 +1,7 @@
 <script lang="ts">
 	// New task. The stage is left to the daemon, which puts a new task in the first
 	// stage of the project's list; everything else here is optional but the title.
-	import { Button, Input } from '$lib/ds';
+	import { Button, Input, TagInput } from '$lib/ds';
 	import { api } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
 	import { personas } from '$lib/stores/personas.svelte';
@@ -131,7 +131,13 @@
 			/>
 		</div>
 
-		<Input label="Labels" bind:value={labels} data-testid="new-task-labels" placeholder="api, ui" />
+		<TagInput
+			label="Labels"
+			placeholder="Add a label"
+			value={splitList(labels)}
+			testId="new-task-labels"
+			onchange={(v) => (labels = v.join(', '))}
+		/>
 
 		<Input
 			label="Blocked by"

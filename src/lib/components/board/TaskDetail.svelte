@@ -8,7 +8,7 @@
 	// The form logic is the Phase 4 drawer's, moved rather than rewritten: the dirty-aware
 	// refill, the 409 reload, the delete confirmation and the toasts all behave as before.
 	import { onMount, untrack } from 'svelte';
-	import { Badge, Button, Icon, IconButton, Input } from '$lib/ds';
+	import { Badge, Button, Icon, IconButton, Input, TagInput } from '$lib/ds';
 	import { errorMessage } from '$lib/errors';
 	import { relativeAge } from '$lib/format';
 	import { copyText, TabStrip, type Tab } from '$lib/shell';
@@ -957,13 +957,15 @@
 					onblur={autosave}
 					onkeydown={onTextKeydown}
 				/>
-				<Input
+				<TagInput
 					label="Labels"
-					bind:value={labels}
-					placeholder="api, ui"
-					data-testid="task-labels"
-					onblur={autosave}
-					onkeydown={onTextKeydown}
+					placeholder="Add a label"
+					value={splitList(labels)}
+					testId="task-labels"
+					onchange={(v) => {
+						labels = v.join(', ');
+						autosave();
+					}}
 				/>
 			</aside>
 
