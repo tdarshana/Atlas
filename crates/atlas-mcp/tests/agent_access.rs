@@ -27,7 +27,7 @@ fn workflow_graph(propose_memories: bool, file_tasks: bool) -> Graph {
                 id: "a".into(),
                 kind: NodeKind::Action,
                 position: Position { x: 240.0, y: 0.0 },
-                data: NodeData::Action { name: "step".into(), instructions: "do it".into(), agent: "desktop".into(), practices: vec![], memories: None },
+                data: NodeData::Action { name: "step".into(), instructions: "do it".into(), agent: "desktop".into(), practices: vec![], memories: None, case: None },
             },
             Node { id: "o".into(), kind: NodeKind::Output, position: Position { x: 480.0, y: 0.0 }, data: NodeData::Output { propose_memories, file_tasks } },
         ],
