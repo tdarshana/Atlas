@@ -18,7 +18,8 @@ function project(id: string, name: string): Project {
 		board_stages: null,
 		agent_access: { memory_writers: null, task_movers: null, require_review: false },
 		extraction: null,
-		mcp_disabled_tools: []
+		mcp_disabled_tools: [],
+		skills_disabled: []
 	};
 }
 

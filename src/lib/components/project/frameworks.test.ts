@@ -104,13 +104,13 @@ describe('sidePanelFrameworks', () => {
 
 describe('reportText', () => {
 	it('reads as "N created, N updated, N skipped"', () => {
-		expect(reportText({ created: 3, updated: 1, skipped: 12 })).toBe(
+		expect(reportText({ created: 3, updated: 1, skipped: 12, reparented: 0 })).toBe(
 			'3 created, 1 updated, 12 skipped'
 		);
 	});
 
 	it('reads the same shape when every count is zero', () => {
-		expect(reportText({ created: 0, updated: 0, skipped: 0 })).toBe(
+		expect(reportText({ created: 0, updated: 0, skipped: 0, reparented: 0 })).toBe(
 			'0 created, 0 updated, 0 skipped'
 		);
 	});

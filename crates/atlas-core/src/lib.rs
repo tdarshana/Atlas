@@ -32,3 +32,6 @@ pub use error::{AtlasError, Result};
 #[cfg(test)]
 #[path = "../tests/common/mod.rs"]
 pub(crate) mod test_common;
+
+#[cfg(test)]
+mod tsgen;

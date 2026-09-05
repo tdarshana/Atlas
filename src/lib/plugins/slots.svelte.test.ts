@@ -86,6 +86,7 @@ function task(key: string): Task {
 		created_at: '2026-09-04T10:00:00Z',
 		updated_at: '2026-09-04T10:00:00Z',
 		closed_at: null,
+		source_ref: null,
 		blocked_by: [],
 		open_blockers: 0,
 		ready: true,

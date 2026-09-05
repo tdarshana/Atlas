@@ -67,9 +67,9 @@ export function refHref(entry: LogEntry, projectId: string): string | null {
 	if (!ref || !projectId) return null;
 	switch (ref.type) {
 		case 'task':
-			return `/projects/${projectId}/board?task=${encodeURIComponent(ref.key || ref.id)}`;
+			return `/projects/${projectId}/board?task=${encodeURIComponent(ref.key || ref.id || '')}`;
 		case 'memory':
-			return `/memories?id=${encodeURIComponent(ref.id)}`;
+			return `/memories?id=${encodeURIComponent(ref.id ?? '')}`;
 		case 'run':
 			return '/workflows';
 		case 'project':
@@ -78,6 +78,8 @@ export function refHref(entry: LogEntry, projectId: string): string | null {
 			return `/projects/${projectId}/agents`;
 		case 'job':
 			return `/projects/${projectId}/settings`;
+		default:
+			return null;
 	}
 }
 

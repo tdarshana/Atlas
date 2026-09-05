@@ -1,47 +1,42 @@
-// TypeScript mirrors of the wire shapes in crates/atlas-core/src/models.rs.
+// The desktop's wire types.
+//
+// Every type the daemon's Rust models define is generated into ./types.generated.ts from
+// the `schemars::JsonSchema` derives (crates/atlas-core/src/tsgen.rs) and re-exported
+// from here; `cargo test -p atlas-core` fails when that file is stale, and
+// `bun run gen:types` regenerates it. What stays hand-written below is either not a
+// Rust model at all (Tauri commands, settings keys, the desktop's own helpers) or a
+// daemon-side shape declared in crates/atlasd/src/http.rs without a `JsonSchema`
+// derive. A local declaration shadows a generated export of the same name, so when one
+// of those moves into models.rs, delete it here.
+//
 // UUIDs and `DateTime<Utc>` both arrive as strings; the string unions match the
 // `str_enum!` literals exactly, so a value that type checks here parses there.
 
-export type Uuid = string;
-/** RFC 3339, e.g. "2026-09-02T10:30:00Z". */
-export type Timestamp = string;
+export * from './types.generated';
 
-export type MemoryScope = 'global' | 'project';
-export type MemoryKind = 'fact' | 'decision' | 'preference' | 'insight' | 'todo';
-export type MemoryStatus = 'active' | 'pending' | 'rejected' | 'superseded';
+import type {
+	Edge,
+	McpToolInfo,
+	McpTransport,
+	McpTransportInput,
+	MemoryScope,
+	MemoryScopeFilter,
+	Node,
+	NodeData,
+	Position,
+	ProjectAccess,
+	SearchQuery,
+	SkillUpdate,
+	SyncAction,
+	Timestamp,
+	TriggerKind,
+	Uuid,
+	WorkflowRun,
+	WorkflowStep
+} from './types.generated';
 
-export interface NewMemory {
-	scope: MemoryScope;
-	project_id?: Uuid | null;
-	kind: MemoryKind;
-	text: string;
-	tags?: string[];
-	source_agent?: string | null;
-	source_tool?: string | null;
-	confidence?: number;
-	status?: MemoryStatus;
-}
-
-export interface Memory {
-	id: Uuid;
-	scope: MemoryScope;
-	project_id: Uuid | null;
-	kind: MemoryKind;
-	text: string;
-	tags: string[];
-	source_agent: string | null;
-	source_tool: string | null;
-	confidence: number;
-	status: MemoryStatus;
-	superseded_by: Uuid | null;
-	created_at: Timestamp;
-	updated_at: Timestamp;
-}
-
-export interface RecallHit {
-	memory: Memory;
-	score: number;
-}
+// ---- the desktop's names for generated types ----
+// Kept so the components read as they did; each is the Rust type under another name.
 
 /**
  * A request-time narrowing, not a value of a memory's own `scope` column (that is
@@ -50,12 +45,34 @@ export interface RecallHit {
  * project-less memories, ignoring any `project_id` sent alongside it; `all` is the
  * default, where a project widens to its own memories plus every global one.
  */
-export type MemoryListScope = 'all' | 'project_only' | 'global_only';
+export type MemoryListScope = MemoryScopeFilter;
+/** `GET /api/v1/projects/{id}/access`. */
+export type ProjectAccessReport = ProjectAccess;
+export type GraphPosition = Position;
+/** Named `WorkflowNode` here because `Node` is `@xyflow/svelte`'s own type. */
+export type WorkflowNode = Node;
+export type WorkflowEdge = Edge;
+/** The action and output arms of the untagged `NodeData`; a trigger node's `data` is a bare `Trigger`. */
+export type ActionNodeData = Extract<NodeData, { agent: string }>;
+export type OutputNodeData = Extract<NodeData, { propose_memories: boolean }>;
+export type McpServerTransport = McpTransport;
+export type McpStdioTransport = Extract<McpTransport, { kind: 'stdio' }>;
+export type McpHttpTransport = Extract<McpTransport, { kind: 'http' }>;
+/** `POST /api/v1/mcp/servers`'s transport, secret values included. */
+export type NewMcpTransport = McpTransportInput;
+export type McpCheckTool = McpToolInfo;
+/** `PATCH /api/v1/skills/{id}`, native skills only. */
+export type SkillPatch = SkillUpdate;
+export type SkillScope = MemoryScope;
+/** Query string for `GET /api/v1/search`. `project_id` takes one project, not a list. */
+export type GlobalSearchQuery = SearchQuery;
+
+// ---- not Rust models ----
 
 /**
  * A window over `GET /memories`: up to `limit` rows after skipping `offset`, in the
  * route's own newest-first order. Neither set is the whole set. The daemon caps
- * `limit` at 1000.
+ * `limit` at 1000. Query parameters, not a serialised model.
  */
 export interface MemoryPage {
 	limit?: number;
@@ -63,35 +80,11 @@ export interface MemoryPage {
 }
 
 /**
- * Kind and tag counts, plus the total, over the active memories `GET
- * /memories/facets` was asked about, `project_id`/`scope` read the same way `GET
- * /memories` reads them.
+ * What a log row's `ref.type` holds. The daemon types it as a plain string; this is the
+ * desktop's own list. `run` is in the union because the Log tab links one; the daemon
+ * does not emit it yet.
  */
-export interface MemoryFacets {
-	kinds: Record<string, number>;
-	tags: Record<string, number>;
-	total: number;
-}
-
-export interface RecallQuery {
-	query: string;
-	limit?: number;
-	scope?: MemoryScope | null;
-	/** How `project_id` is read. Defaults to `all` on the daemon. */
-	list_scope?: MemoryListScope | null;
-	project_id?: Uuid | null;
-	kinds?: MemoryKind[];
-	tags?: string[];
-}
-
-export interface StatusReport {
-	version: string;
-	db_path: string;
-	memories_active: number;
-	memories_pending: number;
-	embedding: string;
-	port: number | null;
-}
+export type LogRefType = 'task' | 'memory' | 'project' | 'sync' | 'job' | 'run';
 
 /** The desktop app's `about_info` Tauri command. */
 export interface AboutInfo {
@@ -126,246 +119,6 @@ export interface UpdateProgress {
 	total: number | null;
 }
 
-/** A planning framework (Superpowers, OpenSpec, SpecKit, GSD), distinct from the
- * code frameworks (Svelte, Tauri, ...) in `ProjectProfile.frameworks`. */
-export type FrameworkKind = 'superpowers' | 'openspec' | 'speckit' | 'gsd';
-
-/** What detection found for one planning framework: its roots plus document and
- * task counts. */
-export interface FrameworkInventory {
-	kind: FrameworkKind;
-	roots: string[];
-	docs: number;
-	tasks: number;
-	detected_at: Timestamp;
-}
-
-export type FrameworkDocType = 'spec' | 'plan' | 'tasks' | 'roadmap' | 'ledger' | 'proposal' | 'summary' | 'todo';
-
-/** One document a framework holds: a spec, plan, ledger and so on. `path` is what
- * `GET /projects/{id}/frameworks/{kind}/docs/{path}` and the MCP tool `framework_docs`
- * take to fetch its text. */
-export interface FrameworkDoc {
-	kind: FrameworkKind;
-	path: string;
-	title: string;
-	doc_type: FrameworkDocType;
-	updated_at: Timestamp;
-}
-
-/** Points an imported task or decision back at the framework file it came from.
- * `anchor` names where inside that file (a heading, a ruling label), empty when the
- * whole file is the source. */
-export interface SourceRef {
-	framework: FrameworkKind;
-	path: string;
-	anchor: string;
-}
-
-/** `GET /projects/{id}/frameworks`'s shape for one detected framework. */
-export interface FrameworkListing {
-	inventory: FrameworkInventory;
-	documents: FrameworkDoc[];
-}
-
-export type ImportWhat = 'tasks' | 'decisions';
-
-/** `POST /projects/{id}/frameworks/{kind}/import`'s reply. */
-export interface ImportReport {
-	created: number;
-	updated: number;
-	skipped: number;
-}
-
-export interface ProjectProfile {
-	name: string;
-	languages: string[];
-	frameworks: string[];
-	tree: string[];
-	readme_head: string;
-	recent_commits: string[];
-	summary: string | null;
-	built_at: Timestamp;
-	/** Optional: absent on a profile stored before this field existed. */
-	planning_frameworks?: FrameworkInventory[];
-}
-
-export interface Project {
-	id: Uuid;
-	name: string;
-	root_path: string;
-	git_remote: string | null;
-	profile: ProjectProfile | null;
-	created_at: Timestamp;
-	last_seen_at: Timestamp;
-	/** Key prefix for this project's task keys, the `ATL` in `ATL-12`. */
-	board_key: string | null;
-	/** Stage override; null means the project follows the global list. */
-	board_stages: Stage[] | null;
-	/** Never null on a read: an unset column comes back as the all-null default. */
-	agent_access: AgentAccess;
-	/** Null until an override is stored. `api_key` reads back as `"***"`. */
-	extraction: ProjectExtraction | null;
-	/** MCP tool names disabled for this project on top of the global `mcp.disabled_tools` list. */
-	mcp_disabled_tools: string[];
-}
-
-/**
- * Who may write memories and move tasks in a project. `null` for either list means any
- * actor. A list matches the whole label (`claude-code/reviewer`) or the part before the
- * slash. `desktop` and anything starting with `cli` are exempt: those are the user's own
- * hands, not an agent.
- */
-export interface AgentAccess {
-	memory_writers: string[] | null;
-	task_movers: string[] | null;
-	require_review: boolean;
-}
-
-/**
- * `GET /api/v1/projects/{id}/access`: the project's own rules, the global defaults from
- * the `access.*` settings, and what the two resolve to. A project field left null takes
- * the default; `require_review` is a floor the global flag sets and a project can only
- * raise.
- */
-export interface ProjectAccessReport {
-	access: AgentAccess;
-	defaults: AgentAccess;
-	effective: AgentAccess;
-}
-
-/**
- * A project's extraction override. Every field is optional and an absent one falls back
- * to the matching global `extraction.*` setting, field by field. Sending
- * `api_key: "***"` back means "leave the stored key alone".
- */
-export interface ProjectExtraction {
-	enabled?: boolean | null;
-	base_url?: string | null;
-	model?: string | null;
-	api_key?: string | null;
-	auto_accept_min_confidence?: number | null;
-}
-
-/**
- * `PATCH /projects/{id}`. Only the fields present change; `git_remote: null` clears the
- * remote where leaving the field out keeps it, which is the daemon's double option.
- */
-export interface ProjectPatch {
-	name?: string;
-	board_key?: string;
-	git_remote?: string | null;
-	/** Replaces the project's MCP tool override wholesale when present. */
-	mcp_disabled_tools?: string[];
-}
-
-/**
- * What a log row points at. `key` is set for tasks only. `run` is in the union because
- * the Log tab links one; the daemon does not emit it yet.
- */
-export type LogRefType = 'task' | 'memory' | 'project' | 'sync' | 'job' | 'run';
-
-export interface LogRef {
-	type: LogRefType;
-	id: string;
-	key?: string | null;
-}
-
-/** One row of `GET /projects/{id}/log`, newest first. */
-export interface LogEntry {
-	time: Timestamp;
-	source: string;
-	kind: string;
-	detail: string;
-	ref: LogRef | null;
-}
-
-/** The log's query string. `after` keeps entries strictly older than the time given. */
-export interface LogFilter {
-	source?: string | null;
-	kind?: string | null;
-	q?: string | null;
-	after?: Timestamp | null;
-	limit?: number | null;
-}
-
-export interface ProjectContext {
-	project: Project;
-	memories: RecallHit[];
-	practices: Doc[];
-	workflows: WorkflowSummary[];
-}
-
-export interface NewAgent {
-	name: string;
-	description: string;
-	instructions: string;
-	model_hint?: string | null;
-	tools?: string[];
-	tags?: string[];
-}
-
-export interface Agent {
-	id: Uuid;
-	name: string;
-	description: string;
-	instructions: string;
-	model_hint: string | null;
-	tools: string[];
-	tags: string[];
-	version: number;
-	created_at: Timestamp;
-	updated_at: Timestamp;
-}
-
-export type DocKind = 'practice' | 'workflow';
-
-export interface NewDoc {
-	name: string;
-	body: string;
-	tags?: string[];
-	project_id?: Uuid | null;
-}
-
-export interface Doc {
-	id: Uuid;
-	kind: DocKind;
-	name: string;
-	body: string;
-	tags: string[];
-	project_id: Uuid | null;
-	created_at: Timestamp;
-	updated_at: Timestamp;
-}
-
-export type SyncKind = 'claude' | 'codex' | 'agents_md' | 'claude_md' | 'framework_instructions';
-
-// `SyncAction` carries no serde rename, so the unit variants serialize as their
-// Rust names and `Skip(String)` as serde's externally tagged `{ "Skip": reason }`.
-export type SyncAction = 'Create' | 'Update' | 'Unchanged' | { Skip: string };
-
-export interface SyncOp {
-	kind: SyncKind;
-	path: string;
-	content: string;
-	action: SyncAction;
-}
-
-export interface SyncRequest {
-	root?: string | null;
-	global?: boolean;
-	targets?: SyncKind[];
-	check_only?: boolean;
-}
-
-export interface SyncReport {
-	ops: SyncOp[];
-	created: number;
-	updated: number;
-	unchanged: number;
-	skipped: number;
-}
-
 /** `GET/PUT /api/v1/settings` is a flat key/value map; `extraction.api_key` reads back as `"***"`. */
 export type Settings = Record<string, unknown>;
 
@@ -395,6 +148,27 @@ export interface ThemePack {
 	tokens: Record<string, string>;
 }
 
+/** The reason on a skipped op, or null when the action is not a skip. */
+export function skipReason(action: SyncAction): string | null {
+	return typeof action === 'object' ? action.Skip : null;
+}
+
+/**
+ * `WorkflowRun.summary` once parsed: written only once a run finishes successfully
+ * (`crates/atlas-core/src/workflow/run.rs`), so a queued, running, failed or cancelled
+ * run's `summary` stays `null` and the run detail view falls back to the step list for
+ * a step count and `n/a` for tokens.
+ */
+export interface RunSummary {
+	steps: number;
+	memories_proposed: number;
+	tasks_filed: number;
+	trigger: TriggerKind;
+	tokens: number | null;
+}
+
+// ---- daemon shapes without a JsonSchema model (crates/atlas-core/src/jobs.rs, crates/atlasd/src/http.rs) ----
+
 export type JobStatus = 'queued' | 'running' | 'done' | 'failed';
 
 /** A background extraction job, returned by `POST /ingest` (as `job_id`) and `GET /jobs/{id}`. */
@@ -416,343 +190,16 @@ export interface ExtractionTestResult {
 	error?: string;
 }
 
-/** The reason on a skipped op, or null when the action is not a skip. */
-export function skipReason(action: SyncAction): string | null {
-	return typeof action === 'object' ? action.Skip : null;
-}
-
-// ---- board ----
-
-export type TaskKind = 'task' | 'bug' | 'feature' | 'chore';
-export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent';
-
-/** One column of the board. `done` stages stamp `closed_at` on the tasks that land in them. */
-export interface Stage {
-	name: string;
-	done: boolean;
-}
-
-/** The stages in force for a project, and whether they are the project's own. */
-export interface StageList {
-	stages: Stage[];
-	overridden: boolean;
-}
-
-export interface Task {
-	id: Uuid;
-	/** The human handle, e.g. `ATL-12`. Every route takes this or the id. */
-	key: string;
-	project_id: Uuid | null;
-	seq: number;
-	title: string;
-	description: string;
-	stage: string;
-	kind: TaskKind;
-	priority: TaskPriority;
-	assignee: string | null;
-	labels: string[];
-	parent_id: Uuid | null;
-	/** The parent's key and title when this is a subtask, so a card can name its
-	 * parent even when the parent is filtered out of the same listing. */
-	parent_key: string | null;
-	parent_title: string | null;
-	created_by: string;
-	created_at: Timestamp;
-	updated_at: Timestamp;
-	closed_at: Timestamp | null;
-	/** Where this task was imported from, when it was. Absent for a task nobody
-	 * imported. */
-	source_ref?: SourceRef | null;
-	/** Keys of the tasks this one waits on. */
-	blocked_by: string[];
-	/**
-	 * How many of `blocked_by` are not themselves done. This is the count the ready
-	 * rule uses, so a badge drawn from it agrees with `ready`; `blocked_by.length`
-	 * counts finished blockers too.
-	 */
-	open_blockers: number;
-	/** Computed on read: open, every blocker done, and no open subtask. */
-	ready: boolean;
-	blocked_reason: string | null;
-	/** How many direct subtasks this task has. Computed on read, like `open_blockers`. */
-	subtasks_total: number;
-	/** How many of `subtasks_total` sit in a done stage. */
-	subtasks_done: number;
-}
-
-export interface NewTask {
-	project_id?: Uuid | null;
-	title: string;
-	description?: string;
-	kind?: TaskKind;
-	priority?: TaskPriority;
-	assignee?: string | null;
-	labels?: string[];
-	/** Parent task, by id or key. */
-	parent?: string;
-	/** Blocking tasks, by id or key. */
-	blocked_by?: string[];
-	stage?: string;
-	/** Set by an import so a re-import finds this task again. */
-	source_ref?: SourceRef | null;
-}
-
-/**
- * Only the fields present are changed. `assignee: null` and `parent: null` clear
- * the field; leaving either out keeps what is stored.
- */
-export interface TaskUpdate {
-	title?: string;
-	description?: string;
-	kind?: TaskKind;
-	priority?: TaskPriority;
-	assignee?: string | null;
-	labels?: string[];
-	parent?: string | null;
-	expected_updated_at?: Timestamp;
-}
-
-/** One line of a task's history: created, edited, moved, commented and the rest. */
-export interface TaskEvent {
-	id: Uuid;
-	task_id: Uuid;
-	actor: string;
-	kind: string;
-	body: string;
-	detail: unknown;
-	created_at: Timestamp;
-}
-
-export interface TaskDetail {
-	task: Task;
-	children: Task[];
-	events: TaskEvent[];
-}
-
-export interface TaskFilter {
-	project_id?: Uuid | null;
-	stage?: string | null;
-	assignee?: string | null;
-	/** Keep only the tasks that are ready to be worked on. */
-	ready?: boolean;
-	/** Case-insensitive substring match over key, title and description. */
-	query?: string | null;
-	include_done?: boolean;
-	/** Keep only parent-less tasks (`true`) or only subtasks (`false`); omitted
-	 * applies no filter either way. */
-	top_level?: boolean;
-}
-
-/** One write the daemon has just made, as `GET /api/v1/events` announces it. */
-export interface Change {
-	/** `task`, `memory`, `project`, `agent`, ... or `lagged` when events were dropped. */
-	entity: string;
-	action: string;
-	id: Uuid | null;
-	/** The task key, when the change is to a task. */
-	key: string | null;
-	project_id: Uuid | null;
-	at: string;
-}
-
 /** One row of `GET /tasks/counts`; every stage appears, including empty ones. */
 export interface StageCount {
 	stage: string;
 	count: number;
 }
 
-// ---- workflows (crates/atlas-core/src/workflow, crates/atlas-core/src/models.rs) ----
-
-export type TriggerKind = 'manual' | 'schedule' | 'prompt';
-export type NodeKind = 'trigger' | 'action' | 'output';
-/** `success`, not `succeeded`: the exact wire string `str_enum!(RunStatus ...)` writes. */
-export type RunStatus = 'queued' | 'running' | 'success' | 'failed' | 'cancelled';
-export type StepStatus = 'queued' | 'running' | 'success' | 'failed' | 'skipped' | 'cancelled';
-export type LogLevel = 'INFO' | 'WARN' | 'ERR';
-
-/** `cron` is read only when `kind` is `schedule`, `prompt` only when it is `prompt`; both
- * are carried on every trigger so the editor keeps a half-typed value across a kind switch. */
-export interface Trigger {
-	kind: TriggerKind;
-	cron: string | null;
-	prompt: string | null;
-}
-
-export interface GraphPosition {
-	x: number;
-	y: number;
-}
-
-/** Empty `kinds` or `tags` mean "no filter on that axis", not "match nothing". */
-export interface MemorySource {
-	kinds: string[];
-	tags: string[];
-	limit: number;
-	project_id: Uuid | null;
-}
-
-export interface ActionNodeData {
-	name: string;
-	instructions: string;
-	agent: string;
-	practices: string[];
-	memories: MemorySource | null;
-}
-
-export interface OutputNodeData {
-	propose_memories: boolean;
-	file_tasks: boolean;
-}
-
-/** Untagged on the wire: a trigger node's `data` is a bare `Trigger`, an action node's is
- * `ActionNodeData`, an output node's is `OutputNodeData`. The node's own `kind` says which. */
-export type NodeData = Trigger | ActionNodeData | OutputNodeData;
-
-/** Named `WorkflowNode` here because `Node` is `@xyflow/svelte`'s own type. */
-export interface WorkflowNode {
-	id: string;
-	kind: NodeKind;
-	position: GraphPosition;
-	data: NodeData;
-}
-
-export interface WorkflowEdge {
-	id: string;
-	source: string;
-	target: string;
-}
-
-export interface Graph {
-	nodes: WorkflowNode[];
-	edges: WorkflowEdge[];
-}
-
-export interface Workflow {
-	id: Uuid;
-	name: string;
-	project_id: Uuid | null;
-	description: string;
-	trigger: Trigger;
-	graph: Graph;
-	enabled: boolean;
-	created_at: Timestamp;
-	updated_at: Timestamp;
-	last_run_at: Timestamp | null;
-	last_status: RunStatus | null;
-}
-
-/** A workflow's shape without its graph, the way `workflow_list` (MCP) and
- * `ProjectContext.workflows` answer. */
-export interface WorkflowSummary {
-	id: Uuid;
-	name: string;
-	trigger: TriggerKind;
-	action_count: number;
-	enabled: boolean;
-	last_status: RunStatus | null;
-}
-
-export interface NewWorkflow {
-	name: string;
-	project_id?: Uuid | null;
-	description?: string;
-	trigger: Trigger;
-	graph?: Graph;
-	enabled?: boolean;
-}
-
-/** Only the fields present change; `project_id: null` clears the project (the daemon's
- * double option), leaving it out keeps what is stored. */
-export interface WorkflowPatch {
-	name?: string;
-	project_id?: Uuid | null;
-	description?: string;
-	trigger?: Trigger;
-	graph?: Graph;
-	enabled?: boolean;
-}
-
-export interface WorkflowRun {
-	id: Uuid;
-	workflow_id: Uuid;
-	/** Per-workflow, starting at 1: the number a run is known by in the GUI and CLI. */
-	number: number;
-	trigger: TriggerKind;
-	status: RunStatus;
-	started_at: Timestamp;
-	finished_at: Timestamp | null;
-	summary: unknown;
-}
-
-export interface LogLine {
-	ts: Timestamp;
-	level: LogLevel;
-	text: string;
-}
-
-export interface WorkflowStep {
-	id: Uuid;
-	run_id: Uuid;
-	/** Zero-based index in the run's execution order. */
-	position: number;
-	/** The graph node this step ran, so a step can be traced back to the canvas. */
-	action_id: string;
-	name: string;
-	agent: string;
-	status: StepStatus;
-	started_at: Timestamp;
-	finished_at: Timestamp | null;
-	output: string | null;
-	log: LogLine[];
-}
-
 /** `GET /api/v1/runs/{id}`. */
 export interface RunDetail {
 	run: WorkflowRun;
 	steps: WorkflowStep[];
-}
-
-/**
- * `WorkflowRun.summary` once parsed: written only once a run finishes successfully
- * (`crates/atlas-core/src/workflow/run.rs`), so a queued, running, failed or cancelled
- * run's `summary` stays `null` and the run detail view falls back to the step list for
- * a step count and `n/a` for tokens.
- */
-export interface RunSummary {
-	steps: number;
-	memories_proposed: number;
-	tasks_filed: number;
-	trigger: TriggerKind;
-	tokens: number | null;
-}
-
-// ---- global search (GET /api/v1/search, crates/atlas-core/src/search/global.rs) ----
-
-/** The seven kinds a search result can hold, in the order the daemon returns them. */
-export type SearchKind = 'task' | 'memory' | 'project' | 'file' | 'commit' | 'event' | 'workflow';
-
-export interface SearchHit {
-	kind: SearchKind;
-	id: string;
-	title: string;
-	subtitle: string | null;
-	project_id: Uuid | null;
-	/** The hit's human pointer: a task key for tasks, the entity id for events. */
-	reference: string | null;
-	score: number;
-	/** Char offsets `[start, end)` into `title`, empty when the hit scored elsewhere. */
-	highlights: [number, number][];
-}
-
-export interface SearchGroup {
-	kind: SearchKind;
-	items: SearchHit[];
-}
-
-export interface SearchResult {
-	groups: SearchGroup[];
-	total: number;
-	took_ms: number;
 }
 
 // ---- MCP (Phase 10) ----
@@ -856,165 +303,4 @@ export interface ProjectMcpReport {
 		http: { url: string; protocol_version: string };
 		project_root: string;
 	};
-}
-
-// ---- MCP servers (Phase 16) ----
-// `GET /api/v1/mcp/servers` and friends (crates/atlas-core/src/mcp_servers). One entry
-// per MCP server the daemon found in an agent's own config, plus one synthesised entry
-// for Atlas itself. Secrets never cross the wire: a transport carries the key names of
-// its `env` or `headers`, never their values.
-
-export type McpServerSource =
-	| 'claude'
-	| 'codex'
-	| 'cursor'
-	| 'gemini'
-	| 'windsurf'
-	| 'plugin'
-	| 'atlas';
-
-/** `local` is Claude Code's per-project entries kept in `~/.claude.json`. */
-export type McpServerScope = 'user' | 'project' | 'local' | 'plugin';
-
-export interface McpStdioTransport {
-	kind: 'stdio';
-	command: string;
-	args: string[];
-	env_keys: string[];
-}
-
-export interface McpHttpTransport {
-	kind: 'http';
-	url: string;
-	header_keys: string[];
-}
-
-export type McpServerTransport = McpStdioTransport | McpHttpTransport;
-
-export interface McpServerEntry {
-	/** `<source>:<scope>:<name>`, `plugin:<marketplace>/<plugin>:<name>`, or `atlas`.
-	 * Contains `:` and `/`, so it is URL-encoded wherever it goes in a path. */
-	id: string;
-	name: string;
-	source: McpServerSource;
-	scope: McpServerScope;
-	transport: McpServerTransport;
-	/** Absolute path of the config file the entry came from; null for Atlas. */
-	file: string | null;
-	/** `<marketplace>/<plugin>` for a plugin server. */
-	plugin: string | null;
-	enabled: boolean;
-	/** False where the agent has no native enable switch, or the entry is not editable. */
-	can_toggle: boolean;
-	can_remove: boolean;
-	is_atlas: boolean;
-	project_id: Uuid | null;
-}
-
-export interface McpServerList {
-	servers: McpServerEntry[];
-	/** Config files that could not be read or parsed. */
-	warnings: string[];
-}
-
-export interface McpCheckTool {
-	name: string;
-	/** Nullable: a server may list a tool with no description at all. */
-	description: string | null;
-}
-
-/** `POST /api/v1/mcp/servers/{id}/check`: the daemon started the server and asked it
- * for its tools. `ok: false` carries the reason in `error`. */
-export interface McpCheckResult {
-	ok: boolean;
-	server_name: string | null;
-	server_version: string | null;
-	protocol_version: string | null;
-	tools: McpCheckTool[];
-	error: string | null;
-	elapsed_ms: number;
-}
-
-/** `POST /api/v1/mcp/servers`. Unlike an entry's transport, this one carries the secret
- * values, which the daemon writes into the agent's config and never sends back. */
-export type NewMcpTransport =
-	| { kind: 'stdio'; command: string; args: string[]; env: Record<string, string> }
-	| { kind: 'http'; url: string; headers: Record<string, string> };
-
-export interface NewMcpServer {
-	source: McpServerSource;
-	scope: McpServerScope;
-	project_id?: Uuid | null;
-	name: string;
-	transport: NewMcpTransport;
-}
-
-/** Query string for `GET /api/v1/search`. `project_id` takes one project, not a list. */
-export interface GlobalSearchQuery {
-	q: string;
-	project_id?: Uuid | null;
-	kinds?: SearchKind[];
-	limit?: number;
-}
-
-// ---- skills ----
-// `GET /api/v1/skills` and friends (crates/atlasd/src/http.rs). A skill is either a
-// discovered `SKILL.md` folder on disk or an Atlas-native row in the daemon's database;
-// both arrive in the same shape, told apart by `source`.
-
-export type SkillSource =
-	| 'native'
-	| 'claude-project'
-	| 'claude-user'
-	| 'codex-project'
-	| 'codex-user'
-	| 'plugin';
-
-export type SkillScope = 'global' | 'project';
-
-export interface SkillSummary {
-	/** `<source>:<path relative to its root>` for a discovered skill, a UUID for a native
-	 * one. Contains `:` and `/`, so it is URL-encoded wherever it goes in a path. */
-	id: string;
-	source: SkillSource;
-	name: string;
-	description: string;
-	scope: SkillScope;
-	project_id: Uuid | null;
-	/** Absolute folder path, for discovered skills only. */
-	path: string | null;
-	/** `<marketplace>/<plugin>` for a plugin skill. */
-	plugin: string | null;
-	/** False for a skill Atlas may read but not write. */
-	editable: boolean;
-	updated_at: string | null;
-	/** Always present; `null` when the request named no project. */
-	enabled_here: boolean | null;
-}
-
-export interface Skill extends SkillSummary {
-	/** The whole `SKILL.md` text, frontmatter included. */
-	body: string;
-	/** Other files in the skill folder, relative, for display only. */
-	files: string[];
-}
-
-export interface SkillList {
-	skills: SkillSummary[];
-	/** Roots that could not be read, and entries that were skipped. */
-	warnings: string[];
-}
-
-/** `POST /api/v1/skills`. Native skills only; a discovered one comes from disk. */
-export interface NewSkill {
-	project_id?: Uuid | null;
-	name: string;
-	description: string;
-	body: string;
-}
-
-/** `PATCH /api/v1/skills/{id}`, native skills only. */
-export interface SkillPatch {
-	name?: string;
-	description?: string;
 }
