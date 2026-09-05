@@ -1069,3 +1069,33 @@ fn a_brief_list_leaves_the_description_and_source_ref_out() {
     let found = repo.list(&TaskFilter { project_id: Some(p.id), brief: true, query: Some("hidden".into()), ..Default::default() }).unwrap();
     assert_eq!(found.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), vec!["the other"]);
 }
+
+// -- subtask associations in the parent's history ------------------------------
+
+#[test]
+fn a_parent_hears_when_a_subtask_is_added_moved_and_removed() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    let parent = repo.create(&new_task(Some(p.id), "parent"), "t").unwrap();
+    let other = repo.create(&new_task(Some(p.id), "other"), "t").unwrap();
+    let child = repo
+        .create(&NewTask { project_id: Some(p.id), title: "child".into(), parent: Some(parent.key.clone()), ..Default::default() }, "t")
+        .unwrap();
+    let kinds = |id: Uuid| events(&db, id).into_iter().map(|(k, _)| k).collect::<Vec<_>>();
+    assert_eq!(kinds(parent.id), vec!["created", "subtask_added"]);
+
+    repo.update(&child.key, &TaskUpdate { parent: Some(Some(other.key.clone())), ..Default::default() }, "t").unwrap();
+    assert_eq!(kinds(parent.id), vec!["created", "subtask_added", "subtask_removed"]);
+    assert_eq!(kinds(other.id), vec!["created", "subtask_added"]);
+
+    // The same parent again writes nothing on either side.
+    repo.update(&child.key, &TaskUpdate { parent: Some(Some(other.key.clone())), ..Default::default() }, "t").unwrap();
+    assert_eq!(kinds(other.id), vec!["created", "subtask_added"]);
+
+    repo.delete(&child.key, "t").unwrap();
+    assert_eq!(kinds(other.id), vec!["created", "subtask_added", "subtask_removed"]);
+    let detail = repo.get(&other.key).unwrap();
+    let last = detail.events.last().unwrap();
+    assert_eq!(last.body, format!("removed subtask {} child", child.key));
+    assert_eq!(last.detail.as_ref().unwrap()["subtask"], child.key);
+}

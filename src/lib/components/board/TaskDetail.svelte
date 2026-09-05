@@ -10,7 +10,7 @@
 	import { onMount, untrack } from 'svelte';
 	import { Badge, Button, Icon, IconButton, Input, TagInput } from '$lib/ds';
 	import { errorMessage } from '$lib/errors';
-	import { relativeAge } from '$lib/format';
+	import { eventTime, fixedTime, relativeAge } from '$lib/format';
 	import { copyText, TabStrip, type Tab } from '$lib/shell';
 	import {
 		type DetailMode,
@@ -97,8 +97,8 @@
 	const commentEvents = $derived([...(detail?.events.filter((e) => e.kind === 'commented') ?? [])].reverse());
 	const tabs = $derived([
 		{ id: 'subtasks', label: 'Subtasks', icon: 'list-checks', count: detail?.children.length ?? 0 },
-		{ id: 'activity', label: 'Activity', icon: 'activity', count: activityEvents.length },
-		{ id: 'comments', label: 'Comments', icon: 'message-square', count: commentEvents.length }
+		{ id: 'comments', label: 'Comments', icon: 'message-square', count: commentEvents.length },
+		{ id: 'activity', label: 'History', icon: 'list-clock', count: activityEvents.length }
 	] satisfies Tab[]);
 
 	// The `task.detail.panel` slot, below the tabs. Each frame is told which task is open
@@ -140,6 +140,19 @@
 			statusOpen = false;
 		}
 	}
+	/** `: kind, priority` for an edit that recorded its fields, else nothing. */
+	function editedFields(event: TaskEvent): string {
+		const d = event.detail as Record<string, unknown> | null | undefined;
+		return d && typeof d.fields === 'string' && d.fields ? `: ${d.fields}` : '';
+	}
+
+	/** The child a subtask association names, read from the event's detail. */
+	function subtaskOf(event: TaskEvent): { key: string; title: string } | null {
+		const d = event.detail as Record<string, unknown> | null | undefined;
+		if (!d || typeof d.subtask !== 'string') return null;
+		return { key: d.subtask, title: typeof d.title === 'string' ? d.title : '' };
+	}
+
 	/** Fields save the moment they change; a text box saves when it loses focus or on Enter. */
 	function autosave() {
 		void save({ quiet: true });
@@ -572,14 +585,32 @@
 <svelte:window onpointerdown={closeMenus} onkeydown={onWindowKey} />
 
 {#snippet eventRow(event: TaskEvent)}
+	{@const sub = subtaskOf(event)}
 	<li>
 		<div class="who">
 			<span class="actor">{event.actor}</span>
-			<Badge variant="outline">{event.kind}</Badge>
+			<Badge variant="outline">{event.kind.replace('_', ' ')}</Badge>
 			<span class="spacer"></span>
-			<span class="when">{relativeAge(event.created_at)}</span>
+			<span class="when" title={fixedTime(event.created_at)}>{eventTime(event.created_at)}</span>
 		</div>
-		<span class="what">{event.body}</span>
+		{#if sub}
+			<!-- A subtask association names the child; the key opens it in this panel. -->
+			<span class="what">
+				{event.kind === 'subtask_added' ? 'added subtask' : 'removed subtask'}
+				<button
+					type="button"
+					class="event-link"
+					data-testid="event-subtask-{sub.key}"
+					onclick={() => onopen?.(sub.key)}
+				>
+					<code>{sub.key}</code>
+				</button>
+				{sub.title}
+			</span>
+		{:else}
+			<!-- An edit names the fields it touched, so the row says what changed. -->
+			<span class="what">{event.body}{editedFields(event)}</span>
+		{/if}
 	</li>
 {/snippet}
 
@@ -937,6 +968,10 @@
 							autosave();
 						}}
 					/>
+					<div class="field">
+						<span class="dbm-field__label">Created</span>
+						<span class="fixed" title={fixedTime(task.created_at)} data-testid="task-created">{fixedTime(task.created_at)}</span>
+					</div>
 					<MenuSelect
 						label="Persona"
 						value={persona}
@@ -1481,6 +1516,13 @@
 		margin-top: 6px;
 	}
 
+	/* A read-only value drawn like a control's text, without the control. */
+	.fixed {
+		font-size: 12px;
+		color: var(--text-secondary);
+		line-height: 28px;
+	}
+
 	.status-head {
 		justify-content: space-between;
 	}
@@ -1704,6 +1746,19 @@
 	/* The lozenge sits in its own right-hand column so the stages line up. */
 	.child-row .child-stage {
 		margin-left: auto;
+	}
+
+	.event-link {
+		padding: 0;
+		border: 0;
+		background: none;
+		color: var(--accent);
+		font: inherit;
+		cursor: pointer;
+	}
+
+	.event-link:hover {
+		text-decoration: underline;
 	}
 
 	.events li {

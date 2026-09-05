@@ -123,3 +123,33 @@ export function duration(
 	const seconds = totalSeconds % 60;
 	return `${minutes}m ${seconds}s`;
 }
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/**
+ * The fixed time a history row shows on hover and the Created field shows outright:
+ * `2026 Sep 06, 08:39PM`. `withYear` false drops the year for a date in the current year.
+ */
+export function fixedTime(ts: Timestamp | null | undefined, withYear = true): string {
+	if (!ts) return NOTHING;
+	const d = new Date(ts);
+	if (Number.isNaN(d.getTime())) return NOTHING;
+	const h = d.getHours();
+	const hour12 = h % 12 === 0 ? 12 : h % 12;
+	const clock = `${pad(hour12)}:${pad(d.getMinutes())}${h < 12 ? 'AM' : 'PM'}`;
+	const day = `${MONTHS[d.getMonth()]} ${pad(d.getDate())}`;
+	return withYear ? `${d.getFullYear()} ${day}, ${clock}` : `${day}, ${clock}`;
+}
+
+/**
+ * A history row's time: `4h ago` for today, the date and time for any other day (with
+ * the year only when it is not this year). The fixed form sits in the row's tooltip.
+ */
+export function eventTime(ts: Timestamp, now: number = Date.now()): string {
+	if (isToday(ts, now)) {
+		const age = relativeAge(ts, now);
+		return age === 'just now' || age === '-' ? age : `${age} ago`;
+	}
+	const sameYear = new Date(ts).getFullYear() === new Date(now).getFullYear();
+	return fixedTime(ts, !sameYear);
+}

@@ -767,6 +767,9 @@ impl TaskRepo {
             )?;
             self.replace_blockers(c, id, &blockers)?;
             self.event(c, id, actor, "created", &format!("created {key}"), Some(json!({"stage": stage.name, "title": title})))?;
+            if let Some(pid) = parent {
+                self.subtask_event(c, pid, actor, "subtask_added", &key, &title)?;
+            }
             self.load_one(c, id)
         })
     }
@@ -822,6 +825,7 @@ impl TaskRepo {
                 args.push(text(serde_json::to_string(l)?));
                 detail.insert("labels".into(), json!(l));
             }
+            let mut reparented: Option<(Option<Uuid>, Option<Uuid>)> = None;
             if let Some(p) = &upd.parent {
                 let parent = match p {
                     Some(v) => {
@@ -831,6 +835,9 @@ impl TaskRepo {
                     }
                     None => None,
                 };
+                if parent != task.parent_id {
+                    reparented = Some((task.parent_id, parent));
+                }
                 sets.push("parent_id = ?".into());
                 args.push(match parent {
                     Some(v) => text(v.to_string()),
@@ -866,8 +873,28 @@ impl TaskRepo {
             };
             let fields = detail.keys().cloned().collect::<Vec<_>>().join(", ");
             self.event(c, id, actor, kind, &format!("{verb} {}", task.key), Some(json!({"fields": fields, "to": detail})))?;
+            // Both parents hear about a move between them, so each one's history says
+            // when the child came and went.
+            if let Some((from, to)) = reparented {
+                let title = upd.title.as_deref().map(str::trim).unwrap_or(&task.title);
+                if let Some(pid) = from {
+                    self.subtask_event(c, pid, actor, "subtask_removed", &task.key, title)?;
+                }
+                if let Some(pid) = to {
+                    self.subtask_event(c, pid, actor, "subtask_added", &task.key, title)?;
+                }
+            }
             self.load_one(c, id)
         })
+    }
+
+    /// The parent's side of a subtask association: `added subtask ATL-9 title` or
+    /// `removed subtask ATL-9 title`, with the child's key in the detail so a reader can
+    /// follow it.
+    fn subtask_event(&self, c: &Connection, parent: Uuid, actor: &str, kind: &str, key: &str, title: &str) -> Result<()> {
+        let verb = if kind == "subtask_added" { "added" } else { "removed" };
+        self.event(c, parent, actor, kind, &format!("{verb} subtask {key} {title}"), Some(json!({"subtask": key, "title": title})))?;
+        Ok(())
     }
 
     /// Moves a task to another stage of its board. Entering a done stage stamps
@@ -997,6 +1024,9 @@ impl TaskRepo {
             let task = self.load_bare(c, id)?;
             c.execute("delete from task_blockers where task_id = ? or blocked_by = ?", params![id.to_string(), id.to_string()])?;
             c.execute("update tasks set parent_id = null, updated_at = now() where parent_id = ?", params![id.to_string()])?;
+            if let Some(pid) = task.parent_id {
+                self.subtask_event(c, pid, actor, "subtask_removed", &task.key, &task.title)?;
+            }
             self.event(c, id, actor, "deleted", &format!("deleted {}", task.key), Some(json!({"title": task.title})))?;
             c.execute("delete from tasks where id = ?", params![id.to_string()])?;
             self.sweep_dangling_blockers(c)?;

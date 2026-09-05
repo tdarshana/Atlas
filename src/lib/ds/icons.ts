@@ -53,6 +53,7 @@ import Info from '@lucide/svelte/icons/info';
 import Keyboard from '@lucide/svelte/icons/keyboard';
 import Layers from '@lucide/svelte/icons/layers';
 import ListChecks from '@lucide/svelte/icons/list-checks';
+import ListClock from '@lucide/svelte/icons/list-clock';
 import Loader from '@lucide/svelte/icons/loader';
 import Lock from '@lucide/svelte/icons/lock';
 import Maximize from '@lucide/svelte/icons/maximize';
@@ -102,6 +103,7 @@ export const icons = {
 	history: History,
 	activity: Activity,
 	'list-checks': ListChecks,
+	'list-clock': ListClock,
 	settings: Settings,
 	search: Search,
 	zap: Zap,

@@ -172,7 +172,7 @@ describe('TaskDetail tabs', () => {
 		expect(subtasksTab?.querySelector('.dbm-badge')?.textContent?.trim()).toBe('2');
 
 		const activityTab = container.querySelector('[data-testid="task-tab-activity"]');
-		expect(activityTab?.textContent).toContain('Activity');
+		expect(activityTab?.textContent).toContain('History');
 		expect(activityTab?.querySelector('.dbm-badge')?.textContent?.trim()).toBe('3');
 
 		const commentsTab = container.querySelector('[data-testid="task-tab-comments"]');
