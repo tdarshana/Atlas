@@ -4,6 +4,24 @@
 use crate::{AtlasError, Result};
 use std::time::Duration;
 
+/// Everything a chat call needs to know about which model to talk to and how. This
+/// is the seam for per-case model assignment: whoever resolves a profile (see
+/// `extract::resolve_model`) decides the model, and the client only carries it.
+#[derive(Clone)]
+pub struct ModelProfile {
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+}
+
+/// Written by hand rather than derived: a derived `Debug` would put the api key
+/// into any log line or panic message that formats the profile.
+impl std::fmt::Debug for ModelProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModelProfile").field("base_url", &self.base_url).field("model", &self.model).finish_non_exhaustive()
+    }
+}
+
 pub struct LlmClient {
     pub base_url: String,
     pub api_key: String,
@@ -23,6 +41,10 @@ impl LlmClient {
             model: model.to_string(),
             client,
         })
+    }
+
+    pub fn from_profile(profile: &ModelProfile) -> Result<Self> {
+        Self::new(&profile.base_url, &profile.api_key, &profile.model)
     }
 
     /// Text with every occurrence of the api key replaced by `***`. An empty key

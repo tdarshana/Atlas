@@ -26,6 +26,7 @@ use crate::db::Db;
 use crate::extract::{self, ExtractionConfig};
 use crate::jobs::Job;
 use crate::library::{AgentRepo, DocRepo};
+use crate::llm::{LlmClient, ModelProfile};
 use crate::models::*;
 use crate::service::MemoryService;
 use crate::{AtlasError, Result};
@@ -304,11 +305,21 @@ pub async fn run_workflow(job: &Job, backend: &LocalBackend) -> Result<Value> {
         };
         let mut log: Vec<LogLine> = vec![];
 
-        let cfg: ExtractionConfig = {
+        // The action runs on its agent's `model_hint` when the agent is saved and names
+        // one; otherwise on the scope's extraction model, exactly as before. The
+        // endpoint and key are the scope's either way (`ExtractionConfig::model_profile`).
+        let (cfg, profile): (ExtractionConfig, ModelProfile) = {
             let db = backend.db.clone();
             let project_id = workflow.project_id;
-            match backend.blocking(move || extract::resolve_extraction(&db, project_id)).await {
-                Ok(cfg) => cfg,
+            let agent = agent.clone();
+            let resolved = backend.blocking(move || {
+                let cfg = extract::resolve_extraction(&db, project_id)?;
+                let hint = AgentRepo::new(&db).get(&agent).ok().and_then(|a| a.model_hint);
+                let profile = cfg.model_profile(hint.as_deref());
+                Ok((cfg, profile))
+            }).await;
+            match resolved {
+                Ok(pair) => pair,
                 Err(e) => {
                     let workflows = backend.workflows.clone();
                     let memories = backend.memories.clone();
@@ -319,7 +330,7 @@ pub async fn run_workflow(job: &Job, backend: &LocalBackend) -> Result<Value> {
             }
         };
         last_threshold = cfg.auto_accept_min_confidence;
-        let client = match extract::build_client(&cfg) {
+        let client = match LlmClient::from_profile(&profile) {
             Ok(c) => c,
             Err(e) => {
                 let workflows = backend.workflows.clone();

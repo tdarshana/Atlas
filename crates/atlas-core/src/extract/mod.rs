@@ -6,7 +6,7 @@ pub use summary::summarize_project;
 use crate::backend::LocalBackend;
 use crate::db::Db;
 use crate::jobs::Job;
-use crate::llm::LlmClient;
+use crate::llm::{LlmClient, ModelProfile};
 use crate::models::{MemoryKind, MemoryScope, MemoryStatus, NewMemory};
 use crate::projects::{detect_root, ProjectRepo};
 use crate::service::MemoryService;
@@ -118,6 +118,28 @@ pub fn resolve_extraction(db: &Db, project_id: Option<Uuid>) -> Result<Extractio
             None => settings.get_raw("extraction.auto_accept_min_confidence")?.and_then(|v| v.as_f64()).unwrap_or(1.0),
         },
     })
+}
+
+impl ExtractionConfig {
+    /// The model profile this config resolves to, with `hint` (an agent's or a
+    /// persona's model name) taking the place of the model when it names one. The
+    /// endpoint and key are not the hint's to change: a hint says which model, not
+    /// where, so it always rides the scope's own endpoint with the scope's own key.
+    pub fn model_profile(&self, hint: Option<&str>) -> ModelProfile {
+        ModelProfile {
+            base_url: self.base_url.clone(),
+            api_key: self.api_key.clone(),
+            model: hint.map(str::trim).filter(|h| !h.is_empty()).unwrap_or(&self.model).to_string(),
+        }
+    }
+}
+
+/// The model to run one call on, for a scope: `hint` first, then the project's
+/// `extraction.model` override, then the global setting. Everything else follows
+/// `resolve_extraction`, including the "disabled" error when the scope is not fully
+/// configured; a hint on its own does not switch extraction on.
+pub fn resolve_model(db: &Db, project_id: Option<Uuid>, hint: Option<&str>) -> Result<ModelProfile> {
+    Ok(resolve_extraction(db, project_id)?.model_profile(hint))
 }
 
 /// The global extraction settings, with no project override in play.
@@ -328,7 +350,7 @@ pub fn project_for(db: &Db, root: Option<PathBuf>) -> Result<Option<Uuid>> {
 /// each constructing an `LlmClient` of their own, so the two ways of reaching the
 /// model never drift apart.
 pub fn build_client(cfg: &ExtractionConfig) -> Result<LlmClient> {
-    LlmClient::new(&cfg.base_url, &cfg.api_key, &cfg.model)
+    LlmClient::from_profile(&cfg.model_profile(None))
 }
 
 /// Runs one `ingest` job: read the transcript out of the payload, ask the model
@@ -589,6 +611,67 @@ mod tests {
         assert_eq!(on.base_url, "http://localhost:1234/v1");
         assert_eq!(on.auto_accept_min_confidence, 0.9);
         assert!(matches!(resolve_extraction(&db, None), Err(AtlasError::Conflict(_))), "the global scope stays off");
+    }
+
+    /// `resolve_model` picks the model by hint, then project override, then global
+    /// setting; the endpoint and key never follow the hint, and a scope that is not
+    /// configured still reports extraction as disabled whatever the hint says.
+    #[test]
+    fn resolve_model_prefers_the_hint_then_the_project_then_the_global_model() {
+        use crate::models::ProjectExtraction;
+        use crate::projects::{Detected, ProjectRepo};
+        let db = Db::open_in_memory().unwrap();
+        let settings = SettingsRepo::new(&db);
+        settings
+            .set_many(
+                &serde_json::Map::from_iter([
+                    ("extraction.enabled".to_string(), serde_json::Value::from(true)),
+                    ("extraction.base_url".to_string(), "https://global.example/v1".into()),
+                    ("extraction.model".to_string(), "global-model".into()),
+                    ("extraction.api_key".to_string(), "sk-global".into()),
+                ]),
+                "t",
+            )
+            .unwrap();
+        let projects = ProjectRepo::new(&db);
+        let p = projects.upsert(&Detected { root: "/tmp/hint".into(), remote: None }, None, "t").unwrap();
+
+        // No override, no hint: the global model.
+        let global = resolve_model(&db, Some(p.id), None).unwrap();
+        assert_eq!(global.model, "global-model");
+        assert_eq!(global.base_url, "https://global.example/v1");
+        assert_eq!(global.api_key, "sk-global");
+
+        // A hint beats the global model and leaves the endpoint and key alone.
+        let hinted = resolve_model(&db, Some(p.id), Some("hint-model")).unwrap();
+        assert_eq!(hinted.model, "hint-model");
+        assert_eq!(hinted.base_url, "https://global.example/v1");
+        assert_eq!(hinted.api_key, "sk-global");
+        // A blank hint is no hint.
+        assert_eq!(resolve_model(&db, Some(p.id), Some("  ")).unwrap().model, "global-model");
+
+        // The project override beats the global model, and the hint beats both.
+        projects
+            .set_project_extraction(
+                p.id,
+                Some(ProjectExtraction { model: Some("project-model".into()), api_key: Some("sk-project".into()), ..Default::default() }),
+                "t",
+            )
+            .unwrap();
+        assert_eq!(resolve_model(&db, Some(p.id), None).unwrap().model, "project-model");
+        let hinted = resolve_model(&db, Some(p.id), Some("hint-model")).unwrap();
+        assert_eq!(hinted.model, "hint-model");
+        assert_eq!(hinted.api_key, "sk-project", "the key still comes from the project override");
+        assert_eq!(hinted.base_url, "https://global.example/v1");
+        assert_eq!(resolve_model(&db, None, Some("hint-model")).unwrap().api_key, "sk-global", "the global scope never sees the project's values");
+
+        // `resolve_extraction` is unchanged by the seam.
+        assert_eq!(resolve_extraction(&db, Some(p.id)).unwrap().model, "project-model");
+
+        // A missing global model is still "disabled", hint or not.
+        settings.set_many(&serde_json::Map::from_iter([("extraction.model".to_string(), serde_json::Value::from(""))]), "t").unwrap();
+        assert!(matches!(resolve_model(&db, None, Some("hint-model")), Err(AtlasError::Conflict(_))));
+        assert!(matches!(resolve_model(&db, None, None), Err(AtlasError::Conflict(_))));
     }
 
     #[test]

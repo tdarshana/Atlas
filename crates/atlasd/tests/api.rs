@@ -2298,6 +2298,64 @@ async fn workflow_run_executes_two_actions_and_succeeds() {
     assert!(text.contains("[step0]") && text.contains("[step1]"), "{text}");
 }
 
+/// A stub model that records the `model` field of every request body, in order, and
+/// answers `reply` to all of them.
+async fn stub_llm_recording_models(reply: &str) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let models = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = models.clone();
+    let content = reply.to_string();
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+            let content = content.clone();
+            let seen = seen.clone();
+            async move {
+                seen.lock().unwrap().push(body["model"].as_str().unwrap_or("").to_string());
+                axum::Json(serde_json::json!({"choices": [{"message": {"content": content}}]}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}/v1"), models)
+}
+
+/// An action whose agent carries a `model_hint` runs on that model; an agent saved
+/// without one, and the unsaved `desktop` fallback, both run on the extraction model.
+#[tokio::test]
+async fn workflow_actions_run_on_the_agents_model_hint_when_it_has_one() {
+    let (stub, models) = stub_llm_recording_models("step done").await;
+    let d = start().await;
+    let base = format!("http://127.0.0.1:{}/api/v1", d.port);
+    let c = reqwest::Client::new();
+    let put = c.put(format!("{base}/settings")).json(&serde_json::json!({
+        "extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub", "extraction.api_key": "k",
+    })).send().await.unwrap();
+    assert_eq!(put.status(), 200);
+    for (name, hint) in [("planner", Some("planner-model")), ("reviewer", None)] {
+        let r = c.post(format!("{base}/agents")).json(&serde_json::json!({
+            "name": name, "description": "d", "instructions": "Do it.", "model_hint": hint,
+        })).send().await.unwrap();
+        assert_eq!(r.status(), 201, "{}", r.text().await.unwrap());
+    }
+
+    let mut graph = linear_workflow_graph(&["plan", "review", "wrap up"], false, false);
+    graph["nodes"][1]["data"]["agent"] = "planner".into();
+    graph["nodes"][2]["data"]["agent"] = "reviewer".into();
+    let r = c.post(format!("{base}/workflows"))
+        .json(&serde_json::json!({"name": "hinted", "trigger": {"kind": "manual"}, "graph": graph, "enabled": true}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 201);
+    let workflow: serde_json::Value = r.json().await.unwrap();
+    let wid = workflow["id"].as_str().unwrap();
+
+    let run: serde_json::Value = c.post(format!("{base}/workflows/{wid}/run")).json(&serde_json::json!({})).send().await.unwrap().json().await.unwrap();
+    let detail = wait_for_run(&c, &base, run["id"].as_str().unwrap()).await;
+    assert_eq!(detail["run"]["status"], "success", "{detail}");
+    assert_eq!(*models.lock().unwrap(), vec!["planner-model", "stub", "stub"]);
+}
+
 /// `GET /api/v1/runs?since=&limit=` lists finished runs across every workflow, newest
 /// first, and a `since` set to just after the run finished excludes it: the notification
 /// poller's own use of the parameter.
