@@ -3,9 +3,8 @@
 #
 # The local history carries docs/, references/, .superpowers/ and .vscode/, which are
 # not published. Rather than rewriting the local repository, this clones it into a
-# scratch directory, strips those paths from every commit with git filter-repo, merges
-# the remote's existing history underneath (so a plain push is a fast-forward and the
-# remote's own commits are kept), and pushes the result as `main`.
+# scratch directory, strips those paths from every commit with git filter-repo, and
+# pushes the result as `main`.
 #
 #   scripts/publish.sh            # push local main
 #   scripts/publish.sh --dry-run  # do everything but the push
@@ -39,11 +38,6 @@ git filter-repo --quiet --force --invert-paths \
   --email-callback "return b'$handle@users.noreply.github.com'"
 
 git remote add origin "$remote_url"
-git fetch -q origin main || true
-if git rev-parse -q --verify origin/main >/dev/null; then
-  # Keep the remote's commits as ancestors; ours win on any path both sides touched.
-  git merge -q --allow-unrelated-histories -X ours -m "Publish $(git -C "$root" rev-parse --short main)" origin/main
-fi
 
 echo "publish: $(git rev-list --count HEAD) commits, $(git ls-files | wc -l | tr -d ' ') files"
 git ls-files | cut -d/ -f1 | sort -u | tr '\n' ' '; echo
@@ -51,5 +45,9 @@ if [ "$dry_run" = 1 ]; then
   echo "publish: dry run, not pushing"
   exit 0
 fi
-git push -q origin HEAD:main
+# The remote is publish-only: nothing is committed there directly, and filter-repo is
+# deterministic, so each run reproduces the earlier published commits and adds the new
+# ones. --force covers the first push over a repository created with a placeholder
+# commit and any later rewrite of the filter.
+git push -q --force origin HEAD:main
 echo "publish: pushed to $remote_url"
