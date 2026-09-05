@@ -19,3 +19,6 @@ references/**/.DS_Store
 .claude/worktrees/
 .tmp*/
 bunx-*/
+
+# Session working notes (briefs, reports); never published
+.superpowers/
