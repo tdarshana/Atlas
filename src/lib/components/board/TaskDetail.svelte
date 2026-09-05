@@ -96,7 +96,8 @@
 
 	// The lower half's three tabs.
 	const activityEvents = $derived(detail?.events.filter((e) => e.kind !== 'commented') ?? []);
-	const commentEvents = $derived(detail?.events.filter((e) => e.kind === 'commented') ?? []);
+	// Newest first: the latest word on a task is what a reader opens the tab for.
+	const commentEvents = $derived([...(detail?.events.filter((e) => e.kind === 'commented') ?? [])].reverse());
 	const tabs = $derived([
 		{ id: 'subtasks', label: 'Subtasks', icon: 'list-checks', count: detail?.children.length ?? 0 },
 		{ id: 'activity', label: 'Activity', icon: 'activity', count: activityEvents.length },
@@ -791,120 +792,6 @@
 				</section>
 			{/if}
 
-			<section>
-				<h3>Blocked by</h3>
-				{#if task.blocked_by.length === 0}
-					<p class="muted">Nothing is holding this up.</p>
-				{:else}
-					<ul class="chips">
-						{#each task.blocked_by as key (key)}
-							<li>
-								<code>{key}</code>
-								<IconButton
-									size="sm"
-									icon="x"
-									label="Remove blocker {key}"
-									disabled={busy}
-									onclick={() => removeBlocker(key)}
-								/>
-							</li>
-						{/each}
-					</ul>
-				{/if}
-				<div class="row end">
-					<div class="grow">
-						<Input
-							mono
-							bind:value={blockerKey}
-							placeholder="ATL-12"
-							aria-label="Blocker key"
-							data-testid="task-blocker-key"
-						/>
-					</div>
-					<Button data-testid="task-blocker-add" disabled={busy} onclick={addBlocker}>Add</Button>
-				</div>
-			</section>
-
-			<section class="tabs" data-testid="task-tabs">
-				<TabStrip
-					items={tabs}
-					active={detailTab()}
-					onselect={(id) => setDetailTab(id as DetailTab)}
-					testid="task-tab"
-				/>
-
-				{#if detailTab() === 'subtasks'}
-					{#if detail && detail.children.length > 0}
-						<ul class="list" data-testid="task-children">
-							{#each detail.children as child (child.id)}
-								<li>
-									<button
-										type="button"
-										class="child-row"
-										onclick={() => onopen?.(child.key)}
-									>
-										<KindIcon kind={child.kind} size={12} />
-										<code>{child.key}</code>
-										<span>{child.title}</span>
-										<span class="child-stage" style="background:{stageColor(child.stage)}">{child.stage}</span>
-									</button>
-								</li>
-							{/each}
-						</ul>
-					{:else}
-						<p class="muted">No subtasks.</p>
-					{/if}
-				{:else if detailTab() === 'activity'}
-					{#if activityEvents.length > 0}
-						<ul class="events" data-testid="task-events">
-							{#each activityEvents as event (event.id)}
-								{@render eventRow(event)}
-							{/each}
-						</ul>
-					{:else}
-						<p class="muted">Nothing has happened yet.</p>
-					{/if}
-				{:else}
-					{#if commentEvents.length > 0}
-						<ul class="events" data-testid="task-events">
-							{#each commentEvents as event (event.id)}
-								{@render eventRow(event)}
-							{/each}
-						</ul>
-					{:else}
-						<p class="muted">No comments yet.</p>
-					{/if}
-					<textarea
-						bind:value={comment}
-						class="area"
-						rows="2"
-						aria-label="Comment"
-						placeholder="Add a comment"
-						data-testid="task-comment"
-					></textarea>
-					<div class="row">
-						<Button size="sm" data-testid="task-comment-send" disabled={busy} onclick={sendComment}>
-							Comment
-						</Button>
-					</div>
-				{/if}
-			</section>
-
-			{#each pluginPanels as panel (`${panel.pluginId}:${panel.id}`)}
-				{@const plugin = pluginById(panel.pluginId)}
-				{#if plugin}
-					<section class="plugin-panel" data-testid="plugin-panel-{panel.pluginId}-{panel.id}">
-						<h3>{plugin.manifest?.name ?? plugin.id}</h3>
-						<PluginFrame
-							{plugin}
-							view={panel.view}
-							slot="task.detail.panel"
-							maxHeight={PLUGIN_PANEL_MAX_HEIGHT}
-							context={pluginContext}
-						/>
-					</section>
-				{/if}
-			{/each}
 			</div>
 
 			<!-- The sidebar: the fields, in the order a tracker's issue view lists them, with
@@ -980,6 +867,123 @@
 					</Button>
 				</div>
 			</aside>
+
+			<section class="full">
+				<h3>Blocked by</h3>
+				{#if task.blocked_by.length === 0}
+					<p class="muted">Nothing is holding this up.</p>
+				{:else}
+					<ul class="chips">
+						{#each task.blocked_by as key (key)}
+							<li>
+								<code>{key}</code>
+								<IconButton
+									size="sm"
+									icon="x"
+									label="Remove blocker {key}"
+									disabled={busy}
+									onclick={() => removeBlocker(key)}
+								/>
+							</li>
+						{/each}
+					</ul>
+				{/if}
+				<div class="row end">
+					<div class="grow">
+						<Input
+							mono
+							bind:value={blockerKey}
+							placeholder="ATL-12"
+							aria-label="Blocker key"
+							data-testid="task-blocker-key"
+						/>
+					</div>
+					<Button data-testid="task-blocker-add" disabled={busy} onclick={addBlocker}>Add</Button>
+				</div>
+			</section>
+
+			<section class="tabs full" data-testid="task-tabs">
+				<TabStrip
+					items={tabs}
+					active={detailTab()}
+					onselect={(id) => setDetailTab(id as DetailTab)}
+					testid="task-tab"
+				/>
+
+				<div class="tab-body">
+				{#if detailTab() === 'subtasks'}
+					{#if detail && detail.children.length > 0}
+						<ul class="list" data-testid="task-children">
+							{#each detail.children as child (child.id)}
+								<li>
+									<button
+										type="button"
+										class="child-row"
+										onclick={() => onopen?.(child.key)}
+									>
+										<KindIcon kind={child.kind} size={12} />
+										<code>{child.key}</code>
+										<span>{child.title}</span>
+										<span class="child-stage" style="background:{stageColor(child.stage)}">{child.stage}</span>
+									</button>
+								</li>
+							{/each}
+						</ul>
+					{:else}
+						<p class="muted">No subtasks.</p>
+					{/if}
+				{:else if detailTab() === 'activity'}
+					{#if activityEvents.length > 0}
+						<ul class="events" data-testid="task-events">
+							{#each activityEvents as event (event.id)}
+								{@render eventRow(event)}
+							{/each}
+						</ul>
+					{:else}
+						<p class="muted">Nothing has happened yet.</p>
+					{/if}
+				{:else}
+					{#if commentEvents.length > 0}
+						<ul class="events" data-testid="task-events">
+							{#each commentEvents as event (event.id)}
+								{@render eventRow(event)}
+							{/each}
+						</ul>
+					{:else}
+						<p class="muted">No comments yet.</p>
+					{/if}
+					<textarea
+						bind:value={comment}
+						class="area"
+						rows="2"
+						aria-label="Comment"
+						placeholder="Add a comment"
+						data-testid="task-comment"
+					></textarea>
+					<div class="row">
+						<Button size="sm" data-testid="task-comment-send" disabled={busy} onclick={sendComment}>
+							Comment
+						</Button>
+					</div>
+				{/if}
+				</div>
+			</section>
+
+			{#each pluginPanels as panel (`${panel.pluginId}:${panel.id}`)}
+				{@const plugin = pluginById(panel.pluginId)}
+				{#if plugin}
+					<section class="plugin-panel full" data-testid="plugin-panel-{panel.pluginId}-{panel.id}">
+						<h3>{plugin.manifest?.name ?? plugin.id}</h3>
+						<PluginFrame
+							{plugin}
+							view={panel.view}
+							slot="task.detail.panel"
+							maxHeight={PLUGIN_PANEL_MAX_HEIGHT}
+							context={pluginContext}
+						/>
+					</section>
+				{/if}
+			{/each}
 			</div>
 		{/if}
 	</div>
@@ -1118,8 +1122,42 @@
 	.columns {
 		display: grid;
 		grid-template-columns: minmax(0, 1fr) var(--side-w, 280px);
-		gap: 0 16px;
+		gap: 12px 16px;
 		align-items: start;
+	}
+
+	/* The first row is the content beside the sidebar and takes the taller of the two;
+	   blockers, the tabs and plugin panels then run under both columns. */
+	.columns > .full {
+		grid-column: 1 / -1;
+	}
+
+	.tabs {
+		min-height: 0;
+	}
+
+	.tab-body {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		min-height: 0;
+	}
+
+	/* The box scrolls; what is inside keeps its natural height (the comment textarea
+	   would otherwise be squeezed to a sliver). */
+	.tab-body > :global(*) {
+		flex: 0 0 auto;
+	}
+
+	/* In the modal the tabs box keeps one height and scrolls inside, so the dialog's
+	   own height never depends on how long the history is. */
+	.detail-modal .tabs {
+		height: 300px;
+	}
+
+	.detail-modal .tab-body {
+		flex: 1;
+		overflow: auto;
 	}
 
 	.main {
