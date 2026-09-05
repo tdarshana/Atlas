@@ -15,6 +15,13 @@ pub struct BlockContext {
 /// Renders the managed block, markers included. Empty `agents`/`practices`
 /// omit their section entirely.
 pub fn render_block(ctx: &BlockContext) -> String {
+    render_block_with(ctx, "")
+}
+
+/// [`render_block`] with `extra` (already rendered Markdown, such as the persona
+/// sections from [`super::persona`]) placed after the practices and before the end
+/// marker. An empty `extra` renders exactly what `render_block` does.
+pub fn render_block_with(ctx: &BlockContext, extra: &str) -> String {
     let mut lines: Vec<String> = vec![START.to_string(), "## Atlas (shared memory and agents)".to_string(), String::new()];
     let command = neutralize(&ctx.mcp_command);
     let sentence = match &ctx.project_name {
@@ -37,6 +44,11 @@ pub fn render_block(ctx: &BlockContext) -> String {
             lines.push(format!("- **{}**: {}", neutralize(&p.name), neutralize(&p.body)));
         }
     }
+    let extra = extra.trim_end();
+    if !extra.is_empty() {
+        lines.push(String::new());
+        lines.push(extra.to_string());
+    }
     lines.push(END.to_string());
     format!("{}\n", lines.join("\n"))
 }
@@ -46,7 +58,7 @@ pub fn render_block(ctx: &BlockContext) -> String {
 /// containing `<!-- atlas:end -->` would otherwise close the block early, and
 /// every later sync would splice into a shorter span and leave the tail behind,
 /// growing the file a copy at a time.
-fn neutralize(s: &str) -> String {
+pub(crate) fn neutralize(s: &str) -> String {
     s.replace("<!-- atlas:", "<!-- atlas\u{200b}:")
 }
 

@@ -30,6 +30,7 @@ fn action_node(id: &str, name: &str, p: Position) -> Node {
             agent: "desktop".into(),
             practices: vec![],
             memories: None,
+            case: None,
         },
     }
 }
@@ -285,7 +286,7 @@ fn the_workflow_trigger_must_match_its_trigger_node() {
 
     let mut no_node = linear();
     no_node.nodes[0].kind = NodeKind::Action;
-    no_node.nodes[0].data = NodeData::Action { name: "not a trigger".into(), instructions: "x".into(), agent: "desktop".into(), practices: vec![], memories: None };
+    no_node.nodes[0].data = NodeData::Action { name: "not a trigger".into(), instructions: "x".into(), agent: "desktop".into(), practices: vec![], memories: None, case: None };
     let missing = NewWorkflow { graph: no_node, ..new_workflow("no-trigger-node") };
     let err = repo.create(&missing, "t").unwrap_err();
     assert!(matches!(err, AtlasError::Invalid(_)), "{err}");
@@ -679,6 +680,7 @@ fn a_full_workflow_round_trips_through_json() {
                         limit: 5,
                         project_id: Some(Uuid::nil()),
                     }),
+                    case: None,
                 },
             },
             Node {
@@ -746,4 +748,103 @@ fn a_run_and_a_step_serialise_with_the_names_the_gui_reads() {
     assert_eq!(step_json["status"], "running");
     assert_eq!(step_json["action_id"], "a");
     assert_eq!(step_json["log"][0], json!({"ts": "2026-09-03T10:00:00Z", "level": "ERR", "text": "boom"}));
+}
+
+/// A stub model that records the `model` of every request, in order, and answers
+/// `reply` to all of them. The same shape `crates/atlasd/tests/api.rs` uses.
+async fn stub_llm_recording_models(reply: &str) -> (String, Arc<Mutex<Vec<String>>>) {
+    let models = Arc::new(Mutex::new(Vec::new()));
+    let seen = models.clone();
+    let content = reply.to_string();
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+            let content = content.clone();
+            let seen = seen.clone();
+            async move {
+                seen.lock().unwrap().push(body["model"].as_str().unwrap_or("").to_string());
+                axum::Json(json!({"choices": [{"message": {"content": content}}]}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}/v1"), models)
+}
+
+/// The model an action runs on, in order: the run's persona's model for the action's
+/// `case`, the persona's `default`, the agent's `model_hint`, the extraction model.
+/// The same workflow run twice, once attributed to a persona and once not, shows
+/// every rung: with the persona, `review` picks `model-r` and the two uncased actions
+/// pick `model-d` (over the agent's own hint); without it, the agent's hint and then
+/// the extraction model apply exactly as before personas existed.
+#[tokio::test]
+async fn a_persona_attributed_run_picks_the_model_by_case() {
+    use crate::backend::LocalBackend;
+    use crate::jobs::Job;
+    use crate::library::AgentRepo;
+    use crate::models::{NewAgent, NewPersona, TriggerKind};
+
+    let (stub, models) = stub_llm_recording_models("step done").await;
+    let dir = tempfile::tempdir().unwrap();
+    let paths = crate::paths::AtlasPaths::at(dir.path());
+    let backend = LocalBackend::open(&paths, None, false).unwrap();
+    let settings = json!({"extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub", "extraction.api_key": "k"});
+    SettingsRepo::new(&backend.db).set_many(settings.as_object().unwrap(), "t").unwrap();
+    AgentRepo::new(&backend.db)
+        .save(&NewAgent { name: "planner".into(), description: "d".into(), instructions: "Do it.".into(), model_hint: Some("planner-model".into()), tools: vec![], tags: vec![] }, "t")
+        .unwrap();
+    let persona = backend
+        .personas
+        .create(
+            &NewPersona {
+                name: "Reviewer".into(),
+                models: std::collections::BTreeMap::from([(Case::Review, "model-r".to_string()), (Case::Default, "model-d".to_string())]),
+                ..Default::default()
+            },
+            "t",
+        )
+        .unwrap();
+
+    // review (planner) -> uncased (planner) -> uncased (desktop, not a saved agent).
+    let mut graph = Graph {
+        nodes: vec![trigger_node("t"), action_node("a", "review", at(200.0, 0.0)), action_node("b", "plan", at(400.0, 0.0)), action_node("c", "wrap", at(600.0, 0.0)), output_node("o")],
+        edges: vec![edge("t", "a"), edge("a", "b"), edge("b", "c"), edge("c", "o")],
+    };
+    for (node, agent, case) in [(1, "planner", Some(Case::Review)), (2, "planner", None), (3, "desktop", None)] {
+        let NodeData::Action { agent: a, case: c, .. } = &mut graph.nodes[node].data else { panic!("not an action") };
+        *a = agent.into();
+        *c = case;
+    }
+    let workflow = backend.workflows.create(&NewWorkflow { graph, ..new_workflow("cased") }, "t").unwrap();
+
+    let job = |run_id: Uuid, persona: Option<&str>| Job {
+        id: Uuid::new_v4(),
+        kind: "workflow_run".into(),
+        status: "queued".into(),
+        payload: json!({"workflow_id": workflow.id, "run_id": run_id, "trigger": "manual", "actor": "t", "persona": persona}),
+        result: None,
+        error: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+
+    let run = backend.workflows.create_run(workflow.id, TriggerKind::Manual).unwrap();
+    let summary = run::run_workflow(&job(run.id, Some(&persona.slug)), &backend).await.unwrap();
+    assert_eq!(summary["steps"], 3, "{summary}");
+    assert_eq!(*models.lock().unwrap(), vec!["model-r", "model-d", "model-d"]);
+
+    models.lock().unwrap().clear();
+    let run = backend.workflows.create_run(workflow.id, TriggerKind::Manual).unwrap();
+    run::run_workflow(&job(run.id, None), &backend).await.unwrap();
+    assert_eq!(*models.lock().unwrap(), vec!["planner-model", "planner-model", "stub"]);
+
+    // A persona that does not resolve is a warning on the first step, not a failure.
+    models.lock().unwrap().clear();
+    let run = backend.workflows.create_run(workflow.id, TriggerKind::Manual).unwrap();
+    run::run_workflow(&job(run.id, Some("nobody")), &backend).await.unwrap();
+    assert_eq!(*models.lock().unwrap(), vec!["planner-model", "planner-model", "stub"]);
+    let (_, steps) = backend.workflows.get_run(run.id).unwrap();
+    assert!(steps[0].log.iter().any(|l| l.level == LogLevel::Warn && l.text.contains("persona 'nobody' not found")), "{:?}", steps[0].log);
 }

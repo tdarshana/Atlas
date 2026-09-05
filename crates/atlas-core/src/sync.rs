@@ -1,9 +1,10 @@
 use crate::board::render::render_board_markdown;
 use crate::export::{self, BlockContext};
 use crate::frameworks;
-use crate::models::{Agent, Stage, SyncAction, SyncKind, SyncOp, SyncReport, Task};
+use crate::models::{Agent, PersonaBundle, Stage, SyncAction, SyncKind, SyncOp, SyncReport, Task};
 use crate::{AtlasError, Result};
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 /// The exact first line of the `TASKS.md` mirror. The file is generated in full on
 /// every sync, but a human who opens the repository still needs to be told, at a
@@ -72,6 +73,24 @@ pub struct SyncInputs<'a> {
     /// has no project to mirror.
     pub board_stages: &'a [Stage],
     pub board_tasks: &'a [Task],
+    /// The project's roster, resolved, in roster order. Each one becomes a Claude
+    /// Code subagent file and a section in the managed blocks. Empty for a global
+    /// sync or a project without a roster, which then writes exactly what it did
+    /// before personas existed.
+    pub personas: &'a [PersonaBundle],
+    /// The roster's default persona, named as such in the `CLAUDE.md` section.
+    pub default_persona: Option<Uuid>,
+}
+
+/// The persona text the managed block in `path` carries: the full `## Persona:`
+/// sections for `AGENTS.md` (Codex has no per-agent file to put them in) and the
+/// roster summary for every other instruction file.
+fn persona_sections(i: &SyncInputs, path: &Path) -> String {
+    if path.file_name().is_some_and(|name| name == "AGENTS.md") {
+        export::agents_md_sections(i.personas)
+    } else {
+        export::claude_md_personas(i.personas, i.default_persona)
+    }
 }
 
 /// Which Claude Code settings file under `.claude/` the Stop hook belongs in.
@@ -95,10 +114,14 @@ pub fn plan_sync(i: &SyncInputs) -> Result<Vec<SyncOp>> {
     for kind in i.targets {
         match kind {
             SyncKind::Claude => {
+                let dir = i.root.join(".claude/agents");
                 for a in i.agents {
-                    let path = i.root.join(".claude/agents").join(format!("{}.md", a.name));
-                    ops.push(agent_op(*kind, path, export::claude_agent_md(a))?);
+                    ops.push(agent_op(*kind, dir.join(format!("{}.md", a.name)), export::claude_agent_md(a))?);
                 }
+                for b in i.personas {
+                    ops.push(agent_op(*kind, dir.join(format!("{}.md", b.persona.slug)), export::claude_subagent(b))?);
+                }
+                ops.extend(stale_persona_exports(&dir, i.personas)?);
             }
             SyncKind::Codex => {
                 for a in i.agents {
@@ -106,8 +129,16 @@ pub fn plan_sync(i: &SyncInputs) -> Result<Vec<SyncOp>> {
                     ops.push(agent_op(*kind, path, export::codex_agent_toml(a))?);
                 }
             }
-            SyncKind::AgentsMd => ops.push(block_op(*kind, i.root.join("AGENTS.md"), &i.block)?),
-            SyncKind::ClaudeMd => ops.push(block_op(*kind, i.root.join("CLAUDE.md"), &i.block)?),
+            SyncKind::AgentsMd => {
+                let path = i.root.join("AGENTS.md");
+                let extra = persona_sections(i, &path);
+                ops.push(block_op(*kind, path, &i.block, &extra)?);
+            }
+            SyncKind::ClaudeMd => {
+                let path = i.root.join("CLAUDE.md");
+                let extra = persona_sections(i, &path);
+                ops.push(block_op(*kind, path, &i.block, &extra)?);
+            }
             SyncKind::ClaudeHook => {
                 if i.hooks {
                     ops.push(claude_hook_op(i.root.join(".claude").join(claude_settings_file(i.global)))?);
@@ -131,7 +162,8 @@ pub fn plan_sync(i: &SyncInputs) -> Result<Vec<SyncOp>> {
                         continue;
                     }
                     for path in adapter.instruction_targets(i.root) {
-                        ops.push(framework_block_op(*kind, path, &i.block)?);
+                        let extra = persona_sections(i, &path);
+                        ops.push(framework_block_op(*kind, path, &i.block, &extra)?);
                     }
                 }
             }
@@ -156,19 +188,46 @@ fn agent_op(kind: SyncKind, path: PathBuf, content: String) -> Result<SyncOp> {
             SyncAction::Update
         }
     };
-    Ok(SyncOp { kind, path, content, action })
+    Ok(SyncOp { kind, path, content, action, delete: false })
+}
+
+/// The persona exports in `dir` whose persona is no longer on the roster, each as a
+/// delete op. Only a file carrying the persona marker qualifies: an agent export or
+/// a hand-written subagent file is never removed, whatever its name. The roster's
+/// own files are planned by `plan_sync` and are not stale, even before they exist.
+fn stale_persona_exports(dir: &Path, personas: &[PersonaBundle]) -> Result<Vec<SyncOp>> {
+    let mut ops = Vec::new();
+    if !dir.is_dir() {
+        return Ok(ops);
+    }
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)?.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    paths.sort();
+    for path in paths {
+        if path.extension().is_none_or(|ext| ext != "md") {
+            continue;
+        }
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+        if personas.iter().any(|b| b.persona.slug == stem) {
+            continue;
+        }
+        let existing = std::fs::read_to_string(&path)?;
+        if export::is_persona_export(&existing) {
+            ops.push(SyncOp { kind: SyncKind::Claude, path, content: String::new(), action: SyncAction::Update, delete: true });
+        }
+    }
+    Ok(ops)
 }
 
 /// A managed-block file (`AGENTS.md`, `CLAUDE.md`): the file itself is
 /// user-owned, only the block between the markers is atlas-managed, so it is
-/// never skipped.
-fn block_op(kind: SyncKind, path: PathBuf, block: &BlockContext) -> Result<SyncOp> {
+/// never skipped. `extra` is the persona text for this file, empty without a roster.
+fn block_op(kind: SyncKind, path: PathBuf, block: &BlockContext, extra: &str) -> Result<SyncOp> {
     let existed = path.exists();
     let existing = if existed { std::fs::read_to_string(&path)? } else { String::new() };
-    // `render_block` ends with a trailing newline after `END`; `splice_block`
+    // `render_block_with` ends with a trailing newline after `END`; `splice_block`
     // expects a bare marker-delimited block and owns newline placement
     // itself, so strip it before handing the block over.
-    let rendered = export::render_block(block);
+    let rendered = export::render_block_with(block, extra);
     let content = export::splice_block(&existing, rendered.trim_end());
     let action = if !existed {
         SyncAction::Create
@@ -177,7 +236,7 @@ fn block_op(kind: SyncKind, path: PathBuf, block: &BlockContext) -> Result<SyncO
     } else {
         SyncAction::Update
     };
-    Ok(SyncOp { kind, path, content, action })
+    Ok(SyncOp { kind, path, content, action, delete: false })
 }
 
 /// A framework's own instruction file (`CLAUDE.md`, `AGENTS.md`, or whatever else an
@@ -186,15 +245,15 @@ fn block_op(kind: SyncKind, path: PathBuf, block: &BlockContext) -> Result<SyncO
 /// only edits inside one that already exists. `instruction_targets` already filters
 /// to files present on disk, so this only turns up empty if one was removed between
 /// that call and this write; treated as a skip rather than a create in that case.
-fn framework_block_op(kind: SyncKind, path: PathBuf, block: &BlockContext) -> Result<SyncOp> {
+fn framework_block_op(kind: SyncKind, path: PathBuf, block: &BlockContext, extra: &str) -> Result<SyncOp> {
     if !path.is_file() {
-        return Ok(SyncOp { kind, path, content: String::new(), action: SyncAction::Skip("the framework instruction file no longer exists".into()) });
+        return Ok(SyncOp { kind, path, content: String::new(), action: SyncAction::Skip("the framework instruction file no longer exists".into()), delete: false });
     }
     let existing = std::fs::read_to_string(&path)?;
-    let rendered = export::render_block(block);
+    let rendered = export::render_block_with(block, extra);
     let content = export::splice_block(&existing, rendered.trim_end());
     let action = if existing == content { SyncAction::Unchanged } else { SyncAction::Update };
-    Ok(SyncOp { kind, path, content, action })
+    Ok(SyncOp { kind, path, content, action, delete: false })
 }
 
 /// The `TASKS.md` mirror: the whole file is generated content, not a block spliced
@@ -208,7 +267,7 @@ fn tasks_md_op(kind: SyncKind, path: PathBuf, content: String) -> Result<SyncOp>
         let existing = std::fs::read_to_string(&path)?;
         if existing == content { SyncAction::Unchanged } else { SyncAction::Update }
     };
-    Ok(SyncOp { kind, path, content, action })
+    Ok(SyncOp { kind, path, content, action, delete: false })
 }
 
 /// A Claude Code settings file: user-owned, and Atlas only adds one `Stop`
@@ -224,19 +283,19 @@ fn claude_hook_op(path: PathBuf) -> Result<SyncOp> {
     } else {
         match serde_json::from_str::<serde_json::Value>(&existing) {
             Ok(v) => v,
-            Err(e) => return Ok(SyncOp { kind, path, content: existing, action: SyncAction::Skip(format!("not valid JSON: {e}")) }),
+            Err(e) => return Ok(SyncOp { kind, path, content: existing, action: SyncAction::Skip(format!("not valid JSON: {e}")), delete: false }),
         }
     };
     let action = match insert_stop_hook(&mut settings) {
-        Err(reason) => return Ok(SyncOp { kind, path, content: existing, action: SyncAction::Skip(reason) }),
+        Err(reason) => return Ok(SyncOp { kind, path, content: existing, action: SyncAction::Skip(reason), delete: false }),
         // Already installed: answer with the file as it stands, so a sync never
         // reformats a settings.json it had nothing to add to.
-        Ok(false) => return Ok(SyncOp { kind, path, content: existing, action: SyncAction::Unchanged }),
+        Ok(false) => return Ok(SyncOp { kind, path, content: existing, action: SyncAction::Unchanged, delete: false }),
         Ok(true) if existed => SyncAction::Update,
         Ok(true) => SyncAction::Create,
     };
     let content = format!("{}\n", serde_json::to_string_pretty(&settings)?);
-    Ok(SyncOp { kind, path, content, action })
+    Ok(SyncOp { kind, path, content, action, delete: false })
 }
 
 /// Adds the `Stop` entry to a parsed settings file. `Ok(true)` when it was added,
@@ -275,34 +334,42 @@ fn codex_hook_op(path: PathBuf) -> Result<SyncOp> {
     let existing = if path.exists() { std::fs::read_to_string(&path)? } else { String::new() };
     let mut doc = match existing.parse::<toml_edit::DocumentMut>() {
         Ok(d) => d,
-        Err(e) => return Ok(SyncOp { kind, path, content: existing, action: SyncAction::Skip(format!("not valid TOML: {e}")) }),
+        Err(e) => return Ok(SyncOp { kind, path, content: existing, action: SyncAction::Skip(format!("not valid TOML: {e}")), delete: false }),
     };
     if let Some(item) = doc.get("notify") {
         let ours = item.as_array().is_some_and(|a| {
             a.len() == CODEX_NOTIFY.len() && a.iter().zip(CODEX_NOTIFY).all(|(v, want)| v.as_str() == Some(*want))
         });
         let action = if ours { SyncAction::Unchanged } else { SyncAction::Skip(CODEX_NOTIFY_TAKEN.into()) };
-        return Ok(SyncOp { kind, path, content: existing, action });
+        return Ok(SyncOp { kind, path, content: existing, action, delete: false });
     }
     let mut argv = toml_edit::Array::new();
     for word in CODEX_NOTIFY {
         argv.push(*word);
     }
     doc["notify"] = toml_edit::value(argv);
-    Ok(SyncOp { kind, path, content: doc.to_string(), action: SyncAction::Create })
+    Ok(SyncOp { kind, path, content: doc.to_string(), action: SyncAction::Create, delete: false })
 }
 
 /// Writes every `Create`/`Update` op to disk, creating parent directories as
-/// needed, then returns the tally. Stops at the first write failure and
-/// reports the failing path plus how many of the planned writes had already
-/// completed, since a bare io error gives no way to tell which file or how
-/// much progress was made.
+/// needed (or removes the file, for a `delete` op), then returns the tally. Stops
+/// at the first write failure and reports the failing path plus how many of the
+/// planned writes had already completed, since a bare io error gives no way to
+/// tell which file or how much progress was made.
 pub fn apply(ops: &[SyncOp]) -> Result<SyncReport> {
     let total = ops.iter().filter(|o| matches!(o.action, SyncAction::Create | SyncAction::Update)).count();
     let mut done = 0usize;
     for op in ops {
         if matches!(op.action, SyncAction::Create | SyncAction::Update) {
             let write = || -> std::io::Result<()> {
+                if op.delete {
+                    // A file that vanished between the plan and the write is already
+                    // what the op asked for.
+                    return match std::fs::remove_file(&op.path) {
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                        other => other,
+                    };
+                }
                 if let Some(parent) = op.path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
@@ -317,7 +384,9 @@ pub fn apply(ops: &[SyncOp]) -> Result<SyncReport> {
     Ok(summarize(ops))
 }
 
-/// Tallies a set of ops into a report without writing anything.
+/// Tallies a set of ops into a report without writing anything. A delete op is an
+/// `Update` (so `--check` fails on it like any other pending change) and is counted
+/// under `deleted` as well, so a reader can tell removals from rewrites.
 pub fn summarize(ops: &[SyncOp]) -> SyncReport {
     let mut report = SyncReport { ops: ops.to_vec(), ..Default::default() };
     for op in ops {
@@ -326,6 +395,9 @@ pub fn summarize(ops: &[SyncOp]) -> SyncReport {
             SyncAction::Update => report.updated += 1,
             SyncAction::Unchanged => report.unchanged += 1,
             SyncAction::Skip(_) => report.skipped += 1,
+        }
+        if op.delete {
+            report.deleted += 1;
         }
     }
     report
@@ -370,6 +442,8 @@ mod tests {
             mirror_tasks_md: false,
             board_stages: &[],
             board_tasks: &[],
+            personas: &[],
+            default_persona: None,
         };
         let ops = plan_sync(&inputs).unwrap();
         assert!(ops.iter().any(|o| o.kind == SyncKind::Claude && o.path.ends_with("reviewer.md") && o.action == SyncAction::Create));
@@ -412,6 +486,8 @@ mod tests {
             mirror_tasks_md: false,
             board_stages: &[],
             board_tasks: &[],
+            personas: &[],
+            default_persona: None,
         };
         let ops = plan_sync(&inputs).unwrap();
         apply(&ops).unwrap();
@@ -435,6 +511,8 @@ mod tests {
             mirror_tasks_md: false,
             board_stages: &[],
             board_tasks: &[],
+            personas: &[],
+            default_persona: None,
         }
     }
 
@@ -671,6 +749,8 @@ mod tests {
             mirror_tasks_md: false,
             board_stages: &[],
             board_tasks: &[],
+            personas: &[],
+            default_persona: None,
         };
         let ops = plan_sync(&inputs).unwrap();
         assert_eq!(ops.len(), 1, "only the file that exists gets an op: {ops:?}");
@@ -709,6 +789,8 @@ mod tests {
             mirror_tasks_md: false,
             board_stages: &[],
             board_tasks: &[],
+            personas: &[],
+            default_persona: None,
         };
         assert!(plan_sync(&inputs).unwrap().is_empty());
     }
@@ -722,9 +804,9 @@ mod tests {
         // Make the second target unwritable: a directory sits where the file should go.
         std::fs::create_dir_all(&bad).unwrap();
         let ops = vec![
-            SyncOp { kind: SyncKind::Claude, path: good1.clone(), content: "one".into(), action: SyncAction::Create },
-            SyncOp { kind: SyncKind::Claude, path: bad.clone(), content: "two".into(), action: SyncAction::Create },
-            SyncOp { kind: SyncKind::Claude, path: good2.clone(), content: "three".into(), action: SyncAction::Create },
+            SyncOp { kind: SyncKind::Claude, path: good1.clone(), content: "one".into(), action: SyncAction::Create, delete: false },
+            SyncOp { kind: SyncKind::Claude, path: bad.clone(), content: "two".into(), action: SyncAction::Create, delete: false },
+            SyncOp { kind: SyncKind::Claude, path: good2.clone(), content: "three".into(), action: SyncAction::Create, delete: false },
         ];
         let err = apply(&ops).unwrap_err();
         let msg = err.to_string();
@@ -732,5 +814,136 @@ mod tests {
         assert!(msg.contains("1 of 3 files written"), "message should report progress: {msg}");
         assert_eq!(std::fs::read_to_string(&good1).unwrap(), "one", "earlier op should still have been written");
         assert!(!good2.exists(), "later op should not have been attempted after the failure");
+    }
+
+    fn persona_bundle(name: &str, slug: &str, id: u128) -> PersonaBundle {
+        PersonaBundle {
+            persona: Persona {
+                id: uuid::Uuid::from_u128(id),
+                name: name.into(),
+                slug: slug.into(),
+                role: "Does things".into(),
+                summary: "In a particular way.".into(),
+                instructions: "Be careful.".into(),
+                skills: vec![],
+                workflows: vec![],
+                practices: vec![],
+                mcp_servers: vec![],
+                tools: vec!["task_list".into()],
+                access: PersonaAccess::default(),
+                models: Default::default(),
+                tags: vec![],
+                created_at: Default::default(),
+                updated_at: Default::default(),
+            },
+            skills: vec![],
+            workflows: vec![],
+            practices: vec![],
+            mcp_servers: vec![],
+            warnings: vec![],
+        }
+    }
+
+    /// Two roster personas become two subagent files beside the agent files and one
+    /// section each in the managed blocks; a second plan is a no-op; a persona that
+    /// leaves the roster has its file deleted, and only its file: the agent export and
+    /// a hand-written subagent file with no marker stay where they are.
+    #[test]
+    fn roster_personas_are_exported_and_pruned_when_they_leave() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join(".claude/agents")).unwrap();
+        std::fs::write(d.path().join(".claude/agents/handwritten.md"), "---\nname: handwritten\n---\nmine\n").unwrap();
+        let agents = vec![agent("reviewer")];
+        let mobile = persona_bundle("Mobile Developer", "mobile-developer", 1);
+        let security = persona_bundle("Security Reviewer", "security-reviewer", 2);
+        let roster = vec![mobile.clone(), security.clone()];
+        let block = || BlockContext { mcp_command: "atlas mcp".into(), agents: agents.clone(), practices: vec![], project_name: Some("p".into()) };
+        let inputs = SyncInputs {
+            root: d.path(),
+            agents: &agents,
+            block: block(),
+            targets: &[SyncKind::Claude, SyncKind::Codex, SyncKind::AgentsMd, SyncKind::ClaudeMd],
+            home: d.path(),
+            hooks: false,
+            global: false,
+            mirror_tasks_md: false,
+            board_stages: &[],
+            board_tasks: &[],
+            personas: &roster,
+            default_persona: Some(security.persona.id),
+        };
+        let ops = plan_sync(&inputs).unwrap();
+        for slug in ["mobile-developer", "security-reviewer"] {
+            let op = ops.iter().find(|o| o.path.ends_with(format!(".claude/agents/{slug}.md"))).unwrap_or_else(|| panic!("no op for {slug}: {ops:?}"));
+            assert_eq!((op.kind, &op.action, op.delete), (SyncKind::Claude, &SyncAction::Create, false));
+            assert!(export::is_persona_export(&op.content), "{}", op.content);
+        }
+        assert!(!ops.iter().any(|o| o.kind == SyncKind::Codex && o.path.to_string_lossy().contains("developer")), "Codex gets no per-persona file: {ops:?}");
+        assert!(!ops.iter().any(|o| o.delete), "nothing to prune on a first sync: {ops:?}");
+        let report = apply(&ops).unwrap();
+        assert_eq!(report.deleted, 0);
+
+        let claude_md = std::fs::read_to_string(d.path().join("CLAUDE.md")).unwrap();
+        assert_eq!(claude_md.matches("## Personas").count(), 1, "{claude_md}");
+        assert!(claude_md.contains("- `security-reviewer` (Security Reviewer): Does things (default)\n"), "{claude_md}");
+        assert!(claude_md.contains("- `mobile-developer` (Mobile Developer): Does things\n"), "{claude_md}");
+        assert!(claude_md.find("## Personas") < claude_md.find(export::END), "the section sits inside the block: {claude_md}");
+        let agents_md = std::fs::read_to_string(d.path().join("AGENTS.md")).unwrap();
+        assert!(agents_md.contains("## Persona: Mobile Developer\n") && agents_md.contains("## Persona: Security Reviewer\n"), "{agents_md}");
+        assert_eq!(agents_md.matches(export::END).count(), 1, "{agents_md}");
+
+        let again = plan_sync(&inputs).unwrap();
+        assert!(again.iter().filter(|o| !matches!(o.action, SyncAction::Skip(_))).all(|o| o.action == SyncAction::Unchanged), "{again:?}");
+
+        // Security leaves the roster: its file is planned for deletion, nothing else is.
+        let roster = vec![mobile];
+        let inputs = SyncInputs { personas: &roster, default_persona: None, block: block(), ..inputs };
+        let ops = plan_sync(&inputs).unwrap();
+        let deletes: Vec<&SyncOp> = ops.iter().filter(|o| o.delete).collect();
+        assert_eq!(deletes.len(), 1, "{ops:?}");
+        assert!(deletes[0].path.ends_with(".claude/agents/security-reviewer.md"), "{}", deletes[0].path.display());
+        assert_eq!(deletes[0].action, SyncAction::Update);
+        let report = apply(&ops).unwrap();
+        assert_eq!(report.deleted, 1);
+        assert!(!d.path().join(".claude/agents/security-reviewer.md").exists());
+        assert!(d.path().join(".claude/agents/mobile-developer.md").exists());
+        assert!(d.path().join(".claude/agents/reviewer.md").exists(), "an agent export is never pruned");
+        assert_eq!(std::fs::read_to_string(d.path().join(".claude/agents/handwritten.md")).unwrap(), "---\nname: handwritten\n---\nmine\n");
+        let claude_md = std::fs::read_to_string(d.path().join("CLAUDE.md")).unwrap();
+        assert_eq!(claude_md.matches("## Personas").count(), 1, "{claude_md}");
+        assert!(!claude_md.contains("security-reviewer"), "{claude_md}");
+
+        let again = plan_sync(&inputs).unwrap();
+        assert!(again.iter().filter(|o| !matches!(o.action, SyncAction::Skip(_))).all(|o| o.action == SyncAction::Unchanged && !o.delete), "{again:?}");
+    }
+
+    /// No roster, no persona output: the managed block and the agent directory read
+    /// exactly as they did before personas existed.
+    #[test]
+    fn no_roster_plans_no_persona_output() {
+        let d = tempfile::tempdir().unwrap();
+        let agents = vec![agent("reviewer")];
+        let inputs = SyncInputs {
+            root: d.path(),
+            agents: &agents,
+            block: BlockContext { mcp_command: "atlas mcp".into(), agents: agents.clone(), practices: vec![], project_name: Some("p".into()) },
+            targets: &[SyncKind::Claude, SyncKind::AgentsMd, SyncKind::ClaudeMd],
+            home: d.path(),
+            hooks: false,
+            global: false,
+            mirror_tasks_md: false,
+            board_stages: &[],
+            board_tasks: &[],
+            personas: &[],
+            default_persona: None,
+        };
+        let ops = plan_sync(&inputs).unwrap();
+        assert_eq!(ops.len(), 3, "{ops:?}");
+        apply(&ops).unwrap();
+        let claude_md = std::fs::read_to_string(d.path().join("CLAUDE.md")).unwrap();
+        let expected = export::splice_block("", export::render_block(&inputs.block).trim_end());
+        assert_eq!(claude_md, expected);
+        assert!(!claude_md.contains("Persona"), "{claude_md}");
+        assert_eq!(std::fs::read_dir(d.path().join(".claude/agents")).unwrap().count(), 1);
     }
 }

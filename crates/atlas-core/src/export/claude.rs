@@ -35,7 +35,7 @@ pub fn claude_agent_md(a: &Agent) -> String {
 /// `:` (which would split the line into another key) or a `#` (which would start
 /// a comment) anywhere in it, padding a reader would trim, or a first character
 /// YAML treats as syntax.
-fn yaml_scalar(s: &str) -> String {
+pub(crate) fn yaml_scalar(s: &str) -> String {
     let starts_special = matches!(s.chars().next(), Some('!' | '&' | '*' | '?' | '|' | '>' | '%' | '@' | '`' | '"' | '\'' | '#' | ',' | '[' | ']' | '{' | '}' | '-'));
     let padded = s.starts_with(' ') || s.ends_with(' ');
     if s.is_empty() || s.contains(':') || s.contains('#') || padded || starts_special {

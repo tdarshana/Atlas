@@ -403,6 +403,12 @@ pub struct SyncOp {
     pub path: PathBuf,
     pub content: String,
     pub action: SyncAction,
+    /// True when applying the op removes `path` instead of writing `content`: a
+    /// persona export whose persona left the roster. Carried as a flag beside an
+    /// `Update` action rather than as a variant of `SyncAction`, so every reader that
+    /// matches the action keeps compiling and `--check` still exits non-zero for it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delete: bool,
 }
 
 /// Everything an agent needs to start work in a project: the project itself,
@@ -438,6 +444,13 @@ pub struct SyncReport {
     pub updated: usize,
     pub unchanged: usize,
     pub skipped: usize,
+    /// Persona exports removed because their persona left the roster.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub deleted: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 // ---------------------------------------------------------------------------
@@ -673,6 +686,9 @@ pub enum NodeData {
         agent: String,
         #[serde(default)] practices: Vec<String>,
         #[serde(default)] memories: Option<MemorySource>,
+        /// Which of a persona's models this action runs on when the run is attributed
+        /// to a persona. Off the wire when unset, so an existing graph reads as before.
+        #[serde(default, skip_serializing_if = "Option::is_none")] case: Option<Case>,
     },
     Output {
         propose_memories: bool,

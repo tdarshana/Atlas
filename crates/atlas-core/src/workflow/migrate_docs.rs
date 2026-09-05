@@ -41,6 +41,7 @@ pub fn single_action_graph(instructions: &str) -> Graph {
                     agent: ACTION_AGENT.into(),
                     practices: vec![],
                     memories: None,
+                    case: None,
                 },
             },
             Node {

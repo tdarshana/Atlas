@@ -220,7 +220,7 @@ mod tests {
                     id: "a".into(),
                     kind: NodeKind::Action,
                     position: Position { x: 200.0, y: 0.0 },
-                    data: NodeData::Action { name: "do it".into(), instructions: "do it".into(), agent: "desktop".into(), practices: vec![], memories: None },
+                    data: NodeData::Action { name: "do it".into(), instructions: "do it".into(), agent: "desktop".into(), practices: vec![], memories: None, case: None },
                 },
                 Node { id: "o".into(), kind: NodeKind::Output, position: Position { x: 400.0, y: 0.0 }, data: NodeData::Output { propose_memories: false, file_tasks: false } },
             ],

@@ -721,6 +721,7 @@ impl ProjectBackend for LocalBackend {
                     kind,
                     content: String::new(),
                     action: SyncAction::Skip(GLOBAL_SKIP.into()),
+                    delete: false,
                 })
                 .collect();
             let block = BlockContext { mcp_command: MCP_COMMAND.into(), agents: agents.clone(), practices: vec![], project_name: None };
@@ -762,6 +763,20 @@ impl ProjectBackend for LocalBackend {
         } else {
             (Vec::new(), Vec::new())
         };
+        // The roster, resolved in roster order, each persona with its references so the
+        // export can name them. A project without a roster (and a global sync) resolves
+        // nothing and writes exactly what it wrote before personas existed.
+        let (personas, default_persona) = match project_id {
+            Some(pid) => {
+                let roster = self.project_roster(pid).await?;
+                let mut bundles = Vec::with_capacity(roster.len());
+                for row in &roster {
+                    bundles.push(self.resolve_persona(&row.persona_id.to_string(), Some(pid)).await?);
+                }
+                (bundles, roster.iter().find(|r| r.is_default).map(|r| r.persona_id))
+            }
+            None => (Vec::new(), None),
+        };
         let mut ops = sync::plan_sync(&SyncInputs {
             root: &root,
             agents: &agents,
@@ -773,6 +788,8 @@ impl ProjectBackend for LocalBackend {
             mirror_tasks_md,
             board_stages: &board_stages,
             board_tasks: &board_tasks,
+            personas: &personas,
+            default_persona,
         })?;
         ops.extend(skipped);
         if req.check_only {

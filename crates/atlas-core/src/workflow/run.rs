@@ -238,10 +238,20 @@ async fn apply_output(backend: &LocalBackend, ctx: &OutputContext<'_>, output: &
     (memories_proposed, tasks_filed)
 }
 
+/// The model hint a persona gives an action: its model for the action's `case`, else
+/// its `default` case, else nothing. `None` when the run has no persona.
+fn persona_model_hint(models: Option<&std::collections::BTreeMap<Case, String>>, case: Option<&Case>) -> Option<String> {
+    let models = models?;
+    case.and_then(|c| models.get(c)).or_else(|| models.get(&Case::Default)).cloned()
+}
+
 /// Runs the `workflow_run` job named by `job.payload`: `{ workflow_id, run_id,
-/// trigger, actor, input? }`. `run_id` is enough to find the workflow and the run
-/// itself, but the run's own actor and optional input are not persisted anywhere but
-/// the job payload, so both travel with it.
+/// trigger, actor, input?, persona? }`. `run_id` is enough to find the workflow and
+/// the run itself, but the run's own actor and optional input are not persisted
+/// anywhere but the job payload, so both travel with it. `persona` (an id or slug)
+/// attributes the run to a persona: each action then runs on the persona's model for
+/// its `case` before anything else. A persona that no longer resolves is a WARN on
+/// the first step, and the run goes on as if it had none.
 pub async fn run_workflow(job: &Job, backend: &LocalBackend) -> Result<Value> {
     let run_id = job.payload["run_id"].as_str().and_then(|s| Uuid::parse_str(s).ok())
         .ok_or_else(|| AtlasError::Invalid("workflow_run job has no run_id".into()))?;
@@ -281,6 +291,22 @@ pub async fn run_workflow(job: &Job, backend: &LocalBackend) -> Result<Value> {
     }
     let workflow_actor = format!("workflow/{}", workflow.name);
 
+    let mut persona_warning: Option<LogLine> = None;
+    let persona_models = match job.payload["persona"].as_str().filter(|s| !s.trim().is_empty()) {
+        Some(key) => {
+            let personas = backend.personas.clone();
+            let key = key.to_string();
+            match backend.blocking({ let key = key.clone(); move || personas.get(&key) }).await {
+                Ok(persona) => Some(persona.models),
+                Err(e) => {
+                    persona_warning = Some(LogLine::now(LogLevel::Warn, format!("persona '{key}' not found, running without it: {e}")));
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+
     let mut last_output: Option<String> = None;
     let mut last_threshold = 1.0f64;
     let mut last_step: Option<WorkflowStep> = None;
@@ -296,7 +322,7 @@ pub async fn run_workflow(job: &Job, backend: &LocalBackend) -> Result<Value> {
         }
 
         let node = workflow.graph.nodes.iter().find(|n| &n.id == action_id).expect("action id came from graph::validate");
-        let NodeData::Action { name, instructions, agent, practices, memories: memory_source } = &node.data else {
+        let NodeData::Action { name, instructions, agent, practices, memories: memory_source, case } = &node.data else {
             unreachable!("graph::validate matched data to kind")
         };
         let step = {
@@ -304,18 +330,21 @@ pub async fn run_workflow(job: &Job, backend: &LocalBackend) -> Result<Value> {
             let (pos, aid, name, agent) = (i as i32, action_id.clone(), name.clone(), agent.clone());
             backend.blocking(move || workflows.append_step(run_id, pos, &aid, &name, &agent)).await?
         };
-        let mut log: Vec<LogLine> = vec![];
+        let mut log: Vec<LogLine> = persona_warning.take().into_iter().collect();
 
-        // The action runs on its agent's `model_hint` when the agent is saved and names
-        // one; otherwise on the scope's extraction model, exactly as before. The
-        // endpoint and key are the scope's either way (`ExtractionConfig::model_profile`).
+        // The model, in order: the run's persona's model for the action's `case`, then
+        // the persona's `default` case, then the agent's `model_hint` when the agent is
+        // saved and names one, then the scope's extraction model. The hint goes through
+        // `ExtractionConfig::model_profile`, which is what `extract::resolve_model` does
+        // once the config is resolved, so the endpoint and key are the scope's either way.
         let (cfg, profile): (ExtractionConfig, ModelProfile) = {
             let db = backend.db.clone();
             let project_id = workflow.project_id;
             let agent = agent.clone();
+            let persona_hint = persona_model_hint(persona_models.as_ref(), case.as_ref());
             let resolved = backend.blocking(move || {
                 let cfg = extract::resolve_extraction(&db, project_id)?;
-                let hint = AgentRepo::new(&db).get(&agent).ok().and_then(|a| a.model_hint);
+                let hint = persona_hint.or_else(|| AgentRepo::new(&db).get(&agent).ok().and_then(|a| a.model_hint));
                 let profile = cfg.model_profile(hint.as_deref());
                 Ok((cfg, profile))
             }).await;
@@ -493,5 +522,16 @@ mod tests {
     #[test]
     fn no_fence_at_all_is_none() {
         assert!(trailing_json_block("just a plain reply").is_none());
+    }
+
+    #[test]
+    fn a_persona_hint_is_the_case_model_then_the_default_then_nothing() {
+        let models = std::collections::BTreeMap::from([(Case::Review, "model-r".to_string()), (Case::Default, "model-d".to_string())]);
+        assert_eq!(persona_model_hint(Some(&models), Some(&Case::Review)).as_deref(), Some("model-r"));
+        assert_eq!(persona_model_hint(Some(&models), Some(&Case::Plan)).as_deref(), Some("model-d"));
+        assert_eq!(persona_model_hint(Some(&models), None).as_deref(), Some("model-d"));
+        let only_review = std::collections::BTreeMap::from([(Case::Review, "model-r".to_string())]);
+        assert_eq!(persona_model_hint(Some(&only_review), Some(&Case::Plan)), None);
+        assert_eq!(persona_model_hint(None, Some(&Case::Review)), None);
     }
 }

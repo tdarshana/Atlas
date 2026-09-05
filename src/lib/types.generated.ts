@@ -319,6 +319,13 @@ export interface SyncOp {
 	path: string;
 	content: string;
 	action: SyncAction;
+	/**
+	 * True when applying the op removes `path` instead of writing `content`: a
+	 * persona export whose persona left the roster. Carried as a flag beside an
+	 * `Update` action rather than as a variant of `SyncAction`, so every reader that
+	 * matches the action keeps compiling and `--check` still exits non-zero for it.
+	 */
+	delete?: boolean;
 }
 
 export interface SyncReport {
@@ -327,6 +334,8 @@ export interface SyncReport {
 	updated: number;
 	unchanged: number;
 	skipped: number;
+	/** Persona exports removed because their persona left the roster. */
+	deleted?: number;
 }
 
 export type TaskKind = 'task' | 'bug' | 'feature' | 'chore';
@@ -497,6 +506,11 @@ export type NodeData = Trigger | {
 	agent: string;
 	practices: string[];
 	memories: MemorySource | null;
+	/**
+	 * Which of a persona's models this action runs on when the run is attributed
+	 * to a persona. Off the wire when unset, so an existing graph reads as before.
+	 */
+	case?: Case | null;
 } | {
 	propose_memories: boolean;
 	file_tasks: boolean;
