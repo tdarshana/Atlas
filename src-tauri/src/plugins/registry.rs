@@ -126,56 +126,70 @@ pub fn list(app_data: &Path) -> Result<Vec<PluginInfo>, String> {
         .collect();
     ids.sort();
 
-    let mut out = Vec::with_capacity(ids.len());
-    for id in ids {
-        let plugin_dir = dir.join(&id);
-        let manifest_path = plugin_dir.join("atlas-plugin.json");
-        let parsed = std::fs::read_to_string(&manifest_path)
-            .map_err(|e| format!("Could not read atlas-plugin.json: {e}"))
-            .and_then(|text| Manifest::parse(&text));
+    Ok(ids.into_iter().map(|id| info_for(&state, dir.join(&id), id)).collect())
+}
 
-        let manifest = match parsed {
-            Ok(manifest) => manifest,
-            Err(reason) => {
-                out.push(PluginInfo {
-                    id,
-                    manifest: None,
-                    enabled: false,
-                    compatible: false,
-                    reason: Some(reason),
-                    dir: plugin_dir,
-                    // No manifest to prune against, so nothing is granted; such a plugin
-                    // never runs anyway.
-                    granted: Vec::new(),
-                });
-                continue;
-            }
-        };
-
-        let recorded_enabled = state.get(&id).map(|e| e.enabled).unwrap_or(false);
-        let granted = prune(state.get(&id).and_then(|e| e.granted.as_deref()), &manifest.permissions);
-        let reason = manifest.validate(&plugin_dir).err().or_else(|| {
-            if compatible(&manifest.api) {
-                None
-            } else {
-                Some(format!(
-                    "'{id}' needs API {} but this app provides {ATLAS_API_VERSION}.",
-                    manifest.api
-                ))
-            }
-        });
-        let is_compatible = reason.is_none();
-        out.push(PluginInfo {
-            id,
-            manifest: Some(manifest),
-            enabled: is_compatible && recorded_enabled,
-            compatible: is_compatible,
-            reason,
-            dir: plugin_dir,
-            granted,
-        });
+/// The one plugin `id`, or `None` when no folder of that name is installed. Reads the
+/// state file and that plugin's manifest only, so the asset protocol, which looks a
+/// plugin up once per served file, does not pay for every other installed manifest.
+/// Same shape as the matching entry from [`list`]. `id` must already be a safe path
+/// segment; the protocol checks that before calling.
+pub fn get(app_data: &Path, id: &str) -> Result<Option<PluginInfo>, String> {
+    let plugin_dir = plugins_dir(app_data).join(id);
+    if !plugin_dir.is_dir() {
+        return Ok(None);
     }
-    Ok(out)
+    let state = read_state(app_data)?;
+    Ok(Some(info_for(&state, plugin_dir, id.to_string())))
+}
+
+/// One plugin's [`PluginInfo`] from its folder and the recorded state; see [`list`] for
+/// how a missing, unreadable or incompatible manifest is reported.
+fn info_for(state: &State, plugin_dir: PathBuf, id: String) -> PluginInfo {
+    let manifest_path = plugin_dir.join("atlas-plugin.json");
+    let parsed = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("Could not read atlas-plugin.json: {e}"))
+        .and_then(|text| Manifest::parse(&text));
+
+    let manifest = match parsed {
+        Ok(manifest) => manifest,
+        Err(reason) => {
+            return PluginInfo {
+                id,
+                manifest: None,
+                enabled: false,
+                compatible: false,
+                reason: Some(reason),
+                dir: plugin_dir,
+                // No manifest to prune against, so nothing is granted; such a plugin
+                // never runs anyway.
+                granted: Vec::new(),
+            };
+        }
+    };
+
+    let recorded_enabled = state.get(&id).map(|e| e.enabled).unwrap_or(false);
+    let granted = prune(state.get(&id).and_then(|e| e.granted.as_deref()), &manifest.permissions);
+    let reason = manifest.validate(&plugin_dir).err().or_else(|| {
+        if compatible(&manifest.api) {
+            None
+        } else {
+            Some(format!(
+                "'{id}' needs API {} but this app provides {ATLAS_API_VERSION}.",
+                manifest.api
+            ))
+        }
+    });
+    let is_compatible = reason.is_none();
+    PluginInfo {
+        id,
+        manifest: Some(manifest),
+        enabled: is_compatible && recorded_enabled,
+        compatible: is_compatible,
+        reason,
+        dir: plugin_dir,
+        granted,
+    }
 }
 
 /// The grants that still hold: whatever was recorded, kept in the manifest's own order
@@ -308,6 +322,26 @@ mod tests {
 
         let err = set_enabled(&app_data, "too-new", true).unwrap_err();
         assert_eq!(err, infos[0].reason.clone().unwrap());
+    }
+
+    /// PERF-11: the asset protocol looks one plugin up per request, so `get` reads
+    /// that plugin's manifest and state entry only and matches what `list` reports.
+    #[test]
+    fn get_reads_one_plugin_and_matches_list() {
+        let app_data = scratch_dir("get-one");
+        write_manifest(&plugins_dir(&app_data).join("ok"), &compatible_manifest("ok"));
+        record_install(&app_data, "ok", true, SourceRef { kind: "folder".into(), value: "x".into() }, Vec::new()).unwrap();
+        write_manifest(&plugins_dir(&app_data).join("too-new"), &incompatible_manifest("too-new"));
+        record_install(&app_data, "too-new", true, SourceRef { kind: "folder".into(), value: "x".into() }, Vec::new()).unwrap();
+        std::fs::create_dir_all(plugins_dir(&app_data).join("broken")).unwrap();
+
+        let listed = list(&app_data).unwrap();
+        for info in &listed {
+            let one = get(&app_data, &info.id).unwrap().expect(&info.id);
+            assert_eq!(serde_json::to_value(&one).unwrap(), serde_json::to_value(info).unwrap(), "{}", info.id);
+        }
+        assert!(get(&app_data, "nope").unwrap().is_none());
+        assert!(get(&scratch_dir("get-empty"), "ok").unwrap().is_none(), "no plugins dir at all");
     }
 
     #[test]

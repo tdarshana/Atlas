@@ -141,10 +141,8 @@ fn servable_plugin(app_data: &Path, id: &str) -> Result<PluginInfo, (u16, String
     if !safe_segment(id) {
         return Err((403, format!("'{id}' is not a plugin id.")));
     }
-    let info = registry::list(app_data)
+    let info = registry::get(app_data, id)
         .map_err(|e| (500, e))?
-        .into_iter()
-        .find(|p| p.id == id)
         .ok_or_else(|| (404, format!("No plugin '{id}' is installed.")))?;
     if !info.compatible {
         return Err((403, info.reason.clone().unwrap_or_else(|| format!("'{id}' is not compatible."))));
