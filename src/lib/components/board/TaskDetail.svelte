@@ -86,7 +86,6 @@
 
 	const kindOptions = KIND_OPTIONS;
 	const priorityOptions = PRIORITIES.map((p) => ({ value: p, label: p }));
-	const stageOptions = $derived(stages.map((s) => ({ value: s.name, label: s.name })));
 	const personaOptions = $derived([
 		{ value: '', label: 'None' },
 		...personas.roster.map((r) => ({ value: r.slug, label: r.name }))
@@ -133,6 +132,26 @@
 	let titleError = $state<string | null>(null);
 	let panel = $state<HTMLElement>();
 	let keyCopied = $state(false);
+	/** The header's ⋮ menu (Claim, Delete) and the sidebar's Status menu (Move to). */
+	let actionsOpen = $state(false);
+	let statusOpen = $state(false);
+	function closeMenus(event: PointerEvent) {
+		const t = event.target as HTMLElement;
+		if (!t.closest('[data-menu]')) {
+			actionsOpen = false;
+			statusOpen = false;
+		}
+	}
+	/** Fields save the moment they change; a text box saves when it loses focus or on Enter. */
+	function autosave() {
+		void save({ quiet: true });
+	}
+	function onTextKeydown(event: KeyboardEvent) {
+		if (event.key === 'Enter') {
+			event.preventDefault();
+			(event.currentTarget as HTMLInputElement).blur();
+		}
+	}
 
 	async function copyKey(): Promise<void> {
 		if (!task) return;
@@ -390,7 +409,7 @@
 		}
 	}
 
-	async function save() {
+	async function save(opts: { quiet?: boolean } = {}) {
 		if (!task) return;
 		const name = title.trim();
 		if (!name) {
@@ -411,7 +430,7 @@
 				expected_updated_at: task.updated_at
 			});
 			await onchanged();
-			push('success', 'Task saved');
+			if (!opts.quiet) push('success', 'Task saved');
 		} catch (e) {
 			// A stale stamp would refuse every retry, so take the fresh row. The reload
 			// keeps this form's typing, because only untouched fields follow the server,
@@ -552,7 +571,7 @@
 	}
 </script>
 
-<svelte:window onkeydown={onWindowKey} />
+<svelte:window onpointerdown={closeMenus} onkeydown={onWindowKey} />
 
 {#snippet eventRow(event: TaskEvent)}
 	<li>
@@ -599,16 +618,6 @@
 				onclick={() => onback?.()}
 			/>
 		{/if}
-		{#if task}<KindIcon kind={task.kind} />{/if}
-		<span class="key">{task?.key ?? ''}</span>
-		{#if task}
-			<IconButton
-				size="sm"
-				icon={keyCopied ? 'check' : 'copy'}
-				label="Copy task key"
-				onclick={copyKey}
-			/>
-		{/if}
 		<!-- `ready` is false for three different reasons, and calling all of them `blocked`
 		     said the wrong thing about a parent whose only holdup is its own children, and
 		     about a task that is simply closed. Blockers first, then open subtasks, then
@@ -621,6 +630,46 @@
 			</Badge>
 		{/if}
 		<span class="spacer"></span>
+		{#if task}
+			<span class="menu-host" data-menu>
+				<IconButton
+					size="sm"
+					icon="ellipsis-vertical"
+					label="Task actions"
+					data-testid="task-detail-menu"
+					onclick={() => (actionsOpen = !actionsOpen)}
+				/>
+				{#if actionsOpen}
+					<div class="dbm-menu actions-menu" role="menu">
+						<button
+							type="button"
+							class="dbm-menu__item"
+							role="menuitem"
+							data-testid="task-claim"
+							disabled={busy}
+							onclick={() => {
+								actionsOpen = false;
+								void run('Task claimed', () => claim(task.key));
+							}}
+						>
+							Claim (assign to me)
+						</button>
+						<button
+							type="button"
+							class="dbm-menu__item dbm-menu__item--danger"
+							role="menuitem"
+							data-testid="task-delete"
+							onclick={() => {
+								actionsOpen = false;
+								confirming = true;
+							}}
+						>
+							Delete…
+						</button>
+					</div>
+				{/if}
+			</span>
+		{/if}
 		<IconButton
 			size="sm"
 			icon={mode === 'docked' ? 'expand' : 'panel-right'}
@@ -692,6 +741,17 @@
 					</div>
 				{:else}
 					<div class="title-display">
+						<span class="title-key" data-testid="task-detail-key">
+							<KindIcon kind={task.kind} />
+							<code class="key">{task.key}</code>
+							<IconButton
+								size="sm"
+								icon={keyCopied ? 'check' : 'copy'}
+								label="Copy task key"
+								data-testid="task-copy-key"
+								onclick={copyKey}
+							/>
+						</span>
 						<button
 							type="button"
 							class="title-hit"
@@ -709,13 +769,6 @@
 						/>
 					</div>
 				{/if}
-				<span
-					class="stage-lozenge"
-					style="background:{stageColor(task.stage)}"
-					data-testid="task-detail-stage"
-				>
-					{task.stage}
-				</span>
 			</div>
 
 			<div class="field">
@@ -808,13 +861,57 @@
 					onresize={onSideResize}
 					testid="task-detail-side-resize"
 				/>
+				<div class="field">
+					<span class="dbm-field__label">Status</span>
+					<span class="menu-host" data-menu>
+						<button
+							type="button"
+							class="stage-lozenge status-button"
+							style="background:{stageColor(task.stage)}"
+							aria-haspopup="menu"
+							aria-expanded={statusOpen}
+							data-testid="task-status"
+							onclick={() => (statusOpen = !statusOpen)}
+						>
+							{task.stage}
+							<Icon name="chevron-down" size={10} />
+						</button>
+						{#if statusOpen}
+							<div class="dbm-menu status-menu" role="menu" data-testid="task-status-menu">
+								<span class="dbm-menu__label">Move to</span>
+								{#each stages.filter((st) => st.name !== task.stage) as st (st.name)}
+									<button
+										type="button"
+										class="dbm-menu__item"
+										role="menuitem"
+										data-testid="task-move-{st.name}"
+										onclick={() => {
+											statusOpen = false;
+											onmove(task.key, st.name);
+										}}
+									>
+										<span class="menu-dot" style="background:{stageColor(st.name)}"></span>
+										{st.name}
+									</button>
+								{/each}
+							</div>
+						{/if}
+					</span>
+				</div>
 				<div class="pair">
-					<Select label="Kind" bind:value={kind} options={kindOptions} data-testid="task-kind" />
+					<Select
+						label="Kind"
+						bind:value={kind}
+						options={kindOptions}
+						data-testid="task-kind"
+						onchange={autosave}
+					/>
 					<Select
 						label="Priority"
 						bind:value={priority}
 						options={priorityOptions}
 						data-testid="task-priority"
+						onchange={autosave}
 					/>
 					<Select
 						label="Persona"
@@ -825,47 +922,24 @@
 							void changePersona(e.currentTarget.value)}
 					/>
 				</div>
-
-				<Input label="Assignee" mono bind:value={assignee} placeholder="nobody" data-testid="task-assignee" />
-				<Input label="Labels" bind:value={labels} placeholder="api, ui" data-testid="task-labels" />
-
-				<Select
-					label="Move to"
-					value={task.stage}
-					options={stageOptions}
-					data-testid="task-stage"
-					onchange={(e: Event & { currentTarget: HTMLSelectElement }) =>
-						onmove(task.key, e.currentTarget.value)}
+				<Input
+					label="Assignee"
+					mono
+					bind:value={assignee}
+					placeholder="nobody"
+					data-testid="task-assignee"
+					onblur={autosave}
+					onkeydown={onTextKeydown}
 				/>
-
-				<div class="row">
-					<Button
-						variant="primary"
-						size="sm"
-						data-testid="task-save"
-						disabled={saving}
-						onclick={save}
-					>
-						{saving ? 'Saving…' : 'Save'}
-					</Button>
-					<Button
-						size="sm"
-						data-testid="task-claim"
-						disabled={busy}
-						onclick={() => run('Task claimed', () => claim(task.key))}
-					>
-						Claim
-					</Button>
-					<span class="spacer"></span>
-					<Button
-						variant="danger"
-						size="sm"
-						data-testid="task-delete"
-						onclick={() => (confirming = true)}
-					>
-						Delete…
-					</Button>
-				</div>
+				<Input
+					label="Labels"
+					bind:value={labels}
+					placeholder="api, ui"
+					data-testid="task-labels"
+					onblur={autosave}
+					onkeydown={onTextKeydown}
+				/>
+				{#if saving}<span class="muted saving">Saving…</span>{/if}
 			</aside>
 
 			<section class="full">
@@ -1276,19 +1350,91 @@
 	}
 
 	/* The stage as a status lozenge under the title: white text on the stage's colour. */
+	/* The stage as a status lozenge: white text on the stage's colour. As a button it
+	   opens the Move to menu. */
 	.stage-lozenge {
-		display: inline-block;
-		align-self: flex-start;
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
 		width: max-content;
-		margin-top: 4px;
 		padding: 0 6px;
+		border: 0;
 		border-radius: 3px;
 		color: #fff;
+		font: inherit;
 		font-size: 10px;
 		font-weight: 600;
-		line-height: 16px;
+		line-height: 18px;
 		letter-spacing: 0.03em;
 		text-transform: uppercase;
+		cursor: pointer;
+	}
+
+	.status-button:focus-visible {
+		outline: var(--focus-ring-width) solid var(--focus-ring);
+		outline-offset: 1px;
+	}
+
+	.menu-host {
+		position: relative;
+		display: inline-flex;
+	}
+
+	.actions-menu,
+	.status-menu {
+		position: absolute;
+		top: calc(100% + 4px);
+		z-index: 30;
+		min-width: 160px;
+	}
+
+	.actions-menu {
+		right: 0;
+	}
+
+	.status-menu {
+		left: 0;
+	}
+
+	.dbm-menu__item {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		width: 100%;
+		text-align: left;
+	}
+
+	.menu-dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 2px;
+	}
+
+	/* The key leads the title line; its copy button appears on hover. */
+	.title-key {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		flex: 0 0 auto;
+		height: 24px;
+	}
+
+	.title-key .key {
+		color: var(--text-secondary);
+	}
+
+	.title-key :global(.dbm-iconbtn) {
+		opacity: 0;
+		transition: opacity 120ms;
+	}
+
+	.title-key:hover :global(.dbm-iconbtn),
+	.title-key :global(.dbm-iconbtn:focus-visible) {
+		opacity: 1;
+	}
+
+	.saving {
+		font-size: 11px;
 	}
 
 	.title-hit {

@@ -122,11 +122,23 @@ describe('TaskDetail parent and back', () => {
 	it('lays the fields out in a sidebar with Move to and the actions, beside the content', () => {
 		const { getByTestId } = open();
 		const side = getByTestId('task-detail-side');
-		for (const id of ['task-kind', 'task-priority', 'task-persona', 'task-assignee', 'task-labels', 'task-stage', 'task-save', 'task-delete']) {
+		for (const id of ['task-status', 'task-kind', 'task-priority', 'task-persona', 'task-assignee', 'task-labels']) {
 			expect(side.contains(getByTestId(id))).toBe(true);
 		}
+		expect(getByTestId('task-detail-key').textContent).toContain('ATL-');
 		expect(getByTestId('task-detail-columns').contains(getByTestId('task-tabs'))).toBe(true);
 		expect(side.contains(getByTestId('task-tabs'))).toBe(false);
+	});
+
+	it('opens Move to from the status lozenge and Claim and Delete from the header menu', async () => {
+		const { getByTestId, queryByTestId } = open();
+		expect(queryByTestId('task-status-menu')).toBeNull();
+		await fireEvent.click(getByTestId('task-status'));
+		expect(getByTestId('task-status-menu')).toBeTruthy();
+		expect(queryByTestId('task-delete')).toBeNull();
+		await fireEvent.click(getByTestId('task-detail-menu'));
+		expect(getByTestId('task-claim')).toBeTruthy();
+		expect(getByTestId('task-delete')).toBeTruthy();
 	});
 
 	it('draws no parent line on a top-level task', () => {

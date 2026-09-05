@@ -35,6 +35,7 @@ import Copy from '@lucide/svelte/icons/copy';
 import Cpu from '@lucide/svelte/icons/cpu';
 import Database from '@lucide/svelte/icons/database';
 import Ellipsis from '@lucide/svelte/icons/ellipsis';
+import EllipsisVertical from '@lucide/svelte/icons/ellipsis-vertical';
 import Expand from '@lucide/svelte/icons/expand';
 import ExternalLink from '@lucide/svelte/icons/external-link';
 import File from '@lucide/svelte/icons/file';
@@ -127,6 +128,7 @@ export const icons = {
 	minus: Minus,
 	maximize: Maximize,
 	ellipsis: Ellipsis,
+	'ellipsis-vertical': EllipsisVertical,
 	tag: Tag,
 	'wand-sparkles': WandSparkles,
 	info: Info,
