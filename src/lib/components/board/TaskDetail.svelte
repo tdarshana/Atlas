@@ -1639,6 +1639,9 @@
 		/* Matches `.area`, the textarea this display replaces, so the text does not
 		   sit flush against the box's own border on every side. */
 		padding: 6px 8px;
+		/* Flush with the wrapper, so the overlay pencil's 6px top gap is measured from
+		   the visible box, the same as its right gap. */
+		margin-top: 0;
 		flex: none;
 		max-height: none;
 		overflow: visible;
