@@ -13,7 +13,7 @@
 	import MarkdownView from '$lib/ui/MarkdownView.svelte';
 	import ResizeBar from '$lib/ui/ResizeBar.svelte';
 	import Textarea from '$lib/ui/Textarea.svelte';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	interface Props {
 		skill: Skill | null;

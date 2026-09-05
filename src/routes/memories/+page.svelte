@@ -28,7 +28,7 @@
 	import Dialog from '$lib/ui/Dialog.svelte';
 	import ErrorState from '$lib/ui/ErrorState.svelte';
 	import Textarea from '$lib/ui/Textarea.svelte';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	const columns: TableColumn<RecallHit>[] = [
 		{ key: 'kind', label: 'Kind', width: '110px', sortable: true, sort: (a, b) => a.memory.kind.localeCompare(b.memory.kind) },

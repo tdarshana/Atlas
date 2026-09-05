@@ -20,7 +20,7 @@
 	import type { FrameworkDoc, FrameworkKind, FrameworkListing, ImportWhat } from '$lib/types';
 	import ErrorState from '$lib/ui/ErrorState.svelte';
 	import MarkdownView from '$lib/ui/MarkdownView.svelte';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	const id = $derived(project.current?.id ?? '');
 

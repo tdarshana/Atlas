@@ -10,7 +10,7 @@
 	import type { Workflow, WorkflowPatch } from '$lib/types';
 	import Dialog from '$lib/ui/Dialog.svelte';
 	import Textarea from '$lib/ui/Textarea.svelte';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	/** `Select` binds a string; the global scope is the empty value. */
 	const GLOBAL = '';

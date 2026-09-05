@@ -8,7 +8,7 @@ import type { Component } from 'svelte';
 import { api } from '$lib/daemon.svelte';
 import type { Platform } from '$lib/ds';
 import { UI_THEME_KEY } from '$lib/types';
-import { migrateLocalStorage, persistSet } from './persist';
+import { migrateLocalStorage, persistSet } from '$lib/platform/persist';
 import { resolvePlatform } from './platform';
 import { panelTitle, type ViewId } from './views';
 

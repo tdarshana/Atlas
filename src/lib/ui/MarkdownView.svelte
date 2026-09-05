@@ -5,7 +5,7 @@
 	// Preview, since the textarea next to it is already the source view. The mode is a single
 	// preference shared by every viewer that shows the switch, remembered across restarts.
 	import { untrack } from 'svelte';
-	import { persistSet } from '$lib/shell/persist';
+	import { persistSet } from '$lib/platform/persist';
 	import { inTauri } from '$lib/shell/platform';
 	import { highlightSource, renderMarkdown } from './markdown';
 

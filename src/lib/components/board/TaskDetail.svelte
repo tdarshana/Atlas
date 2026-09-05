@@ -31,7 +31,7 @@
 	import Dialog from '$lib/ui/Dialog.svelte';
 	import MarkdownView from '$lib/ui/MarkdownView.svelte';
 	import ResizeBar from '$lib/ui/ResizeBar.svelte';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	interface Props {
 		detail: TaskDetail | null;

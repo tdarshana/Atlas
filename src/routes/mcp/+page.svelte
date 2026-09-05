@@ -27,7 +27,7 @@
 	} from '$lib/stores/mcp-servers.svelte';
 	import type { McpServerEntry, NewMcpServer } from '$lib/types';
 	import Dialog from '$lib/ui/Dialog.svelte';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	let adding = $state(false);
 	let removing = $state<McpServerEntry | null>(null);

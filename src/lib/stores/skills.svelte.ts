@@ -5,7 +5,7 @@
 
 import { api } from '$lib/daemon.svelte';
 import { errorMessage } from '$lib/errors';
-import { persistSet } from '$lib/shell/persist';
+import { persistSet } from '$lib/platform/persist';
 import {
 	clampDetail,
 	DETAIL_DEFAULT,

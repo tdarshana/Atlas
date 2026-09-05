@@ -27,7 +27,7 @@
 	} from '$lib/components/project/settings/settings';
 	import type { Project, ProjectPatch, VaultStatus } from '$lib/types';
 	import Dialog from '$lib/ui/Dialog.svelte';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	interface Form {
 		name: string;

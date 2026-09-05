@@ -6,7 +6,7 @@
 import { api } from '$lib/daemon.svelte';
 import { errorMessage } from '$lib/errors';
 import { clampDetail, DETAIL_DEFAULT, DETAIL_KEY } from '$lib/mcp-servers';
-import { persistSet } from '$lib/shell/persist';
+import { persistSet } from '$lib/platform/persist';
 import type { McpCheckResult, McpServerEntry, NewMcpServer, Uuid } from '$lib/types';
 
 export const servers = $state({

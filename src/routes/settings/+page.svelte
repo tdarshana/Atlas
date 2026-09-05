@@ -76,7 +76,7 @@
 		VaultStatus
 	} from '$lib/types';
 	import ErrorState from '$lib/ui/ErrorState.svelte';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	/** Draft values. The API key starts blank on every load: blank means unchanged. */
 	let enabled = $state(false);

@@ -18,7 +18,7 @@
 	import { loadProjects, projects } from '$lib/stores/projects.svelte';
 	import { loadSettings, saveSettings, settings } from '$lib/stores/settings.svelte';
 	import type { AgentAccess } from '$lib/types';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	/** How often the system rows are re-read, so a grant made in System Settings shows up
 	 * without the user coming back and clicking. */

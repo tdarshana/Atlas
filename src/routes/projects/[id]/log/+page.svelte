@@ -31,7 +31,7 @@
 	} from '$lib/components/project/log/log';
 	import type { LogEntry } from '$lib/types';
 	import ErrorState from '$lib/ui/ErrorState.svelte';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	/** The daemon's rows carry no id, so the table is keyed by position instead. */
 	type Row = LogEntry & { rowId: string };

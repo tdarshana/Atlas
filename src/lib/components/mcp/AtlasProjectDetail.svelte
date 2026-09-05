@@ -13,7 +13,7 @@
 	import { loadProject } from '$lib/stores/projects.svelte';
 	import { project } from '$lib/stores/project.svelte';
 	import type { McpClient, ProjectMcpReport, ProjectMcpToolRow, Uuid } from '$lib/types';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 	import { scrollDetailTo } from './scroll';
 
 	interface Props {

@@ -19,7 +19,7 @@
 	import type { Memory, MemoryKind } from '$lib/types';
 	import Dialog from '$lib/ui/Dialog.svelte';
 	import ErrorState from '$lib/ui/ErrorState.svelte';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	const columns: TableColumn<Memory>[] = [
 		{ key: 'text', label: 'Text', mono: true },

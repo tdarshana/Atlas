@@ -19,7 +19,7 @@
 	import ErrorState from '$lib/ui/ErrorState.svelte';
 	import Input from '$lib/ui/Input.svelte';
 	import Table from '$lib/ui/Table.svelte';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	const columns = [
 		{ key: 'name', label: 'Name', width: '200px' },

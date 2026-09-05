@@ -17,7 +17,7 @@
 	import type { Persona, RosterRow } from '$lib/types';
 	import Dialog from '$lib/ui/Dialog.svelte';
 	import EmptyState from '$lib/ui/EmptyState.svelte';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	const id = $derived(project.current?.id ?? '');
 

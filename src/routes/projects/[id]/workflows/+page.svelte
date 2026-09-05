@@ -17,7 +17,7 @@
 	import type { Workflow, WorkflowRun } from '$lib/types';
 	import { lastRunLabel, workflowRows, type WorkflowRow } from '$lib/components/project/workflows';
 	import ErrorState from '$lib/ui/ErrorState.svelte';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	/** How many of the project's most recent runs, across every one of its workflows,
 	 * the Recent runs card shows. */

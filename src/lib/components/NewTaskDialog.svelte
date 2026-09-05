@@ -8,7 +8,7 @@
 	import type { TaskKind, TaskPriority, Uuid } from '$lib/types';
 	import Dialog from '$lib/ui/Dialog.svelte';
 	import Textarea from '$lib/ui/Textarea.svelte';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	interface Props {
 		open: boolean;

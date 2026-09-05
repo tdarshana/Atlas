@@ -7,7 +7,7 @@ export { default as SidePanel } from './SidePanel.svelte';
 export { default as StatusBar } from './StatusBar.svelte';
 export { default as Panel } from './Panel.svelte';
 export { default as SectionHeading } from './SectionHeading.svelte';
-export { default as TabStrip, type Tab } from './TabStrip.svelte';
+export { default as TabStrip } from './TabStrip.svelte';
 export { default as TreeGroup } from './TreeGroup.svelte';
 export { default as TreeRow } from './TreeRow.svelte';
 
@@ -32,4 +32,4 @@ export {
 } from './shell.svelte';
 export { installShortcuts, installGlobalShortcutBridge, PALETTE_EVENT } from './shortcuts';
 export { resolvePlatform, inTauri, copyText } from './platform';
-export { VIEWS, MAIN_VIEWS, viewForPath, viewLabel, panelTitle, type ViewId } from './views';
+export { VIEWS, MAIN_VIEWS, viewForPath, viewLabel, panelTitle, type ViewId, type Tab } from './views';

@@ -17,7 +17,7 @@
 		workflow
 	} from '$lib/stores/workflows.svelte';
 	import type { RunSummary, WorkflowRun } from '$lib/types';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 	import StepLog from './StepLog.svelte';
 
 	const POLL_MS = 2000;

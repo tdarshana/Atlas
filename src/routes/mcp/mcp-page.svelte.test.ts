@@ -75,7 +75,7 @@ vi.mock('$lib/daemon.svelte', () => ({
 
 import McpPage from './+page.svelte';
 import { servers } from '$lib/stores/mcp-servers.svelte';
-import { clear, toasts } from '$lib/ui/toasts.svelte';
+import { clear, toasts } from '$lib/platform/toasts.svelte';
 
 beforeEach(() => {
 	checked.length = 0;

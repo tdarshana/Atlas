@@ -7,7 +7,7 @@
 	import { DEFAULT_SYNC_TARGETS, SYNC_TARGET_LABELS, projectSyncRequest } from './sync';
 	import type { SyncOp, SyncReport } from '$lib/types';
 	import { skipReason } from '$lib/types';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	interface Props {
 		projectName: string;

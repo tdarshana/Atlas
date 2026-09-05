@@ -5,7 +5,7 @@
 	import { Button } from '$lib/ds';
 	import { createWorkflow } from '$lib/stores/workflows.svelte';
 	import { errorMessage } from '$lib/errors';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	async function newWorkflow(): Promise<void> {
 		try {

@@ -20,7 +20,7 @@
 	import type { MemoryKind, MemorySource } from '$lib/types';
 	import Dialog from '$lib/ui/Dialog.svelte';
 	import Textarea from '$lib/ui/Textarea.svelte';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 	import { errorMessage } from '$lib/errors';
 
 	const RAW_AGENTS = ['cli/claude-code', 'cli/codex', 'desktop'];

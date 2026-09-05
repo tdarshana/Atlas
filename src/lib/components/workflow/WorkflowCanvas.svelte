@@ -7,7 +7,7 @@
 	import type { Connection } from '@xyflow/svelte';
 	import { SvelteFlow } from '@xyflow/svelte';
 	import { connect, workflow } from '$lib/stores/workflows.svelte';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 	import ActionNode from './ActionNode.svelte';
 	import CanvasControls from './CanvasControls.svelte';
 	import OutputNode from './OutputNode.svelte';

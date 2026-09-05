@@ -11,7 +11,7 @@
 	import { copyText } from '$lib/shell';
 	import type { McpCheckResult, McpServerEntry } from '$lib/types';
 	import ResizeBar from '$lib/ui/ResizeBar.svelte';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	interface Props {
 		server: McpServerEntry;

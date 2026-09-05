@@ -24,7 +24,7 @@
 	import EmptyState from '$lib/ui/EmptyState.svelte';
 	import MarkdownView from '$lib/ui/MarkdownView.svelte';
 	import Textarea from '$lib/ui/Textarea.svelte';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	const CASES: Case[] = ['plan', 'implement', 'review', 'test', 'document', 'default'];
 	const MEMORY_RULES: PersonaRule[] = ['allow', 'deny', 'review'];

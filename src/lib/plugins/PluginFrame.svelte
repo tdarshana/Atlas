@@ -12,7 +12,7 @@
 	import type { Platform } from '$lib/ds';
 	import { resolvePlatform } from '$lib/shell/platform';
 	import { themeTokenAllowlist } from '$lib/shell/theme-pack';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 	import { createBridge, type Bridge, type FrameContext, type ThemeTokens } from './bridge';
 	import { frameUrl } from './frame-url';
 	import { pluginById, registerFrame, unregisterFrame } from './host.svelte';

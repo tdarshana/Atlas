@@ -7,7 +7,7 @@
 // the store when running in Tauri and is a no-op otherwise, once a console warning per
 // command name (`desktop`'s job).
 
-import { desktop } from './platform';
+import { desktop } from '$lib/shell/platform';
 
 /** Marks the one-time copy of pre-existing `localStorage` values into the store done. */
 const MIGRATED_KEY = 'atlas.persist.migrated';

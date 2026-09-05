@@ -9,7 +9,7 @@ import { dispatchCommand } from '$lib/plugins/host.svelte';
 import { desktop, inTauri } from '$lib/shell/platform';
 import { setTheme, shell, toggleRail, toggleSidePanel } from '$lib/shell/shell.svelte';
 import type { Uuid } from '$lib/types';
-import { push } from '$lib/ui/toasts.svelte';
+import { push } from '$lib/platform/toasts.svelte';
 
 /** Opens the log directory in the OS file manager. No-op outside Tauri: there is no
  * folder to reveal in a browser tab, so `desktop` is skipped entirely rather than

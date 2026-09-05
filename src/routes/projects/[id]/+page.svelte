@@ -21,7 +21,7 @@
 	import type { Task } from '$lib/types';
 	import RemoveProjectDialog from '$lib/components/project/RemoveProjectDialog.svelte';
 	import MarkdownView from '$lib/ui/MarkdownView.svelte';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	let tasks = $state<Task[]>([]);
 	let confirming = $state(false);

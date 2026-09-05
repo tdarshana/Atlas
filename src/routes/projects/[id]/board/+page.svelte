@@ -45,7 +45,7 @@
 	import Dialog from '$lib/ui/Dialog.svelte';
 	import EmptyState from '$lib/ui/EmptyState.svelte';
 	import ErrorState from '$lib/ui/ErrorState.svelte';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	/** `global` is the every-project board, which the daemon means by no `project_id`. */
 	const routeId = $derived(page.params.id ?? 'global');

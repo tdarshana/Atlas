@@ -10,7 +10,7 @@
 	import { GLOBAL_SCOPE, PROJECT_ONLY_HINT, SYNC_TARGETS, chosenKinds, syncRequest, targetEnabled } from './sync';
 	import type { Project, SyncKind, SyncOp, SyncReport } from '$lib/types';
 	import { skipReason } from '$lib/types';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	interface Props {
 		/** Runs a Check as soon as the card mounts, for `/agents?sync=1`. */

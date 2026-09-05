@@ -21,6 +21,17 @@ export type ViewId =
 	 * a side panel of its own, so it needs a view id. */
 	| 'plugins';
 
+/** One entry of a `TabStrip`. Lives here rather than in the component so a store can
+ * name the type without importing the shell's components. */
+export interface Tab {
+	id: string;
+	label: string;
+	icon?: IconName;
+	href?: string;
+	/** Shown as a small outline badge after the label when greater than zero. */
+	count?: number;
+}
+
 export interface ViewDef {
 	id: ViewId;
 	label: string;

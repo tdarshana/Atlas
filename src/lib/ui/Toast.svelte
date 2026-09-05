@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { copyText } from '$lib/shell';
-	import { dismiss, toasts, type ToastItem } from './toasts.svelte';
+	import { dismiss, toasts, type ToastItem } from '$lib/platform/toasts.svelte';
 
 	/**
 	 * An error interrupts whatever a screen reader is saying; a success or an info note

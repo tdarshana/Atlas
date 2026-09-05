@@ -17,7 +17,7 @@ vi.mock('$lib/daemon.svelte', () => ({
 
 import { DETAIL_TAB_KEY, setDetailTab } from '$lib/stores/board.svelte';
 import { personas } from '$lib/stores/personas.svelte';
-import { clear as clearToasts, toasts } from '$lib/ui/toasts.svelte';
+import { clear as clearToasts, toasts } from '$lib/platform/toasts.svelte';
 import TaskDetail from './TaskDetail.svelte';
 
 afterEach(cleanup);

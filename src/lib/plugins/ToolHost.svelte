@@ -9,7 +9,7 @@
 	// Nothing renders for a plugin without tools, and nothing at all renders outside Tauri,
 	// where there is no plugin store and no daemon socket to speak of.
 	import { onMount } from 'svelte';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 	import PluginFrame from './PluginFrame.svelte';
 	import { BACKGROUND_VIEW, callPluginTool, loadPlugins, plugins } from './host.svelte';
 	import {

@@ -14,7 +14,7 @@
 	import { knownActors } from '$lib/components/project/settings/settings';
 	import type { ProjectAccessReport } from '$lib/types';
 	import ErrorState from '$lib/ui/ErrorState.svelte';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	/** Actor labels seen in this project's log. A vocabulary, never a rebuild trigger. */
 	let sources = $state<string[]>([]);

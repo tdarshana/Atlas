@@ -23,7 +23,7 @@
 	} from '$lib/stores/skills.svelte';
 	import type { NewSkill, SkillSummary } from '$lib/types';
 	import EmptyState from '$lib/ui/EmptyState.svelte';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	let search = $state('');
 	let creating = $state(false);

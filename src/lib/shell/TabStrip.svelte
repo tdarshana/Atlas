@@ -1,16 +1,8 @@
 <script lang="ts">
 	// The 34px view tab strip. Items carry an href when the tabs are routes and fall back to
 	// `onselect` when they only switch a pane.
-	import { Badge, Icon, type IconName } from '$lib/ds';
-
-	export interface Tab {
-		id: string;
-		label: string;
-		icon?: IconName;
-		href?: string;
-		/** Shown as a small outline badge after the label when greater than zero. */
-		count?: number;
-	}
+	import { Badge, Icon } from '$lib/ds';
+	import type { Tab } from './views';
 
 	interface Props {
 		items: Tab[];

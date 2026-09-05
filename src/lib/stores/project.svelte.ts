@@ -4,7 +4,7 @@
 // the Projects screen never disagree about the same project.
 
 import type { Snippet } from 'svelte';
-import type { Tab } from '$lib/shell';
+import type { Tab } from '$lib/shell/views';
 import type { IconName } from '$lib/ds';
 import type { Project, Task } from '$lib/types';
 import { deleteProject, loadProject, projectDetail, refreshProject } from './projects.svelte';

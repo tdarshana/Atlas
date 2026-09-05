@@ -6,7 +6,7 @@ import type { Bridge } from '$lib/plugins/bridge';
 import { collectContributions } from '$lib/plugins/contributions';
 import { dispatchCommand, registerFrame, unregisterFrame } from '$lib/plugins/host.svelte';
 import type { Contributes, Manifest, PluginInfo } from '$lib/plugins/types';
-import { clear, toasts } from '$lib/ui/toasts.svelte';
+import { clear, toasts } from '$lib/platform/toasts.svelte';
 import { pluginCommands } from './commands';
 
 function plugin(id: string, name: string, contributes: Partial<Contributes>): PluginInfo {

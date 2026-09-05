@@ -6,9 +6,9 @@ import { ApiError } from '$lib/api';
 import { api } from '$lib/daemon.svelte';
 import { onChange } from './changes.svelte';
 import { errorLogPath, errorMessage } from '$lib/errors';
-import { persistSet } from '$lib/shell/persist';
+import { persistSet } from '$lib/platform/persist';
 import type { Stage, Task, TaskDetail, Uuid } from '$lib/types';
-import { push } from '$lib/ui/toasts.svelte';
+import { push } from '$lib/platform/toasts.svelte';
 
 export const SEARCH_DEBOUNCE_MS = 300;
 

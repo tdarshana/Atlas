@@ -5,7 +5,7 @@ const desktopMock = vi.fn();
 
 // `persist.ts` only ever talks to Tauri through `desktop`, so mocking it here lets each
 // test choose the Tauri or the browser path without touching `window.__TAURI_INTERNALS__`.
-vi.mock('./platform', () => ({
+vi.mock('$lib/shell/platform', () => ({
 	desktop: (command: string, args: Record<string, unknown> | undefined, fallback: () => unknown) =>
 		desktopMock(command, args, fallback)
 }));

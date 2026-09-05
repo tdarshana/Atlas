@@ -8,7 +8,7 @@
 import type { ThemePack } from '$lib/types';
 import type { FontMono, FontSize, FontUi } from './fonts';
 import { applyFonts } from './fonts';
-import { persistSet } from './persist';
+import { persistSet } from '$lib/platform/persist';
 import { shell, THEME_KEY, type Theme } from './shell.svelte';
 import { applyThemePack, clearThemePack } from './theme-pack';
 

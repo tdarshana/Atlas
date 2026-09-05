@@ -26,7 +26,7 @@
 		setEnabled
 	} from '$lib/stores/mcp-servers.svelte';
 	import type { McpServerEntry, NewMcpServer } from '$lib/types';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	const id = $derived(project.current?.id ?? '');
 	const rootPath = $derived(project.current?.root_path ?? '');

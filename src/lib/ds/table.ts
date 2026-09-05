@@ -2,7 +2,7 @@
 // `atlas.table.<id>` localStorage persistence. No Svelte here, so these are plain
 // unit tests.
 
-import { persistSet } from '$lib/shell/persist';
+import { persistSet } from '$lib/platform/persist';
 
 export interface TableColumn<T> {
 	key: string;

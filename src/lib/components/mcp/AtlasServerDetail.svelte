@@ -11,7 +11,7 @@
 	import { copyText, inTauri } from '$lib/shell';
 	import { loadMcp, mcp, toggleTool } from '$lib/stores/mcp.svelte';
 	import type { McpClient, McpToolRow } from '$lib/types';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 	import { scrollDetailTo } from './scroll';
 
 	interface Props {

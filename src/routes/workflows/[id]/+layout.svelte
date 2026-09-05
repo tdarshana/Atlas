@@ -16,7 +16,7 @@
 		workflow
 	} from '$lib/stores/workflows.svelte';
 	import type { RunStatus } from '$lib/types';
-	import { push } from '$lib/ui/toasts.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
 	let { children, data }: { children: Snippet; data: { id: string } } = $props();
 
