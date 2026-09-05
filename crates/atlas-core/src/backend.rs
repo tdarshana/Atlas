@@ -11,7 +11,7 @@ use crate::jobs::{Job, JobQueue, JobRepo};
 use crate::library::{AgentRepo, DocRepo};
 use crate::models::*;
 use crate::paths::AtlasPaths;
-use crate::projects::{build_profile, detect_root, ProjectRepo};
+use crate::projects::{access, build_profile, detect_root, Action, Actor, ProjectRepo};
 use crate::search::global::{SearchQuery, SearchResult};
 use crate::search::{FastEmbedder, NoopEmbedder};
 use crate::service::MemoryService;
@@ -293,23 +293,18 @@ fn settings_repo(db: &Db) -> crate::settings::SettingsRepo<'_> { crate::settings
 /// refusal: there is no rule to apply. Takes `db` rather than `&LocalBackend` so it
 /// can run inside a `blocking` closure.
 fn memory_gate(db: &Db, project_id: Option<Uuid>, actor: &str) -> Result<bool> {
-    let Some(pid) = project_id.filter(|_| !crate::projects::actor_is_user(actor)) else { return Ok(false) };
-    let project = projects_repo(db).get(pid)?;
-    let defaults = crate::projects::access_defaults(&settings_repo(db))?;
-    crate::projects::check_memory_write(actor, &project, &defaults)?;
-    Ok(crate::projects::effective_access(&project.agent_access, &defaults).require_review)
+    Ok(access::check(db, &Actor::parse(actor), Action::WriteMemory, project_id)?.require_review)
 }
 
 /// Refuses an agent that may not move tasks on this task's board. The task read is
 /// skipped entirely for the user's own hands, which are always exempt.
 fn task_move_gate(db: &Db, tasks: &TaskRepo, id_or_key: &str, actor: &str) -> Result<()> {
-    if crate::projects::actor_is_user(actor) {
+    let actor = Actor::parse(actor);
+    if actor.is_user() {
         return Ok(());
     }
-    let Some(pid) = tasks.get(id_or_key)?.task.project_id else { return Ok(()) };
-    let project = projects_repo(db).get(pid)?;
-    let defaults = crate::projects::access_defaults(&settings_repo(db))?;
-    crate::projects::check_task_move(actor, &project, &defaults)
+    let pid = tasks.get(id_or_key)?.task.project_id;
+    access::check(db, &actor, Action::MoveTask, pid).map(|_| ())
 }
 
 /// Refuses to trigger a run for an actor this project's `agent_access` would
@@ -324,18 +319,10 @@ fn task_move_gate(db: &Db, tasks: &TaskRepo, id_or_key: &str, actor: &str) -> Re
 /// are exempt, the same as every other gate in this file; a global workflow (no
 /// project) is never gated, since there is no project's `agent_access` to check.
 fn workflow_trigger_gate(db: &Db, workflow: &Workflow, actor: &str) -> Result<()> {
-    let Some(pid) = workflow.project_id.filter(|_| !crate::projects::actor_is_user(actor)) else { return Ok(()) };
     let Some(output) = workflow.graph.nodes.iter().find(|n| n.kind == NodeKind::Output) else { return Ok(()) };
     let NodeData::Output { propose_memories, file_tasks } = &output.data else { return Ok(()) };
-    let project = projects_repo(db).get(pid)?;
-    let defaults = crate::projects::access_defaults(&settings_repo(db))?;
-    if *propose_memories {
-        crate::projects::check_memory_write(actor, &project, &defaults)?;
-    }
-    if *file_tasks {
-        crate::projects::check_task_move(actor, &project, &defaults)?;
-    }
-    Ok(())
+    let action = Action::TriggerWorkflow { propose_memories: *propose_memories, file_tasks: *file_tasks };
+    access::check(db, &Actor::parse(actor), action, workflow.project_id).map(|_| ())
 }
 
 /// Deleting a project cascades to its tasks, blocker links and events, so it is a

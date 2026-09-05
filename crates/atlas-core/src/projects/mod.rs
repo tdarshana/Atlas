@@ -1,5 +1,7 @@
+pub mod access;
 pub mod detect;
 pub mod profile;
+pub use access::{access_defaults, actor_is_user, check_memory_write, check_task_move, effective_access, Action, Actor, Decision};
 pub use detect::{detect_root, Detected};
 pub use profile::build_profile;
 
@@ -33,81 +35,6 @@ pub fn normalize_board_key(raw: &str) -> Result<String> {
     }
     Ok(key)
 }
-
-/// Whether `actor` is the user's own hands rather than an agent, and so exempt from a
-/// project's `agent_access` rules.
-///
-/// Those are the desktop (`desktop`), the CLI (`cli`, or `cli/NAME` for `atlas task
-/// --as NAME`), the daemon's own default label for an HTTP caller that sent no
-/// `X-Atlas-Actor` header (`api`), and the workflow scheduler (`scheduler`), which fires
-/// on the user's own configured cron rather than at an agent's request. The rules exist
-/// to fence off *agents*, which always announce themselves.
-///
-/// Matched exactly rather than by prefix: `cli` alone would also exempt `cline`, a real
-/// coding agent, along with anything else that happens to start with those letters, and
-/// such an actor would silently pass every allow-list and `require_review`.
-pub fn actor_is_user(actor: &str) -> bool {
-    let a = actor.trim();
-    a == "desktop" || a == "api" || a == "cli" || a.starts_with("cli/") || a == "scheduler"
-}
-
-/// Whether `actor` is on `allowed`. A `None` list means any actor. A list matches the
-/// full label (`claude-code/reviewer`) or the part before the slash (`claude-code`),
-/// so a project can admit a tool without naming every agent it hosts.
-fn allowed_by(allowed: &Option<Vec<String>>, actor: &str) -> bool {
-    let Some(list) = allowed else { return true };
-    let actor = actor.trim();
-    let tool = actor.split_once('/').map(|(t, _)| t).unwrap_or(actor);
-    list.iter().any(|l| l == actor || l == tool)
-}
-
-/// Resolves a project's access against the global defaults `access_defaults` reads.
-/// Each list takes the project's own value when it is `Some`, else the default's;
-/// `require_review` is a floor a project can only raise, never lower, so it is true
-/// when either side is true.
-pub fn effective_access(project: &AgentAccess, defaults: &AgentAccess) -> AgentAccess {
-    AgentAccess {
-        memory_writers: project.memory_writers.clone().or_else(|| defaults.memory_writers.clone()),
-        task_movers: project.task_movers.clone().or_else(|| defaults.task_movers.clone()),
-        require_review: project.require_review || defaults.require_review,
-    }
-}
-
-/// Reads the three `access.*` settings keys into the global agent-access defaults.
-/// An unset key reads as `AgentAccess::default()` (all-null, `require_review` false),
-/// the same "admits anyone" meaning an unset project's own `agent_access` carries.
-pub fn access_defaults(settings: &crate::settings::SettingsRepo) -> Result<AgentAccess> {
-    let list = |key: &str| -> Result<Option<Vec<String>>> {
-        match settings.get_raw(key)? {
-            Some(v) => Ok(serde_json::from_value(v)?),
-            None => Ok(None),
-        }
-    };
-    Ok(AgentAccess {
-        memory_writers: list("access.memory_writers")?,
-        task_movers: list("access.task_movers")?,
-        require_review: settings.get_raw("access.require_review")?.and_then(|v| v.as_bool()).unwrap_or(false),
-    })
-}
-
-/// Refuses an agent that may not write memories here, checked against the project's
-/// own rule filled in by `defaults` where the project leaves a field unset.
-pub fn check_memory_write(actor: &str, p: &Project, defaults: &AgentAccess) -> Result<()> {
-    if actor_is_user(actor) || allowed_by(&effective_access(&p.agent_access, defaults).memory_writers, actor) {
-        return Ok(());
-    }
-    Err(AtlasError::Conflict(format!("actor '{actor}' may not write memories in project {}", p.name)))
-}
-
-/// Refuses an agent that may not move tasks here, checked against the project's own
-/// rule filled in by `defaults` where the project leaves a field unset.
-pub fn check_task_move(actor: &str, p: &Project, defaults: &AgentAccess) -> Result<()> {
-    if actor_is_user(actor) || allowed_by(&effective_access(&p.agent_access, defaults).task_movers, actor) {
-        return Ok(());
-    }
-    Err(AtlasError::Conflict(format!("actor '{actor}' may not move tasks in project {}", p.name)))
-}
-
 /// The override as a client may see it: the api key becomes `"***"` when one is
 /// stored, the same rule the global `extraction.api_key` follows.
 fn mask_extraction(mut e: ProjectExtraction) -> ProjectExtraction {
