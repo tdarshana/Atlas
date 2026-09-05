@@ -2,6 +2,16 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+/// How long a daemon gets to write `daemon.json`, and then again to answer `/status`:
+/// `READY_ATTEMPTS` polls `READY_STEP` apart. Every test in the file boots its own daemon
+/// and they all start at once, so under a full parallel run a single boot has been seen to
+/// take well past twenty seconds; sixty per phase leaves room without hiding a daemon that
+/// really never comes up.
+const READY_ATTEMPTS: u32 = 600;
+const READY_STEP: Duration = Duration::from_millis(100);
+
+fn ready_budget() -> String { format!("{}s", READY_ATTEMPTS as u128 * READY_STEP.as_millis() / 1000) }
+
 struct Daemon { child: Child, port: u16, _home: tempfile::TempDir }
 impl Drop for Daemon { fn drop(&mut self) { let _ = self.child.kill(); let _ = self.child.wait(); } }
 
@@ -33,24 +43,24 @@ async fn start_with_env(env: &[(&str, &str)]) -> Daemon {
     // below. A daemon that never writes the file fails here, where the reason is plain,
     // rather than as a "port unknown" error further down.
     let mut port = None;
-    for _ in 0..200 {
+    for _ in 0..READY_ATTEMPTS {
         if let Ok(s) = std::fs::read_to_string(&daemon_json) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
                 if let Some(p) = v["port"].as_u64() { port = Some(p as u16); break; }
             }
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(READY_STEP).await;
     }
-    let port = port.unwrap_or_else(|| panic!("daemon.json had no port within 20s"));
+    let port = port.unwrap_or_else(|| panic!("daemon.json had no port within {}", ready_budget()));
     let client = reqwest::Client::new();
     // A daemon that never answers fails here, where the reason is plain, rather than as
     // a connection error inside the test body.
     let mut up = false;
-    for _ in 0..200 {
+    for _ in 0..READY_ATTEMPTS {
         if client.get(format!("http://127.0.0.1:{port}/api/v1/status")).send().await.is_ok() { up = true; break; }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(READY_STEP).await;
     }
-    assert!(up, "atlasd did not answer on port {port} within 20s");
+    assert!(up, "atlasd did not answer on port {port} within {}", ready_budget());
     Daemon { child, port, _home: home }
 }
 

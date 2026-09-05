@@ -65,7 +65,7 @@ pub fn discover(home: &Path, project: Option<&Project>) -> Found {
             );
         }
     }
-    claude::plugin_servers(home, &mut found);
+    claude::plugin_servers(home, project, &mut found);
     found.servers.push(atlas_entry());
     found.servers.sort_by(|a, b| a.entry.name.cmp(&b.entry.name).then_with(|| a.entry.id.cmp(&b.entry.id)));
     found

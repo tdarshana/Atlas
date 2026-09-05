@@ -32,7 +32,7 @@
           "args": []
         }
       },
-      "disabledMcpServers": ["switched-off"],
+      "disabledMcpServers": ["switched-off", "plugin:tools:packaged-off"],
       "enabledMcpjsonServers": ["approved"],
       "disabledMcpjsonServers": []
     }

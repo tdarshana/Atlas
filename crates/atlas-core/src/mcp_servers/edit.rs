@@ -11,8 +11,9 @@
 //! scope, where `.mcp.json`, `.codex/config.toml` and `.cursor/mcp.json` are exactly the
 //! files a user adding a server to a repository means to create.
 //!
-//! Plugin and Atlas entries are never editable: a plugin's files belong to whoever
-//! published it, and Atlas does not edit itself out of its own list.
+//! Plugin and Atlas entries are never edited in place: a plugin's files belong to whoever
+//! published it, and Atlas does not edit itself out of its own list. A plugin server's
+//! per-project switch is Claude Code's own `disabledMcpServers`, though, so that one flips.
 
 use std::path::{Path, PathBuf};
 
@@ -46,7 +47,8 @@ pub const NO_SWITCH: &str = "this agent has no enable switch; remove the server 
 /// Flips the agent's own switch for one server.
 ///
 /// Claude Code keeps its switches in `~/.claude.json` under the project's root:
-/// `disabledMcpServers` for the servers configured in that block, and the
+/// `disabledMcpServers` for the servers configured in that block and, keyed
+/// `plugin:<plugin>:<server>`, for a plugin's servers within that project, and the
 /// `enabledMcpjsonServers` / `disabledMcpjsonServers` pair for the repository's own
 /// `.mcp.json` entries, which it will not start until they are approved. Codex and Cursor
 /// keep theirs in the server's own entry (`enabled = false`, `"disabled": true`).
@@ -74,6 +76,14 @@ pub fn set_enabled(
             claude_list_edit(paths, db, &root, entry, action, actor, |block, name| {
                 set_membership(block, "enabledMcpjsonServers", name, enabled);
                 set_membership(block, "disabledMcpjsonServers", name, !enabled);
+            })
+        }
+        (McpServerSource::Plugin, McpServerScope::Plugin) => {
+            let root = require_project(project)?.root_path.clone();
+            let plugin = entry.plugin.as_deref().ok_or_else(|| AtlasError::Invalid("a plugin server names no plugin".into()))?;
+            let key = claude::plugin_switch_key(plugin, &entry.name);
+            claude_list_edit(paths, db, &root, entry, action, actor, |block, _| {
+                set_membership(block, "disabledMcpServers", &key, !enabled);
             })
         }
         (McpServerSource::Codex, _) => {

@@ -32,7 +32,13 @@ function entry(
 const full: McpServerList = {
 	servers: [
 		entry('atlas', 'atlas', { id: 'atlas', scope: 'user', is_atlas: true, can_toggle: false }),
-		entry('docs', 'plugin', { scope: 'plugin', plugin: 'anthropics/docs', can_toggle: false }),
+		entry('docs', 'plugin', { scope: 'plugin', plugin: 'anthropics/docs', can_toggle: true }),
+		entry('off', 'plugin', {
+			scope: 'plugin',
+			plugin: 'anthropics/off',
+			enabled: false,
+			can_toggle: false
+		}),
 		entry('fs', 'claude')
 	],
 	warnings: []
@@ -124,11 +130,24 @@ describe('the project MCP tab', () => {
 		);
 	});
 
-	it('offers no Enabled checkbox for the Atlas or plugin rows', async () => {
+	it('offers no Enabled checkbox for the Atlas row or a plugin row without a switch', async () => {
 		render(ProjectMcpPage);
 
 		await waitFor(() => screen.getByTestId('mcp-server-fixed-atlas'));
 		expect(screen.queryByTestId('mcp-server-toggle-atlas')).toBeNull();
-		expect(screen.queryByTestId('mcp-server-toggle-plugin:project:docs')).toBeNull();
+		expect(screen.queryByTestId('mcp-server-toggle-plugin:project:off')).toBeNull();
+	});
+
+	it('switches a plugin server off for this project through its own row', async () => {
+		render(ProjectMcpPage);
+
+		await waitFor(() => screen.getByTestId('mcp-server-toggle-plugin:project:docs'));
+		await fireEvent.click(screen.getByTestId('mcp-server-toggle-plugin:project:docs'));
+		await waitFor(() => expect(calls.some((c) => c.name === 'setEnabled')).toBe(true));
+		expect(calls.find((c) => c.name === 'setEnabled')?.args).toEqual([
+			'plugin:project:docs',
+			false,
+			'p-1'
+		]);
 	});
 });

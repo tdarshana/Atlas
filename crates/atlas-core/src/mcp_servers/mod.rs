@@ -286,6 +286,7 @@ mod tests {
                 "gemini:user:gemini-one",
                 "codex:user:node_repl",
                 "plugin:acme/tools:packaged",
+                "plugin:acme/tools:packaged-off",
                 "codex:user:playwright",
                 "claude:user:svelte",
                 "claude:user:user-stdio",
@@ -364,6 +365,7 @@ mod tests {
                 "claude:project:approved",
                 "atlas",
                 "plugin:acme/tools:packaged",
+                "plugin:acme/tools:packaged-off",
                 "claude:local:playwright",
                 "codex:project:repo-codex",
                 "cursor:project:repo-cursor",
@@ -388,7 +390,52 @@ mod tests {
 
         assert!(entry(&list, "codex:project:repo-codex").enabled);
         assert!(entry(&list, "cursor:project:repo-cursor").enabled);
-        assert!(list.servers.iter().any(|s| s.id == "plugin:acme/tools:packaged"));
+
+        // The same `disabledMcpServers` gates a plugin's servers within the project, under
+        // `plugin:<plugin>:<server>`, and every server of an enabled plugin has a switch here.
+        assert!(entry(&list, "plugin:acme/tools:packaged").enabled);
+        assert!(!entry(&list, "plugin:acme/tools:packaged-off").enabled, "listed as plugin:tools:packaged-off");
+        assert!(entry(&list, "plugin:acme/tools:packaged").can_toggle);
+        assert!(entry(&list, "plugin:acme/tools:packaged-off").can_toggle);
+        assert!(!entry(&list, "plugin:acme/tools:packaged").can_remove, "the plugin's own file is never edited");
+
+        // Without a project there is no list to flip, so the rows only follow their plugin.
+        let global = list_mcp_servers(paths.agent_home(), None);
+        assert!(entry(&global, "plugin:acme/tools:packaged-off").enabled);
+        assert!(!entry(&global, "plugin:acme/tools:packaged-off").can_toggle);
+    }
+
+    /// A plugin server's per-project switch is Claude Code's `disabledMcpServers`, written
+    /// under the `plugin:<plugin>:<server>` key Claude Code itself uses (no marketplace),
+    /// next to the local servers' bare names.
+    #[test]
+    fn a_plugin_server_switches_per_project_through_disabled_mcp_servers() {
+        let db = Db::open_in_memory().unwrap();
+        let (_temp, paths, project) = fixture(&db);
+        let project = Some(&project);
+        let disabled_list = || -> Vec<String> {
+            let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(paths.agent_home().join(".claude.json")).unwrap()).unwrap();
+            let block = &config["projects"][&project.unwrap().root_path];
+            block["disabledMcpServers"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect()
+        };
+
+        set_mcp_server_enabled(&paths, &db, project, "plugin:acme/tools:packaged", false, "t").unwrap();
+        assert!(!entry(&list_mcp_servers(paths.agent_home(), project), "plugin:acme/tools:packaged").enabled);
+        assert_eq!(disabled_list(), vec!["switched-off", "plugin:tools:packaged-off", "plugin:tools:packaged"]);
+
+        set_mcp_server_enabled(&paths, &db, project, "plugin:acme/tools:packaged-off", true, "t").unwrap();
+        let list = list_mcp_servers(paths.agent_home(), project);
+        assert!(entry(&list, "plugin:acme/tools:packaged-off").enabled);
+        assert!(!entry(&list, "plugin:acme/tools:packaged").enabled, "the other one is untouched");
+        assert_eq!(disabled_list(), vec!["switched-off", "plugin:tools:packaged"]);
+
+        // The plugin's own `.mcp.json` was never written.
+        let cache = paths.agent_home().join(".claude/plugins/cache/acme/tools/bbbb2222/.mcp.json");
+        assert!(std::fs::read_to_string(cache).unwrap().contains("packaged-off"));
+        let audited: i64 = db
+            .with_conn(|c| Ok(c.query_row("select count(*) from audit where action = 'mcp_config_edit'", [], |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(audited, 2);
     }
 
     /// The one rule that would be worst to get wrong: a token in an agent's config never

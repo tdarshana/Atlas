@@ -276,24 +276,33 @@ mod tests {
         gz_bytes
     }
 
-    /// Serves `body` once as the whole response to any request on a background thread,
-    /// then stops. Returns the `http://127.0.0.1:<port>/archive.tar.gz` URL to fetch it
-    /// from. Hand-rolled because the goal is exercising `download_capped` and
-    /// `extract_tar_gz` against a real socket without reaching the internet.
-    fn serve_once(body: Vec<u8>) -> String {
+    /// Serves `body` as the whole response to every connection on a background thread
+    /// for as long as the test process lives. Returns the
+    /// `http://127.0.0.1:<port>/archive.tar.gz` URL to fetch it from. Hand-rolled
+    /// because the goal is exercising `download_capped` and `extract_tar_gz` against a
+    /// real socket without reaching the internet.
+    ///
+    /// It answers every connection rather than one, and never panics on the serving
+    /// thread: under load a client can open a connection the server never reads (a
+    /// probe, a retry after a reset), and a one-shot server that spent its only accept on
+    /// that one left the real request to time out.
+    fn serve(body: Vec<u8>) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut discard = [0u8; 4096];
-            let _ = std::io::Read::read(&mut stream, &mut discard);
-            let header = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            let _ = stream.write_all(header.as_bytes());
-            let _ = stream.write_all(&body);
-            let _ = stream.flush();
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                let mut discard = [0u8; 4096];
+                let _ = std::io::Read::read(&mut stream, &mut discard);
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            }
         });
         format!("http://127.0.0.1:{port}/archive.tar.gz")
     }
@@ -301,7 +310,7 @@ mod tests {
     #[test]
     fn archive_install_strips_the_top_level_directory_and_installs() {
         let app_data = scratch_dir("archive");
-        let url = serve_once(build_fixture_archive());
+        let url = serve(build_fixture_archive());
 
         let info = install_from_archive_url(&app_data, &url, "https://github.com/acme/hello-world").unwrap();
         assert_eq!(info.id, "hello-world");
@@ -371,7 +380,7 @@ mod tests {
     #[test]
     fn archive_traversal_and_symlink_entries_do_not_escape_or_survive_install() {
         let app_data = scratch_dir("hostile-archive");
-        let url = serve_once(build_hostile_archive());
+        let url = serve(build_hostile_archive());
 
         let info = install_from_archive_url(&app_data, &url, "https://github.com/acme/hello-world").unwrap();
         assert_eq!(info.id, "hello-world");

@@ -6,6 +6,10 @@
       "env": {
         "PLUGIN_TOKEN": "SECRET-DO-NOT-LEAK"
       }
+    },
+    "packaged-off": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/other",
+      "args": []
     }
   }
 }

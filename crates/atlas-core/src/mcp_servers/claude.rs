@@ -9,8 +9,10 @@
 //!
 //! A plugin's servers come from `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/.mcp.json`
 //! at the version directory with the newest modification time, and are on when
-//! `~/.claude/settings.json` lists `<plugin>@<marketplace>` in `enabledPlugins`. Nothing
-//! here edits a plugin: its files belong to whoever published it.
+//! `~/.claude/settings.json` lists `<plugin>@<marketplace>` in `enabledPlugins`. Within a
+//! project, Claude Code switches one of them off through the same `disabledMcpServers`
+//! list as a local server, under the key `plugin:<plugin>:<server>` (no marketplace).
+//! Nothing here edits a plugin: its files belong to whoever published it.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -95,11 +97,29 @@ pub fn project_servers(home: &Path, project: &Project, found: &mut Found) {
     );
 }
 
+/// The key Claude Code files a plugin server under in a project's `disabledMcpServers`:
+/// `plugin:<plugin>:<server>`, with `plugin` being the `<marketplace>/<plugin>` label an
+/// entry carries, so the marketplace is dropped.
+pub fn plugin_switch_key(plugin: &str, name: &str) -> String {
+    let plugin = plugin.rsplit('/').next().unwrap_or(plugin);
+    format!("plugin:{plugin}:{name}")
+}
+
 /// Every installed plugin's `.mcp.json`, at the version directory with the newest
 /// modification time. Directories ending in `.clone` or starting with `temp_` are a
 /// half-finished install and are skipped, the same rule skill discovery uses.
-pub fn plugin_servers(home: &Path, found: &mut Found) {
+///
+/// With a project, the project's `disabledMcpServers` is applied on top of the plugin's
+/// own switch and every server of an enabled plugin can be toggled; without one there is
+/// nothing per-project to flip, so the rows only follow their plugin.
+pub fn plugin_servers(home: &Path, project: Option<&Project>, found: &mut Found) {
     let enabled = enabled_plugins(home, found);
+    let disabled: HashSet<String> = match project {
+        Some(p) => generic_json::read_file(&config_path(home), found)
+            .map(|config| names(project_block(&config, &p.root_path).map(|b| &b["disabledMcpServers"])))
+            .unwrap_or_default(),
+        None => HashSet::new(),
+    };
     let cache = home.join(".claude/plugins/cache");
     let Some(marketplaces) = read_dirs(&cache, found) else { return };
     for marketplace in marketplaces {
@@ -126,9 +146,9 @@ pub fn plugin_servers(home: &Path, found: &mut Found) {
                 &path,
                 None,
                 Some(&label),
+                on && project.is_some(),
                 false,
-                false,
-                &|_| on,
+                &|name| on && !disabled.contains(&plugin_switch_key(&label, name)),
                 found,
             );
         }
