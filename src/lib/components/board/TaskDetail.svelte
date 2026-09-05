@@ -1,14 +1,13 @@
 <script lang="ts">
 	// The open task, docked at the right of the lane strip per frame 02.2b: its fields,
 	// its blockers and children, its history, and the writes a person can make from here.
-	// Every write goes straight to the daemon and then asks the board to reload, so this
-	// panel holds no state the server does not.
+	// Every write goes through the board store, which patches the card from the daemon's
+	// reply, and then asks the board to reload, so this panel holds no state the server
+	// does not.
 	//
 	// The form logic is the Phase 4 drawer's, moved rather than rewritten: the dirty-aware
 	// refill, the 409 reload, the delete confirmation and the toasts all behave as before.
 	import { onMount, untrack } from 'svelte';
-	import { ApiError } from '$lib/api';
-	import { api } from '$lib/daemon.svelte';
 	import { Badge, Button, Icon, IconButton, Input, Select } from '$lib/ds';
 	import { errorMessage } from '$lib/errors';
 	import { relativeAge } from '$lib/format';
@@ -16,11 +15,18 @@
 	import {
 		type DetailMode,
 		type DetailTab,
+		claim,
+		comment as postComment,
+		ConflictError,
 		CONFLICT_MESSAGE,
 		DETAIL_MAX,
 		DETAIL_MIN,
 		detailTab,
-		setDetailTab
+		importFramework,
+		removeTask,
+		setBlockers,
+		setDetailTab,
+		updateTask
 	} from '$lib/stores/board.svelte';
 	import { personas } from '$lib/stores/personas.svelte';
 	import { FRAMEWORK_LABEL, reportText } from '$lib/components/project/frameworks';
@@ -236,7 +242,7 @@
 			return;
 		}
 		try {
-			await api().updateTask(task.key, { title: name });
+			await updateTask(task.key, { title: name });
 			title = name;
 			titleEditing = false;
 			await onchanged();
@@ -311,7 +317,7 @@
 			return;
 		}
 		try {
-			await api().updateTask(task.key, { description: next });
+			await updateTask(task.key, { description: next });
 			description = next;
 			descriptionEditing = false;
 			await onchanged();
@@ -392,7 +398,7 @@
 		titleError = null;
 		saving = true;
 		try {
-			await api().updateTask(task.key, {
+			await updateTask(task.key, {
 				title: name,
 				description,
 				kind: kind as TaskKind,
@@ -408,7 +414,7 @@
 			// A stale stamp would refuse every retry, so take the fresh row. The reload
 			// keeps this form's typing, because only untouched fields follow the server,
 			// and the next Save carries the new `expected_updated_at`.
-			if (e instanceof ApiError && e.status === 409) {
+			if (e instanceof ConflictError) {
 				await onchanged();
 				push('error', CONFLICT_MESSAGE);
 			} else {
@@ -423,7 +429,7 @@
 	async function changePersona(value: string) {
 		if (!task) return;
 		try {
-			await api().updateTask(task.key, { persona: value });
+			await updateTask(task.key, { persona: value });
 			await onchanged();
 		} catch (e) {
 			persona = task.persona_slug ?? '';
@@ -436,20 +442,20 @@
 		if (!task || !key) return;
 		const next = [...task.blocked_by, key];
 		blockerKey = '';
-		void run('Blocker added', () => api().setTaskBlockers(task.key, next));
+		void run('Blocker added', () => setBlockers(task.key, next));
 	}
 
 	function removeBlocker(key: string) {
 		if (!task) return;
 		const next = task.blocked_by.filter((k) => k !== key);
-		void run('Blocker removed', () => api().setTaskBlockers(task.key, next));
+		void run('Blocker removed', () => setBlockers(task.key, next));
 	}
 
 	function sendComment() {
 		const body = comment.trim();
 		if (!task || !body) return;
 		comment = '';
-		void run('Comment added', () => api().commentTask(task.key, body));
+		void run('Comment added', () => postComment(task.key, body));
 	}
 
 	let reimporting = $state(false);
@@ -462,7 +468,7 @@
 		const { project_id, source_ref } = task;
 		reimporting = true;
 		try {
-			const report = await api().importFramework(project_id, source_ref.framework, 'tasks');
+			const report = await importFramework(project_id, source_ref.framework, 'tasks');
 			await onchanged();
 			push('success', reportText(report));
 		} catch (e) {
@@ -479,7 +485,7 @@
 		const key = task.key;
 		busy = true;
 		try {
-			await api().deleteTask(key);
+			await removeTask(key);
 			confirming = false;
 			await ondeleted();
 			push('success', `Deleted ${key}`);
@@ -764,7 +770,7 @@
 					size="sm"
 					data-testid="task-claim"
 					disabled={busy}
-					onclick={() => run('Task claimed', () => api().claimTask(task.key))}
+					onclick={() => run('Task claimed', () => claim(task.key))}
 				>
 					Claim
 				</Button>

@@ -7,7 +7,17 @@ import { api } from '$lib/daemon.svelte';
 import { onChange } from './changes.svelte';
 import { errorLogPath, errorMessage } from '$lib/errors';
 import { persistSet } from '$lib/platform/persist';
-import type { Stage, Task, TaskDetail, Uuid } from '$lib/types';
+import type {
+	FrameworkKind,
+	ImportReport,
+	ImportWhat,
+	Stage,
+	Task,
+	TaskDetail,
+	TaskEvent,
+	TaskUpdate,
+	Uuid
+} from '$lib/types';
 import { push } from '$lib/platform/toasts.svelte';
 
 export const SEARCH_DEBOUNCE_MS = 300;
@@ -703,4 +713,80 @@ export async function move(key: string, stage: string): Promise<void> {
 			push('error', errorMessage(e));
 		}
 	}
+}
+
+// --- Writes from the detail ------------------------------------------------------------
+//
+// Every write the task detail makes goes through here, so the card in the lane and the
+// open detail are patched from the same row the daemon sends back and never disagree
+// (ARCH-11). The detail still asks the page to reload afterwards, which brings the
+// events and the rows a write touched indirectly (a blocker's `ready`, a child's stage).
+
+/** A write the daemon refused because the task changed under it (HTTP 409). */
+export class ConflictError extends Error {
+	constructor() {
+		super(CONFLICT_MESSAGE);
+		this.name = 'ConflictError';
+	}
+}
+
+/** Replaces the task's row in the list and in the open detail with the daemon's. */
+function accept(task: Task): void {
+	const i = board.tasks.findIndex((t) => t.id === task.id);
+	if (i >= 0) board.tasks[i] = task;
+	const detail = board.detail;
+	if (!detail) return;
+	if (detail.task.id === task.id) detail.task = task;
+	else {
+		const c = detail.children.findIndex((t) => t.id === task.id);
+		if (c >= 0) detail.children[c] = task;
+	}
+}
+
+/** Patches the task's fields; a stale `expected_updated_at` throws `ConflictError`. */
+export async function updateTask(key: string, patch: TaskUpdate): Promise<Task> {
+	try {
+		const task = await api().updateTask(key, patch);
+		accept(task);
+		return task;
+	} catch (e) {
+		if (e instanceof ApiError && e.status === 409) throw new ConflictError();
+		throw e;
+	}
+}
+
+export async function setBlockers(key: string, keys: string[]): Promise<Task> {
+	const task = await api().setTaskBlockers(key, keys);
+	accept(task);
+	return task;
+}
+
+export async function claim(key: string): Promise<Task> {
+	const task = await api().claimTask(key);
+	accept(task);
+	return task;
+}
+
+/** Appends the new event to the open detail when it is this task's. */
+export async function comment(key: string, body: string): Promise<TaskEvent> {
+	const event = await api().commentTask(key, body);
+	if (board.detail?.task.key === key) board.detail.events.push(event);
+	return event;
+}
+
+/** Drops the row from the list and from the open detail's children. */
+export async function removeTask(key: string): Promise<void> {
+	await api().deleteTask(key);
+	board.tasks = board.tasks.filter((t) => t.key !== key);
+	if (board.detail) board.detail.children = board.detail.children.filter((t) => t.key !== key);
+}
+
+/** Re-runs a framework import. Nothing to patch: the report says what changed, and the
+ * caller's reload lists it. */
+export function importFramework(
+	projectId: Uuid,
+	framework: FrameworkKind,
+	what: ImportWhat
+): Promise<ImportReport> {
+	return api().importFramework(projectId, framework, what);
 }

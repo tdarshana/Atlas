@@ -9,7 +9,13 @@ const mocks = vi.hoisted(() => ({
 	listTasks: vi.fn(),
 	boardStages: vi.fn(),
 	moveTask: vi.fn(),
-	getTask: vi.fn()
+	getTask: vi.fn(),
+	updateTask: vi.fn(),
+	setTaskBlockers: vi.fn(),
+	claimTask: vi.fn(),
+	commentTask: vi.fn(),
+	deleteTask: vi.fn(),
+	importFramework: vi.fn()
 }));
 
 vi.mock('$lib/daemon.svelte', () => ({
@@ -19,7 +25,26 @@ vi.mock('$lib/daemon.svelte', () => ({
 	boot: async () => {}
 }));
 
-import { backTask, board, closeTask, deriveColumns, loadDetail, move, openTask, refresh, stageRenames, startBoardPolling, validateStages } from './board.svelte';
+import {
+	backTask,
+	board,
+	claim,
+	closeTask,
+	comment,
+	ConflictError,
+	deriveColumns,
+	importFramework,
+	loadDetail,
+	move,
+	openTask,
+	refresh,
+	removeTask,
+	setBlockers,
+	stageRenames,
+	startBoardPolling,
+	updateTask,
+	validateStages
+} from './board.svelte';
 import { dispatch } from './changes.svelte';
 
 const STAGES: Stage[] = [
@@ -68,6 +93,7 @@ beforeEach(() => {
 	board.filters.hideDone = false;
 	board.error = null;
 	board.selected = null;
+	board.detail = null;
 });
 
 describe('deriveColumns', () => {
@@ -457,5 +483,95 @@ describe('move', () => {
 		await pending;
 
 		expect(board.tasks[0].stage).toBe('In Progress');
+	});
+});
+
+
+// The detail's writes (ARCH-11): each one calls the api once and patches the row the
+// daemon sends back into the list and into the open detail, so the card and the panel
+// never disagree.
+describe('writes from the detail', () => {
+	function openDetail(children: Task[] = []) {
+		board.tasks = [task('ATL-1', 'Backlog'), task('ATL-2', 'Backlog'), ...children];
+		board.detail = { task: task('ATL-1', 'Backlog'), children, events: [] };
+	}
+
+	it('updateTask patches the list row and the open task with what the daemon returns', async () => {
+		openDetail();
+		const fresh = { ...task('ATL-1', 'Backlog'), title: 'Renamed' };
+		mocks.updateTask.mockResolvedValue(fresh);
+
+		const got = await updateTask('ATL-1', { title: 'Renamed' });
+
+		expect(mocks.updateTask).toHaveBeenCalledTimes(1);
+		expect(mocks.updateTask).toHaveBeenCalledWith('ATL-1', { title: 'Renamed' });
+		expect(got).toEqual(fresh);
+		expect(board.tasks[0].title).toBe('Renamed');
+		expect(board.detail?.task.title).toBe('Renamed');
+	});
+
+	it('updateTask turns a 409 into ConflictError and leaves the list alone', async () => {
+		openDetail();
+		mocks.updateTask.mockRejectedValue(new ApiError('changed', 409));
+
+		await expect(updateTask('ATL-1', { title: 'x' })).rejects.toBeInstanceOf(ConflictError);
+		expect(board.tasks[0].title).toBe('ATL-1');
+	});
+
+	it('updateTask rethrows any other failure as it is', async () => {
+		openDetail();
+		const boom = new ApiError('nope', 400);
+		mocks.updateTask.mockRejectedValue(boom);
+
+		await expect(updateTask('ATL-1', { title: 'x' })).rejects.toBe(boom);
+	});
+
+	it('setBlockers and claim patch the row and a child of the open detail', async () => {
+		openDetail([task('ATL-3', 'Backlog')]);
+		mocks.setTaskBlockers.mockResolvedValue({ ...task('ATL-1', 'Backlog'), blocked_by: ['ATL-2'] });
+		mocks.claimTask.mockResolvedValue({ ...task('ATL-3', 'In Progress'), assignee: 'codex' });
+
+		await setBlockers('ATL-1', ['ATL-2']);
+		await claim('ATL-3');
+
+		expect(mocks.setTaskBlockers).toHaveBeenCalledWith('ATL-1', ['ATL-2']);
+		expect(mocks.claimTask).toHaveBeenCalledWith('ATL-3');
+		expect(board.tasks[0].blocked_by).toEqual(['ATL-2']);
+		expect(board.detail?.task.blocked_by).toEqual(['ATL-2']);
+		expect(board.tasks[2].stage).toBe('In Progress');
+		expect(board.detail?.children[0].assignee).toBe('codex');
+	});
+
+	it('comment appends the event to the open detail and not to another task', async () => {
+		openDetail();
+		const ev = { id: 'e1', task_id: 'id-ATL-1', actor: 'desktop', kind: 'commented', body: 'hi', detail: null, created_at: '2026-09-03T10:00:00Z' };
+		mocks.commentTask.mockResolvedValue(ev);
+
+		await comment('ATL-1', 'hi');
+		await comment('ATL-2', 'elsewhere');
+
+		expect(mocks.commentTask).toHaveBeenNthCalledWith(1, 'ATL-1', 'hi');
+		expect(board.detail?.events).toEqual([ev]);
+	});
+
+	it('removeTask drops the row and a child of the open detail', async () => {
+		openDetail([task('ATL-3', 'Backlog')]);
+		mocks.deleteTask.mockResolvedValue(undefined);
+
+		await removeTask('ATL-3');
+
+		expect(mocks.deleteTask).toHaveBeenCalledWith('ATL-3');
+		expect(board.tasks.map((t) => t.key)).toEqual(['ATL-1', 'ATL-2']);
+		expect(board.detail?.children).toEqual([]);
+	});
+
+	it('importFramework hands the arguments through and returns the report', async () => {
+		const report = { created: 1, updated: 0, skipped: 2 };
+		mocks.importFramework.mockResolvedValue(report);
+
+		const got = await importFramework('p1', 'superpowers', 'tasks');
+
+		expect(mocks.importFramework).toHaveBeenCalledWith('p1', 'superpowers', 'tasks');
+		expect(got).toBe(report);
 	});
 });
