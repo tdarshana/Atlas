@@ -71,12 +71,19 @@ impl RemoteBackend {
     /// through. `Client::builder` only fails on a bad TLS or resolver setup, which a
     /// loopback client has none of, so the default is a sound fallback.
     pub fn with_token(port: u16, token: Option<String>) -> Self {
+        Self::from_base_url(format!("http://127.0.0.1:{port}/api/v1"), token)
+    }
+
+    /// The same client over an API base the caller already resolved
+    /// (`http://127.0.0.1:{port}/api/v1`) and the token it read beside it, for a host
+    /// that reads `daemon.json` on every call rather than holding a backend.
+    pub fn from_base_url(base: String, token: Option<String>) -> Self {
         let mut headers = reqwest::header::HeaderMap::new();
         if let Some(value) = token.as_deref().and_then(|t| t.parse().ok()) {
             headers.insert(crate::daemon_ctl::TOKEN_HEADER, value);
         }
         let inner = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).default_headers(headers).build().unwrap_or_default();
-        Self { base: format!("http://127.0.0.1:{port}/api/v1"), client: Http { inner, persona: Default::default() }, actor: "cli".into() }
+        Self { base, client: Http { inner, persona: Default::default() }, actor: "cli".into() }
     }
     async fn handle<T: serde::de::DeserializeOwned>(r: reqwest::Response) -> Result<T> {
         if r.status().is_success() { return r.json::<T>().await.map_err(|e| AtlasError::Other(e.to_string())); }

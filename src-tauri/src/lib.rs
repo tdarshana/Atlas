@@ -12,7 +12,9 @@ mod notify_poller;
 mod plugins;
 mod scratch;
 
-use commands::platform::{
+use atlas_client::remote::RemoteBackend;
+use atlas_core::backend::StatusBackend;
+use commands::{
     about_info, about_menu_refresh, app_exit, app_relaunch, autostart_get, autostart_set, clipboard_write,
     install_shortcut, log_dir, notification_permission, notification_request_permission, notify,
     open_log_folder, shortcut_set, ui_state_all, ui_state_get, ui_state_set, update_check,
@@ -104,18 +106,11 @@ const SHORTCUT_RESTORE_POLL: std::time::Duration = std::time::Duration::from_mil
 /// logged and otherwise left alone, since the user can always set one from Settings.
 fn restore_global_shortcut_at_boot(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
-        let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).build().unwrap_or_default();
         let deadline = tokio::time::Instant::now() + SHORTCUT_RESTORE_TIMEOUT;
         let settings = loop {
             if let Some(info) = daemon_ctl::read_daemon_info(&AtlasPaths::discover()) {
-                let base = format!("http://127.0.0.1:{}/api/v1", info.port);
-                let token = info.token.unwrap_or_default();
-                if let Ok(resp) = client.get(format!("{base}/settings")).header(daemon_ctl::TOKEN_HEADER, token).send().await {
-                    if resp.status().is_success() {
-                        if let Ok(settings) = resp.json::<serde_json::Value>().await {
-                            break Some(settings);
-                        }
-                    }
+                if let Ok(settings) = RemoteBackend::with_token(info.port, info.token).get_settings().await {
+                    break Some(settings);
                 }
             }
             if tokio::time::Instant::now() >= deadline {
@@ -221,7 +216,7 @@ pub fn run() {
             // daemon's version and database are filled in by `about_menu_refresh` once
             // the webview has heard from the daemon.
             #[cfg(target_os = "macos")]
-            if let Err(e) = commands::platform::install_app_menu(app.handle(), None) {
+            if let Err(e) = commands::install_app_menu(app.handle(), None) {
                 log::warn!("app menu not installed: {e}");
             }
             Ok(())

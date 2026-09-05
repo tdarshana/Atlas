@@ -13,18 +13,29 @@
 //   the poller remembers the last value it read and keeps using that while the daemon
 //   is down, rather than staying silent for having nothing to ask.
 //
-// A daemon that is not running yet, or that restarts mid-poll, only ever surfaces here
-// as a request failure: the loop below never returns and never panics on one, so a
-// restart is invisible to anything but the `daemon_errors` notification itself.
+// Every read goes through `atlas_client::RemoteBackend`, the same typed client the CLI
+// uses, so a route change is a compile error here rather than a string to find. A
+// daemon that is not running yet, or that restarts mid-poll, only ever surfaces as a
+// failed call: the loop below never returns and never panics on one, so a restart is
+// invisible to anything but the `daemon_errors` notification itself.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use atlas_client::daemon_ctl;
+use atlas_client::remote::RemoteBackend;
+use atlas_core::backend::{StatusBackend, WorkflowBackend};
+use atlas_core::models::{RunStatus, WorkflowRun};
 use atlas_core::paths::AtlasPaths;
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_notification::NotificationExt;
+use uuid::Uuid;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How many finished runs one tick asks for: the daemon's own default for
+/// `GET /api/v1/runs`, which the poller used to leave unset.
+const RUNS_LIMIT: usize = 50;
 
 struct State {
     /// The pending-memory count as of the last successful `/status` read, or `None`
@@ -50,29 +61,20 @@ struct State {
 /// app.
 pub fn spawn<R: Runtime>(app: AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
-        let client = reqwest::Client::builder().timeout(Duration::from_secs(5)).build().unwrap_or_default();
         let mut state = State { last_pending: None, since: chrono::Utc::now(), was_unreachable: false, notify_daemon_errors: false };
         loop {
-            tick(&app, &client, &mut state).await;
+            tick(&app, &mut state).await;
             tokio::time::sleep(POLL_INTERVAL).await;
         }
     });
 }
 
-/// The daemon's base API url and token (SEC-5), read fresh from `daemon.json` on every
-/// tick rather than cached: the port and the token both change across a restart, and
-/// this is the same file the CLI and the `daemon_ensure` command already trust for them.
-fn daemon_target() -> Option<(String, String)> {
+/// A client for the daemon `daemon.json` names, with its token (SEC-5), read fresh on
+/// every tick rather than cached: the port and the token both change across a restart,
+/// and this is the same file the CLI and the `daemon_ensure` command already trust.
+fn backend() -> Option<RemoteBackend> {
     let info = daemon_ctl::read_daemon_info(&AtlasPaths::discover())?;
-    Some((format!("http://127.0.0.1:{}/api/v1", info.port), info.token?))
-}
-
-async fn get_json(client: &reqwest::Client, url: &str, token: &str) -> Option<serde_json::Value> {
-    let resp = client.get(url).header(daemon_ctl::TOKEN_HEADER, token).send().await.ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    resp.json().await.ok()
+    Some(RemoteBackend::with_token(info.port, Some(info.token?)))
 }
 
 fn show<R: Runtime>(app: &AppHandle<R>, body: &str) {
@@ -90,13 +92,13 @@ fn mark_unreachable<R: Runtime>(app: &AppHandle<R>, state: &mut State) {
     }
 }
 
-async fn tick<R: Runtime>(app: &AppHandle<R>, client: &reqwest::Client, state: &mut State) {
+async fn tick<R: Runtime>(app: &AppHandle<R>, state: &mut State) {
     let now = chrono::Utc::now();
-    let Some((base, token)) = daemon_target() else {
+    let Some(daemon) = backend() else {
         mark_unreachable(app, state);
         return;
     };
-    let Some(settings) = get_json(client, &format!("{base}/settings"), &token).await else {
+    let Ok(settings) = daemon.get_settings().await else {
         mark_unreachable(app, state);
         return;
     };
@@ -112,8 +114,8 @@ async fn tick<R: Runtime>(app: &AppHandle<R>, client: &reqwest::Client, state: &
     state.notify_daemon_errors = flag("ui.notify.daemon_errors");
 
     if flag("ui.notify.review_pending") {
-        if let Some(status) = get_json(client, &format!("{base}/status"), &token).await {
-            let pending = status.get("memories_pending").and_then(|v| v.as_i64()).unwrap_or(0);
+        if let Ok(status) = daemon.status().await {
+            let pending = status.memories_pending;
             // `None` means this is the first successful read (of the app's life, or
             // since the toggle was last turned on): seed the baseline rather than
             // notifying for whatever backlog already existed.
@@ -132,94 +134,91 @@ async fn tick<R: Runtime>(app: &AppHandle<R>, client: &reqwest::Client, state: &
     // everything since the last time this was actually checked rather than silently
     // skipping runs that finished in between.
     if flag("ui.notify.workflow_runs") {
-        let since_rfc3339 = state.since.to_rfc3339();
-        let url = format!("{base}/runs?since={}", urlencoding_light(&since_rfc3339));
-        if let Some(serde_json::Value::Array(runs)) = get_json(client, &url, &token).await {
+        if let Ok(runs) = daemon.runs_since(state.since, RUNS_LIMIT).await {
             if !runs.is_empty() {
-                let workflows = get_json(client, &format!("{base}/workflows"), &token).await;
-                show(app, &workflow_runs_summary(&runs, workflows.as_ref()));
+                let names: HashMap<Uuid, String> = daemon
+                    .list_workflows(None)
+                    .await
+                    .map(|list| list.into_iter().map(|w| (w.id, w.name)).collect())
+                    .unwrap_or_default();
+                show(app, &workflow_runs_summary(&runs, &names));
             }
             state.since = now;
         }
     }
 }
 
-/// Percent-encodes just the characters `to_rfc3339` can produce that a query string
-/// would otherwise misread (`+` decodes as a space; `:` is safe unescaped but encoding
-/// it changes nothing a server-side parser cares about, so only `+` is handled here).
-fn urlencoding_light(s: &str) -> String {
-    s.replace('+', "%2B")
-}
-
-/// The name of the workflow `run["workflow_id"]` belongs to, or `"a workflow"` when the
-/// lookup list is missing or does not have it (a run for a workflow deleted since).
-fn workflow_name(run: &serde_json::Value, workflows: Option<&serde_json::Value>) -> String {
-    let id = run.get("workflow_id").and_then(|v| v.as_str()).unwrap_or_default();
-    workflows
-        .and_then(|w| w.as_array())
-        .and_then(|list| list.iter().find(|w| w.get("id").and_then(|v| v.as_str()) == Some(id)))
-        .and_then(|w| w.get("name")).and_then(|v| v.as_str())
-        .unwrap_or("a workflow")
-        .to_string()
+/// The name of the workflow `run` belongs to, or `"a workflow"` when the lookup did
+/// not have it (the list could not be fetched, or the workflow was deleted since).
+fn workflow_name(run: &WorkflowRun, names: &HashMap<Uuid, String>) -> String {
+    names.get(&run.workflow_id).cloned().unwrap_or_else(|| "a workflow".to_string())
 }
 
 /// One line summarising every run this tick found: names the workflow when there is
 /// exactly one failure to report, otherwise a plain count, mirroring the daemon's own
 /// "N memories waiting for review" (a single figure, not a run-by-run list) shape.
-fn workflow_runs_summary(runs: &[serde_json::Value], workflows: Option<&serde_json::Value>) -> String {
-    let failed: Vec<&serde_json::Value> = runs.iter().filter(|r| r.get("status").and_then(|v| v.as_str()) == Some("failed")).collect();
+fn workflow_runs_summary(runs: &[WorkflowRun], names: &HashMap<Uuid, String>) -> String {
+    let failed: Vec<&WorkflowRun> = runs.iter().filter(|r| r.status == RunStatus::Failed).collect();
     match failed.as_slice() {
-        [] if runs.len() == 1 => format!("Workflow {} finished", workflow_name(&runs[0], workflows)),
+        [] if runs.len() == 1 => format!("Workflow {} finished", workflow_name(&runs[0], names)),
         [] => format!("{} workflow runs finished", runs.len()),
-        [one] => format!("Workflow {} failed", workflow_name(one, workflows)),
-        many => format!("Workflow {} and {} more failed", workflow_name(many[0], workflows), many.len() - 1),
+        [one] => format!("Workflow {} failed", workflow_name(one, names)),
+        many => format!("Workflow {} and {} more failed", workflow_name(many[0], names), many.len() - 1),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use atlas_core::models::TriggerKind;
 
-    fn run(status: &str, workflow_id: &str) -> serde_json::Value {
-        serde_json::json!({"id": "r1", "workflow_id": workflow_id, "status": status})
+    const W1: Uuid = Uuid::from_u128(1);
+    const W2: Uuid = Uuid::from_u128(2);
+
+    fn run(status: RunStatus, workflow_id: Uuid) -> WorkflowRun {
+        WorkflowRun {
+            id: Uuid::new_v4(),
+            workflow_id,
+            number: 1,
+            trigger: TriggerKind::Manual,
+            status,
+            started_at: chrono::Utc::now(),
+            finished_at: None,
+            summary: None,
+        }
     }
 
-    fn workflows() -> serde_json::Value {
-        serde_json::json!([{"id": "w1", "name": "nightly-summary"}, {"id": "w2", "name": "release"}])
+    fn workflows() -> HashMap<Uuid, String> {
+        HashMap::from([(W1, "nightly-summary".to_string()), (W2, "release".to_string())])
     }
 
     #[test]
     fn one_finished_run_names_the_workflow() {
-        let runs = vec![run("success", "w1")];
-        assert_eq!(workflow_runs_summary(&runs, Some(&workflows())), "Workflow nightly-summary finished");
+        let runs = vec![run(RunStatus::Success, W1)];
+        assert_eq!(workflow_runs_summary(&runs, &workflows()), "Workflow nightly-summary finished");
     }
 
     #[test]
     fn one_failed_run_names_the_workflow() {
-        let runs = vec![run("failed", "w1")];
-        assert_eq!(workflow_runs_summary(&runs, Some(&workflows())), "Workflow nightly-summary failed");
+        let runs = vec![run(RunStatus::Failed, W1)];
+        assert_eq!(workflow_runs_summary(&runs, &workflows()), "Workflow nightly-summary failed");
     }
 
     #[test]
     fn several_finished_runs_are_a_count() {
-        let runs = vec![run("success", "w1"), run("success", "w2")];
-        assert_eq!(workflow_runs_summary(&runs, Some(&workflows())), "2 workflow runs finished");
+        let runs = vec![run(RunStatus::Success, W1), run(RunStatus::Success, W2)];
+        assert_eq!(workflow_runs_summary(&runs, &workflows()), "2 workflow runs finished");
     }
 
     #[test]
     fn several_failed_runs_name_the_first_and_count_the_rest() {
-        let runs = vec![run("failed", "w1"), run("failed", "w2")];
-        assert_eq!(workflow_runs_summary(&runs, Some(&workflows())), "Workflow nightly-summary and 1 more failed");
+        let runs = vec![run(RunStatus::Failed, W1), run(RunStatus::Failed, W2)];
+        assert_eq!(workflow_runs_summary(&runs, &workflows()), "Workflow nightly-summary and 1 more failed");
     }
 
     #[test]
     fn a_run_for_an_unknown_workflow_falls_back_to_a_plain_name() {
-        let runs = vec![run("failed", "gone")];
-        assert_eq!(workflow_runs_summary(&runs, Some(&workflows())), "Workflow a workflow failed");
-    }
-
-    #[test]
-    fn urlencoding_light_escapes_only_the_plus() {
-        assert_eq!(urlencoding_light("2026-09-04T10:00:00+00:00"), "2026-09-04T10:00:00%2B00:00");
+        let runs = vec![run(RunStatus::Failed, Uuid::from_u128(9))];
+        assert_eq!(workflow_runs_summary(&runs, &workflows()), "Workflow a workflow failed");
     }
 }

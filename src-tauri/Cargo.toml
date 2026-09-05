@@ -52,12 +52,13 @@ serde_json = "1"
 log = "0.4"
 # SEC-6: per-frame nonces for the atlas-plugin scheme. Already in the lock file.
 getrandom = "0.3"
-# The notification poller reads the daemon's HTTP API from a Rust background task; the
-# plugin installer's GitHub download uses the same crate's blocking client instead, since
-# that work already runs inside `spawn_blocking`.
+# Only the plugin installer's GitHub download, on the blocking client, since that work
+# already runs inside `spawn_blocking`. Everything that talks to the daemon goes through
+# `atlas-client`'s `RemoteBackend` instead (asserted by `commands::tests`).
 reqwest = { workspace = true, features = ["blocking"] }
 tokio = { workspace = true }
 chrono = { workspace = true }
+uuid = { workspace = true }
 # The desktop app reaches Atlas only through the daemon, and starts it with the
 # same `daemon_ctl` the CLI uses rather than opening the DuckDB file itself.
 atlas-client = { path = "../crates/atlas-client" }
