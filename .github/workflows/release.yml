@@ -18,11 +18,10 @@
 #      `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` as repository secrets, which the `env:` block
 #      below already reads.
 #
-# macOS bundle targets: `tauri.conf.json`'s `bundle.targets` is `["app"]` only right now.
-# The `dmg` target was disabled earlier for a bundling issue tracked as ATL-3
-# (docs/superpowers/plans/2026-09-04-phase14-maintenance.md, Task 3), which verifies it
-# with a real `bun run tauri build` and re-enables it; this workflow will pick up a `dmg`
-# artifact automatically once that lands, with no change needed here.
+# macOS bundle targets: `tauri.conf.json`'s `bundle.targets` is `["app", "dmg"]`. The
+# `dmg` target was off until ATL-3 verified it on 2026-09-05. Its Finder-styling
+# AppleScript step is skipped by the bundler whenever `CI` is set, which GitHub Actions
+# always does, so no Automation grant is needed here.
 
 name: Release
 
