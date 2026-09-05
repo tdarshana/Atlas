@@ -71,8 +71,12 @@ pub fn import_tasks(tasks: &TaskRepo, memories: &MemoryRepo, project: &Project, 
     // share a heading's exact text (a generic step title reused across phase
     // plans), and without the path a second file's children would resolve against
     // the first file's parent instead of falling through to the path-scoped
-    // `find_by_source_ref` below.
+    // `by_ref` lookup below.
     let mut anchor_ids: HashMap<(String, String), Uuid> = HashMap::new();
+    // Every task this project already imported, by its `source_ref`, read once here
+    // rather than queried per item (PERF-8, ATL-310). A task created below joins it,
+    // so a second item with the same ref in one run updates rather than duplicates.
+    let mut by_ref = tasks.source_ref_index(Some(project.id))?;
 
     for item in items {
         let parent_id: Option<Uuid> = match &item.parent_anchor {
@@ -85,12 +89,12 @@ pub fn import_tasks(tasks: &TaskRepo, memories: &MemoryRepo, project: &Project, 
                 // child uses for itself.
                 None => {
                     let parent_ref = SourceRef { framework: kind, path: item.source_ref.path.clone(), anchor: anchor.clone() };
-                    tasks.find_by_source_ref(Some(project.id), &parent_ref)?.map(|t| t.id)
+                    by_ref.get(&parent_ref).map(|t| t.id)
                 }
             },
         };
 
-        let task_id = match tasks.find_by_source_ref(Some(project.id), &item.source_ref)? {
+        let task_id = match by_ref.get(&item.source_ref) {
             Some(existing) => {
                 let mut upd = TaskUpdate::default();
                 let content_changed = existing.title != item.title || existing.description != item.description;
@@ -137,7 +141,9 @@ pub fn import_tasks(tasks: &TaskRepo, memories: &MemoryRepo, project: &Project, 
                 };
                 let created = tasks.create(&new, &import_actor)?;
                 report.created += 1;
-                created.id
+                let id = created.id;
+                by_ref.insert(item.source_ref.clone(), created);
+                id
             }
         };
         anchor_ids.insert((item.source_ref.path.clone(), item.source_ref.anchor.clone()), task_id);

@@ -1012,3 +1012,29 @@ fn a_task_carries_its_persona_by_id_or_slug_and_clears_on_an_empty_string() {
     // The patch is an ordinary edit in the history.
     assert_eq!(events(&db, other.id).last().map(|(k, _)| k.as_str()), Some("edited"));
 }
+
+// -- source refs -------------------------------------------------------------
+
+/// PERF-8 (ATL-310): the importer looks each item up in one map loaded per import
+/// rather than scanning `tasks` per item. The map is scoped like every board read:
+/// a project's own rows, or the project-less board for `None`.
+#[test]
+fn source_ref_index_maps_a_projects_refs_to_their_tasks() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    let other = project(&db, "/tmp/other");
+    let sref = |path: &str, anchor: &str| SourceRef { framework: FrameworkKind::Superpowers, path: path.into(), anchor: anchor.into() };
+    let a = repo.create(&NewTask { source_ref: Some(sref("plans/a.md", "Task 1")), ..new_task(Some(p.id), "a") }, "t").unwrap();
+    let b = repo.create(&NewTask { source_ref: Some(sref("plans/a.md", "Task 2")), ..new_task(Some(p.id), "b") }, "t").unwrap();
+    repo.create(&new_task(Some(p.id), "no ref"), "t").unwrap();
+    repo.create(&NewTask { source_ref: Some(sref("plans/a.md", "Task 1")), ..new_task(Some(other.id), "elsewhere") }, "t").unwrap();
+    repo.create(&NewTask { source_ref: Some(sref("plans/a.md", "Task 1")), ..new_task(None, "global") }, "t").unwrap();
+
+    let index = repo.source_ref_index(Some(p.id)).unwrap();
+    assert_eq!(index.len(), 2);
+    assert_eq!(index.get(&sref("plans/a.md", "Task 1")).map(|t| t.id), Some(a.id));
+    assert_eq!(index.get(&sref("plans/a.md", "Task 2")).map(|t| t.id), Some(b.id));
+
+    let global = repo.source_ref_index(None).unwrap();
+    assert_eq!(global.values().map(|t| t.title.as_str()).collect::<Vec<_>>(), vec!["global"]);
+}

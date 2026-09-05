@@ -618,21 +618,15 @@ impl TaskRepo {
         })
     }
 
-    /// The task carrying `source_ref`, scoped to `project_id` the same way every
-    /// other board read is (`None` means the project-less board, not "any project").
-    /// Matched field by field through DuckDB's JSON functions rather than by exact
-    /// text, so a difference in how the column happened to be reformatted on write
-    /// never hides a match. Used by `frameworks::import::import_tasks` so a re-import
-    /// finds the task it already created instead of filing a duplicate.
-    pub fn find_by_source_ref(&self, project_id: Option<Uuid>, source_ref: &SourceRef) -> Result<Option<Task>> {
+    /// Every task carrying a `source_ref`, keyed by it, scoped to `project_id` the
+    /// same way every other board read is (`None` means the project-less board, not
+    /// "any project"). Loaded once per import by `frameworks::import::import_tasks`,
+    /// which then resolves each item in memory; a lookup per item was one JSON-
+    /// extracting scan of `tasks` each (PERF-8, ATL-310).
+    pub fn source_ref_index(&self, project_id: Option<Uuid>) -> Result<HashMap<SourceRef, Task>> {
         self.db.with_conn(|c| {
-            let mut sql = format!(
-                "select {TASK_COLS} from tasks where source_ref is not null \
-                 and json_extract_string(source_ref, '$.framework') = ? \
-                 and json_extract_string(source_ref, '$.path') = ? \
-                 and json_extract_string(source_ref, '$.anchor') = ?"
-            );
-            let mut args: Vec<String> = vec![source_ref.framework.as_str().to_string(), source_ref.path.clone(), source_ref.anchor.clone()];
+            let mut sql = format!("select {TASK_COLS} from tasks where source_ref is not null");
+            let mut args: Vec<String> = Vec::new();
             if let Some(p) = project_id {
                 sql.push_str(" and project_id = ?");
                 args.push(p.to_string());
@@ -640,11 +634,15 @@ impl TaskRepo {
                 sql.push_str(" and project_id is null");
             }
             let mut st = c.prepare(&sql)?;
-            let mut rows = st.query(params_from_iter(args.iter()))?;
-            match rows.next()? {
-                Some(r) => Ok(Some(row_to_task(r)?)),
-                None => Ok(None),
+            let rows = st.query_map(params_from_iter(args.iter()), row_to_task)?;
+            let mut index = HashMap::new();
+            for task in rows {
+                let task = task?;
+                if let Some(source_ref) = task.source_ref.clone() {
+                    index.entry(source_ref).or_insert(task);
+                }
             }
+            Ok(index)
         })
     }
 

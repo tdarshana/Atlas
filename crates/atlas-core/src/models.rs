@@ -887,7 +887,7 @@ pub struct FrameworkDoc {
 /// Points an imported task or decision back at the framework file it came from.
 /// `anchor` names where inside that file: a heading, a ruling label, or similarly
 /// a short human-readable locator, empty when the whole file is the source.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SourceRef {
     pub framework: FrameworkKind,
     pub path: String,
