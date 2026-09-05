@@ -32,3 +32,16 @@ export const KIND_OPTIONS = KINDS.map((k) => ({ value: k, label: KIND_META[k].la
 export function kindMeta(kind: string): KindMeta {
 	return KIND_META[kind as TaskKind] ?? KIND_META.task;
 }
+
+/** The colour of a stage's lozenge in the task detail, by the default stage names; a
+ * renamed or added stage falls back to grey. */
+export const STAGE_COLORS: Record<string, string> = {
+	Backlog: '#8993A4',
+	'In Progress': '#4BADE8',
+	Testing: '#904EE2',
+	Done: '#65BA43'
+};
+
+export function stageColor(stage: string): string {
+	return STAGE_COLORS[stage] ?? STAGE_COLORS.Backlog;
+}

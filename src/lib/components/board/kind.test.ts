@@ -26,3 +26,14 @@ describe('task kind marks', () => {
 		expect(kindMeta('nope')).toBe(KIND_META.task);
 	});
 });
+
+describe('stage lozenge colours', () => {
+	it('colours the four default stages and greys an unknown one', async () => {
+		const { stageColor } = await import('./kind');
+		expect(stageColor('Backlog')).toBe('#8993A4');
+		expect(stageColor('In Progress')).toBe('#4BADE8');
+		expect(stageColor('Testing')).toBe('#904EE2');
+		expect(stageColor('Done')).toBe('#65BA43');
+		expect(stageColor('Review')).toBe('#8993A4');
+	});
+});

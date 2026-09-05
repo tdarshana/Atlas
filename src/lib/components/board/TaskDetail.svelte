@@ -80,7 +80,8 @@
 		onback
 	}: Props = $props();
 
-	import { KIND_OPTIONS } from './kind';
+	import { KIND_OPTIONS, stageColor } from './kind';
+	import KindIcon from './KindIcon.svelte';
 	const PRIORITIES: TaskPriority[] = ['low', 'medium', 'high', 'urgent'];
 
 	const kindOptions = KIND_OPTIONS;
@@ -570,6 +571,7 @@
 				onclick={() => onback?.()}
 			/>
 		{/if}
+		{#if task}<KindIcon kind={task.kind} />{/if}
 		<span class="key">{task?.key ?? ''}</span>
 		{#if task}
 			<IconButton
@@ -677,6 +679,13 @@
 						/>
 					</div>
 				{/if}
+				<span
+					class="stage-lozenge"
+					style="background:{stageColor(task.stage)}"
+					data-testid="task-detail-stage"
+				>
+					{task.stage}
+				</span>
 			</div>
 
 			<div class="field">
@@ -1107,6 +1116,19 @@
 		display: flex;
 		align-items: flex-start;
 		gap: 6px;
+	}
+
+	/* The stage as a status lozenge under the title: white text on the stage's colour. */
+	.stage-lozenge {
+		display: inline-block;
+		margin-top: 6px;
+		padding: 1px 8px;
+		border-radius: 3px;
+		color: #fff;
+		font-size: 11px;
+		font-weight: 600;
+		letter-spacing: 0.02em;
+		text-transform: uppercase;
 	}
 
 	.title-hit {
