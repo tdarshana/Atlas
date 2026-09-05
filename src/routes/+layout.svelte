@@ -11,7 +11,7 @@
 	import { connectChanges, onChange } from '$lib/stores/changes.svelte';
 	import { loadSettings, settings } from '$lib/stores/settings.svelte';
 	import { UI_THEME_KEY } from '$lib/types';
-	import Button from '$lib/ui/Button.svelte';
+	import { Button } from '$lib/ds';
 	import ErrorState from '$lib/ui/ErrorState.svelte';
 	import Toast from '$lib/ui/Toast.svelte';
 	import CommandPalette from '$lib/search/CommandPalette.svelte';

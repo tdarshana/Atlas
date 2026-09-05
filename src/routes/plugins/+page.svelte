@@ -3,7 +3,7 @@
 	// one. Enabling a plugin is what lets its code run at all, so the checkbox is the only
 	// switch that matters here and an incompatible plugin's is disabled with its reason.
 	import { onMount } from 'svelte';
-	import { Badge, Checkbox, Input, Table, type TableColumn } from '$lib/ds';
+	import { Badge, Button, Checkbox, Input, Table, type TableColumn } from '$lib/ds';
 	import { errorMessage } from '$lib/errors';
 	import {
 		installFolder,
@@ -17,7 +17,6 @@
 	import ToolChannelWarning from '$lib/plugins/ToolChannelWarning.svelte';
 	import type { PluginInfo } from '$lib/plugins/types';
 	import { inTauri, setStatusItems } from '$lib/shell';
-	import Button from '$lib/ui/Button.svelte';
 	import Dialog from '$lib/ui/Dialog.svelte';
 	import EmptyState from '$lib/ui/EmptyState.svelte';
 	import { push } from '$lib/platform/toasts.svelte';

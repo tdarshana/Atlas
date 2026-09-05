@@ -28,6 +28,8 @@
 		defaultSort?: SortState;
 		cell?: Snippet<[T, TableColumn<T>]>;
 		empty?: Snippet;
+		/** Stamped as `data-testid` on the grid, for tests that find the table by name. */
+		testid?: string;
 	}
 
 	let {
@@ -40,7 +42,8 @@
 		emptyText = 'Nothing here yet.',
 		defaultSort,
 		cell,
-		empty
+		empty,
+		testid
 	}: Props = $props();
 
 	/** Keeps a persisted order valid against today's columns: drop keys that no longer
@@ -158,7 +161,7 @@
 	}
 </script>
 
-<div class="table" role="grid">
+<div class="table" role="grid" data-testid={testid}>
 	<!-- A grid owns rows and rowgroups only, so the header row and the body each sit in
 	     one; a plain generic in between drops the rows out of the grid's ownership. The
 	     columnheader is the cell, with a real button inside it, so the header still
