@@ -225,6 +225,8 @@ export const board = $state({
 		/** Null is every project, which is what the daemon means by no project_id. */
 		projectId: null as Uuid | null,
 		assignee: '',
+		/** A persona slug from the filters panel, applied on screen like `stage`; empty is all. */
+		persona: '',
 		query: '',
 		/** Done tasks show by default; this hides them on request. */
 		hideDone: false,

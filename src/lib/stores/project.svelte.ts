@@ -18,6 +18,7 @@ export type ProjectTabId =
 	| 'memories'
 	| 'practices'
 	| 'skills'
+	| 'personas'
 	| 'agents'
 	| 'workflows'
 	| 'frameworks'
@@ -41,6 +42,7 @@ export const PROJECT_TABS: TabDef[] = [
 	{ id: 'memories', label: 'Memories', icon: 'database', segment: 'memories' },
 	{ id: 'practices', label: 'Practices', icon: 'book-open', segment: 'practices' },
 	{ id: 'skills', label: 'Skills', icon: 'graduation-cap', segment: 'skills' },
+	{ id: 'personas', label: 'Personas', icon: 'users', segment: 'personas' },
 	{ id: 'agents', label: 'Agents', icon: 'bot', segment: 'agents' },
 	{ id: 'workflows', label: 'Workflows', icon: 'git-branch', segment: 'workflows' },
 	{ id: 'frameworks', label: 'Frameworks', icon: 'list-checks', segment: 'frameworks' },

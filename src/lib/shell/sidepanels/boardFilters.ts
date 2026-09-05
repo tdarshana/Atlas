@@ -25,6 +25,26 @@ export function groupAssignees(tasks: Task[]): AssigneeGroups {
 	};
 }
 
+export interface PersonaGroup {
+	slug: string;
+	/** The role when the roster or library knows it, else the persona's name. */
+	label: string;
+	count: number;
+}
+
+/** Every persona holding a task, with its count, in label order; `roleOf` names the chip. */
+export function groupPersonas(tasks: Task[], roleOf: (slug: string, name: string) => string): PersonaGroup[] {
+	const counts = new Map<string, PersonaGroup>();
+	for (const task of tasks) {
+		const slug = task.persona_slug;
+		if (!slug) continue;
+		const hit = counts.get(slug);
+		if (hit) hit.count += 1;
+		else counts.set(slug, { slug, label: roleOf(slug, task.persona_name ?? slug), count: 1 });
+	}
+	return [...counts.values()].sort((a, b) => a.label.localeCompare(b.label));
+}
+
 /**
  * The frame's glyphs by stage. A board's stages are the user's own, so the one the design
  * names by word is matched by name and the rest fall back on their place in the list.

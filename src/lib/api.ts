@@ -29,9 +29,13 @@ import type {
 	NewDoc,
 	NewMcpServer,
 	NewMemory,
+	NewPersona,
 	NewSkill,
 	NewTask,
 	NewWorkflow,
+	Persona,
+	PersonaBundle,
+	PersonaPatch,
 	Project,
 	ProjectAccessReport,
 	ProjectExtraction,
@@ -40,6 +44,8 @@ import type {
 	ProjectContext,
 	RecallHit,
 	RecallQuery,
+	RosterEntry,
+	RosterRow,
 	SearchResult,
 	Settings,
 	Skill,
@@ -478,6 +484,48 @@ export class AtlasApi {
 		return this.req('PUT', `/api/v1/projects/${encodeURIComponent(id)}/skills`, { disabled });
 	}
 
+	// ---- personas ----
+
+	listPersonas(): Promise<Persona[]> {
+		return this.req('GET', '/api/v1/personas');
+	}
+
+	/** Takes an id, a slug or a name. */
+	getPersona(idOrSlug: string): Promise<Persona> {
+		return this.req('GET', `/api/v1/personas/${encodeURIComponent(idOrSlug)}`);
+	}
+
+	/** Every persona write is audited against this app's actor, like a board write. */
+	createPersona(input: NewPersona): Promise<Persona> {
+		return this.boardReq('POST', '/api/v1/personas', input);
+	}
+
+	/** Only the fields in `patch` change. Takes the id, not the slug. */
+	updatePersona(id: Uuid, patch: PersonaPatch): Promise<Persona> {
+		return this.boardReq('PUT', `/api/v1/personas/${encodeURIComponent(id)}`, patch);
+	}
+
+	deletePersona(id: Uuid): Promise<void> {
+		return this.boardReq('DELETE', `/api/v1/personas/${encodeURIComponent(id)}`);
+	}
+
+	/** The persona with everything it references resolved; missing references are warnings. */
+	getPersonaBundle(id: string, projectId?: Uuid | null): Promise<PersonaBundle> {
+		return this.req(
+			'GET',
+			`/api/v1/personas/${encodeURIComponent(id)}/bundle${query({ project_id: projectId })}`
+		);
+	}
+
+	getProjectRoster(projectId: Uuid): Promise<RosterRow[]> {
+		return this.req('GET', `/api/v1/projects/${encodeURIComponent(projectId)}/personas`);
+	}
+
+	/** Replaces the project's roster wholesale: ids, the default and the order. */
+	setProjectRoster(projectId: Uuid, entries: RosterEntry[]): Promise<RosterRow[]> {
+		return this.boardReq('PUT', `/api/v1/projects/${encodeURIComponent(projectId)}/personas`, entries);
+	}
+
 	// ---- extraction ----
 
 	/**
@@ -531,6 +579,7 @@ export class AtlasApi {
 				project_id: filter.project_id,
 				stage: filter.stage,
 				assignee: filter.assignee,
+				persona: filter.persona,
 				ready: filter.ready ? 'true' : null,
 				q: filter.query,
 				include_done: filter.include_done ? 'true' : null,

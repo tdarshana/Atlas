@@ -1,4 +1,4 @@
-// The eleven rail destinations. Board is not one of them: it belongs to a project, so
+// The twelve rail destinations. Board is not one of them: it belongs to a project, so
 // `/board` keeps the Projects item lit.
 
 import { comboKeys, type Platform } from '$lib/ds';
@@ -15,6 +15,7 @@ export type ViewId =
 	| 'mcp'
 	| 'permissions'
 	| 'skills'
+	| 'personas'
 	| 'settings'
 	/** Not a rail item: `/plugins` is reached from Settings and the palette, but it owns
 	 * a side panel of its own, so it needs a view id. */
@@ -41,10 +42,11 @@ export const VIEWS: ViewDef[] = [
 	{ id: 'mcp', label: 'MCP', icon: 'plug', href: '/mcp', combo: 'Mod+8' },
 	{ id: 'permissions', label: 'Permissions', icon: 'shield-check', href: '/permissions', combo: 'Mod+9' },
 	{ id: 'skills', label: 'Skills', icon: 'graduation-cap', href: '/skills', combo: 'Mod+0' },
+	{ id: 'personas', label: 'Personas', icon: 'users', href: '/personas', combo: 'Mod+;' },
 	{ id: 'settings', label: 'Settings', icon: 'settings', href: '/settings', combo: 'Mod+,' }
 ];
 
-/** The ten the rail stacks at the top; Settings is drawn separately at the bottom. */
+/** The eleven the rail stacks at the top; Settings is drawn separately at the bottom. */
 export const MAIN_VIEWS = VIEWS.filter((v) => v.id !== 'settings');
 export const SETTINGS_VIEW = VIEWS[VIEWS.length - 1];
 
@@ -60,6 +62,7 @@ const PANEL_TITLES: Record<ViewId, string> = {
 	mcp: 'MCP',
 	permissions: 'Permissions',
 	skills: 'Skills',
+	personas: 'Personas',
 	settings: 'Settings',
 	plugins: 'Plugins'
 };

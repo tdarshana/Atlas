@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { countInStage, groupAssignees, stageIcon } from './boardFilters';
+import { countInStage, groupAssignees, groupPersonas, stageIcon } from './boardFilters';
 import type { Stage, Task } from '$lib/types';
 
 function task(over: Partial<Task>): Task {
@@ -54,6 +54,29 @@ describe('groupAssignees', () => {
 
 	it('is empty for an empty board', () => {
 		expect(groupAssignees([])).toEqual({ named: [], unassigned: 0 });
+	});
+});
+
+describe('groupPersonas', () => {
+	it('counts each persona slug, labels it by role, and skips tasks without one', () => {
+		const roles: Record<string, string> = { reviewer: 'Careful reviewer' };
+		const groups = groupPersonas(
+			[
+				task({ persona_id: 'id-r', persona_name: 'Reviewer', persona_slug: 'reviewer' }),
+				task({ persona_id: 'id-r', persona_name: 'Reviewer', persona_slug: 'reviewer' }),
+				task({ persona_id: 'id-b', persona_name: 'Builder', persona_slug: 'builder' }),
+				task({})
+			],
+			(slug, name) => roles[slug] ?? name
+		);
+		expect(groups).toEqual([
+			{ slug: 'builder', label: 'Builder', count: 1 },
+			{ slug: 'reviewer', label: 'Careful reviewer', count: 2 }
+		]);
+	});
+
+	it('is empty when no task has a persona', () => {
+		expect(groupPersonas([task({})], (_s, n) => n)).toEqual([]);
 	});
 });
 

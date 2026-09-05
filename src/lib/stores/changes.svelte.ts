@@ -20,7 +20,7 @@ let source: EventSource | null = null;
 
 /** The entities the stream names; `lagged` means the daemon dropped events and the
  * listener should refresh wholesale. Any other entity is delivered under its own name. */
-export const ENTITIES = ['task', 'memory', 'project', 'agent', 'lagged'] as const;
+export const ENTITIES = ['task', 'memory', 'project', 'agent', 'persona', 'lagged'] as const;
 
 /** Calls `fn` for every change to `entity` (or to anything, for `*`). Returns the unsubscribe. */
 export function onChange(entity: string, fn: Listener): () => void {
