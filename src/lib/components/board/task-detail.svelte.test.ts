@@ -262,11 +262,13 @@ describe('TaskDetail title and description edit in place', () => {
 		expect(container.querySelector('[data-testid="task-title"]')).toBeNull();
 	});
 
-	it('clicking the title text enters edit mode and Enter saves through the API with only { title }', async () => {
+	it('the pencil enters edit mode (a click on the words does not) and Enter saves through the API with only { title }', async () => {
 		const onchanged = vi.fn(async () => {});
 		const { container } = open(detail(), { onchanged });
 
 		await fireEvent.click(container.querySelector('[data-testid="task-title-text"]')!);
+		expect(container.querySelector('[data-testid="task-title"]')).toBeNull();
+		await fireEvent.click(container.querySelector('[data-testid="task-title-edit"]')!);
 
 		const editor = container.querySelector<HTMLTextAreaElement>('[data-testid="task-title"]');
 		expect(editor).not.toBeNull();

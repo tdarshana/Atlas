@@ -324,11 +324,6 @@
 
 	/** A link inside the rendered Markdown opens (`MarkdownView`'s own click handler)
 	    rather than also dropping the panel into edit mode. */
-	function onDescriptionDisplayClick(event: MouseEvent) {
-		if ((event.target as HTMLElement).closest('a[href]')) return;
-		beginDescriptionEdit();
-	}
-
 	$effect(() => {
 		if (!descriptionEditing) return;
 		const el = descriptionEditorEl;
@@ -377,15 +372,6 @@
 	/** Keeps a Save/Cancel button click from first blurring the field it belongs to. */
 	function keepFocus(event: MouseEvent) {
 		event.preventDefault();
-	}
-
-	function onEditableKeydown(begin: () => void) {
-		return (event: KeyboardEvent) => {
-			if (event.key === 'Enter' || event.key === ' ') {
-				event.preventDefault();
-				begin();
-			}
-		};
 	}
 
 	function onWindowKey(event: KeyboardEvent) {
@@ -766,16 +752,9 @@
 					</div>
 				{:else}
 					<div class="title-display">
-						<!-- A div, not a button: the key inside carries its own copy button, and a
-						     button may not nest in a button. Enter and Space still open the editor. -->
-						<div
-							class="title-hit"
-							role="button"
-							tabindex="0"
-							data-testid="task-title-hit"
-							onclick={beginTitleEdit}
-							onkeydown={onEditableKeydown(beginTitleEdit)}
-						>
+						<!-- Static text: the editor opens from the pencil at the end of the heading,
+						     which shows on hover, never from a click on the words. -->
+						<div class="title-hit" data-testid="task-title-hit">
 							<h2 class="title-text">
 								<span class="title-key" data-testid="task-detail-key">
 									<KindIcon kind={task.kind} size={16} />
@@ -796,15 +775,18 @@
 									</button>
 								</span>
 								<span data-testid="task-title-text">{title}</span>
+								<button
+									type="button"
+									class="edit-inline"
+									aria-label="Edit title"
+									title="Edit title"
+									data-testid="task-title-edit"
+									onclick={beginTitleEdit}
+								>
+									<Icon name="pencil" size={13} />
+								</button>
 							</h2>
 						</div>
-						<IconButton
-							size="sm"
-							icon="pencil"
-							label="Edit title"
-							data-testid="task-title-edit"
-							onclick={beginTitleEdit}
-						/>
 					</div>
 				{/if}
 				{#if !task.ready && task.open_blockers > 0}
@@ -821,15 +803,6 @@
 			<div class="field">
 				<div class="field-head">
 					<span>Description</span>
-					{#if !descriptionEditing}
-						<IconButton
-							size="sm"
-							icon="pencil"
-							label="Edit description"
-							data-testid="task-description-edit"
-							onclick={beginDescriptionEdit}
-						/>
-					{/if}
 				</div>
 				{#if descriptionEditing}
 					<textarea
@@ -861,15 +834,20 @@
 						</Button>
 					</div>
 				{:else}
-					<div
-						class="description-display"
-						role="button"
-						tabindex="0"
-						data-testid="task-description-text"
-						onclick={onDescriptionDisplayClick}
-						onkeydown={onEditableKeydown(beginDescriptionEdit)}
-					>
+					<!-- Static text with a pencil laid over its corner on hover; only the pencil
+					     opens the editor. -->
+					<div class="description-display" data-testid="task-description-text">
 						<MarkdownView source={description} showHeader={false} emptyText="No description" />
+						<button
+							type="button"
+							class="edit-overlay"
+							aria-label="Edit description"
+							title="Edit description"
+							data-testid="task-description-edit"
+							onclick={beginDescriptionEdit}
+						>
+							<Icon name="pencil" size={13} />
+						</button>
 					</div>
 				{/if}
 			</div>
@@ -1479,6 +1457,54 @@
 		width: 8px;
 		height: 8px;
 		border-radius: 2px;
+	}
+
+	/* The pencils: one inline after the last word of the heading, one laid over the
+	   description's corner; both appear on hover of their text and on keyboard focus. */
+	.edit-inline,
+	.edit-overlay {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 22px;
+		height: 22px;
+		padding: 0;
+		border: 0;
+		border-radius: 3px;
+		background: none;
+		color: var(--text-secondary);
+		opacity: 0;
+		cursor: pointer;
+		transition: opacity 120ms;
+	}
+
+	.edit-inline {
+		margin-left: 6px;
+		vertical-align: middle;
+	}
+
+	.edit-overlay {
+		position: absolute;
+		top: 6px;
+		right: 6px;
+		background: var(--bg-overlay);
+	}
+
+	.title-display:hover .edit-inline,
+	.description-display:hover .edit-overlay,
+	.edit-inline:focus-visible,
+	.edit-overlay:focus-visible {
+		opacity: 1;
+	}
+
+	.edit-inline:hover,
+	.edit-overlay:hover {
+		color: var(--text-primary);
+		background: var(--bg-active);
+	}
+
+	.description-display {
+		position: relative;
 	}
 
 	/* The key is part of the heading's text, at the heading's size, so it wraps with the
