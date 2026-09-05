@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -58,9 +59,19 @@ impl FrameworkAdapter for SuperpowersAdapter {
 
     fn tasks(&self, root: &Path) -> Vec<ImportedTask> {
         let mut out = vec![];
+        let completed = completed_plans(root);
         for path in md_files(&root.join(PLANS_DIR)) {
+            // A ledger holds no tasks of its own; it is read once above for the plans
+            // it marks complete.
+            if is_ledger_filename(&path) {
+                continue;
+            }
             let Some(text) = read_doc_file(&path) else { continue };
             let path_rel = rel(root, &path);
+            // A plan its ledger marks complete is done whatever its checkboxes say:
+            // the ledger is written when the work merges, the plan file is not
+            // ticked afterwards.
+            let plan_done = completed.contains(&path_rel);
             // Group the plan's checkboxes by their "### Task N" heading, keeping the
             // order each heading is first seen in the file: a stray checklist with no
             // such heading (there is none in practice, but the rule is explicit) is
@@ -81,7 +92,7 @@ impl FrameworkAdapter for SuperpowersAdapter {
                 out.push(ImportedTask {
                     title: heading.clone(),
                     description: path_rel.clone(),
-                    status_hint: Some(if items.iter().all(|i| i.checked) { "done".to_string() } else { "todo".to_string() }),
+                    status_hint: Some(if plan_done || items.iter().all(|i| i.checked) { "done".to_string() } else { "todo".to_string() }),
                     source_ref: SourceRef { framework: self.kind(), path: path_rel.clone(), anchor: heading.clone() },
                     parent_anchor: None,
                 });
@@ -93,7 +104,7 @@ impl FrameworkAdapter for SuperpowersAdapter {
                     out.push(ImportedTask {
                         title: clean_step_title(&item.text),
                         description: heading.clone(),
-                        status_hint: Some(if item.checked { "done".to_string() } else { "todo".to_string() }),
+                        status_hint: Some(if plan_done || item.checked { "done".to_string() } else { "todo".to_string() }),
                         source_ref: SourceRef { framework: self.kind(), path: path_rel.clone(), anchor },
                         parent_anchor: Some(heading.clone()),
                     });
@@ -136,6 +147,58 @@ impl SuperpowersAdapter {
 /// plan.
 fn is_ledger_filename(path: &Path) -> bool {
     path.file_name().and_then(|f| f.to_str()).is_some_and(|f| f.ends_with(".ledger.md"))
+}
+
+/// The plans (as paths relative to `root`) that a `*.ledger.md` under `PLANS_DIR`
+/// marks complete. Reads every ledger there, which `tasks` is allowed to do.
+fn completed_plans(root: &Path) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for path in md_files(&root.join(PLANS_DIR)).into_iter().filter(|p| is_ledger_filename(p)) {
+        let Some(text) = read_doc_file(&path) else { continue };
+        if ledger_marks_complete(&text) {
+            out.insert(rel(root, &plan_of_ledger(root, &path, &text)));
+        }
+    }
+    out
+}
+
+/// The plan a ledger belongs to: the `.md` path its first line names after `plan:`
+/// (the `# SDD ledger — plan: docs/superpowers/plans/<name>.md` convention, which
+/// lets two ledgers share one plan), else the plan sharing its file stem, so
+/// `<name>.ledger.md` belongs to `<name>.md` next to it.
+fn plan_of_ledger(root: &Path, ledger: &Path, text: &str) -> PathBuf {
+    let first = text.lines().next().unwrap_or("");
+    if let Some((_, after)) = first.split_once("plan:") {
+        let token = after.split_whitespace().next().unwrap_or("").trim_end_matches(['.', ',', ';', ')']);
+        if token.ends_with(".md") && !token.starts_with('/') && !token.split('/').any(|part| part == "..") {
+            return root.join(token);
+        }
+    }
+    let stem = ledger.file_name().and_then(|f| f.to_str()).unwrap_or("").trim_end_matches(".ledger.md");
+    ledger.with_file_name(format!("{stem}.md"))
+}
+
+/// Whether a ledger says its plan's work is finished: some line has `phase`
+/// followed, in the same clause, by `complete`, `closed` or `shipped`. A clause
+/// ends at `.`, `;`, `:`, `(` or `)`, which is what keeps a task-level note such
+/// as `Task 1: complete (delivered in Phase 2 commit ...; ...)` from counting.
+fn ledger_marks_complete(text: &str) -> bool {
+    text.lines().any(line_marks_complete)
+}
+
+fn line_marks_complete(line: &str) -> bool {
+    const FINISHED: [&str; 3] = ["complete", "closed", "shipped"];
+    let lower = line.to_lowercase();
+    let mut rest = lower.as_str();
+    while let Some(at) = rest.find("phase") {
+        let after = &rest[at + "phase".len()..];
+        let clause = after.split(['.', ';', ':', '(', ')']).next().unwrap_or("");
+        if clause.split(|c: char| !c.is_alphanumeric()).any(|word| FINISHED.contains(&word)) {
+            return true;
+        }
+        rest = after;
+    }
+    false
 }
 
 /// `*.md` files directly under `dir` (no recursion). Empty if `dir` doesn't exist.
@@ -289,6 +352,66 @@ mod tests {
         // the other checkbox is checked.
         let task_1 = tasks.iter().find(|t| t.title == "Task 1: Set up the widget").expect("Task 1 parent present");
         assert_eq!(task_1.status_hint.as_deref(), Some("todo"));
+    }
+
+    #[test]
+    fn a_line_marks_a_plan_complete_only_where_phase_and_a_finishing_word_share_a_clause() {
+        for line in [
+            "PHASE 1 COMPLETE: branch feat/phase1-core-daemon ready to merge.",
+            "Final fix re-review: all addressed, 0 new (105 cargo tests). Phase 4 closed; ff-merge to main.",
+            "Phase 10 complete at 0ee6854.",
+            "Re-review 3c: APPROVED. Phase 13b plus Permissions complete at cc785ad; fast-forwarding main.",
+            "Phase 15 complete (SKILLS-A dec4dc6 + 25583fc; SKILLS-B 841752b); merged at fc202e7.",
+            "Phase 16 shipped.",
+        ] {
+            assert!(line_marks_complete(line), "{line}");
+        }
+        for line in [
+            "Task 1: complete (delivered in Phase 2 commit 38cd720; test pending_memories_can_be_listed)",
+            "T5: implementer DONE (a74e910). Review dispatched. Phase 5 browser pass starting.",
+            "Fix wave: complete at eab5e25; scoped re-review dispatched.",
+            "Phase 7 final review dispatched (sonnet): open until the fix wave closes.",
+            "",
+        ] {
+            assert!(!line_marks_complete(line), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_ledger_names_its_plan_on_its_first_line_or_shares_its_stem() {
+        let root = Path::new("/repo");
+        let ledger = root.join("docs/superpowers/plans/2026-01-01-a.ledger.md");
+        let named = "# SDD ledger — plan: docs/superpowers/plans/2026-01-01-b.md\n\nScope.";
+        assert_eq!(plan_of_ledger(root, &ledger, named), root.join("docs/superpowers/plans/2026-01-01-b.md"));
+        let unnamed = "# SDD ledger — plan: (bounded request, no plan file) something\n";
+        assert_eq!(plan_of_ledger(root, &ledger, unnamed), root.join("docs/superpowers/plans/2026-01-01-a.md"));
+        let escaping = "# plan: ../../etc/passwd.md\n";
+        assert_eq!(plan_of_ledger(root, &ledger, escaping), root.join("docs/superpowers/plans/2026-01-01-a.md"));
+    }
+
+    /// The fixture's `2026-01-02-example.ledger.md` names no plan and finishes
+    /// nothing, so the fixture imports as before; a ledger that names a plan and
+    /// closes its phase hints every task of that plan done, ticked or not.
+    #[test]
+    fn a_completing_ledger_hints_every_task_of_its_plan_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let plans = dir.path().join(PLANS_DIR);
+        std::fs::create_dir_all(&plans).unwrap();
+        std::fs::write(plans.join("2026-01-05-finished.md"), "# Finished\n\n### Task 1: Ship it\n\n- [ ] Step 1: Do it\n- [ ] Step 2: Test it\n").unwrap();
+        std::fs::write(plans.join("2026-01-06-open.md"), "# Open\n\n### Task 1: Start it\n\n- [ ] Step 1: Do it\n").unwrap();
+        std::fs::write(
+            plans.join("2026-01-05-finished-b.ledger.md"),
+            "# SDD ledger — plan: docs/superpowers/plans/2026-01-05-finished.md\n\n## Progress\nTask 1: complete (delivered in Phase 2 commit abc)\nPhase 5 complete at abc1234; fast-forwarding main.\n",
+        )
+        .unwrap();
+        std::fs::write(plans.join("2026-01-06-open.ledger.md"), "# SDD ledger — plan: docs/superpowers/plans/2026-01-06-open.md\n\n## Progress\nTask 1: dispatched.\n").unwrap();
+
+        let tasks = SuperpowersAdapter.tasks(dir.path());
+        let hints: Vec<(&str, &str)> = tasks.iter().map(|t| (t.title.as_str(), t.status_hint.as_deref().unwrap())).collect();
+        assert_eq!(
+            hints,
+            vec![("Task 1: Ship it", "done"), ("Step 1: Do it", "done"), ("Step 2: Test it", "done"), ("Task 1: Start it", "todo"), ("Step 1: Do it", "todo")],
+        );
     }
 
     #[test]

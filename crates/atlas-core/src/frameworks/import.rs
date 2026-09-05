@@ -3,7 +3,9 @@
 //! An imported task stays linked to the file it came from by `SourceRef`, so
 //! running an import twice updates the tasks it already created rather than
 //! filing duplicates, and never moves a task's stage back: the board owns
-//! progress once a task exists. An imported decision becomes a pending memory,
+//! progress once a task exists, and the one stage an import writes to an existing
+//! task is the done stage, when the framework now says the item is done. An
+//! imported decision becomes a pending memory,
 //! deduplicated by an exact text match against this project's memories already
 //! tagged for the framework.
 
@@ -43,7 +45,10 @@ fn adapter_for(kind: FrameworkKind) -> Result<Box<dyn frameworks::FrameworkAdapt
 /// Creates or updates board tasks from `kind`'s adapter under `project`, keyed by
 /// `source_ref` so a re-import never duplicates a task. An existing task's title
 /// and description are refreshed when the source changed and left alone when they
-/// match; its stage is never touched either way. An item whose `parent_anchor` names
+/// match; its stage is touched only to move it from the board's first stage into
+/// its done stage when the item now hints done (a plan whose ledger closed after
+/// the first import landed its tasks in Backlog). A task anywhere else was moved
+/// by hand and stays where the board put it. An item whose `parent_anchor` names
 /// another item from the same adapter run becomes (or is moved to be) that item's
 /// subtask; the adapter emits a parent immediately before its children, so this
 /// resolves without a second pass over `items`.
@@ -99,13 +104,22 @@ pub fn import_tasks(tasks: &TaskRepo, memories: &MemoryRepo, project: &Project, 
                 }
                 if content_changed || reparent {
                     tasks.update(&existing.key, &upd, &import_actor)?;
-                    if content_changed {
-                        report.updated += 1;
-                    }
                     if reparent {
                         report.reparented += 1;
                     }
-                } else {
+                }
+                let now_done = item.status_hint.as_deref().is_some_and(is_done_hint);
+                let untouched = stages.first().is_some_and(|s| s.name == existing.stage);
+                let finish = match stages.iter().find(|s| s.done) {
+                    Some(done) if now_done && untouched => Some(done.name.clone()),
+                    _ => None,
+                };
+                if let Some(done) = &finish {
+                    tasks.move_stage(&existing.key, done, None, &import_actor)?;
+                }
+                if content_changed || finish.is_some() {
+                    report.updated += 1;
+                } else if !reparent {
                     report.skipped += 1;
                 }
                 existing.id
@@ -300,6 +314,90 @@ mod tests {
         let task_2 = all.iter().find(|t| t.title == "Task 2: Wire the widget in").unwrap();
         let stages = tasks.effective_stages(Some(project.id)).unwrap().stages;
         assert!(stages.iter().find(|s| s.name == task_2.stage).unwrap().done, "{task_2:?}");
+    }
+
+    fn write_plan(dir: &std::path::Path, name: &str, body: &str) {
+        let plans = dir.join("docs/superpowers/plans");
+        std::fs::create_dir_all(&plans).unwrap();
+        std::fs::write(plans.join(name), body).unwrap();
+    }
+
+    const FINISHED_PLAN: &str = "# Finished\n\n### Task 9: Ship it\n\n- [ ] Step 1: Do it\n- [ ] Step 2: Test it\n";
+    const CLOSING_LEDGER: &str = "# SDD ledger — plan: docs/superpowers/plans/2026-01-05-finished.md\n\n## Progress\nPhase 9 complete at abc1234; fast-forwarding main.\n";
+
+    fn finished_plan_tasks(tasks: &TaskRepo, project: &Project) -> Vec<Task> {
+        let all = tasks.list(&TaskFilter { project_id: Some(project.id), include_done: true, ..Default::default() }).unwrap();
+        let mut mine: Vec<Task> = all.into_iter().filter(|t| t.source_ref.as_ref().is_some_and(|s| s.path.ends_with("2026-01-05-finished.md"))).collect();
+        mine.sort_by_key(|t| t.seq);
+        assert_eq!(mine.len(), 3, "{mine:?}");
+        mine
+    }
+
+    /// A plan whose ledger closes its phase imports straight into the done stage,
+    /// parent and steps alike, even though none of its checkboxes is ticked.
+    #[test]
+    fn a_plan_whose_ledger_marks_it_complete_imports_as_done() {
+        let (db, tasks) = setup();
+        let memories = MemoryRepo::new(&db);
+        let (project, dir) = project_for_fixture(&db, "superpowers");
+        write_plan(dir.path(), "2026-01-05-finished.md", FINISHED_PLAN);
+        write_plan(dir.path(), "2026-01-05-finished.ledger.md", CLOSING_LEDGER);
+
+        let report = import_tasks(&tasks, &memories, &project, FrameworkKind::Superpowers, "test").unwrap();
+        assert_eq!(report.created, 10, "the fixture's seven plus the finished plan's three: {report:?}");
+
+        let stages = tasks.effective_stages(Some(project.id)).unwrap().stages;
+        let done = stages.iter().find(|s| s.done).unwrap();
+        for task in finished_plan_tasks(&tasks, &project) {
+            assert_eq!(task.stage, done.name, "{task:?}");
+            assert!(task.closed_at.is_some(), "{task:?}");
+        }
+        // The fixture's own ledger names no plan and closes nothing, so Task 1 of the
+        // example plan still lands in the first stage.
+        let all = tasks.list(&TaskFilter { project_id: Some(project.id), include_done: true, ..Default::default() }).unwrap();
+        let task_1 = all.iter().find(|t| t.title == "Task 1: Set up the widget").unwrap();
+        assert_eq!(task_1.stage, stages[0].name);
+    }
+
+    /// The ledger usually arrives after the plan was first imported: the re-import
+    /// moves the tasks still in the first stage to done and counts them as updated,
+    /// leaves the one a human had moved to another stage alone, and a third import
+    /// skips them all.
+    #[test]
+    fn a_ledger_written_after_the_first_import_moves_its_open_tasks_to_done() {
+        let (db, tasks) = setup();
+        let memories = MemoryRepo::new(&db);
+        let (project, dir) = project_for_fixture(&db, "superpowers");
+        write_plan(dir.path(), "2026-01-05-finished.md", FINISHED_PLAN);
+
+        import_tasks(&tasks, &memories, &project, FrameworkKind::Superpowers, "test").unwrap();
+        let stages = tasks.effective_stages(Some(project.id)).unwrap().stages;
+        let done = stages.iter().find(|s| s.done).unwrap();
+        for task in finished_plan_tasks(&tasks, &project) {
+            assert_eq!(task.stage, stages[0].name, "{task:?}");
+        }
+
+        // A human takes one step in hand before the ledger closes.
+        let in_hand = stages.iter().find(|s| !s.done && s.name != stages[0].name).expect("a middle stage").name.clone();
+        let step_2 = finished_plan_tasks(&tasks, &project).into_iter().find(|t| t.title == "Step 2: Test it").unwrap();
+        tasks.move_stage(&step_2.key, &in_hand, None, "human").unwrap();
+
+        write_plan(dir.path(), "2026-01-05-finished.ledger.md", CLOSING_LEDGER);
+        let second = import_tasks(&tasks, &memories, &project, FrameworkKind::Superpowers, "test").unwrap();
+        assert_eq!((second.created, second.updated, second.skipped), (0, 2, 8), "{second:?}");
+        for task in finished_plan_tasks(&tasks, &project) {
+            let moved_by = tasks.get(&task.key).unwrap().events.into_iter().filter(|e| e.kind == "moved").map(|e| e.actor).collect::<Vec<_>>();
+            if task.key == step_2.key {
+                assert_eq!(task.stage, in_hand, "the board owns a task a human moved: {task:?}");
+                assert_eq!(moved_by, vec!["human".to_string()]);
+            } else {
+                assert_eq!(task.stage, done.name, "{task:?}");
+                assert_eq!(moved_by, vec!["import/superpowers".to_string()], "{task:?}");
+            }
+        }
+
+        let third = import_tasks(&tasks, &memories, &project, FrameworkKind::Superpowers, "test").unwrap();
+        assert_eq!((third.created, third.updated, third.skipped), (0, 0, 10), "{third:?}");
     }
 
     /// The fixture's second plan file repeats the first file's "Task 1: Set up the
