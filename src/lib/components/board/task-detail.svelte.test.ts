@@ -119,6 +119,16 @@ describe('TaskDetail parent and back', () => {
 		expect(opened).toEqual(['ATL-0']);
 	});
 
+	it('lays the fields out in a sidebar with Move to and the actions, beside the content', () => {
+		const { getByTestId } = open();
+		const side = getByTestId('task-detail-side');
+		for (const id of ['task-kind', 'task-priority', 'task-persona', 'task-assignee', 'task-labels', 'task-stage', 'task-save', 'task-delete']) {
+			expect(side.contains(getByTestId(id))).toBe(true);
+		}
+		expect(getByTestId('task-detail-columns').contains(getByTestId('task-tabs'))).toBe(true);
+		expect(side.contains(getByTestId('task-tabs'))).toBe(false);
+	});
+
 	it('draws no parent line on a top-level task', () => {
 		const { container } = open();
 		expect(container.querySelector('[data-testid="task-detail-parent"]')).toBeNull();

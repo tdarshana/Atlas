@@ -498,6 +498,33 @@
 	}
 
 	/** The drag paints the node's own CSS variable; the store hears the final width on release. */
+	// The sidebar's width, adjustable between the two bounds and remembered per machine.
+	const SIDE_DEFAULT = 280;
+	const SIDE_MIN = 220;
+	const SIDE_MAX = 420;
+	const SIDE_KEY = 'atlas.task-detail.side-width';
+	function loadSideWidth(): number {
+		try {
+			const raw = localStorage.getItem(SIDE_KEY);
+			const n = raw ? Number(raw) : NaN;
+			return Number.isFinite(n) ? Math.min(SIDE_MAX, Math.max(SIDE_MIN, n)) : SIDE_DEFAULT;
+		} catch {
+			return SIDE_DEFAULT;
+		}
+	}
+	let sideWidth = $state(SIDE_DEFAULT);
+	onMount(() => {
+		sideWidth = loadSideWidth();
+	});
+	function onSideResize(w: number) {
+		sideWidth = w;
+		try {
+			localStorage.setItem(SIDE_KEY, String(w));
+		} catch {
+			// A private window or blocked storage: the width still applies for this session.
+		}
+	}
+
 	function paint(live: number) {
 		panel?.style.setProperty('--detail-w', `${live}px`);
 	}
@@ -609,6 +636,8 @@
 		{:else if !task}
 			<p class="muted">{loading ? 'Loading…' : 'No task open.'}</p>
 		{:else}
+			<div class="columns" style="--side-w:{sideWidth}px" data-testid="task-detail-columns">
+			<div class="main">
 			{#if task.parent_key}
 				<!-- A subtask names its parent above its title, the way Jira draws the
 				     breadcrumb; the line opens the parent in this same panel. -->
@@ -744,64 +773,6 @@
 				{/if}
 			</div>
 
-			<div class="pair">
-				<Select label="Kind" bind:value={kind} options={kindOptions} data-testid="task-kind" />
-				<Select
-					label="Priority"
-					bind:value={priority}
-					options={priorityOptions}
-					data-testid="task-priority"
-				/>
-				<Select
-					label="Persona"
-					bind:value={persona}
-					options={personaOptions}
-					data-testid="task-persona"
-					onchange={(e: Event & { currentTarget: HTMLSelectElement }) =>
-						void changePersona(e.currentTarget.value)}
-				/>
-			</div>
-
-			<Input label="Assignee" mono bind:value={assignee} placeholder="nobody" data-testid="task-assignee" />
-			<Input label="Labels" bind:value={labels} placeholder="api, ui" data-testid="task-labels" />
-
-			<div class="row">
-				<Button
-					variant="primary"
-					size="sm"
-					data-testid="task-save"
-					disabled={saving}
-					onclick={save}
-				>
-					{saving ? 'Saving…' : 'Save'}
-				</Button>
-				<Button
-					size="sm"
-					data-testid="task-claim"
-					disabled={busy}
-					onclick={() => run('Task claimed', () => claim(task.key))}
-				>
-					Claim
-				</Button>
-				<span class="spacer"></span>
-				<Button
-					variant="danger"
-					size="sm"
-					data-testid="task-delete"
-					onclick={() => (confirming = true)}
-				>
-					Delete…
-				</Button>
-			</div>
-
-			<Select
-				label="Move to"
-				value={task.stage}
-				options={stageOptions}
-				data-testid="task-stage"
-				onchange={(e: Event & { currentTarget: HTMLSelectElement }) =>
-					onmove(task.key, e.currentTarget.value)}
-			/>
 
 			{#if task.source_ref}
 				<section>
@@ -934,6 +905,82 @@
 					</section>
 				{/if}
 			{/each}
+			</div>
+
+			<!-- The sidebar: the fields, in the order a tracker's issue view lists them, with
+			     the actions at the bottom. Draggable at its left edge between two bounds. -->
+			<aside class="side" data-testid="task-detail-side">
+				<ResizeBar
+					side="left"
+					label="Resize task fields"
+					value={sideWidth}
+					min={SIDE_MIN}
+					max={SIDE_MAX}
+					gap={8}
+					onlive={(w) => (sideWidth = w)}
+					onresize={onSideResize}
+					testid="task-detail-side-resize"
+				/>
+				<div class="pair">
+					<Select label="Kind" bind:value={kind} options={kindOptions} data-testid="task-kind" />
+					<Select
+						label="Priority"
+						bind:value={priority}
+						options={priorityOptions}
+						data-testid="task-priority"
+					/>
+					<Select
+						label="Persona"
+						bind:value={persona}
+						options={personaOptions}
+						data-testid="task-persona"
+						onchange={(e: Event & { currentTarget: HTMLSelectElement }) =>
+							void changePersona(e.currentTarget.value)}
+					/>
+				</div>
+
+				<Input label="Assignee" mono bind:value={assignee} placeholder="nobody" data-testid="task-assignee" />
+				<Input label="Labels" bind:value={labels} placeholder="api, ui" data-testid="task-labels" />
+
+				<Select
+					label="Move to"
+					value={task.stage}
+					options={stageOptions}
+					data-testid="task-stage"
+					onchange={(e: Event & { currentTarget: HTMLSelectElement }) =>
+						onmove(task.key, e.currentTarget.value)}
+				/>
+
+				<div class="row">
+					<Button
+						variant="primary"
+						size="sm"
+						data-testid="task-save"
+						disabled={saving}
+						onclick={save}
+					>
+						{saving ? 'Saving…' : 'Save'}
+					</Button>
+					<Button
+						size="sm"
+						data-testid="task-claim"
+						disabled={busy}
+						onclick={() => run('Task claimed', () => claim(task.key))}
+					>
+						Claim
+					</Button>
+					<span class="spacer"></span>
+					<Button
+						variant="danger"
+						size="sm"
+						data-testid="task-delete"
+						onclick={() => (confirming = true)}
+					>
+						Delete…
+					</Button>
+				</div>
+			</aside>
+			</div>
 		{/if}
 	</div>
 </aside>
@@ -1062,6 +1109,54 @@
 		display: flex;
 		flex-direction: column;
 		gap: 10px;
+		container-type: inline-size;
+	}
+
+	/* Two columns like a tracker's issue view: the content on the left, the fields in a
+	   sidebar on the right whose width the user drags. Below 700px of panel (the docked
+	   panel at its usual size) the sidebar stacks under the content instead. */
+	.columns {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) var(--side-w, 280px);
+		gap: 0 16px;
+		align-items: start;
+	}
+
+	.main {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		min-width: 0;
+	}
+
+	.side {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		min-width: 0;
+		padding-left: 14px;
+		border-left: 1px solid var(--border-subtle);
+	}
+
+	.side .pair {
+		grid-template-columns: 1fr;
+	}
+
+	@container (max-width: 699px) {
+		.columns {
+			grid-template-columns: minmax(0, 1fr);
+			gap: 10px;
+		}
+
+		.side {
+			padding-left: 0;
+			border-left: 0;
+		}
+
+		.side :global(.bar) {
+			display: none;
+		}
 	}
 
 	.field {
