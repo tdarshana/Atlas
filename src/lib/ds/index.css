@@ -130,3 +130,14 @@
 .svelte-flow__attribution a {
 	color: var(--text-tertiary);
 }
+
+/* Menu rows hover with the active surface rather than the kit's near-invisible hover
+   tint, so a pointer over a menu reads at a glance; the danger row keeps its own. */
+.dbm-menu__item:hover,
+.dbm-menu__item:focus-visible {
+	background: var(--bg-active);
+}
+
+.dbm-menu__item--danger:hover {
+	background: var(--danger-muted);
+}

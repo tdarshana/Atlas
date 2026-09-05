@@ -3,7 +3,7 @@
 // a kind (they are tasks with a parent) but carry a mark of their own beside it.
 
 import type { IconName } from '$lib/ds';
-import type { TaskKind } from '$lib/types';
+import type { TaskKind, TaskPriority } from '$lib/types';
 
 export interface KindMeta {
 	label: string;
@@ -45,3 +45,20 @@ export const STAGE_COLORS: Record<string, string> = {
 export function stageColor(stage: string): string {
 	return STAGE_COLORS[stage] ?? STAGE_COLORS.Backlog;
 }
+
+/** Priority glyphs and colours, in the tracker style: a down arrow for low, a dash for
+ * medium, an up arrow for high and a double up arrow for urgent. */
+export const PRIORITY_META: Record<TaskPriority, { label: string; icon: IconName; color: string }> = {
+	low: { label: 'Low', icon: 'arrow-down', color: '#4BADE8' },
+	medium: { label: 'Medium', icon: 'minus', color: '#F79232' },
+	high: { label: 'High', icon: 'arrow-up', color: '#E5493A' },
+	urgent: { label: 'Urgent', icon: 'chevrons-up', color: '#E5493A' }
+};
+
+export const PRIORITIES = Object.keys(PRIORITY_META) as TaskPriority[];
+
+/** Menu options for the Kind picker, each with its mark. */
+export const KIND_MENU = KINDS.map((k) => ({ value: k, label: KIND_META[k].label, kind: k }));
+
+/** Menu options for the Priority picker, each with its glyph. */
+export const PRIORITY_MENU = PRIORITIES.map((p) => ({ value: p, label: PRIORITY_META[p].label, icon: PRIORITY_META[p].icon, color: PRIORITY_META[p].color }));

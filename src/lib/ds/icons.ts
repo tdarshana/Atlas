@@ -25,6 +25,7 @@ import ChevronRight from '@lucide/svelte/icons/chevron-right';
 import ChevronUp from '@lucide/svelte/icons/chevron-up';
 import ChevronsLeft from '@lucide/svelte/icons/chevrons-left';
 import ChevronsRight from '@lucide/svelte/icons/chevrons-right';
+import ChevronsUp from '@lucide/svelte/icons/chevrons-up';
 import Circle from '@lucide/svelte/icons/circle';
 import CircleCheck from '@lucide/svelte/icons/circle-check';
 import CircleDot from '@lucide/svelte/icons/circle-dot';
@@ -115,6 +116,7 @@ export const icons = {
 	'chevron-up': ChevronUp,
 	'chevrons-left': ChevronsLeft,
 	'chevrons-right': ChevronsRight,
+	'chevrons-up': ChevronsUp,
 	circle: Circle,
 	'circle-dot': CircleDot,
 	'circle-check': CircleCheck,

@@ -8,7 +8,7 @@
 	// The form logic is the Phase 4 drawer's, moved rather than rewritten: the dirty-aware
 	// refill, the 409 reload, the delete confirmation and the toasts all behave as before.
 	import { onMount, untrack } from 'svelte';
-	import { Badge, Button, Icon, IconButton, Input, Select } from '$lib/ds';
+	import { Badge, Button, Icon, IconButton, Input } from '$lib/ds';
 	import { errorMessage } from '$lib/errors';
 	import { relativeAge } from '$lib/format';
 	import { copyText, TabStrip, type Tab } from '$lib/shell';
@@ -80,15 +80,12 @@
 		onback
 	}: Props = $props();
 
-	import { KIND_OPTIONS, stageColor } from './kind';
+	import { KIND_MENU, PRIORITY_MENU, stageColor } from './kind';
 	import KindIcon from './KindIcon.svelte';
-	const PRIORITIES: TaskPriority[] = ['low', 'medium', 'high', 'urgent'];
-
-	const kindOptions = KIND_OPTIONS;
-	const priorityOptions = PRIORITIES.map((p) => ({ value: p, label: p }));
+	import MenuSelect from './MenuSelect.svelte';
 	const personaOptions = $derived([
 		{ value: '', label: 'None' },
-		...personas.roster.map((r) => ({ value: r.slug, label: r.name }))
+		...personas.roster.map((r) => ({ value: r.slug, label: r.name, hint: r.role }))
 	]);
 
 	const task = $derived(detail?.task ?? null);
@@ -916,27 +913,36 @@
 					</span>
 				</div>
 				<div class="pair">
-					<Select
+					<MenuSelect
 						label="Kind"
-						bind:value={kind}
-						options={kindOptions}
-						data-testid="task-kind"
-						onchange={autosave}
+						value={kind}
+						options={KIND_MENU}
+						testId="task-kind"
+						onchange={(k) => {
+							kind = k;
+							autosave();
+						}}
 					/>
-					<Select
+					<MenuSelect
 						label="Priority"
-						bind:value={priority}
-						options={priorityOptions}
-						data-testid="task-priority"
-						onchange={autosave}
+						value={priority}
+						options={PRIORITY_MENU}
+						testId="task-priority"
+						onchange={(p) => {
+							priority = p;
+							autosave();
+						}}
 					/>
-					<Select
+					<MenuSelect
 						label="Persona"
-						bind:value={persona}
+						value={persona}
 						options={personaOptions}
-						data-testid="task-persona"
-						onchange={(e: Event & { currentTarget: HTMLSelectElement }) =>
-							void changePersona(e.currentTarget.value)}
+						searchable
+						testId="task-persona"
+						onchange={(v) => {
+							persona = v;
+							void changePersona(v);
+						}}
 					/>
 				</div>
 				<Input
@@ -1042,8 +1048,8 @@
 						placeholder="Add a comment"
 						data-testid="task-comment"
 					></textarea>
-					<div class="row">
-						<Button size="sm" data-testid="task-comment-send" disabled={busy} onclick={sendComment}>
+					<div class="row comment-actions">
+						<Button size="sm" variant="primary" data-testid="task-comment-send" disabled={busy} onclick={sendComment}>
 							Comment
 						</Button>
 					</div>
@@ -1570,6 +1576,10 @@
 		display: flex;
 		align-items: center;
 		gap: 8px;
+	}
+
+	.comment-actions {
+		justify-content: flex-end;
 	}
 
 	.row.end {

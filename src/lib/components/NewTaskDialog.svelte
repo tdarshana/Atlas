@@ -1,12 +1,13 @@
 <script lang="ts">
 	// New task. The stage is left to the daemon, which puts a new task in the first
 	// stage of the project's list; everything else here is optional but the title.
-	import { Button, Input, Select } from '$lib/ds';
+	import { Button, Input } from '$lib/ds';
 	import { api } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
 	import { personas } from '$lib/stores/personas.svelte';
 	import type { TaskKind, TaskPriority, Uuid } from '$lib/types';
-	import { KIND_OPTIONS } from '$lib/components/board/kind';
+	import { KIND_MENU, PRIORITY_MENU } from '$lib/components/board/kind';
+	import MenuSelect from '$lib/components/board/MenuSelect.svelte';
 	import Dialog from '$lib/ui/Dialog.svelte';
 	import Textarea from '$lib/ui/Textarea.svelte';
 	import { push } from '$lib/platform/toasts.svelte';
@@ -28,14 +29,9 @@
 	// out after the task is created.
 	const target = $derived(projectName ? `Project: ${projectName}` : 'Global board');
 
-	const kindOptions = KIND_OPTIONS;
-	const priorityOptions = (['low', 'medium', 'high', 'urgent'] as TaskPriority[]).map((p) => ({
-		value: p,
-		label: p
-	}));
 	const personaOptions = $derived([
 		{ value: '', label: 'None' },
-		...personas.roster.map((r) => ({ value: r.slug, label: r.name }))
+		...personas.roster.map((r) => ({ value: r.slug, label: r.name, hint: r.role }))
 	]);
 
 	let title = $state('');
@@ -117,18 +113,21 @@
 		</span>
 
 		<div class="pair">
-			<Select label="Kind" bind:value={kind} options={kindOptions} data-testid="new-task-kind" />
-			<Select
+			<MenuSelect label="Kind" value={kind} options={KIND_MENU} testId="new-task-kind" onchange={(k) => (kind = k)} />
+			<MenuSelect
 				label="Priority"
-				bind:value={priority}
-				options={priorityOptions}
-				data-testid="new-task-priority"
+				value={priority}
+				options={PRIORITY_MENU}
+				testId="new-task-priority"
+				onchange={(p) => (priority = p)}
 			/>
-			<Select
+			<MenuSelect
 				label="Persona"
-				bind:value={persona}
+				value={persona}
 				options={personaOptions}
-				data-testid="new-task-persona"
+				searchable
+				testId="new-task-persona"
+				onchange={(v) => (persona = v)}
 			/>
 		</div>
 

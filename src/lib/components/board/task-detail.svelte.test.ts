@@ -451,21 +451,22 @@ describe('TaskDetail persona select', () => {
 		personas.roster = [];
 	});
 
-	it('lists None and the roster, and writes the persona on change', async () => {
+	it('lists None and the roster in a menu, and writes the persona on pick', async () => {
 		personas.roster = [reviewer, builder];
 		let changed = 0;
-		const { container } = open(detail(), { onchanged: () => changed++ });
-		const select = container.querySelector<HTMLSelectElement>('[data-testid="task-persona"]')!;
-		expect([...select.options].map((o) => o.value)).toEqual(['', 'reviewer', 'builder']);
-		expect([...select.options].map((o) => o.textContent)).toEqual(['None', 'Reviewer', 'Builder']);
+		const { getByTestId, queryByTestId } = open(detail(), { onchanged: () => changed++ });
+		expect(queryByTestId('task-persona-menu')).toBeNull();
+		await fireEvent.click(getByTestId('task-persona'));
+		const menu = getByTestId('task-persona-menu');
+		expect([...menu.querySelectorAll('[role="menuitemradio"]')].map((o) => o.textContent?.trim().split(/\s+/)[0])).toEqual(['None', 'Reviewer', 'Builder']);
+		expect(getByTestId('task-persona-search')).toBeTruthy();
 
-		select.value = 'builder';
-		await fireEvent.change(select);
+		await fireEvent.click(getByTestId('task-persona-builder'));
 		await waitFor(() => expect(mocks.updateTask).toHaveBeenCalledWith('ATL-1', { persona: 'builder' }));
 		expect(changed).toBe(1);
 
-		select.value = '';
-		await fireEvent.change(select);
+		await fireEvent.click(getByTestId('task-persona'));
+		await fireEvent.click(getByTestId('task-persona-none'));
 		await waitFor(() => expect(mocks.updateTask).toHaveBeenCalledWith('ATL-1', { persona: '' }));
 	});
 
@@ -473,8 +474,7 @@ describe('TaskDetail persona select', () => {
 		personas.roster = [reviewer];
 		const d = detail();
 		d.task = { ...d.task, persona_id: 'id-r', persona_name: 'Reviewer', persona_slug: 'reviewer' };
-		const { container } = open(d);
-		const select = container.querySelector<HTMLSelectElement>('[data-testid="task-persona"]')!;
-		expect(select.value).toBe('reviewer');
+		const { getByTestId } = open(d);
+		expect(getByTestId('task-persona').textContent).toContain('Reviewer');
 	});
 });
