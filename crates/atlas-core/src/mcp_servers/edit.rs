@@ -532,7 +532,8 @@ fn write(paths: &AtlasPaths, db: &Db, path: &Path, text: String, edited: Edited<
 /// `path` with every symlink resolved, without requiring it to exist: the deepest
 /// ancestor that does exist is canonicalised and the rest is appended, so a target whose
 /// parent directory has not been created yet still resolves to where it would land.
-fn resolve(path: &Path) -> Result<PathBuf> {
+/// `sync::plan_sync` vets its targets with it too.
+pub(crate) fn resolve(path: &Path) -> Result<PathBuf> {
     if let Ok(real) = path.canonicalize() {
         return Ok(real);
     }

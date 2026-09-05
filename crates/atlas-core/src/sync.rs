@@ -1,6 +1,7 @@
 use crate::board::render::render_board_markdown;
 use crate::export::{self, BlockContext};
 use crate::frameworks;
+use crate::mcp_servers::edit;
 use crate::models::{Agent, PersonaBundle, Stage, SyncAction, SyncKind, SyncOp, SyncReport, Task};
 use crate::{AtlasError, Result};
 use std::path::{Path, PathBuf};
@@ -123,49 +124,50 @@ pub fn plan_sync(i: &SyncInputs) -> Result<Vec<SyncOp>> {
     #[cfg(test)]
     note_fs_thread();
     let mut ops = Vec::new();
+    // Every target goes through `plan_target` before anything reads it, with the
+    // directory it must stay under: the project root, or the sync home for Codex's hook.
     for kind in i.targets {
         match kind {
             SyncKind::Claude => {
                 let dir = i.root.join(".claude/agents");
                 for a in i.agents {
-                    ops.push(agent_op(*kind, dir.join(format!("{}.md", a.name)), export::claude_agent_md(a))?);
+                    plan_target(&mut ops, *kind, i.root, dir.join(format!("{}.md", a.name)), |p| agent_op(*kind, p, export::claude_agent_md(a)))?;
                 }
                 for b in i.personas {
-                    ops.push(agent_op(*kind, dir.join(format!("{}.md", b.persona.slug)), export::claude_subagent(b))?);
+                    plan_target(&mut ops, *kind, i.root, dir.join(format!("{}.md", b.persona.slug)), |p| agent_op(*kind, p, export::claude_subagent(b)))?;
                 }
-                ops.extend(stale_persona_exports(&dir, i.personas)?);
+                if escape_reason(i.root, &dir).is_none() {
+                    ops.extend(stale_persona_exports(&dir, i.personas)?);
+                }
             }
             SyncKind::Codex => {
                 for a in i.agents {
                     let path = i.root.join(".codex/agents").join(format!("{}.toml", a.name));
-                    ops.push(agent_op(*kind, path, export::codex_agent_toml(a))?);
+                    plan_target(&mut ops, *kind, i.root, path, |p| agent_op(*kind, p, export::codex_agent_toml(a)))?;
                 }
             }
             SyncKind::AgentsMd => {
-                let path = i.root.join("AGENTS.md");
-                let extra = persona_sections(i, &path);
-                ops.push(block_op(*kind, path, &i.block, &extra)?);
+                plan_target(&mut ops, *kind, i.root, i.root.join("AGENTS.md"), |p| block_op(*kind, p.clone(), &i.block, &persona_sections(i, &p)))?;
             }
             SyncKind::ClaudeMd => {
-                let path = i.root.join("CLAUDE.md");
-                let extra = persona_sections(i, &path);
-                ops.push(block_op(*kind, path, &i.block, &extra)?);
+                plan_target(&mut ops, *kind, i.root, i.root.join("CLAUDE.md"), |p| block_op(*kind, p.clone(), &i.block, &persona_sections(i, &p)))?;
             }
             SyncKind::ClaudeHook => {
                 if i.hooks {
-                    ops.push(claude_hook_op(i.root.join(".claude").join(claude_settings_file(i.global)))?);
+                    let path = i.root.join(".claude").join(claude_settings_file(i.global));
+                    plan_target(&mut ops, *kind, i.root, path, claude_hook_op)?;
                 }
             }
             SyncKind::CodexHook => {
                 if i.hooks {
-                    ops.push(codex_hook_op(i.home.join(".codex/config.toml"))?);
+                    plan_target(&mut ops, *kind, i.home, i.home.join(".codex/config.toml"), codex_hook_op)?;
                 }
             }
             SyncKind::TasksMd => {
                 if i.mirror_tasks_md {
                     let body = render_board_markdown(i.board_stages, i.board_tasks);
                     let content = format!("{TASKS_MD_HEADER}\n\n{body}");
-                    ops.push(tasks_md_op(*kind, i.root.join("TASKS.md"), content)?);
+                    plan_target(&mut ops, *kind, i.root, i.root.join("TASKS.md"), |p| tasks_md_op(*kind, p, content))?;
                 }
             }
             SyncKind::FrameworkInstructions => {
@@ -174,14 +176,41 @@ pub fn plan_sync(i: &SyncInputs) -> Result<Vec<SyncOp>> {
                         continue;
                     }
                     for path in adapter.instruction_targets(i.root) {
-                        let extra = persona_sections(i, &path);
-                        ops.push(framework_block_op(*kind, path, &i.block, &extra)?);
+                        plan_target(&mut ops, *kind, i.root, path, |p| framework_block_op(*kind, p.clone(), &i.block, &persona_sections(i, &p)))?;
                     }
                 }
             }
         }
     }
     Ok(ops)
+}
+
+/// Plans the op for one target: `build` when the target may be written, otherwise a
+/// skip naming the reason, with nothing read. See [`escape_reason`].
+fn plan_target(ops: &mut Vec<SyncOp>, kind: SyncKind, base: &Path, path: PathBuf, build: impl FnOnce(PathBuf) -> Result<SyncOp>) -> Result<()> {
+    let op = match escape_reason(base, &path) {
+        Some(reason) => SyncOp { kind, path, content: String::new(), action: SyncAction::Skip(reason), delete: false },
+        None => build(path)?,
+    };
+    ops.push(op);
+    Ok(())
+}
+
+/// Why `path` may not be a sync target, or `None` when it may: the leaf must not be a
+/// symlink, and the path with every link resolved must sit under `base`. A repository is
+/// not trusted to say where Atlas writes (the same rule as `mcp_servers::edit::confine_to_project`):
+/// a checkout that ships `CLAUDE.md` as a symlink to a file in the user's home, or `.claude`
+/// as a symlink to a directory there, would otherwise have the sync read that file, splice
+/// its block in and write the result back over it.
+fn escape_reason(base: &Path, path: &Path) -> Option<String> {
+    if path.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()) {
+        return Some("a symlink, which a sync does not write through".into());
+    }
+    let inside = match (edit::resolve(base), edit::resolve(path)) {
+        (Ok(base), Ok(path)) => path.starts_with(base),
+        _ => false,
+    };
+    (!inside).then(|| "resolves outside the project".into())
 }
 
 /// An exporter-owned file (`.claude/agents/*.md`, `.codex/agents/*.toml`):
@@ -807,6 +836,52 @@ mod tests {
             default_persona: None,
         };
         assert!(plan_sync(&inputs).unwrap().is_empty());
+    }
+
+    /// SEC-3 (ATL-297). A checkout is not trusted to say where a sync writes: a repository
+    /// that ships `CLAUDE.md` as a symlink to a file in the user's home, or `.claude` as a
+    /// symlink to a directory there, must not have the sync read that file, splice its
+    /// block in and write the result back over it. Each such target is planned as a skip
+    /// that names the reason, its content is not read, and `apply` touches nothing.
+    #[test]
+    #[cfg(unix)]
+    fn a_target_that_leaves_the_project_through_a_symlink_is_skipped_and_never_written() {
+        let outside = tempfile::tempdir().unwrap();
+        let zshrc = outside.path().join("zshrc");
+        std::fs::write(&zshrc, "export SECRET=1\n").unwrap();
+        let home_claude = outside.path().join("home-claude");
+        std::fs::create_dir_all(&home_claude).unwrap();
+        std::fs::write(home_claude.join("settings.local.json"), "{\"theme\":\"dark\"}\n").unwrap();
+
+        let repo = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(&zshrc, repo.path().join("CLAUDE.md")).unwrap();
+        std::os::unix::fs::symlink(&home_claude, repo.path().join(".claude")).unwrap();
+
+        let inputs = SyncInputs {
+            root: repo.path(),
+            agents: &[],
+            block: BlockContext { mcp_command: "atlas mcp".into(), agents: vec![], practices: vec![], project_name: None },
+            targets: &[SyncKind::ClaudeMd, SyncKind::ClaudeHook],
+            home: repo.path(),
+            hooks: true,
+            global: false,
+            mirror_tasks_md: false,
+            board_stages: &[],
+            board_tasks: &[],
+            personas: &[],
+            default_persona: None,
+        };
+        let ops = plan_sync(&inputs).unwrap();
+        assert_eq!(ops.len(), 2, "{ops:?}");
+        for op in &ops {
+            assert!(matches!(&op.action, SyncAction::Skip(reason) if reason.contains("symlink") || reason.contains("outside the project")), "{op:?}");
+            assert!(op.content.is_empty(), "a refused target's content is never read: {op:?}");
+        }
+
+        apply(&ops).unwrap();
+        assert_eq!(std::fs::read_to_string(&zshrc).unwrap(), "export SECRET=1\n");
+        assert_eq!(std::fs::read_to_string(home_claude.join("settings.local.json")).unwrap(), "{\"theme\":\"dark\"}\n");
+        assert!(repo.path().join("CLAUDE.md").symlink_metadata().unwrap().file_type().is_symlink(), "the link itself is left alone");
     }
 
     #[test]
