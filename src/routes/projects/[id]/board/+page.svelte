@@ -38,6 +38,7 @@
 		toggleLaneCollapsed,
 		visibleLanes
 	} from '$lib/stores/board.svelte';
+	import { followPersonaChanges, loadRoster, personas } from '$lib/stores/personas.svelte';
 	import { setHeaderActions } from '$lib/stores/project.svelte';
 	import { loadProjects, projects } from '$lib/stores/projects.svelte';
 	import type { Stage } from '$lib/types';
@@ -52,10 +53,15 @@
 	const project = $derived(projects.items.find((p) => p.id === projectId) ?? null);
 	const name = $derived(projectId ? (project?.name ?? 'Project') : 'Global');
 
-	// The filters panel sets a column and an unassigned toggle; both narrow what is drawn
-	// rather than what is fetched, so the panel's counts stay whole.
+	// The filters panel sets a column, an unassigned toggle and a persona; all narrow what
+	// is drawn rather than what is fetched, so the panel's counts stay whole.
+	const byPersona = $derived(
+		board.filters.persona
+			? board.tasks.filter((t) => t.persona_slug === board.filters.persona)
+			: board.tasks
+	);
 	const shown = $derived(
-		board.filters.unassigned ? board.tasks.filter((t) => !t.assignee) : board.tasks
+		board.filters.unassigned ? byPersona.filter((t) => !t.assignee) : byPersona
 	);
 	const lanes = $derived(
 		visibleLanes(deriveColumns(board.stages, shown), board.filters.stage, board.collapsedLanes)
@@ -83,9 +89,13 @@
 			if (board.filters.projectId !== id) {
 				board.filters.stage = null;
 				board.filters.unassigned = false;
+				board.filters.persona = '';
 			}
 			board.filters.projectId = id;
 			board.filters.query = q;
+			// The persona select and chips read this project's roster.
+			if (id === null) personas.roster = [];
+			else void loadRoster(id);
 			// Re-read on every URL change, not only when the project does: the widths for a
 			// board are the same values each time, so a `?task=` change costs one read of
 			// two storage keys and moves nothing on the screen.
@@ -171,10 +181,12 @@
 	onMount(() => {
 		void loadProjects();
 		const stopPolling = startBoardPolling();
+		const stopPersonas = followPersonaChanges();
 		// A pending debounce would fire a request for a screen that is gone.
 		return () => {
 			cancelRefresh();
 			stopPolling();
+			stopPersonas();
 		};
 	});
 </script>

@@ -4,6 +4,7 @@
 	import { Button, Input, Select } from '$lib/ds';
 	import { api } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
+	import { personas } from '$lib/stores/personas.svelte';
 	import type { TaskKind, TaskPriority, Uuid } from '$lib/types';
 	import Dialog from '$lib/ui/Dialog.svelte';
 	import Textarea from '$lib/ui/Textarea.svelte';
@@ -34,11 +35,16 @@
 		value: p,
 		label: p
 	}));
+	const personaOptions = $derived([
+		{ value: '', label: 'None' },
+		...personas.roster.map((r) => ({ value: r.slug, label: r.name }))
+	]);
 
 	let title = $state('');
 	let description = $state('');
 	let kind = $state('task');
 	let priority = $state('medium');
+	let persona = $state('');
 	let labels = $state('');
 	let blockedBy = $state('');
 	let creating = $state(false);
@@ -57,6 +63,7 @@
 		description = '';
 		kind = 'task';
 		priority = 'medium';
+		persona = '';
 		labels = '';
 		blockedBy = '';
 	}
@@ -77,6 +84,7 @@
 				description,
 				kind: kind as TaskKind,
 				priority: priority as TaskPriority,
+				persona: persona || undefined,
 				labels: splitList(labels),
 				blocked_by: splitList(blockedBy)
 			});
@@ -117,6 +125,12 @@
 				bind:value={priority}
 				options={priorityOptions}
 				data-testid="new-task-priority"
+			/>
+			<Select
+				label="Persona"
+				bind:value={persona}
+				options={personaOptions}
+				data-testid="new-task-persona"
 			/>
 		</div>
 

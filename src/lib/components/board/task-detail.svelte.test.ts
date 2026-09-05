@@ -16,6 +16,7 @@ vi.mock('$lib/daemon.svelte', () => ({
 }));
 
 import { DETAIL_TAB_KEY, setDetailTab } from '$lib/stores/board.svelte';
+import { personas } from '$lib/stores/personas.svelte';
 import { clear as clearToasts, toasts } from '$lib/ui/toasts.svelte';
 import TaskDetail from './TaskDetail.svelte';
 
@@ -407,5 +408,51 @@ describe('TaskDetail title and description edit in place', () => {
 		expect(container.querySelector('[data-testid="task-description"]')).toBeNull();
 
 		openSpy.mockRestore();
+	});
+});
+
+describe('TaskDetail persona select', () => {
+	const reviewer = {
+		persona_id: 'id-r',
+		name: 'Reviewer',
+		slug: 'reviewer',
+		role: 'Careful reviewer',
+		summary: '',
+		tags: [],
+		is_default: true,
+		position: 0,
+		project_id: 'p-1'
+	};
+	const builder = { ...reviewer, persona_id: 'id-b', name: 'Builder', slug: 'builder', role: 'Builds', is_default: false, position: 1 };
+
+	afterEach(() => {
+		personas.roster = [];
+	});
+
+	it('lists None and the roster, and writes the persona on change', async () => {
+		personas.roster = [reviewer, builder];
+		let changed = 0;
+		const { container } = open(detail(), { onchanged: () => changed++ });
+		const select = container.querySelector<HTMLSelectElement>('[data-testid="task-persona"]')!;
+		expect([...select.options].map((o) => o.value)).toEqual(['', 'reviewer', 'builder']);
+		expect([...select.options].map((o) => o.textContent)).toEqual(['None', 'Reviewer', 'Builder']);
+
+		select.value = 'builder';
+		await fireEvent.change(select);
+		await waitFor(() => expect(mocks.updateTask).toHaveBeenCalledWith('ATL-1', { persona: 'builder' }));
+		expect(changed).toBe(1);
+
+		select.value = '';
+		await fireEvent.change(select);
+		await waitFor(() => expect(mocks.updateTask).toHaveBeenCalledWith('ATL-1', { persona: '' }));
+	});
+
+	it('selects the persona the task opened with', () => {
+		personas.roster = [reviewer];
+		const d = detail();
+		d.task = { ...d.task, persona_id: 'id-r', persona_name: 'Reviewer', persona_slug: 'reviewer' };
+		const { container } = open(d);
+		const select = container.querySelector<HTMLSelectElement>('[data-testid="task-persona"]')!;
+		expect(select.value).toBe('reviewer');
 	});
 });

@@ -8,8 +8,9 @@
 	import { daemon } from '$lib/daemon.svelte';
 	import { board, scheduleRefresh } from '$lib/stores/board.svelte';
 	import { connectProject, loadProjects, pickProjectRoot, projects } from '$lib/stores/projects.svelte';
+	import { personaRole } from '$lib/stores/personas.svelte';
 	import { GLOBAL_ID } from '$lib/stores/project.svelte';
-	import { countInStage, groupAssignees, stageIcon } from './boardFilters';
+	import { countInStage, groupAssignees, groupPersonas, stageIcon } from './boardFilters';
 	import TreeGroup from '../TreeGroup.svelte';
 	import TreeRow from '../TreeRow.svelte';
 
@@ -19,6 +20,7 @@
 	const tasks = $derived(board.tasks);
 
 	const assignees = $derived(groupAssignees(tasks));
+	const personaGroups = $derived(groupPersonas(tasks, personaRole));
 
 	onMount(() => {
 		if (projects.items.length === 0 && !projects.loading) void loadProjects();
@@ -41,6 +43,11 @@
 			board.filters.assignee = '';
 			scheduleRefresh(0);
 		}
+	}
+
+	/** Applied on screen like the column filter, so no refresh is needed. */
+	function togglePersona(slug: string) {
+		board.filters.persona = board.filters.persona === slug ? '' : slug;
 	}
 
 	async function connect() {
@@ -108,6 +115,18 @@
 		selected={board.filters.unassigned}
 		onclick={toggleUnassigned}
 	/>
+</TreeGroup>
+
+<TreeGroup label="Personas">
+	{#each personaGroups as group (group.slug)}
+		<TreeRow
+			icon="users"
+			label={group.label}
+			meta={group.count}
+			selected={board.filters.persona === group.slug}
+			onclick={() => togglePersona(group.slug)}
+		/>
+	{/each}
 </TreeGroup>
 
 <span class="spacer"></span>

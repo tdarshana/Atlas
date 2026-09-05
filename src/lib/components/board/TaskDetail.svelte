@@ -22,6 +22,7 @@
 		detailTab,
 		setDetailTab
 	} from '$lib/stores/board.svelte';
+	import { personas } from '$lib/stores/personas.svelte';
 	import { FRAMEWORK_LABEL, reportText } from '$lib/components/project/frameworks';
 	import PluginFrame from '$lib/plugins/PluginFrame.svelte';
 	import { contributions, loadPlugins, pluginById, plugins } from '$lib/plugins/host.svelte';
@@ -79,6 +80,10 @@
 	const kindOptions = KINDS.map((k) => ({ value: k, label: k }));
 	const priorityOptions = PRIORITIES.map((p) => ({ value: p, label: p }));
 	const stageOptions = $derived(stages.map((s) => ({ value: s.name, label: s.name })));
+	const personaOptions = $derived([
+		{ value: '', label: 'None' },
+		...personas.roster.map((r) => ({ value: r.slug, label: r.name }))
+	]);
 
 	const task = $derived(detail?.task ?? null);
 
@@ -109,6 +114,8 @@
 	let priority = $state('medium');
 	let assignee = $state('');
 	let labels = $state('');
+	// Written the moment it changes rather than on Save, so it always follows the server.
+	let persona = $state('');
 	let blockerKey = $state('');
 	let comment = $state('');
 
@@ -170,6 +177,7 @@
 			if (other || same(priority, base.priority)) priority = next.priority;
 			if (other || same(assignee, base.assignee)) assignee = next.assignee;
 			if (other || same(labels, base.labels)) labels = next.labels;
+			persona = t.persona_slug ?? '';
 			if (other) titleError = null;
 			base = next;
 			// Opening another task or a reload after a write (Claim, a blocker, a comment)
@@ -408,6 +416,18 @@
 			}
 		} finally {
 			saving = false;
+		}
+	}
+
+	/** Writes the persona straight away; an empty value clears it. */
+	async function changePersona(value: string) {
+		if (!task) return;
+		try {
+			await api().updateTask(task.key, { persona: value });
+			await onchanged();
+		} catch (e) {
+			persona = task.persona_slug ?? '';
+			push('error', errorMessage(e));
 		}
 	}
 
@@ -716,6 +736,14 @@
 					bind:value={priority}
 					options={priorityOptions}
 					data-testid="task-priority"
+				/>
+				<Select
+					label="Persona"
+					bind:value={persona}
+					options={personaOptions}
+					data-testid="task-persona"
+					onchange={(e: Event & { currentTarget: HTMLSelectElement }) =>
+						void changePersona(e.currentTarget.value)}
 				/>
 			</div>
 

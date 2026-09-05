@@ -14,6 +14,7 @@ vi.mock('$lib/daemon.svelte', () => ({
 }));
 
 import { deriveColumns, visibleLanes } from '$lib/stores/board.svelte';
+import { personas } from '$lib/stores/personas.svelte';
 import LaneStrip from './LaneStrip.svelte';
 import TaskCard from './TaskCard.svelte';
 import { priorityTone } from './card';
@@ -194,5 +195,47 @@ describe('priorityTone', () => {
 		expect(priorityTone('medium')).toBe('var(--text-tertiary)');
 		expect(priorityTone('low')).toBe('var(--border-default)');
 		expect(priorityTone('whenever')).toBe('var(--border-default)');
+	});
+});
+
+describe('TaskCard persona chip', () => {
+	function card(overrides: Partial<Task>) {
+		return render(TaskCard, {
+			props: {
+				task: { ...task('ATL-1', 'Backlog'), ...overrides },
+				stageOptions: [],
+				selected: false,
+				onopen: () => {},
+				onmove: () => {}
+			}
+		});
+	}
+
+	it('shows the role from the roster beside the kind badge when the task has a persona', () => {
+		personas.roster = [
+			{
+				persona_id: 'id-r',
+				name: 'Reviewer',
+				slug: 'reviewer',
+				role: 'Careful reviewer',
+				summary: '',
+				tags: [],
+				is_default: true,
+				position: 0,
+				project_id: 'p-1'
+			}
+		];
+		const { container } = card({ persona_id: 'id-r', persona_name: 'Reviewer', persona_slug: 'reviewer' });
+		expect(container.querySelector('[data-testid="persona-chip-ATL-1"]')?.textContent).toContain(
+			'Careful reviewer'
+		);
+		personas.roster = [];
+	});
+
+	it('falls back to the persona name when nothing knows the role, and draws no chip without one', () => {
+		const { container } = card({ persona_id: 'id-g', persona_name: 'Ghost', persona_slug: 'ghost' });
+		expect(container.querySelector('[data-testid="persona-chip-ATL-1"]')?.textContent).toContain('Ghost');
+		const bare = card({});
+		expect(bare.container.querySelector('[data-testid="persona-chip-ATL-1"]')).toBeNull();
 	});
 });

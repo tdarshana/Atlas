@@ -6,6 +6,7 @@
 	// line above the title the way Jira draws one; that line opens the parent instead.
 	import { Badge, Icon, Select } from '$lib/ds';
 	import type { SelectOption } from '$lib/ds';
+	import { personaRole } from '$lib/stores/personas.svelte';
 	import type { Task } from '$lib/types';
 	import { priorityTone } from './card';
 
@@ -83,6 +84,11 @@
 
 	<div class="tags">
 		<Badge mono>{task.kind}</Badge>
+		{#if task.persona_slug}
+			<Badge tone="accent" icon="users" data-testid="persona-chip-{task.key}">
+				{personaRole(task.persona_slug, task.persona_name ?? task.persona_slug)}
+			</Badge>
+		{/if}
 		{#if task.subtasks_total > 0}
 			<Badge mono icon="list-checks">{task.subtasks_done}/{task.subtasks_total}</Badge>
 		{/if}
