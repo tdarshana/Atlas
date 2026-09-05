@@ -192,10 +192,15 @@
 	.body {
 		flex: 1;
 		min-height: 0;
+		min-width: 0;
 		overflow: auto;
 		padding: var(--space-2) var(--space-3);
 		color: var(--text-secondary);
 		font: var(--type-ui);
+		/* A long inline code span (a path, a brace list of file names) has no break
+		   opportunity of its own; without this it sets the panel's minimum width and
+		   pushes the whole detail sideways. Fenced blocks keep their own scroll. */
+		overflow-wrap: anywhere;
 	}
 
 	.body.embedded {
