@@ -337,7 +337,7 @@ mod tests {
         let current = vec![row(&a, true, 0), row(&b, false, 1)];
         let edited = edit_roster(&current, vec![b.clone(), c.clone()], &[], Some(&c)).unwrap();
         assert_eq!(edited.iter().map(|e| (e.persona_id, e.is_default, e.position)).collect::<Vec<_>>(), vec![(a.id, false, 0), (b.id, false, 1), (c.id, true, 2)]);
-        let edited = edit_roster(&current, vec![], &[a.clone()], None).unwrap();
+        let edited = edit_roster(&current, vec![], std::slice::from_ref(&a), None).unwrap();
         assert_eq!(edited.iter().map(|e| e.persona_id).collect::<Vec<_>>(), vec![b.id]);
         assert!(!edited[0].is_default, "removing the default leaves none rather than picking one");
     }
@@ -348,7 +348,7 @@ mod tests {
         let (a, b) = (persona("a"), persona("b"));
         let err = edit_roster(&[row(&a, false, 0)], vec![], &[], Some(&b)).unwrap_err();
         assert_eq!(err.to_string(), "persona 'b' is not on the roster; add it first");
-        let err = edit_roster(&[row(&a, false, 0)], vec![], &[a.clone()], Some(&a)).unwrap_err();
+        let err = edit_roster(&[row(&a, false, 0)], vec![], std::slice::from_ref(&a), Some(&a)).unwrap_err();
         assert!(err.to_string().contains("not on the roster"), "a persona removed in the same call cannot be the default");
     }
 }

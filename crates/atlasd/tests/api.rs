@@ -3512,6 +3512,6 @@ async fn a_persona_header_gates_writes_and_lands_in_the_detail() {
         .json(&serde_json::json!({"stage": "Testing"})).send().await.unwrap();
     assert_eq!(plain.status(), 200);
     let detail: serde_json::Value = c.get(format!("{base}/tasks/{key}")).send().await.unwrap().json().await.unwrap();
-    let last = detail["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "moved").last().unwrap();
+    let last = detail["events"].as_array().unwrap().iter().rfind(|e| e["kind"] == "moved").unwrap();
     assert!(last["detail"].get("persona").is_none(), "no persona, no field: {last}");
 }
