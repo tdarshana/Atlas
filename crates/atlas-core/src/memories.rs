@@ -92,6 +92,12 @@ impl<'a> MemoryRepo<'a> {
     pub fn new(db: &'a Db) -> Self { Self { db } }
 
     pub fn insert(&self, m: &NewMemory, actor: &str) -> Result<Memory> {
+        self.insert_as(m, actor, None)
+    }
+
+    /// `insert` for an actor bound by a persona: the audit row's `detail` names the
+    /// persona slug, since the actor label never carries it.
+    pub fn insert_as(&self, m: &NewMemory, actor: &str, persona: Option<&str>) -> Result<Memory> {
         if m.text.trim().is_empty() { return Err(AtlasError::Invalid("memory text is empty".into())); }
         let id = Uuid::new_v4();
         let tags_list = format!("[{}]", m.tags.iter().map(|t| format!("'{}'", t.replace('\'', "''"))).collect::<Vec<_>>().join(","));
@@ -100,7 +106,11 @@ impl<'a> MemoryRepo<'a> {
                 params![id.to_string(), m.scope.as_str(), m.project_id.map(|p| p.to_string()), m.kind.as_str(), m.text, m.source_agent, m.source_tool, m.confidence, m.status.as_str()])?;
             Ok(())
         })?;
-        self.audit(actor, "insert", "memory", Some(id), serde_json::json!({"kind": m.kind.as_str(), "scope": m.scope.as_str()}))?;
+        let mut detail = serde_json::json!({"kind": m.kind.as_str(), "scope": m.scope.as_str()});
+        if let Some(slug) = persona {
+            detail["persona"] = serde_json::Value::String(slug.to_string());
+        }
+        self.audit(actor, "insert", "memory", Some(id), detail)?;
         self.get(id)
     }
 

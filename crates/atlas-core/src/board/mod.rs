@@ -33,6 +33,15 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use uuid::Uuid;
 
+/// `detail` with `"persona": slug` added when the actor was bound by one, so the
+/// event names the persona without the actor label carrying it.
+fn with_persona(mut detail: serde_json::Value, persona: Option<&str>) -> serde_json::Value {
+    if let Some(slug) = persona {
+        detail["persona"] = serde_json::Value::String(slug.to_string());
+    }
+    detail
+}
+
 /// Key prefix for tasks that belong to no project.
 pub const GLOBAL_BOARD_KEY: &str = "ATLAS";
 /// Settings key holding the global stage list.
@@ -909,6 +918,12 @@ impl TaskRepo {
     /// Moves a task to another stage of its board. Entering a done stage stamps
     /// `closed_at`; leaving one clears it.
     pub fn move_stage(&self, id_or_key: &str, stage: &str, expected: Option<DateTime<Utc>>, actor: &str) -> Result<Task> {
+        self.move_stage_as(id_or_key, stage, expected, actor, None)
+    }
+
+    /// `move_stage` for an actor bound by a persona: the `moved` event's detail names
+    /// the persona slug, since the actor label never carries it.
+    pub fn move_stage_as(&self, id_or_key: &str, stage: &str, expected: Option<DateTime<Utc>>, actor: &str, persona: Option<&str>) -> Result<Task> {
         let _gate = self.gate();
         self.db.with_conn(|c| {
             let id = self.resolve(c, id_or_key)?;
@@ -922,14 +937,14 @@ impl TaskRepo {
             if target.name.trim().eq_ignore_ascii_case(task.stage.trim()) {
                 return self.load_one(c, id);
             }
-            self.move_gated(c, &task, &target, actor)?;
+            self.move_gated(c, &task, &target, actor, persona)?;
             self.load_one(c, id)
         })
     }
 
     /// The body of a move, for callers inside this type that already resolved the
     /// task and the target stage.
-    fn move_gated(&self, c: &Connection, task: &Task, target: &Stage, actor: &str) -> Result<()> {
+    fn move_gated(&self, c: &Connection, task: &Task, target: &Stage, actor: &str, persona: Option<&str>) -> Result<()> {
         let closed = if target.done { "now()" } else { "null" };
         c.execute(
             &format!("update tasks set stage = ?, closed_at = {closed}, updated_at = now() where id = ?"),
@@ -941,7 +956,7 @@ impl TaskRepo {
             actor,
             "moved",
             &format!("moved {} from {} to {}", task.key, task.stage, target.name),
-            Some(json!({"from": task.stage, "to": target.name})),
+            Some(with_persona(json!({"from": task.stage, "to": target.name}), persona)),
         )?;
         Ok(())
     }
@@ -964,6 +979,12 @@ impl TaskRepo {
     /// stage, moves it to the second. Fails when someone else holds it unless
     /// `force` is set.
     pub fn claim(&self, id_or_key: &str, force: bool, actor: &str) -> Result<Task> {
+        self.claim_as(id_or_key, force, actor, None)
+    }
+
+    /// `claim` for an actor bound by a persona: the `assigned` and `moved` events'
+    /// details name the persona slug.
+    pub fn claim_as(&self, id_or_key: &str, force: bool, actor: &str, persona: Option<&str>) -> Result<Task> {
         let _gate = self.gate();
         self.db.with_conn(|c| {
             let id = self.resolve(c, id_or_key)?;
@@ -977,11 +998,11 @@ impl TaskRepo {
                 }
             }
             c.execute("update tasks set assignee = ?, updated_at = now() where id = ?", params![actor, id.to_string()])?;
-            self.event(c, id, actor, "assigned", &format!("{actor} claimed {}", task.key), Some(json!({"assignee": actor, "force": force})))?;
+            self.event(c, id, actor, "assigned", &format!("{actor} claimed {}", task.key), Some(with_persona(json!({"assignee": actor, "force": force}), persona)))?;
             let stages = self.stages_for(c, task.project_id)?.stages;
             if stages.len() > 1 && find_stage(&stages, &task.stage).map(|s| s.name == stages[0].name).unwrap_or(false) {
                 let target = stages[1].clone();
-                self.move_gated(c, &task, &target, actor)?;
+                self.move_gated(c, &task, &target, actor, persona)?;
             }
             self.load_one(c, id)
         })

@@ -422,6 +422,18 @@ pub struct ProjectContext {
     /// The skills that apply here, minus the ones this project switched off, so an
     /// agent reading its context knows which skills are actually in play.
     #[serde(default)] pub skills: Vec<SkillSummary>,
+    /// The project's persona roster and the session's current persona, filled in by
+    /// the MCP router (which is what holds a session); the daemon route leaves it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub personas: Option<PersonaContext>,
+}
+
+/// The personas in play for a project, as `project_context` reports them: the
+/// roster, its default and the persona the calling session has adopted (or `None`).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct PersonaContext {
+    pub roster: Vec<RosterRow>,
+    pub default: Option<RosterRow>,
+    pub current: Option<PersonaBundle>,
 }
 
 /// One sync request. `root` is required unless `global` is set, in which case

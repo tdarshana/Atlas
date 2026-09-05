@@ -72,6 +72,9 @@ pub const MCP_TOOL_NAMES: &[&str] = &[
     "framework_docs",
     "skill_list",
     "skill_get",
+    "persona_list",
+    "persona_get",
+    "persona_use",
 ];
 
 /// Rejects any name outside [`MCP_TOOL_NAMES`]. The rule the global

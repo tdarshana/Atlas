@@ -280,6 +280,11 @@ export interface ProjectContext {
 	 * agent reading its context knows which skills are actually in play.
 	 */
 	skills: SkillSummary[];
+	/**
+	 * The project's persona roster and the session's current persona, filled in by
+	 * the MCP router (which is what holds a session); the daemon route leaves it out.
+	 */
+	personas?: PersonaContext | null;
 }
 
 export interface Agent {
@@ -908,6 +913,16 @@ export interface PersonaBundle {
 	practices: Doc[];
 	mcp_servers: McpServerEntry[];
 	warnings: string[];
+}
+
+/**
+ * The personas in play for a project, as `project_context` reports them: the
+ * roster, its default and the persona the calling session has adopted (or `None`).
+ */
+export interface PersonaContext {
+	roster: RosterRow[];
+	default: RosterRow | null;
+	current: PersonaBundle | null;
 }
 
 // ---- shapes the daemon reads (a defaulted or Option field may be left out) ----

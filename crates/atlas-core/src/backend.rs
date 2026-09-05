@@ -12,7 +12,7 @@ use crate::library::{AgentRepo, DocRepo};
 use crate::models::*;
 use crate::paths::AtlasPaths;
 use crate::personas::PersonaRepo;
-use crate::projects::{access, build_profile, detect_root, Action, Actor, ProjectRepo};
+use crate::projects::{access, build_profile, detect_root, Action, Actor, PersonaRef, ProjectRepo};
 use crate::search::global::{SearchQuery, SearchResult};
 use crate::search::{FastEmbedder, NoopEmbedder};
 use crate::service::MemoryService;
@@ -313,6 +313,11 @@ pub trait PersonaBackend: Send + Sync + 'static {
     /// the scope of `project_id`, plus one warning per reference that no longer
     /// resolves. A missing reference never fails the call.
     async fn resolve_persona(&self, id_or_slug: &str, project_id: Option<Uuid>) -> Result<PersonaBundle>;
+    /// Binds every later call from this backend handle to `slug` (or unbinds it with
+    /// `None`). Only a client that reaches the daemon over HTTP has anything to do
+    /// here: it sends the slug as `X-Atlas-Persona`, which the daemon's gates read.
+    /// The local backend has no session of its own and ignores it.
+    fn set_session_persona(&self, _slug: Option<String>) {}
 }
 
 /// The whole surface at once: every domain trait, blanket-implemented for any type
@@ -352,19 +357,23 @@ fn settings_repo(db: &Db) -> crate::settings::SettingsRepo<'_> { crate::settings
 /// writes has to wait for review. A project id that no longer resolves is not a
 /// refusal: there is no rule to apply. Takes `db` rather than `&LocalBackend` so it
 /// can run inside a `blocking` closure.
-fn memory_gate(db: &Db, project_id: Option<Uuid>, actor: &str) -> Result<bool> {
-    Ok(access::check(db, &Actor::parse(actor), Action::WriteMemory, project_id)?.require_review)
+fn memory_gate(db: &Db, project_id: Option<Uuid>, actor: &Actor) -> Result<bool> {
+    Ok(access::check(db, actor, Action::WriteMemory, project_id)?.require_review)
 }
 
 /// Refuses an agent that may not move tasks on this task's board. The task read is
 /// skipped entirely for the user's own hands, which are always exempt.
-fn task_move_gate(db: &Db, tasks: &TaskRepo, id_or_key: &str, actor: &str) -> Result<()> {
-    let actor = Actor::parse(actor);
+fn task_move_gate(db: &Db, tasks: &TaskRepo, id_or_key: &str, actor: &Actor) -> Result<()> {
     if actor.is_user() {
         return Ok(());
     }
     let pid = tasks.get(id_or_key)?.task.project_id;
-    access::check(db, &actor, Action::MoveTask, pid).map(|_| ())
+    access::check(db, actor, Action::MoveTask, pid).map(|_| ())
+}
+
+/// The slug an audit detail names for `actor`, when it is bound by a persona.
+fn persona_slug(actor: &Actor) -> Option<&str> {
+    actor.persona.as_ref().map(|p| p.slug.as_str())
 }
 
 /// Refuses to trigger a run for an actor this project's `agent_access` would
@@ -378,11 +387,11 @@ fn task_move_gate(db: &Db, tasks: &TaskRepo, id_or_key: &str, actor: &str) -> Re
 /// otherwise admit it regardless of who asked for the run. The user's own hands
 /// are exempt, the same as every other gate in this file; a global workflow (no
 /// project) is never gated, since there is no project's `agent_access` to check.
-fn workflow_trigger_gate(db: &Db, workflow: &Workflow, actor: &str) -> Result<()> {
+fn workflow_trigger_gate(db: &Db, workflow: &Workflow, actor: &Actor) -> Result<()> {
     let Some(output) = workflow.graph.nodes.iter().find(|n| n.kind == NodeKind::Output) else { return Ok(()) };
     let NodeData::Output { propose_memories, file_tasks } = &output.data else { return Ok(()) };
     let action = Action::TriggerWorkflow { propose_memories: *propose_memories, file_tasks: *file_tasks };
-    access::check(db, &Actor::parse(actor), action, workflow.project_id).map(|_| ())
+    access::check(db, actor, action, workflow.project_id).map(|_| ())
 }
 
 /// Deleting a project cascades to its tasks, blocker links and events, so it is a
@@ -502,22 +511,86 @@ impl StatusBackend for LocalBackend {
     }
 }
 
-#[async_trait::async_trait]
-impl MemoryBackend for LocalBackend {
+/// The gated writes with the persona the caller is bound by (Phase 17). The daemon's
+/// routes call these with the `X-Atlas-Persona` ref the `Actor` extractor resolved;
+/// the trait methods are the same calls with no persona.
+impl LocalBackend {
     /// The project's `agent_access` is enforced here rather than in the MCP router,
     /// because MCP reaches the daemon over HTTP and the shim cannot see the rule. An
-    /// actor the project has not admitted is refused, and `require_review` turns an
-    /// agent's memory into a pending one.
-    async fn remember(&self, mut m: NewMemory, actor: &str) -> Result<Memory> {
+    /// actor the project has not admitted is refused, and `require_review` (the
+    /// project's or the persona's) turns an agent's memory into a pending one.
+    pub async fn remember_as(&self, mut m: NewMemory, actor: &str, persona: Option<PersonaRef>) -> Result<Memory> {
         let db = self.db.clone();
         let memories = self.memories.clone();
-        let actor = actor.to_string();
+        let label = actor.to_string();
+        let actor = Actor::parse(&label).with_persona(persona);
         self.blocking(move || {
             if memory_gate(&db, m.project_id, &actor)? {
                 m.status = MemoryStatus::Pending;
             }
-            memories.remember(m, &actor)
+            memories.remember_as(m, &label, persona_slug(&actor))
         }).await
+    }
+
+    pub async fn move_task_as(&self, id_or_key: &str, stage: &str, expected: Option<DateTime<Utc>>, actor: &str, persona: Option<PersonaRef>) -> Result<Task> {
+        let db = self.db.clone();
+        let tasks = self.tasks.clone();
+        let id_or_key = id_or_key.to_string();
+        let stage = stage.to_string();
+        let label = actor.to_string();
+        let actor = Actor::parse(&label).with_persona(persona);
+        self.blocking(move || {
+            task_move_gate(&db, &tasks, &id_or_key, &actor)?;
+            tasks.move_stage_as(&id_or_key, &stage, expected, &label, persona_slug(&actor))
+        }).await
+    }
+
+    /// A claim moves the task out of the first stage, so it is a move.
+    pub async fn claim_task_as(&self, id_or_key: &str, force: bool, actor: &str, persona: Option<PersonaRef>) -> Result<Task> {
+        let db = self.db.clone();
+        let tasks = self.tasks.clone();
+        let id_or_key = id_or_key.to_string();
+        let label = actor.to_string();
+        let actor = Actor::parse(&label).with_persona(persona);
+        self.blocking(move || {
+            task_move_gate(&db, &tasks, &id_or_key, &actor)?;
+            tasks.claim_as(&id_or_key, force, &label, persona_slug(&actor))
+        }).await
+    }
+
+    /// The persona, when set, rides in the job payload beside the actor so the run's
+    /// own record can name it.
+    pub async fn run_workflow_as(&self, id_or_name: &str, trigger: TriggerKind, actor: &str, input: Option<String>, persona: Option<PersonaRef>) -> Result<WorkflowRun> {
+        let db = self.db.clone();
+        let workflows = self.workflows.clone();
+        let jobs = self.jobs.clone();
+        let id_or_name = id_or_name.to_string();
+        let label = actor.to_string();
+        let actor = Actor::parse(&label).with_persona(persona);
+        let run = self.blocking(move || {
+            let workflow = workflows.get(&id_or_name)?;
+            workflow_trigger_gate(&db, &workflow, &actor)?;
+            if workflows.has_pending_run(workflow.id)? {
+                return Err(AtlasError::Conflict(format!("workflow '{}' already has a run queued or running", workflow.name)));
+            }
+            let run = workflows.create_run(workflow.id, trigger)?;
+            let mut payload = serde_json::json!({"workflow_id": workflow.id, "run_id": run.id, "trigger": trigger.as_str(), "actor": label, "input": input});
+            if let Some(slug) = persona_slug(&actor) {
+                payload["persona"] = serde_json::Value::String(slug.to_string());
+            }
+            jobs.enqueue("workflow_run", payload)?;
+            Ok(run)
+        }).await?;
+        self.queue.notify.notify_one();
+        Ok(run)
+    }
+}
+
+#[async_trait::async_trait]
+impl MemoryBackend for LocalBackend {
+    /// See [`LocalBackend::remember_as`].
+    async fn remember(&self, m: NewMemory, actor: &str) -> Result<Memory> {
+        self.remember_as(m, actor, None).await
     }
     async fn recall(&self, q: RecallQuery) -> Result<Vec<RecallHit>> {
         check_scope(q.project_id, q.list_scope)?;
@@ -606,6 +679,7 @@ impl ProjectBackend for LocalBackend {
                 skills,
                 project,
                 memories: hits,
+                personas: None,
             })
         }).await
     }
@@ -931,7 +1005,7 @@ impl JobBackend for LocalBackend {
             // the wrong scope. The answer travels in the payload so the worker never has to
             // ask again.
             let project_id = crate::extract::project_for(&db, project_root.clone())?;
-            memory_gate(&db, project_id, &source_tool)?;
+            memory_gate(&db, project_id, &Actor::parse(&source_tool))?;
             crate::extract::resolve_extraction(&db, project_id)?;
             if text.trim().is_empty() {
                 return Err(AtlasError::Invalid("ingest text is empty".into()));
@@ -987,15 +1061,7 @@ impl BoardBackend for LocalBackend {
         self.blocking(move || tasks.update(&id_or_key, &u, &actor)).await
     }
     async fn move_task(&self, id_or_key: &str, stage: &str, expected: Option<DateTime<Utc>>, actor: &str) -> Result<Task> {
-        let db = self.db.clone();
-        let tasks = self.tasks.clone();
-        let id_or_key = id_or_key.to_string();
-        let stage = stage.to_string();
-        let actor = actor.to_string();
-        self.blocking(move || {
-            task_move_gate(&db, &tasks, &id_or_key, &actor)?;
-            tasks.move_stage(&id_or_key, &stage, expected, &actor)
-        }).await
+        self.move_task_as(id_or_key, stage, expected, actor, None).await
     }
     async fn comment_task(&self, id_or_key: &str, body: &str, actor: &str) -> Result<TaskEvent> {
         let tasks = self.tasks.clone();
@@ -1005,15 +1071,7 @@ impl BoardBackend for LocalBackend {
         self.blocking(move || tasks.comment(&id_or_key, &body, &actor)).await
     }
     async fn claim_task(&self, id_or_key: &str, force: bool, actor: &str) -> Result<Task> {
-        // A claim moves the task out of the first stage, so it is a move.
-        let db = self.db.clone();
-        let tasks = self.tasks.clone();
-        let id_or_key = id_or_key.to_string();
-        let actor = actor.to_string();
-        self.blocking(move || {
-            task_move_gate(&db, &tasks, &id_or_key, &actor)?;
-            tasks.claim(&id_or_key, force, &actor)
-        }).await
+        self.claim_task_as(id_or_key, force, actor, None).await
     }
     async fn set_task_blockers(&self, id_or_key: &str, blocked_by: Vec<String>, actor: &str) -> Result<Task> {
         let tasks = self.tasks.clone();
@@ -1076,26 +1134,7 @@ impl WorkflowBackend for LocalBackend {
         self.blocking(move || workflows.delete(&id_or_name, &actor)).await
     }
     async fn run_workflow(&self, id_or_name: &str, trigger: TriggerKind, actor: &str, input: Option<String>) -> Result<WorkflowRun> {
-        let db = self.db.clone();
-        let workflows = self.workflows.clone();
-        let jobs = self.jobs.clone();
-        let id_or_name = id_or_name.to_string();
-        let actor = actor.to_string();
-        let run = self.blocking(move || {
-            let workflow = workflows.get(&id_or_name)?;
-            workflow_trigger_gate(&db, &workflow, &actor)?;
-            if workflows.has_pending_run(workflow.id)? {
-                return Err(AtlasError::Conflict(format!("workflow '{}' already has a run queued or running", workflow.name)));
-            }
-            let run = workflows.create_run(workflow.id, trigger)?;
-            jobs.enqueue(
-                "workflow_run",
-                serde_json::json!({"workflow_id": workflow.id, "run_id": run.id, "trigger": trigger.as_str(), "actor": actor, "input": input}),
-            )?;
-            Ok(run)
-        }).await?;
-        self.queue.notify.notify_one();
-        Ok(run)
+        self.run_workflow_as(id_or_name, trigger, actor, input, None).await
     }
     async fn list_runs(&self, id_or_name: &str, limit: usize) -> Result<Vec<WorkflowRun>> {
         let workflows = self.workflows.clone();

@@ -188,10 +188,15 @@ impl MemoryService {
     }
 
     pub fn remember(&self, m: NewMemory, actor: &str) -> Result<Memory> {
+        self.remember_as(m, actor, None)
+    }
+
+    /// `remember` for an actor bound by a persona, whose slug goes in the audit detail.
+    pub fn remember_as(&self, m: NewMemory, actor: &str, persona: Option<&str>) -> Result<Memory> {
         if m.scope == MemoryScope::Project && m.project_id.is_none() { return Err(AtlasError::Invalid("project scope requires project_id".into())); }
         let saved = {
             let _gate = self.gate();
-            let saved = self.repo().insert(&m, actor)?;
+            let saved = self.repo().insert_as(&m, actor, persona)?;
             // Only active memories belong in the derived state: `reload` rebuilds it from the
             // active rows alone, so indexing a pending one here would not survive a restart.
             if saved.status == MemoryStatus::Active { self.idx_write().upsert(saved.id, &saved.text); }

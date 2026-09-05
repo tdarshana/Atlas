@@ -44,7 +44,7 @@ fn outputs(g: &mut SchemaGenerator) -> Vec<&'static str> {
         McpServerSource, McpServerScope, McpTransport, McpServerEntry, McpServerList, McpToolInfo,
         McpCheckResult,
         SkillSource, SkillSummary, Skill, SkillList,
-        Case, PersonaRule, PersonaAccess, Persona, RosterRow, PersonaBundle,
+        Case, PersonaRule, PersonaAccess, Persona, RosterRow, PersonaBundle, PersonaContext,
     ]
 }
 
