@@ -41,6 +41,8 @@ function task(key: string, stage: string): Task {
 		assignee: null,
 		labels: [],
 		parent_id: null,
+		parent_key: null,
+		parent_title: null,
 		created_by: 'desktop',
 		created_at: '2026-09-03T10:00:00Z',
 		updated_at: '2026-09-03T10:00:00Z',
@@ -170,10 +172,14 @@ describe('refresh', () => {
 		expect(board.tasks.map((t) => t.key)).toEqual(['ATL-2']);
 	});
 
-	it('asks for top-level tasks only while the search box is empty', async () => {
+	it('lists subtasks too, narrows to top-level only when asked, and never while searching', async () => {
 		mocks.boardStages.mockResolvedValue({ stages: STAGES, overridden: false });
 		mocks.listTasks.mockResolvedValue([]);
 
+		await refresh();
+		expect(mocks.listTasks.mock.calls.at(-1)![0].top_level).toBeUndefined();
+
+		board.filters.hideSubtasks = true;
 		await refresh();
 		expect(mocks.listTasks).toHaveBeenLastCalledWith(expect.objectContaining({ top_level: true }));
 
@@ -182,6 +188,7 @@ describe('refresh', () => {
 		const call = mocks.listTasks.mock.calls.at(-1)![0];
 		expect(call.top_level).toBeUndefined();
 		expect(call.query).toBe('widget');
+		board.filters.hideSubtasks = false;
 	});
 });
 

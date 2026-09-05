@@ -199,6 +199,12 @@
 		data-testid="board-hide-done"
 		onchange={() => scheduleRefresh(0)}
 	/>
+	<Checkbox
+		label="Hide subtasks"
+		bind:checked={board.filters.hideSubtasks}
+		data-testid="board-hide-subtasks"
+		onchange={() => scheduleRefresh(0)}
+	/>
 	<span class="grow"></span>
 	<Button variant="primary" data-testid="board-new" onclick={() => (creating = true)}>
 		New task

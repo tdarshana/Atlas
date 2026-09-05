@@ -462,6 +462,11 @@ pub struct Task {
     pub assignee: Option<String>,
     pub labels: Vec<String>,
     pub parent_id: Option<Uuid>,
+    /// The parent's key and title when this is a subtask, read with the row, so a
+    /// board card can name its parent even when the parent is filtered out of the
+    /// same listing.
+    #[serde(default)] pub parent_key: Option<String>,
+    #[serde(default)] pub parent_title: Option<String>,
     pub created_by: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

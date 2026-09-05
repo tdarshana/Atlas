@@ -227,6 +227,9 @@ export const board = $state({
 		query: '',
 		/** Done tasks show by default; this hides them on request. */
 		hideDone: false,
+		/** Subtasks show as their own cards by default; this narrows the board to
+		 * top-level tasks on request. */
+		hideSubtasks: false,
 		/**
 		 * One column, or null for all of them. Applied on the screen rather than in the
 		 * request: the filters panel counts every column from the same list, and a stage
@@ -404,7 +407,7 @@ let generation = 0;
 
 export async function refresh(): Promise<void> {
 	const g = ++generation;
-	const { projectId, assignee, query, hideDone } = board.filters;
+	const { projectId, assignee, query, hideDone, hideSubtasks } = board.filters;
 	const trimmedQuery = query.trim();
 	board.loading = true;
 	try {
@@ -416,9 +419,9 @@ export async function refresh(): Promise<void> {
 				assignee: assignee.trim() || null,
 				query: trimmedQuery || null,
 				include_done: !hideDone,
-				// A search must still find subtasks, so the top-level-only narrowing
-				// applies only while the board isn't being searched.
-				top_level: trimmedQuery ? undefined : true
+				// Subtasks are cards of their own unless hidden, and a search must still
+				// find them, so the top-level narrowing applies only to an unsearched board.
+				top_level: hideSubtasks && !trimmedQuery ? true : undefined
 			})
 		]);
 		if (g !== generation) return;

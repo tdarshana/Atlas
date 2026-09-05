@@ -560,6 +560,8 @@ mod tests {
             assignee: None,
             labels: vec![],
             parent_id: None,
+            parent_key: None,
+            parent_title: None,
             created_by: "test".into(),
             created_at: now,
             updated_at: now,

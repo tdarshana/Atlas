@@ -50,6 +50,8 @@ mod tests {
             assignee: assignee.map(String::from),
             labels: vec![],
             parent_id: None,
+            parent_key: None,
+            parent_title: None,
             created_by: "t".into(),
             created_at: now,
             updated_at: now,

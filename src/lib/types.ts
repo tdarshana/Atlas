@@ -442,6 +442,10 @@ export interface Task {
 	assignee: string | null;
 	labels: string[];
 	parent_id: Uuid | null;
+	/** The parent's key and title when this is a subtask, so a card can name its
+	 * parent even when the parent is filtered out of the same listing. */
+	parent_key: string | null;
+	parent_title: string | null;
 	created_by: string;
 	created_at: Timestamp;
 	updated_at: Timestamp;

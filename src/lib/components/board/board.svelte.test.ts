@@ -40,6 +40,8 @@ function task(key: string, stage: string): Task {
 		assignee: null,
 		labels: [],
 		parent_id: null,
+		parent_key: null,
+		parent_title: null,
 		created_by: 'desktop',
 		created_at: '2026-09-03T10:00:00Z',
 		updated_at: '2026-09-03T10:00:00Z',
@@ -152,6 +154,35 @@ describe('TaskCard', () => {
 	it('shows no chip for a task with no subtasks', () => {
 		const { container } = card({});
 		expect(container.querySelector('[data-testid="task-open-ATL-1"]')?.textContent).not.toContain('/');
+	});
+
+	it('draws a subtask with its parent named above the title, and that line opens the parent', async () => {
+		const opened: string[] = [];
+		const { container } = render(TaskCard, {
+			props: {
+				task: { ...task('ATL-9', 'Backlog'), parent_id: 'id-ATL-1', parent_key: 'ATL-1', parent_title: 'Ship the widget' },
+				stageOptions: [],
+				selected: false,
+				onopen: (key: string) => opened.push(key),
+				onmove: () => {}
+			}
+		});
+		const card = container.querySelector('[data-testid="task-open-ATL-9"]')!;
+		expect(card.classList.contains('subtask')).toBe(true);
+		const parent = container.querySelector('[data-testid="task-parent-ATL-9"]')!;
+		expect(parent.textContent).toContain('ATL-1');
+		expect(parent.textContent).toContain('Ship the widget');
+
+		(parent as HTMLElement).click();
+		expect(opened).toEqual(['ATL-1']);
+		(card as HTMLElement).click();
+		expect(opened).toEqual(['ATL-1', 'ATL-9']);
+	});
+
+	it('draws no parent line on a top-level task', () => {
+		const { container } = card({});
+		expect(container.querySelector('[data-testid="task-parent-ATL-1"]')).toBeNull();
+		expect(container.querySelector('[data-testid="task-open-ATL-1"]')?.classList.contains('subtask')).toBe(false);
 	});
 });
 

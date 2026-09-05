@@ -321,6 +321,30 @@ fn a_parent_with_an_open_child_is_not_ready_and_says_why() {
     assert_eq!(after.subtasks_done, 1, "the child moved to a done stage");
 }
 
+/// A subtask row names its parent by key and title wherever it is read (a listing,
+/// a single get, the parent's children), and a top-level row names none.
+#[test]
+fn a_subtask_row_carries_its_parents_key_and_title() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    let parent = repo.create(&new_task(Some(p.id), "Ship the widget"), "t").unwrap();
+    let child = repo
+        .create(&NewTask { project_id: Some(p.id), title: "child".into(), parent: Some(parent.key.clone()), ..Default::default() }, "t")
+        .unwrap();
+    assert_eq!(child.parent_key.as_deref(), Some(parent.key.as_str()));
+    assert_eq!(child.parent_title.as_deref(), Some("Ship the widget"));
+    assert_eq!((parent.parent_key.as_deref(), parent.parent_title.as_deref()), (None, None));
+
+    let listed = repo.list(&TaskFilter { project_id: Some(p.id), ..Default::default() }).unwrap();
+    let row = listed.iter().find(|t| t.key == child.key).unwrap();
+    assert_eq!(row.parent_key.as_deref(), Some(parent.key.as_str()));
+    assert_eq!(repo.get(&parent.key).unwrap().children[0].parent_title.as_deref(), Some("Ship the widget"));
+
+    // Renaming the parent is reflected on the next read; the fields are never stored.
+    repo.update(&parent.key, &TaskUpdate { title: Some("Ship it".into()), ..Default::default() }, "t").unwrap();
+    assert_eq!(repo.get(&child.key).unwrap().task.parent_title.as_deref(), Some("Ship it"));
+}
+
 /// `subtasks_total`/`subtasks_done` count only direct children, are 0 for a task
 /// with none, and count a done child even while another sibling is still open.
 #[test]

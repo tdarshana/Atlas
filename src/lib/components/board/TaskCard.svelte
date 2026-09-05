@@ -2,8 +2,9 @@
 	// One task in a lane, per frame 02.2: its key and priority dot on one line, the title,
 	// then what it is and who has it, and a small select that moves it to another stage.
 	// The card itself is the click target; the select is not, or moving a card would open
-	// it at the same time.
-	import { Badge, Select } from '$lib/ds';
+	// it at the same time. A subtask is a card like any other, with its parent named on a
+	// line above the title the way Jira draws one; that line opens the parent instead.
+	import { Badge, Icon, Select } from '$lib/ds';
 	import type { SelectOption } from '$lib/ds';
 	import type { Task } from '$lib/types';
 	import { priorityTone } from './card';
@@ -24,12 +25,18 @@
 		event.preventDefault();
 		onopen(task.key);
 	}
+
+	function openParent(event: Event) {
+		event.stopPropagation();
+		if (task.parent_key) onopen(task.parent_key);
+	}
 </script>
 
 <!-- A row in a grid is the pattern the Table uses, so a card carries the same roles. -->
 <div
 	class="card"
 	class:selected
+	class:subtask={task.parent_key !== null}
 	role="button"
 	tabindex="0"
 	data-testid="task-open-{task.key}"
@@ -46,6 +53,21 @@
 			title="{task.priority} priority"
 		></span>
 	</div>
+
+	{#if task.parent_key}
+		<button
+			type="button"
+			class="parent"
+			data-testid="task-parent-{task.key}"
+			title="Subtask of {task.parent_key}: {task.parent_title ?? ''}"
+			onclick={openParent}
+			onkeydown={(e) => e.stopPropagation()}
+		>
+			<Icon name="corner-down-right" size={12} />
+			<span class="parent-key">{task.parent_key}</span>
+			{#if task.parent_title}<span class="parent-title">{task.parent_title}</span>{/if}
+		</button>
+	{/if}
 
 	<div class="title">{task.title}</div>
 
@@ -129,6 +151,48 @@
 		font-size: 12px;
 		line-height: 16px;
 		overflow-wrap: anywhere;
+	}
+
+	/* A subtask reads as one at a glance: a thin accent edge and the parent line. */
+	.card.subtask {
+		border-left: 2px solid var(--accent);
+	}
+
+	.parent {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		min-width: 0;
+		padding: 0;
+		border: 0;
+		background: none;
+		color: var(--text-tertiary);
+		font: inherit;
+		font-size: 11px;
+		line-height: 14px;
+		cursor: pointer;
+		text-align: left;
+	}
+
+	.parent:hover .parent-key,
+	.parent:hover .parent-title {
+		color: var(--text-secondary);
+	}
+
+	.parent:focus-visible {
+		outline: var(--focus-ring-width) solid var(--focus-ring);
+		outline-offset: 1px;
+	}
+
+	.parent-key {
+		font-family: var(--font-mono);
+		flex: 0 0 auto;
+	}
+
+	.parent-title {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
 	.tags {

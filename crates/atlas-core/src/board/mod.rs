@@ -41,7 +41,8 @@ pub const STAGES_SETTING: &str = "board.stages";
 pub const MIRROR_SETTING: &str = "board.mirror_tasks_md";
 
 const TASK_COLS: &str = "id::text, key, project_id::text, seq, title, description, stage, kind, priority, \
-     assignee, labels::text, parent_id::text, created_by, epoch_us(created_at), epoch_us(updated_at), epoch_us(closed_at), source_ref::text";
+     assignee, labels::text, parent_id::text, created_by, epoch_us(created_at), epoch_us(updated_at), epoch_us(closed_at), source_ref::text, \
+     (select p.key from tasks p where p.id = tasks.parent_id), (select p.title from tasks p where p.id = tasks.parent_id)";
 
 const EVENT_COLS: &str = "id::text, task_id::text, actor, kind, body, detail::text, epoch_us(created_at)";
 
@@ -78,6 +79,8 @@ fn row_to_task(r: &Row) -> duckdb::Result<Task> {
         assignee: r.get(9)?,
         labels: serde_json::from_str(&labels).map_err(|e| conv_err(10, Type::Text, e))?,
         parent_id: parse_uuid(11, r.get::<_, Option<String>>(11)?)?,
+        parent_key: r.get(17)?,
+        parent_title: r.get(18)?,
         created_by: r.get(12)?,
         created_at: ts(13, r.get(13)?)?,
         updated_at: ts(14, r.get(14)?)?,

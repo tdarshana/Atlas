@@ -10,6 +10,7 @@ import ArrowUp from '@lucide/svelte/icons/arrow-up';
 import Bell from '@lucide/svelte/icons/bell';
 import BookOpen from '@lucide/svelte/icons/book-open';
 import Bot from '@lucide/svelte/icons/bot';
+import CornerDownRight from '@lucide/svelte/icons/corner-down-right';
 import Braces from '@lucide/svelte/icons/braces';
 import Check from '@lucide/svelte/icons/check';
 import ChevronDown from '@lucide/svelte/icons/chevron-down';
@@ -79,6 +80,7 @@ export const icons = {
 	bot: Bot,
 	'book-open': BookOpen,
 	'git-branch': GitBranch,
+	'corner-down-right': CornerDownRight,
 	'graduation-cap': GraduationCap,
 	history: History,
 	activity: Activity,

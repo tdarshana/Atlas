@@ -48,6 +48,8 @@ function task(key: string, stage = 'Backlog'): Task {
 		assignee: null,
 		labels: [],
 		parent_id: null,
+		parent_key: null,
+		parent_title: null,
 		created_by: 'desktop',
 		created_at: '2026-09-03T10:00:00Z',
 		updated_at: '2026-09-03T10:00:00Z',
