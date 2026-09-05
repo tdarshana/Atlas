@@ -125,11 +125,16 @@ async fn json_api_round_trip() {
     assert_eq!(hits.as_array().unwrap().len(), 0);
     let missing = c.get(format!("{base}/memories/{}", uuid::Uuid::new_v4())).send().await.unwrap();
     assert_eq!(missing.status(), 404);
+    // ARCH-12: the body names the variant, so a client rebuilds it rather than guessing
+    // from the status code.
+    let missing_body: serde_json::Value = missing.json().await.unwrap();
+    assert_eq!(missing_body["kind"], "not_found", "{missing_body}");
 
     let bad_create = c.post(format!("{base}/memories")).header("Content-Type", "application/json").body("{\"scope\":\"global\"").send().await.unwrap();
     assert_eq!(bad_create.status(), 400);
     let bad_create_body: serde_json::Value = bad_create.json().await.unwrap();
     assert!(bad_create_body["error"].as_str().is_some(), "{bad_create_body}");
+    assert_eq!(bad_create_body["kind"], "invalid", "{bad_create_body}");
 
     let bad_get = c.get(format!("{base}/memories/not-a-uuid")).send().await.unwrap();
     assert_eq!(bad_get.status(), 400);

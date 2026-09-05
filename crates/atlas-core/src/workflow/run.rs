@@ -57,6 +57,16 @@ fn trailing_json_block(text: &str) -> Option<Value> {
     serde_json::from_str(body.trim()).ok()
 }
 
+/// Bookkeeping written on the way out of a failed or cancelled run: the failed status,
+/// the closing step and the audit row. None of these may mask the error being
+/// reported, so a write that fails is logged rather than returned, but never dropped
+/// in silence: a lost audit row is exactly the event an operator wants in the log.
+pub(super) fn warn_if_failed<T>(what: &str, run_id: Uuid, result: Result<T>) {
+    if let Err(e) = result {
+        tracing::warn!(run = %run_id, "{what} failed: {e}");
+    }
+}
+
 /// Records a failure on a step that never got to run: a synthetic step (there is no
 /// action to attach it to) carrying one ERR line, so a graph that fails re-validation
 /// still leaves a readable trail in the run view. Takes the repos directly, not
@@ -64,11 +74,12 @@ fn trailing_json_block(text: &str) -> Option<Value> {
 /// rather than a borrow of the backend.
 fn fail_before_steps(workflows: &WorkflowRepo, memories: &MemoryService, run_id: Uuid, run_actor: &str, err: AtlasError) -> Result<Value> {
     let log = vec![LogLine::now(LogLevel::Error, err.to_string())];
-    if let Ok(step) = workflows.append_step(run_id, 0, "", "validate", "") {
-        let _ = workflows.finish_step(step.id, StepStatus::Failed, None, &log);
+    match workflows.append_step(run_id, 0, "", "validate", "") {
+        Ok(step) => warn_if_failed("closing the validate step", run_id, workflows.finish_step(step.id, StepStatus::Failed, None, &log)),
+        Err(e) => warn_if_failed("opening the validate step", run_id, Err::<(), _>(e)),
     }
-    let _ = workflows.set_run_status(run_id, RunStatus::Failed, None);
-    let _ = memories.audit(run_actor, "run", "workflow_run", Some(run_id), json!({"status": "failed", "reason": err.to_string()}));
+    warn_if_failed("marking the run failed", run_id, workflows.set_run_status(run_id, RunStatus::Failed, None));
+    warn_if_failed("writing the audit row", run_id, memories.audit(run_actor, "run", "workflow_run", Some(run_id), json!({"status": "failed", "reason": err.to_string()})));
     Err(err)
 }
 
@@ -76,9 +87,9 @@ fn fail_before_steps(workflows: &WorkflowRepo, memories: &MemoryService, run_id:
 /// ERR line, the run is marked failed, and the rest of the actions are skipped.
 fn fail_step(workflows: &WorkflowRepo, memories: &MemoryService, run_id: Uuid, step_id: Uuid, run_actor: &str, mut log: Vec<LogLine>, err: AtlasError) -> Result<Value> {
     log.push(LogLine::now(LogLevel::Error, err.to_string()));
-    let _ = workflows.finish_step(step_id, StepStatus::Failed, None, &log);
-    let _ = workflows.set_run_status(run_id, RunStatus::Failed, None);
-    let _ = memories.audit(run_actor, "run", "workflow_run", Some(run_id), json!({"status": "failed", "reason": err.to_string()}));
+    warn_if_failed("closing the failed step", run_id, workflows.finish_step(step_id, StepStatus::Failed, None, &log));
+    warn_if_failed("marking the run failed", run_id, workflows.set_run_status(run_id, RunStatus::Failed, None));
+    warn_if_failed("writing the audit row", run_id, memories.audit(run_actor, "run", "workflow_run", Some(run_id), json!({"status": "failed", "reason": err.to_string()})));
     Err(err)
 }
 
@@ -88,13 +99,13 @@ fn fail_step(workflows: &WorkflowRepo, memories: &MemoryService, run_id: Uuid, s
 /// compare-and-swap will refuse to overwrite it a moment later, so there is nothing
 /// left to write here but the record of what happened.
 fn cancelled_result(memories: &MemoryService, run_id: Uuid, run_actor: &str, steps: usize) -> Value {
-    let _ = memories.audit(
+    warn_if_failed("writing the audit row", run_id, memories.audit(
         run_actor,
         "run",
         "workflow_run",
         Some(run_id),
         json!({"status": "cancelled", "reason": "the run was cancelled", "steps": steps}),
-    );
+    ));
     json!({"status": "cancelled", "steps": steps})
 }
 
@@ -454,7 +465,7 @@ pub async fn run_workflow(job: &Job, backend: &LocalBackend) -> Result<Value> {
         combined.extend(output_log);
         let (last_id, last_status, last_out) = (last.id, last.status, last.output.clone());
         backend.blocking(move || {
-            let _ = workflows.finish_step(last_id, last_status, last_out.as_deref(), &combined);
+            warn_if_failed("folding the output log into the last step", run_id, workflows.finish_step(last_id, last_status, last_out.as_deref(), &combined));
             Ok(())
         }).await?;
     }

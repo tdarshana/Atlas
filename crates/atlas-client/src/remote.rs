@@ -73,7 +73,14 @@ impl RemoteBackend {
     }
     async fn error(r: reqwest::Response) -> AtlasError {
         let status = r.status();
-        let msg = r.json::<serde_json::Value>().await.ok().and_then(|v| v["error"].as_str().map(String::from)).unwrap_or_else(|| status.to_string());
+        let body = r.json::<serde_json::Value>().await.ok();
+        let msg = body.as_ref().and_then(|v| v["error"].as_str().map(String::from)).unwrap_or_else(|| status.to_string());
+        // The daemon names the variant in `kind`, so `Embedding`, `Internal` and the
+        // rest come back as themselves rather than as whatever the status code
+        // suggests. The status-code guess below is only for a body without one.
+        if let Some(kind) = body.as_ref().and_then(|v| v["kind"].as_str()) {
+            return AtlasError::from_wire(kind, msg);
+        }
         // The daemon renders `AtlasError` through `Display` before putting it on the
         // wire, so `{"error": ...}` already carries the prefix the variant rebuilt
         // here would add a second time: without this, the CLI prints

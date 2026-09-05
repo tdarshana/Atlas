@@ -21,7 +21,9 @@ impl IntoResponse for ApiError {
             AtlasError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        (code, Json(serde_json::json!({"error": self.0.to_string()}))).into_response()
+        // `kind` names the variant, since five of them share the 500 above and a
+        // client (`RemoteBackend::error`) should get the variant back, not a guess.
+        (code, Json(serde_json::json!({"error": self.0.to_string(), "kind": self.0.kind()}))).into_response()
     }
 }
 

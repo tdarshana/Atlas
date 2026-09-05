@@ -554,7 +554,7 @@ impl WorkflowRepo {
             }
             self.set_run_status_gated(c, run_id, RunStatus::Failed, None)
         })?;
-        let _ = MemoryRepo::new(&self.db).audit(actor, "run", "workflow_run", Some(run_id), json!({"status": "failed", "reason": message}));
+        run::warn_if_failed("writing the audit row", run_id, MemoryRepo::new(&self.db).audit(actor, "run", "workflow_run", Some(run_id), json!({"status": "failed", "reason": message})));
         Ok(run)
     }
 
