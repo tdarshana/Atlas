@@ -82,22 +82,24 @@
 [data-theme="light"]{
   color-scheme:light;
 
-  --bg-base:#FFFFFF;
-  --bg-surface:#F7F8FA;
-  --bg-raised:#EFF1F5;
+  /* Same order as the dark ramp: the window frame (base) is the darkest of the three
+     surfaces, panels sit lighter on it and cards are white on the panels. */
+  --bg-base:#E3E6EC;
+  --bg-surface:#F3F4F7;
+  --bg-raised:#FFFFFF;
   --bg-overlay:#FFFFFF;
-  --bg-hover:#E8EBF0;
-  --bg-active:#DCE3F1;
-  --bg-inset:#F2F4F8;
+  --bg-hover:#D8DDE6;
+  --bg-active:#CBD5E8;
+  --bg-inset:#EDEFF3;
 
-  --border-subtle:#E3E6EC;
-  --border-default:#D2D7E0;
-  --border-strong:#A9B1C1;
+  --border-subtle:#D5DAE2;
+  --border-default:#C6CCD7;
+  --border-strong:#9AA3B5;
 
   --text-primary:#12151C;
   --text-secondary:#5A6478;
-  --text-tertiary:#6B7488;  /* AA: 5.2:1 on --bg-base */
-  --text-null:#71798D;
+  --text-tertiary:#5C667C;  /* AA: 4.6:1 on --bg-base */
+  --text-null:#626B80;
   --text-inverse:#FFFFFF;
   --text-on-accent:#FFFFFF;
 

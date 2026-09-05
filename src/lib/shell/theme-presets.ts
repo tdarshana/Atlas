@@ -1,9 +1,11 @@
-// Bundled theme presets: the five palettes the user asked for, each as a light and a
-// dark pack in the same shape an imported theme pack takes, so picking one stores it
-// through `ui.theme_pack` and the boot script applies it like any other pack. The four
-// tweakcn palettes (Pastel dreams, Perpetuity, Sunset horizon, Vercel) are mapped from
-// their shadcn variables onto the DS tokens; VS Code is authored from the editor's own
-// Dark+ and Light+ colours. Radii are scaled down to the DS control sizes.
+// Bundled theme presets: four palettes, each as a light and a dark pack in the same
+// shape an imported theme pack takes, so picking one stores it through `ui.theme_pack`
+// and the boot script applies it like any other pack. The three tweakcn palettes (Pastel
+// dreams, Perpetuity, Vercel) are mapped from their shadcn variables onto the DS tokens;
+// VS Code is authored from the editor's own Dark+ and Light+ colours. Radii are scaled
+// down to the DS control sizes. Light packs keep the frame (`--bg-base`) the darkest of
+// the three surfaces, with panels lighter and cards lightest, as the built-in light
+// ramp does.
 import type { ThemePack } from '$lib/types';
 
 export const THEME_PRESETS: readonly ThemePack[] = [
@@ -11,12 +13,12 @@ export const THEME_PRESETS: readonly ThemePack[] = [
   "name": "Pastel dreams light",
   "base": "light",
   "tokens": {
-   "--bg-base": "oklch(0.9689 0.0090 314.7819)",
-   "--bg-surface": "oklch(0.9073 0.0530 306.0902)",
+   "--bg-base": "oklch(0.9073 0.0530 306.0902)",
+   "--bg-surface": "oklch(0.9689 0.0090 314.7819)",
    "--bg-raised": "oklch(1.0000 0 0)",
    "--bg-overlay": "oklch(1.0000 0 0)",
-   "--bg-hover": "oklch(0.9376 0.0260 321.9388)",
-   "--bg-active": "oklch(0.9073 0.0530 306.0902)",
+   "--bg-hover": "oklch(0.8700 0.0600 306.0902)",
+   "--bg-active": "oklch(0.8500 0.0650 306.0902)",
    "--bg-inset": "oklch(0.9464 0.0327 307.1745)",
    "--border-subtle": "oklch(0.9073 0.0530 306.0902)",
    "--border-default": "oklch(0.9073 0.0530 306.0902)",
@@ -73,12 +75,12 @@ export const THEME_PRESETS: readonly ThemePack[] = [
   "name": "Perpetuity light",
   "base": "light",
   "tokens": {
-   "--bg-base": "oklch(0.9491 0.0085 197.0126)",
-   "--bg-surface": "oklch(0.9280 0.0183 205.3151)",
-   "--bg-raised": "oklch(0.9724 0.0053 197.0692)",
-   "--bg-overlay": "oklch(0.9724 0.0053 197.0692)",
+   "--bg-base": "oklch(0.9280 0.0183 205.3151)",
+   "--bg-surface": "oklch(0.9491 0.0085 197.0126)",
+   "--bg-raised": "oklch(0.9900 0.0030 197.0692)",
+   "--bg-overlay": "oklch(0.9900 0.0030 197.0692)",
    "--bg-hover": "oklch(0.9021 0.0297 201.8915)",
-   "--bg-active": "oklch(0.9244 0.0181 196.8450)",
+   "--bg-active": "oklch(0.8800 0.0300 201.8915)",
    "--bg-inset": "oklch(0.9295 0.0107 196.9723)",
    "--border-subtle": "oklch(0.8931 0.0205 204.4136)",
    "--border-default": "oklch(0.9244 0.0181 196.8450)",
@@ -132,80 +134,18 @@ export const THEME_PRESETS: readonly ThemePack[] = [
   }
  },
  {
-  "name": "Sunset horizon light",
-  "base": "light",
-  "tokens": {
-   "--bg-base": "oklch(0.9856 0.0084 56.3169)",
-   "--bg-surface": "oklch(0.9656 0.0176 39.4009)",
-   "--bg-raised": "oklch(1.0000 0 0)",
-   "--bg-overlay": "oklch(1.0000 0 0)",
-   "--bg-hover": "oklch(0.8278 0.1131 57.9984)",
-   "--bg-active": "oklch(0.9596 0.0200 28.9029)",
-   "--bg-inset": "oklch(0.9656 0.0176 39.4009)",
-   "--border-subtle": "oklch(0.9296 0.0370 38.6868)",
-   "--border-default": "oklch(0.9296 0.0370 38.6868)",
-   "--border-strong": "oklch(0.5534 0.0116 58.0708)",
-   "--text-primary": "oklch(0.3353 0.0132 2.7676)",
-   "--text-secondary": "oklch(0.5534 0.0116 58.0708)",
-   "--text-tertiary": "oklch(0.5534 0.0116 58.0708)",
-   "--text-null": "oklch(0.5534 0.0116 58.0708)",
-   "--text-inverse": "oklch(0.9856 0.0084 56.3169)",
-   "--text-on-accent": "oklch(1.0000 0 0)",
-   "--accent": "oklch(0.7357 0.1641 34.7091)",
-   "--accent-hover": "oklch(0.8278 0.1131 57.9984)",
-   "--accent-press": "oklch(0.8773 0.0763 54.9314)",
-   "--accent-muted": "oklch(0.8278 0.1131 57.9984)",
-   "--accent-ring": "oklch(0.7357 0.1641 34.7091)",
-   "--danger": "oklch(0.6122 0.2082 22.2410)",
-   "--danger-text": "oklch(0.6122 0.2082 22.2410)",
-   "--radius-sm": "2px",
-   "--radius-md": "4px"
-  }
- },
- {
-  "name": "Sunset horizon dark",
-  "base": "dark",
-  "tokens": {
-   "--bg-base": "oklch(0.2569 0.0169 352.4042)",
-   "--bg-surface": "oklch(0.2569 0.0169 352.4042)",
-   "--bg-raised": "oklch(0.3184 0.0176 341.4465)",
-   "--bg-overlay": "oklch(0.3184 0.0176 341.4465)",
-   "--bg-hover": "oklch(0.8278 0.1131 57.9984)",
-   "--bg-active": "oklch(0.3637 0.0203 342.2664)",
-   "--bg-inset": "oklch(0.2848 0.0159 343.6554)",
-   "--border-subtle": "oklch(0.3637 0.0203 342.2664)",
-   "--border-default": "oklch(0.3637 0.0203 342.2664)",
-   "--border-strong": "oklch(0.8378 0.0237 52.6346)",
-   "--text-primary": "oklch(0.9397 0.0119 51.3156)",
-   "--text-secondary": "oklch(0.8378 0.0237 52.6346)",
-   "--text-tertiary": "oklch(0.8378 0.0237 52.6346)",
-   "--text-null": "oklch(0.8378 0.0237 52.6346)",
-   "--text-inverse": "oklch(0.2569 0.0169 352.4042)",
-   "--text-on-accent": "oklch(1.0000 0 0)",
-   "--accent": "oklch(0.7357 0.1641 34.7091)",
-   "--accent-hover": "oklch(0.8278 0.1131 57.9984)",
-   "--accent-press": "oklch(0.8773 0.0763 54.9314)",
-   "--accent-muted": "oklch(0.8278 0.1131 57.9984)",
-   "--accent-ring": "oklch(0.7357 0.1641 34.7091)",
-   "--danger": "oklch(0.6122 0.2082 22.2410)",
-   "--danger-text": "oklch(0.6122 0.2082 22.2410)",
-   "--radius-sm": "2px",
-   "--radius-md": "4px"
-  }
- },
- {
   "name": "Vercel light",
   "base": "light",
   "tokens": {
-   "--bg-base": "oklch(0.9900 0 0)",
-   "--bg-surface": "oklch(0.9900 0 0)",
+   "--bg-base": "oklch(0.9300 0 0)",
+   "--bg-surface": "oklch(0.9700 0 0)",
    "--bg-raised": "oklch(1 0 0)",
-   "--bg-overlay": "oklch(0.9900 0 0)",
-   "--bg-hover": "oklch(0.9400 0 0)",
-   "--bg-active": "oklch(0.9400 0 0)",
-   "--bg-inset": "oklch(0.9700 0 0)",
-   "--border-subtle": "oklch(0.9200 0 0)",
-   "--border-default": "oklch(0.9400 0 0)",
+   "--bg-overlay": "oklch(1 0 0)",
+   "--bg-hover": "oklch(0.9000 0 0)",
+   "--bg-active": "oklch(0.8700 0 0)",
+   "--bg-inset": "oklch(0.9600 0 0)",
+   "--border-subtle": "oklch(0.8800 0 0)",
+   "--border-default": "oklch(0.9000 0 0)",
    "--border-strong": "oklch(0.4400 0 0)",
    "--text-primary": "oklch(0 0 0)",
    "--text-secondary": "oklch(0.4400 0 0)",
@@ -259,15 +199,15 @@ export const THEME_PRESETS: readonly ThemePack[] = [
   "name": "VS Code light",
   "base": "light",
   "tokens": {
-   "--bg-base": "#FFFFFF",
-   "--bg-surface": "#F3F3F3",
-   "--bg-raised": "#F8F8F8",
+   "--bg-base": "#ECECEC",
+   "--bg-surface": "#F8F8F8",
+   "--bg-raised": "#FFFFFF",
    "--bg-overlay": "#FFFFFF",
-   "--bg-hover": "#E8E8E8",
-   "--bg-active": "#E4E6F1",
+   "--bg-hover": "#DEDEDE",
+   "--bg-active": "#D6DBEE",
    "--bg-inset": "#F3F3F3",
-   "--border-subtle": "#E5E5E5",
-   "--border-default": "#D4D4D4",
+   "--border-subtle": "#DADADA",
+   "--border-default": "#CECECE",
    "--border-strong": "#C8C8C8",
    "--text-primary": "#1F1F1F",
    "--text-secondary": "#616161",

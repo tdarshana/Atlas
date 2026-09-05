@@ -3,10 +3,11 @@ import { validateThemePack } from './theme-pack';
 import { THEME_PRESETS, themePreset } from './theme-presets';
 
 describe('theme presets', () => {
-	it('ships ten packs, a light and a dark one per palette', () => {
-		expect(THEME_PRESETS.length).toBe(10);
-		expect(THEME_PRESETS.filter((p) => p.base === 'light').length).toBe(5);
-		expect(new Set(THEME_PRESETS.map((p) => p.name)).size).toBe(10);
+	it('ships eight packs, a light and a dark one per palette', () => {
+		expect(THEME_PRESETS.length).toBe(8);
+		expect(THEME_PRESETS.filter((p) => p.base === 'light').length).toBe(4);
+		expect(new Set(THEME_PRESETS.map((p) => p.name)).size).toBe(8);
+		expect(themePreset('Sunset horizon light')).toBeNull();
 	});
 
 	it('every preset passes the same validation an imported pack does', () => {
