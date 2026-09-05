@@ -35,6 +35,7 @@ import Copy from '@lucide/svelte/icons/copy';
 import Cpu from '@lucide/svelte/icons/cpu';
 import Database from '@lucide/svelte/icons/database';
 import Ellipsis from '@lucide/svelte/icons/ellipsis';
+import Expand from '@lucide/svelte/icons/expand';
 import ExternalLink from '@lucide/svelte/icons/external-link';
 import File from '@lucide/svelte/icons/file';
 import Filter from '@lucide/svelte/icons/filter';
@@ -142,6 +143,7 @@ export const icons = {
 	users: Users,
 	pencil: Pencil,
 	'message-square': MessageSquare,
+	expand: Expand,
 	'external-link': ExternalLink,
 	filter: Filter,
 	'alert-triangle': AlertTriangle,

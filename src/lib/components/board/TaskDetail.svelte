@@ -595,7 +595,7 @@
 		<span class="spacer"></span>
 		<IconButton
 			size="sm"
-			icon={mode === 'docked' ? 'external-link' : 'panel-right'}
+			icon={mode === 'docked' ? 'expand' : 'panel-right'}
 			label={mode === 'docked' ? 'Open as a dialog' : 'Dock beside the board'}
 			data-testid="task-detail-mode"
 			onclick={ontogglemode}
