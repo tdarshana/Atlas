@@ -44,6 +44,9 @@ pub const SETTING_KEYS: &[&str] = &[
     "access.require_review",
 ];
 
+/// The longest font family name `ui.font_ui` and `ui.font_mono` accept.
+pub const MAX_FONT_FAMILY_CHARS: usize = 100;
+
 /// Every MCP tool name `mcp.disabled_tools` may name. The single source of truth for
 /// validation here; `atlas-mcp`'s `TOOL_TABLE` is asserted (by test) to cover the same
 /// names, since this crate cannot depend on atlas-mcp to import them directly.
@@ -281,20 +284,28 @@ fn check_type(key: &str, value: &Value) -> Result<()> {
             Some(s) => validate_theme_pack(s)?,
             None => return wrong("a JSON string or null"),
         },
-        "ui.font_ui" => match value.as_str() {
-            Some("system") | Some("inter") | Some("jetbrains-mono") => {}
-            _ => return wrong("\"system\", \"inter\" or \"jetbrains-mono\""),
+        // A preset name (`system`, `inter`, `jetbrains-mono`; `system-mono` for code) or
+        // the name of a font family installed on the machine, which only the desktop
+        // can know, so the daemon asks for a short non-empty name and nothing more.
+        "ui.font_ui" | "ui.font_mono" => match value.as_str() {
+            Some(s) if !s.trim().is_empty() && s.chars().count() <= MAX_FONT_FAMILY_CHARS => {}
+            _ => return wrong("a font preset or family name of at most 100 characters"),
         },
-        "ui.font_mono" => match value.as_str() {
-            Some("jetbrains-mono") | Some("system-mono") => {}
-            _ => return wrong("\"jetbrains-mono\" or \"system-mono\""),
-        },
-        // The UI size scale's base step; 11/12/13 per the design requirements (15 is
-        // the largest step, never the default and not offered here).
+        // Interface text size in px; the app is laid out for 12.
         "ui.font_size" => match value.as_u64() {
-            Some(11) | Some(12) | Some(13) => {}
-            _ => return wrong("11, 12 or 13"),
+            Some(11..=16) => {}
+            _ => return wrong("an integer from 11 to 16"),
         },
+        // Code text size in px.
+        "ui.font_mono_size" => match value.as_u64() {
+            Some(10..=16) => {}
+            _ => return wrong("an integer from 10 to 16"),
+        },
+        "ui.font_smoothing" => {
+            if !value.is_boolean() {
+                return wrong("true or false");
+            }
+        }
         // The whole app's zoom level as an integer percent; 100 is the default.
         "ui.scale" => match value.as_u64() {
             Some(80) | Some(90) | Some(100) | Some(110) | Some(125) | Some(150) => {}
@@ -564,11 +575,13 @@ mod tests {
                 "ui.theme_pack",
                 Value::String(r#"{"name":"x","base":"dark","tokens":{"--radius-lg":"3px"}}"#.into()),
             ),
-            ("ui.font_ui", Value::String("comic-sans".into())),
             ("ui.font_ui", Value::from(1)),
-            ("ui.font_mono", Value::String("comic-sans".into())),
-            ("ui.font_size", Value::from(14)),
+            ("ui.font_ui", Value::String("   ".into())),
+            ("ui.font_mono", Value::String("x".repeat(101))),
+            ("ui.font_size", Value::from(17)),
             ("ui.font_size", Value::String("12".into())),
+            ("ui.font_mono_size", Value::from(9)),
+            ("ui.font_smoothing", Value::String("off".into())),
             ("ui.scale", Value::from(101)),
             ("ui.scale", Value::String("125".into())),
             ("mcp.disabled_tools", Value::String("memory_review".into())),
@@ -633,9 +646,11 @@ mod tests {
                 "ui.theme_pack".to_string(),
                 Value::String(r##"{"name":"Ocean","base":"dark","tokens":{"--accent":"#4C8DF6","--radius-sm":"4px"}}"##.into()),
             ),
-            ("ui.font_ui".to_string(), Value::String("inter".into())),
-            ("ui.font_mono".to_string(), Value::String("system-mono".into())),
+            ("ui.font_ui".to_string(), Value::String("SF Pro".into())),
+            ("ui.font_mono".to_string(), Value::String("IBM Plex Mono".into())),
             ("ui.font_size".to_string(), Value::from(13)),
+            ("ui.font_mono_size".to_string(), Value::from(14)),
+            ("ui.font_smoothing".to_string(), Value::Bool(false)),
             ("ui.scale".to_string(), Value::from(125)),
             ("mcp.disabled_tools".to_string(), serde_json::json!(["project_connect", "memory_review"])),
             ("access.memory_writers".to_string(), serde_json::json!(["claude-code"])),
@@ -653,9 +668,11 @@ mod tests {
             repo.get_raw("ui.theme_pack").unwrap(),
             Some(Value::String(r##"{"name":"Ocean","base":"dark","tokens":{"--accent":"#4C8DF6","--radius-sm":"4px"}}"##.into()))
         );
-        assert_eq!(repo.get_raw("ui.font_ui").unwrap(), Some(Value::String("inter".into())));
-        assert_eq!(repo.get_raw("ui.font_mono").unwrap(), Some(Value::String("system-mono".into())));
+        assert_eq!(repo.get_raw("ui.font_ui").unwrap(), Some(Value::String("SF Pro".into())));
+        assert_eq!(repo.get_raw("ui.font_mono").unwrap(), Some(Value::String("IBM Plex Mono".into())));
         assert_eq!(repo.get_raw("ui.font_size").unwrap(), Some(Value::from(13)));
+        assert_eq!(repo.get_raw("ui.font_mono_size").unwrap(), Some(Value::from(14)));
+        assert_eq!(repo.get_raw("ui.font_smoothing").unwrap(), Some(Value::Bool(false)));
         assert_eq!(repo.get_raw("ui.scale").unwrap(), Some(Value::from(125)));
         assert_eq!(repo.get_raw("ui.global_shortcut").unwrap(), Some(Value::String("CmdOrCtrl+Shift+K".into())));
         assert_eq!(repo.get_raw("mcp.disabled_tools").unwrap(), Some(serde_json::json!(["project_connect", "memory_review"])));

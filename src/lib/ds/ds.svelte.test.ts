@@ -11,6 +11,7 @@ import IconButton from './IconButton.svelte';
 import Input from './Input.svelte';
 import KeyHint from './KeyHint.svelte';
 import Select from './Select.svelte';
+import Typeahead from './Typeahead.svelte';
 import Skeleton from './Skeleton.svelte';
 import Tooltip from './Tooltip.svelte';
 
@@ -251,5 +252,51 @@ describe('Icon', () => {
 		expect(document.querySelector('svg.lucide-circle')).toBeTruthy();
 		expect(warn).toHaveBeenCalledTimes(1);
 		warn.mockRestore();
+	});
+});
+
+describe('Typeahead', () => {
+	const rows = [
+		{ value: 'ATL-9', label: 'Newer daemon fix', hint: 'ATL-9' },
+		{ value: 'ATL-3', label: 'Older daemon fix', hint: 'ATL-3' }
+	];
+
+	it('shows the rows under the box while typing, moves with the arrows and picks on Enter', async () => {
+		const picked: string[] = [];
+		const { container, queryByRole, getAllByRole } = render(Typeahead, {
+			props: { rows, value: '', onpick: (r: { value: string }) => picked.push(r.value), 'data-testid': 'search' }
+		});
+		const input = container.querySelector('input')!;
+		expect(queryByRole('listbox')).toBeNull();
+
+		await fireEvent.focus(input);
+		await fireEvent.input(input, { target: { value: 'daemon' } });
+		expect(queryByRole('listbox')).not.toBeNull();
+		const options = getAllByRole('option');
+		expect(options.map((o) => o.textContent?.replace(/\s+/g, ' ').trim())).toEqual(['Newer daemon fix ATL-9', 'Older daemon fix ATL-3']);
+		expect(options[0].getAttribute('aria-selected')).toBe('true');
+
+		await fireEvent.keyDown(input, { key: 'ArrowDown' });
+		expect(options[1].getAttribute('aria-selected')).toBe('true');
+		await fireEvent.keyDown(input, { key: 'Enter' });
+		expect(picked).toEqual(['ATL-3']);
+		expect(queryByRole('listbox')).toBeNull();
+	});
+
+	it('closes on Escape and stays closed for that text, and clicking a row picks it', async () => {
+		const picked: string[] = [];
+		const { container, queryByRole, getByText } = render(Typeahead, {
+			props: { rows, value: '', onpick: (r: { value: string }) => picked.push(r.value) }
+		});
+		const input = container.querySelector('input')!;
+		await fireEvent.focus(input);
+		await fireEvent.input(input, { target: { value: 'daemon' } });
+		expect(queryByRole('listbox')).not.toBeNull();
+		await fireEvent.keyDown(input, { key: 'Escape' });
+		expect(queryByRole('listbox')).toBeNull();
+		await fireEvent.input(input, { target: { value: 'daemon f' } });
+		expect(queryByRole('listbox')).not.toBeNull();
+		await fireEvent.click(getByText('Newer daemon fix'));
+		expect(picked).toEqual(['ATL-9']);
 	});
 });

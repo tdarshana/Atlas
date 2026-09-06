@@ -14,7 +14,9 @@
 	import LaneStrip from '$lib/components/board/LaneStrip.svelte';
 	import TaskDetail from '$lib/components/board/TaskDetail.svelte';
 	import { api } from '$lib/daemon.svelte';
-	import { Button, Checkbox, Input } from '$lib/ds';
+	import { Button, Checkbox, Typeahead } from '$lib/ds';
+	import KindIcon from '$lib/components/board/KindIcon.svelte';
+	import { groupAssignees } from '$lib/shell/sidepanels/boardFilters';
 	import { errorMessage } from '$lib/errors';
 	import { plural } from '$lib/format';
 	import { clearSidePanelOverride, setSidePanelOverride, setStatusItems } from '$lib/shell';
@@ -41,7 +43,7 @@
 	import { followPersonaChanges, loadRoster, personas } from '$lib/stores/personas.svelte';
 	import { setHeaderActions } from '$lib/stores/project.svelte';
 	import { loadProjects, projects } from '$lib/stores/projects.svelte';
-	import type { Stage } from '$lib/types';
+	import type { Stage, Task } from '$lib/types';
 	import Dialog from '$lib/ui/Dialog.svelte';
 	import EmptyState from '$lib/ui/EmptyState.svelte';
 	import ErrorState from '$lib/ui/ErrorState.svelte';
@@ -67,6 +69,64 @@
 		visibleLanes(deriveColumns(board.stages, shown), board.filters.stage, board.collapsedLanes)
 	);
 	const stageOptions = $derived(board.stages.map((s) => ({ value: s.name, label: s.name })));
+
+	/** Suggestions under the search box: the project's tasks matching the text (the
+	 * daemon matches key, title and description), newest first, at most eight; picking
+	 * one opens it and leaves the text as the board's filter. */
+	let searchHits = $state<Task[]>([]);
+	let searchTimer: ReturnType<typeof setTimeout> | undefined;
+	let searchGeneration = 0;
+	async function suggestTasks(): Promise<void> {
+		const g = ++searchGeneration;
+		const q = board.filters.query.trim();
+		if (q === '') {
+			searchHits = [];
+			return;
+		}
+		try {
+			const hits = await api().listTasks({
+				project_id: board.filters.projectId,
+				query: q,
+				include_done: !board.filters.hideDone,
+				brief: true
+			});
+			if (g !== searchGeneration) return;
+			searchHits = [...hits]
+				.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+				.slice(0, 8);
+		} catch {
+			searchHits = [];
+		}
+	}
+	function onSearchInput(): void {
+		scheduleRefresh();
+		clearTimeout(searchTimer);
+		searchTimer = setTimeout(() => void suggestTasks(), 150);
+	}
+	const searchRows = $derived(searchHits.map((t) => ({ value: t.key, label: t.title, hint: t.key, kind: t.kind })));
+
+	/** Suggestions under the assignee box: every assignee on this project's tasks (done
+	 * ones included, so a name does not vanish once its work is done), matched to the
+	 * text; loaded once the box is focused. Picking one sets the filter. */
+	let knownAssignees = $state<string[]>([]);
+	let assigneesFor: string | null | undefined;
+	async function loadAssignees(): Promise<void> {
+		if (assigneesFor === board.filters.projectId) return;
+		assigneesFor = board.filters.projectId;
+		try {
+			const tasks = await api().listTasks({ project_id: board.filters.projectId, include_done: true, brief: true });
+			knownAssignees = groupAssignees(tasks).named.map(([name]) => name);
+		} catch {
+			knownAssignees = [];
+		}
+	}
+	const assigneeRows = $derived.by(() => {
+		const q = board.filters.assignee.trim().toLowerCase();
+		return knownAssignees
+			.filter((n) => n.toLowerCase().includes(q) && n !== board.filters.assignee.trim())
+			.slice(0, 8)
+			.map((n) => ({ value: n, label: n }));
+	});
 
 	/** The frame's status line counts the testing column, when the board has one. */
 	const testing = $derived(board.stages.find((s) => s.name.toLowerCase() === 'testing') ?? null);
@@ -194,21 +254,35 @@
 {#snippet headerActions()}
 	<!-- Filters read left to right at the start of the row; the one action sits at the end. -->
 	<div class="search">
-		<Input
+		<Typeahead
 			bind:value={board.filters.query}
+			rows={searchRows}
 			data-testid="board-search"
 			aria-label="Search tasks"
 			placeholder="Search tasks..."
-			oninput={() => scheduleRefresh()}
-		/>
+			oninput={onSearchInput}
+			onpick={(r) => openTask(r.value)}
+		>
+			{#snippet row(r)}
+				<KindIcon kind={r.kind} size={14} />
+				<code class="hit-key">{r.value}</code>
+				<span class="dbm-menu__label">{r.label}</span>
+			{/snippet}
+		</Typeahead>
 	</div>
 	<div class="assignee">
-		<Input
+		<Typeahead
 			bind:value={board.filters.assignee}
+			rows={assigneeRows}
 			data-testid="board-assignee"
 			aria-label="Assignee"
 			placeholder="Assignee"
 			oninput={() => scheduleRefresh()}
+			onfocus={() => void loadAssignees()}
+			onpick={(r) => {
+				board.filters.assignee = r.value;
+				scheduleRefresh(0);
+			}}
 		/>
 	</div>
 	<Checkbox
@@ -316,5 +390,11 @@
 
 	.grow {
 		flex: 1;
+	}
+	.hit-key {
+		flex: none;
+		font-family: var(--font-mono);
+		font-size: var(--mono-sm);
+		color: var(--text-secondary);
 	}
 </style>

@@ -21,6 +21,7 @@
 		FONT_UI_OPTIONS,
 		fontMonoStack,
 		fontUiStack,
+		isMonospace,
 		loadInstalledFonts,
 		MONO_SIZE_OPTIONS,
 		MONO_SIZES,
@@ -74,23 +75,26 @@
 		void loadInstalledFonts().then((fonts) => (installedFonts = fonts));
 	});
 
-	/** Presets first, then every installed family drawn in its own face. A stored family
-	 * the machine no longer has still appears, so the trigger never shows a blank. */
+	/** Presets first, then every installed proportional family drawn in its own face
+	 * (monospace ones belong to the code picker). A stored family the machine no longer
+	 * has still appears, so the trigger never shows a blank. */
 	const uiFontOptions = $derived.by(() => {
 		const rows = [
 			...FONT_UI_OPTIONS,
-			...installedFonts.map((f) => ({ value: f.family, label: f.family, font: fontUiStack(f.family) }))
+			...installedFonts
+				.filter((f) => !isMonospace(f))
+				.map((f) => ({ value: f.family, label: f.family, font: fontUiStack(f.family) }))
 		];
 		if (!rows.some((r) => r.value === draftFontUi)) rows.push({ value: draftFontUi, label: draftFontUi });
 		return rows;
 	});
-	/** Same for code, with the monospace families ahead of the rest. */
+	/** Same for code, with only the monospace families. */
 	const monoFontOptions = $derived.by(() => {
 		const rows = [
 			...FONT_MONO_OPTIONS,
-			...[...installedFonts]
-				.sort((a, b) => Number(b.monospace) - Number(a.monospace))
-				.map((f) => ({ value: f.family, label: f.family, font: fontMonoStack(f.family), hint: f.monospace ? 'mono' : undefined }))
+			...installedFonts
+				.filter(isMonospace)
+				.map((f) => ({ value: f.family, label: f.family, font: fontMonoStack(f.family) }))
 		];
 		if (!rows.some((r) => r.value === draftFontMono)) rows.push({ value: draftFontMono, label: draftFontMono });
 		return rows;

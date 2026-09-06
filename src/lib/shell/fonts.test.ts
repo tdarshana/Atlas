@@ -8,6 +8,7 @@ import {
 	FONT_MONO_OPTIONS,
 	FONT_SIZE_OPTIONS,
 	FONT_UI_OPTIONS,
+	isMonospace,
 	MONO_SIZE_OPTIONS
 } from './fonts';
 
@@ -27,7 +28,7 @@ describe('fontUiStack / fontMonoStack', () => {
 	});
 
 	it('option lists name the presets and the size stops', () => {
-		expect(FONT_UI_OPTIONS.map((o) => o.value)).toEqual(['system', 'inter', 'jetbrains-mono']);
+		expect(FONT_UI_OPTIONS.map((o) => o.value)).toEqual(['system', 'inter']);
 		expect(FONT_MONO_OPTIONS.map((o) => o.value)).toEqual(['jetbrains-mono', 'system-mono']);
 		expect(FONT_SIZE_OPTIONS.map((o) => o.value)).toEqual(['11', '12', '13', '14', '15', '16']);
 		expect(MONO_SIZE_OPTIONS.map((o) => o.value)).toEqual(['10', '11', '12', '13', '14', '15', '16']);
@@ -50,5 +51,15 @@ describe('applyFonts', () => {
 		expect(document.documentElement.dataset.smoothing).toBe('off');
 		applyFonts('system', 'jetbrains-mono', 12, 12, true);
 		expect(document.documentElement.dataset.smoothing).toBeUndefined();
+	});
+});
+
+describe('isMonospace', () => {
+	it('trusts the flag and falls back to the names monospace fonts carry', () => {
+		expect(isMonospace({ family: 'Menlo', monospace: true })).toBe(true);
+		expect(isMonospace({ family: 'Fira Code', monospace: false })).toBe(true);
+		expect(isMonospace({ family: 'IBM Plex Mono', monospace: false })).toBe(true);
+		expect(isMonospace({ family: 'SF Pro', monospace: false })).toBe(false);
+		expect(isMonospace({ family: 'Monoton', monospace: false })).toBe(false);
 	});
 });

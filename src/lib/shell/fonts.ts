@@ -20,10 +20,11 @@ export const DEFAULT_FONT_MONO = 'jetbrains-mono';
 export const DEFAULT_FONT_SIZE = 12;
 export const DEFAULT_MONO_SIZE = 12;
 
+/** Interface presets. `jetbrains-mono` is still a valid stored value (see the stacks),
+ * but a monospace face is not offered for the interface any more. */
 export const FONT_UI_OPTIONS: { value: string; label: string; hint?: string }[] = [
 	{ value: 'system', label: 'System', hint: 'default' },
-	{ value: 'inter', label: 'Inter' },
-	{ value: 'jetbrains-mono', label: 'JetBrains Mono' }
+	{ value: 'inter', label: 'Inter' }
 ];
 
 export const FONT_MONO_OPTIONS: { value: string; label: string; hint?: string }[] = [
@@ -100,6 +101,12 @@ export interface InstalledFont {
 	family: string;
 	/** True when every face of the family is monospaced. */
 	monospace: boolean;
+}
+
+/** Whether a family is for code: the host's flag, backed by the names monospace fonts
+ * tend to carry, since some leave the flag unset in their tables. */
+export function isMonospace(font: InstalledFont): boolean {
+	return font.monospace || /\bmono\b|monospace|\bcode\b|consol|courier|menlo|monaco/i.test(font.family);
 }
 
 /** The families installed on this machine, from the host; empty in a plain browser. */
