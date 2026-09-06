@@ -19,3 +19,14 @@ pub struct AppState {
     /// else on the port.
     pub token: Arc<str>,
 }
+
+#[cfg(test)]
+impl AppState {
+    /// A state around an already-open backend with no MCP clients, no plugin channel
+    /// traffic and no shutdown pending: what the in-process handler tests need to run
+    /// the router with `oneshot`.
+    pub fn in_process(backend: Arc<LocalBackend>, token: Arc<str>) -> Self {
+        let (_tx, shutdown) = tokio::sync::watch::channel(false);
+        Self { backend, mcp_clients: Arc::new(ClientRegistry::new()), plugin_tools: Arc::new(PluginToolChannel::new()), shutdown, token }
+    }
+}

@@ -219,6 +219,14 @@ async fn guard(State(s): State<AppState>, req: Request, next: Next) -> Response 
 /// Wrap a whole app, `/mcp` included, in the token and loopback guard.
 pub fn guard_loopback(app: Router, state: AppState) -> Router { app.layer(middleware::from_fn_with_state(state, guard)) }
 
+/// The JSON API behind its guard, as one service, for the in-process handler tests to
+/// drive with `oneshot`. `main` builds the same thing with `/mcp` nested beside it.
+#[cfg(test)]
+pub fn app(state: AppState) -> Router { guard_loopback(router(state.clone()), state) }
+
+#[cfg(test)]
+mod handler_tests;
+
 /// The only origins allowed to *read* a response: the two the Tauri webview sends
 /// (`tauri://localhost` on WKWebView/wry, `http://tauri.localhost` on WebView2) and the
 /// desktop app's Vite dev server. Deliberately narrower than `is_loopback_origin`, which

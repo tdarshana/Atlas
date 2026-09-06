@@ -31,6 +31,8 @@ sha2 = "0.10"
 
 [dev-dependencies]
 reqwest.workspace = true
+# `ServiceExt::oneshot`, for the in-process handler tests in `http/tests.rs`.
+tower = { version = "0.5", features = ["util"] }
 tempfile.workspace = true
 uuid.workspace = true
 git2 = "0.21"
