@@ -40,7 +40,6 @@ export const PROJECT_TABS: TabDef[] = [
 	{ id: 'profile', label: 'Profile', icon: 'info', segment: '' },
 	{ id: 'board', label: 'Board', icon: 'columns-3', segment: 'board' },
 	{ id: 'memories', label: 'Memories', icon: 'database', segment: 'memories' },
-	{ id: 'practices', label: 'Practices', icon: 'book-open', segment: 'practices' },
 	{ id: 'skills', label: 'Skills', icon: 'graduation-cap', segment: 'skills' },
 	{ id: 'personas', label: 'Personas', icon: 'users', segment: 'personas' },
 	{ id: 'agents', label: 'Agents', icon: 'bot', segment: 'agents' },

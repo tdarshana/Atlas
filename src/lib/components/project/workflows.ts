@@ -14,6 +14,8 @@ export interface WorkflowRow {
 	/** Count of `action`-kind nodes in the graph; the trigger and the output are not
 	 * actions. */
 	actions: number;
+	/** Null for a global workflow, so the table can say which scope a row belongs to. */
+	projectId: string | null;
 	lastRunStatus: RunStatus | null;
 	lastRunAt: Timestamp | null;
 }
@@ -25,6 +27,7 @@ export function workflowRows(workflows: Workflow[]): WorkflowRow[] {
 		triggerKind: w.trigger.kind,
 		cron: w.trigger.kind === 'schedule' ? w.trigger.cron : null,
 		actions: w.graph.nodes.filter((n) => n.kind === 'action').length,
+		projectId: w.project_id ?? null,
 		lastRunStatus: w.last_status,
 		lastRunAt: w.last_run_at
 	}));

@@ -298,7 +298,7 @@
 		onchange={() => scheduleRefresh(0)}
 	/>
 	<span class="grow"></span>
-	<Button variant="primary" data-testid="board-new" onclick={() => (creating = true)}>
+	<Button data-testid="board-new" onclick={() => (creating = true)}>
 		New task
 	</Button>
 {/snippet}

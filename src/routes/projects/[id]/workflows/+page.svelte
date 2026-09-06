@@ -36,6 +36,7 @@
 
 	const columns: TableColumn<WorkflowRow>[] = [
 		{ key: 'name', label: 'Name', width: '200px', sortable: true },
+		{ key: 'scope', label: 'Scope', width: '84px' },
 		{ key: 'trigger', label: 'Trigger' },
 		{ key: 'actions', label: 'Actions', width: '90px', align: 'right' },
 		{ key: 'lastRun', label: 'Last run', width: '160px', align: 'right' }
@@ -129,6 +130,8 @@
 			{#snippet cell(row: WorkflowRow, column: TableColumn<WorkflowRow>)}
 				{#if column.key === 'name'}
 					<a class="link" href={`/workflows/${row.id}`}>{row.name}</a>
+				{:else if column.key === 'scope'}
+					<Badge tone={row.projectId ? 'accent' : 'neutral'} title={row.projectId ? 'Belongs to this project' : 'Global: shared by every project'}>{row.projectId ? 'project' : 'global'}</Badge>
 				{:else if column.key === 'trigger'}
 					<span class="trigger-cell">
 						<Badge tone={TRIGGER_TONE[row.triggerKind]}>{row.triggerKind}</Badge>

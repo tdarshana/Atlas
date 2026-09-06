@@ -21,6 +21,10 @@
 		type SourceFilter
 	} from '$lib/skills';
 	import { project, setHeaderActions } from '$lib/stores/project.svelte';
+	import { page } from '$app/state';
+	import { replaceState } from '$app/navigation';
+	import ProjectPractices from '$lib/components/project/ProjectPractices.svelte';
+	import { TabStrip, type Tab } from '$lib/shell';
 	import {
 		closeSkill,
 		createSkill,
@@ -80,8 +84,28 @@
 		void loadSkills(id);
 	});
 
+	/** Skills and the project's practices share this tab (2026-09-06). */
+	const STRIP: Tab[] = [
+		{ id: 'skills', label: 'Skills', icon: 'graduation-cap' },
+		{ id: 'practices', label: 'Practices', icon: 'book-open' }
+	];
+	let tab = $state<'skills' | 'practices'>(page.url.searchParams.get('tab') === 'practices' ? 'practices' : 'skills');
+	// A deep link or a redirect that lands with `?tab=practices` selects that strip.
 	$effect(() => {
-		setHeaderActions(headerActions);
+		if (page.url.searchParams.get('tab') === 'practices') tab = 'practices';
+	});
+	function selectTab(id: string): void {
+		tab = id === 'practices' ? 'practices' : 'skills';
+		const url = new URL(page.url);
+		if (id === 'practices') url.searchParams.set('tab', 'practices');
+		else url.searchParams.delete('tab');
+		replaceState(url, {});
+	}
+
+	// The header lends its actions to the skills strip only; the practices strip carries
+	// its own New practice button inline.
+	$effect(() => {
+		setHeaderActions(tab === 'skills' ? headerActions : null);
 		return () => setHeaderActions(null);
 	});
 </script>
@@ -108,6 +132,13 @@
 	<Button size="sm" data-testid="skills-new" onclick={() => (creating = true)}>New skill</Button>
 {/snippet}
 
+<div class="strip-row">
+	<TabStrip items={STRIP} active={tab} onselect={selectTab} testid="project-skills-tab" />
+</div>
+
+{#if tab === 'practices'}
+<ProjectPractices />
+{:else}
 <div class="pane" data-testid="project-skills-page">
 	{#if skills.error}
 		<p class="bad" role="alert" data-testid="skills-error">{skills.error}</p>
@@ -157,6 +188,8 @@
 	</div>
 </div>
 
+{/if}
+
 <NewSkillDialog
 	open={creating}
 	projectId={id || null}
@@ -201,5 +234,10 @@
 		align-items: center;
 		gap: 6px;
 		color: var(--warning-text);
+	}
+	.strip-row {
+		display: flex;
+		align-items: center;
+		margin-bottom: 8px;
 	}
 </style>

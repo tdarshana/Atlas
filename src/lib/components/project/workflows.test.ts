@@ -77,3 +77,12 @@ describe('lastRunLabel', () => {
 		expect(lastRunLabel(row, now)).toBe('2h');
 	});
 });
+
+describe('workflowRows scope', () => {
+	it('keeps the project id so the table can tell a project workflow from a global one', async () => {
+		const { workflowRows } = await import('./workflows');
+		const base = { id: 'w', name: 'n', trigger: { kind: 'manual' }, graph: { nodes: [], edges: [] }, last_status: null, last_run_at: null };
+		expect(workflowRows([{ ...base, project_id: 'p-1' } as never])[0].projectId).toBe('p-1');
+		expect(workflowRows([{ ...base, project_id: null } as never])[0].projectId).toBeNull();
+	});
+});

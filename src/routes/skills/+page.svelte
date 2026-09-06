@@ -10,6 +10,11 @@
 	// table client-side; a row opens the skill in the panel on the right, which reads it
 	// and, where Atlas may write, edits it in place.
 	import { onMount } from 'svelte';
+	import { page } from '$app/state';
+	import { replaceState } from '$app/navigation';
+	import DocsPage from '$lib/components/DocsPage.svelte';
+	import { practices } from '$lib/stores/docs.svelte';
+	import { TabStrip, type Tab } from '$lib/shell';
 	import { Button, Input, Select, Icon } from '$lib/ds';
 	import NewSkillDialog from '$lib/components/skills/NewSkillDialog.svelte';
 	import SkillDetail from '$lib/components/skills/SkillDetail.svelte';
@@ -31,6 +36,25 @@
 	import { push } from '$lib/platform/toasts.svelte';
 
 	let search = $state('');
+
+	/** Skills and Practices share this view (2026-09-06): `?tab=practices` opens the
+	 * rules, anything else the skill folders. */
+	const STRIP: Tab[] = [
+		{ id: 'skills', label: 'Skills', icon: 'graduation-cap' },
+		{ id: 'practices', label: 'Practices', icon: 'book-open' }
+	];
+	let tab = $state<'skills' | 'practices'>(page.url.searchParams.get('tab') === 'practices' ? 'practices' : 'skills');
+	// A deep link or a redirect that lands with `?tab=practices` selects that strip.
+	$effect(() => {
+		if (page.url.searchParams.get('tab') === 'practices') tab = 'practices';
+	});
+	function selectTab(id: string): void {
+		tab = id === 'practices' ? 'practices' : 'skills';
+		const url = new URL(page.url);
+		if (id === 'practices') url.searchParams.set('tab', 'practices');
+		else url.searchParams.delete('tab');
+		replaceState(url, {});
+	}
 	let creating = $state(false);
 
 	const rows = $derived(filterSkills(skills.items, search, skills.source));
@@ -60,6 +84,7 @@
 <div class="title-row">
 	<span class="title">Skills</span>
 	<span class="spacer"></span>
+	{#if tab === 'skills'}
 	<Input
 		placeholder="Search skills"
 		aria-label="Search skills"
@@ -76,10 +101,25 @@
 		data-testid="skills-source"
 	/>
 	<Button size="sm" data-testid="skills-new" onclick={() => (creating = true)}>New skill</Button>
+	{/if}
 </div>
+<div class="strip-row">
+	<TabStrip items={STRIP} active={tab} onselect={selectTab} testid="skills-tab" />
+</div>
+
+{#if tab === 'practices'}
+<div class="pane" data-testid="practices-pane">
+	<DocsPage
+		store={practices}
+		title="Practices"
+		noun="practice"
+		hint="A practice is a standing rule agents always follow, written in Markdown. Instructions agents load on demand are the Skills beside it."
+	/>
+</div>
+{:else}
 <span class="hint" data-testid="skills-note">
-	Skills are SKILL.md folders agents load on demand. Rules that always apply live in
-	<a href="/practices">Practices</a>.
+	Skills are SKILL.md folders agents load on demand. Rules that always apply are the
+	<a href="/skills?tab=practices">Practices</a> on the next tab.
 </span>
 
 <div class="pane" data-testid="skills-page">
@@ -124,6 +164,8 @@
 		{/if}
 	</div>
 </div>
+
+{/if}
 
 <NewSkillDialog
 	open={creating}
@@ -195,5 +237,10 @@
 		align-items: center;
 		gap: 6px;
 		color: var(--warning-text);
+	}
+	.strip-row {
+		display: flex;
+		align-items: center;
+		margin: 2px 0 8px;
 	}
 </style>

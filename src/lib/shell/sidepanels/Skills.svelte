@@ -6,10 +6,12 @@
 	import type { IconName } from '$lib/ds';
 	import { skillCounts, type SourceGroup } from '$lib/skills';
 	import { loadSkills, skills } from '$lib/stores/skills.svelte';
+	import { practices } from '$lib/stores/docs.svelte';
 	import TreeGroup from '../TreeGroup.svelte';
 	import TreeRow from '../TreeRow.svelte';
 
 	onMount(() => {
+		void practices.load();
 		// The route loads the same list; only fetch when nothing has yet.
 		if (skills.items.length === 0 && !skills.loading) void loadSkills(skills.projectId);
 	});
@@ -57,3 +59,7 @@
 		{/each}
 	</TreeGroup>
 {/if}
+
+<TreeGroup label="Practices" count={practices.state.list.length}>
+	<TreeRow icon="book-open" label="All practices" meta={practices.state.list.length} href="/skills?tab=practices" />
+</TreeGroup>

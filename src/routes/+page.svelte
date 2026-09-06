@@ -6,7 +6,8 @@
 	// global (no project) counts.
 	import { onMount } from 'svelte';
 	import { api } from '$lib/daemon.svelte';
-	import { Badge, Button, Table, type TableColumn } from '$lib/ds';
+	import { loadProjects, projects } from '$lib/stores/projects.svelte';
+	import { Badge, Button, Table, type TableColumn, Select } from '$lib/ds';
 	import { errorLogPath, errorMessage } from '$lib/errors';
 	import { plural, relativeAge } from '$lib/format';
 	import PluginFrame from '$lib/plugins/PluginFrame.svelte';
@@ -33,6 +34,34 @@
 	const embeddingText = $derived(status.error ? 'offline' : embeddingWord || 'connecting');
 
 	let counts = $state({ projects: null as number | null, agents: null as number | null });
+
+	/** `all`, or one project's id: narrows the memory count, the recent memories and the
+	 * open-task counts to that project. Remembered per machine. */
+	const SCOPE_KEY = 'atlas.dashboard.scope';
+	let scope = $state<string>('all');
+	let scopedActive = $state<number | null>(null);
+	try {
+		scope = localStorage.getItem(SCOPE_KEY) || 'all';
+	} catch {
+		/* no storage: the page starts on all projects */
+	}
+	const scopeOptions = $derived([
+		{ value: 'all', label: 'All projects' },
+		...projects.items.map((p) => ({ value: p.id, label: p.name }))
+	]);
+	const scopedProject = $derived(scope === 'all' ? null : (projects.items.find((p) => p.id === scope) ?? null));
+	function setScope(next: string): void {
+		scope = next;
+		try {
+			if (next === 'all') localStorage.removeItem(SCOPE_KEY);
+			else localStorage.setItem(SCOPE_KEY, next);
+		} catch {
+			/* not remembered */
+		}
+		refresh();
+	}
+	const memoriesHref = $derived(scopedProject ? `/projects/${scopedProject.id}/memories` : '/memories');
+	const boardHref = $derived(scopedProject ? `/projects/${scopedProject.id}/board` : '/board');
 	let recent = $state<Memory[]>([]);
 	let openTasks = $state<StageCount[]>([]);
 	/** The board's own stage names, minus the done ones: the card must match the
@@ -75,12 +104,15 @@
 		try {
 			const client = api();
 			// The route lists newest first, so asking for `RECENT` rows is the whole card.
-			const [active, projectList, agentList] = await Promise.all([
-				client.listMemories('active', undefined, undefined, { limit: RECENT }),
+			const projectId = scope === 'all' ? undefined : scope;
+			const [active, projectList, agentList, facets] = await Promise.all([
+				client.listMemories('active', projectId, projectId ? 'project_only' : undefined, { limit: RECENT }),
 				client.listProjects(),
-				client.listAgents()
+				client.listAgents(),
+				projectId ? client.memoryFacets(projectId, 'project_only') : Promise.resolve(null)
 			]);
 			counts = { projects: projectList.length, agents: agentList.length };
+			scopedActive = facets ? facets.total : null;
 			recent = active;
 			error = null;
 			loadErrorLogPath = null;
@@ -98,7 +130,8 @@
 	async function loadTasks() {
 		tasksLoading = true;
 		try {
-			const [stageList, taskCounts] = await Promise.all([api().boardStages(), api().taskCounts()]);
+			const projectId = scope === 'all' ? undefined : scope;
+			const [stageList, taskCounts] = await Promise.all([api().boardStages(projectId), api().taskCounts(projectId)]);
 			openStages = stageList.stages.filter((s) => !s.done).map((s) => s.name);
 			openTasks = taskCounts;
 			tasksError = null;
@@ -122,6 +155,7 @@
 	const pluginCards = $derived(contributions().components['dashboard.card'] ?? []);
 
 	onMount(() => {
+		void loadProjects();
 		refresh();
 		if (!plugins.loaded && plugins.available) void loadPlugins();
 	});
@@ -144,7 +178,7 @@
 <div class="stats">
 	<div class="card stat-card">
 		<span class="group-heading">Active memories</span>
-		<a class="metric" href="/memories" data-testid="dashboard-link-memories">{report?.memories_active ?? '-'}</a>
+		<a class="metric" href={memoriesHref} data-testid="dashboard-link-memories">{scope === 'all' ? (report?.memories_active ?? '-') : (scopedActive ?? '-')}</a>
 	</div>
 
 	<div class="card stat-card">
@@ -163,7 +197,7 @@
 			<p class="error-line" role="alert">The board could not be read. {tasksError}</p>
 		{:else if !tasksLoading}
 			{#each openStages as stage (stage)}
-				<a class="stat-row" href="/board" data-testid="dashboard-link-board-{stage}">
+				<a class="stat-row" href={boardHref} data-testid="dashboard-link-board-{stage}">
 					<span>{stage}</span>
 					<span class="mono value">{openTaskCount(stage)}</span>
 				</a>
@@ -208,7 +242,17 @@
 	<div class="recent-header">
 		<span class="recent-title">Recent memories</span>
 		<span class="spacer"></span>
-		<Button variant="ghost" size="sm" disabled={loading} onclick={refresh}>Refresh</Button>
+		<div class="scope" data-testid="dashboard-scope">
+		<Select
+			size="sm"
+			aria-label="Project scope"
+			options={scopeOptions}
+			value={scope}
+			data-testid="dashboard-scope-select"
+			onchange={(e) => setScope(e.currentTarget.value)}
+		/>
+	</div>
+	<Button variant="ghost" size="sm" disabled={loading} onclick={refresh}>Refresh</Button>
 	</div>
 
 	{#if error}
@@ -367,5 +411,8 @@
 	a.stat-row:hover {
 		color: var(--accent);
 		text-decoration: none;
+	}
+	.scope {
+		width: 200px;
 	}
 </style>

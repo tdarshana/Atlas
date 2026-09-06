@@ -33,11 +33,11 @@ describe('installShortcuts', () => {
 			'/projects',
 			'/memories',
 			'/agents',
-			'/practices',
 			'/workflows',
 			'/review',
 			'/mcp',
-			'/permissions'
+			'/permissions',
+			'/skills'
 		];
 		hrefs.forEach((href, i) => {
 			press(String(i + 1));
@@ -48,7 +48,7 @@ describe('installShortcuts', () => {
 
 	it('maps Mod+0 to the tenth main view', () => {
 		press('0');
-		expect(goto).toHaveBeenCalledWith('/skills');
+		expect(goto).toHaveBeenCalledWith('/personas');
 	});
 
 	it('maps Mod+, to settings', () => {
