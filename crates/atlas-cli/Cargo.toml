@@ -27,6 +27,7 @@ crossterm = { version = "0.29", features = ["event-stream"] }
 futures-util = "0.3"
 
 [dev-dependencies]
+atlas-testkit = { path = "../atlas-testkit" }
 tempfile.workspace = true
 reqwest.workspace = true
 # Test-only: the MCP client half plus the child-process transport, so a test can

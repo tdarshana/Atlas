@@ -584,6 +584,7 @@ dependencies = [
  "atlas-client",
  "atlas-core",
  "atlas-mcp",
+ "atlas-testkit",
  "chrono",
  "clap",
  "crossterm 0.29.0",
@@ -624,6 +625,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "atlas-testkit",
  "axum",
  "chrono",
  "cron",
@@ -710,18 +712,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "atlas-testkit"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures-util",
+ "git2",
+ "reqwest 0.13.4",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.28.0",
+]
+
+[[package]]
 name = "atlasd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "atlas-core",
  "atlas-mcp",
+ "atlas-testkit",
  "axum",
  "chrono",
  "clap",
  "futures-util",
  "getrandom 0.3.4",
- "git2",
  "reqwest 0.13.4",
  "rmcp",
  "serde",

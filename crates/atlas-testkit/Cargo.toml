@@ -1,0 +1,17 @@
+[package]
+name = "atlas-testkit"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "Test-only harness shared by the atlasd and atlas-cli integration tests: daemon boots, fixture repositories, MCP round trips, stub models and the plugin channel stand-in."
+
+[dependencies]
+axum = "0.8"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+git2 = "0.21"
+reqwest.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+tempfile.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "sync"] }
+tokio-tungstenite = "0.28"

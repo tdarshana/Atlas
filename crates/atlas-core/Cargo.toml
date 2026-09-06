@@ -41,6 +41,7 @@ pulldown-cmark.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
+atlas-testkit = { path = "../atlas-testkit" }
 tempfile.workspace = true
 tokio.workspace = true
 toml = "0.9"

@@ -30,13 +30,13 @@ getrandom = "0.3"
 sha2 = "0.10"
 
 [dev-dependencies]
+atlas-testkit = { path = "../atlas-testkit" }
 reqwest.workspace = true
-# `ServiceExt::oneshot`, for the in-process handler tests in `http/tests.rs`.
+# `ServiceExt::oneshot`, for the in-process handler tests in `http/handler_tests.rs`.
 tower = { version = "0.5", features = ["util"] }
 tempfile.workspace = true
 uuid.workspace = true
-git2 = "0.21"
-# Test-only: stands in for the desktop app on the plugin channel. Already in the lock
-# file, and the daemon itself only ever serves the server half (axum's `ws`).
+# Test-only: stands in for the desktop app on the plugin channel (the harness crate
+# holds the stand-in itself; the tests speak its frame types).
 tokio-tungstenite = "0.28"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
