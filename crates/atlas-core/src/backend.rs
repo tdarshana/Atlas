@@ -19,16 +19,6 @@ use crate::service::MemoryService;
 use crate::sync::{self, SyncInputs};
 use crate::{AtlasError, Result};
 
-/// How the managed block tells an agent to reach Atlas.
-const MCP_COMMAND: &str = "atlas mcp";
-
-/// Targets a sync writes when the request names none.
-const DEFAULT_TARGETS: &[SyncKind] =
-    &[SyncKind::Claude, SyncKind::Codex, SyncKind::AgentsMd, SyncKind::ClaudeMd, SyncKind::ClaudeHook, SyncKind::CodexHook, SyncKind::TasksMd];
-
-/// Why a global sync reports a managed-block target as skipped.
-const GLOBAL_SKIP: &str = "global sync writes agent files only";
-
 /// Characters a transcript may carry. Neither `POST /ingest` nor the MCP
 /// `ingest_transcript` tool is authenticated, so this bounds how much any one
 /// caller can push into a single model call.
@@ -648,39 +638,7 @@ impl ProjectBackend for LocalBackend {
         let db = self.db.clone();
         let workflows = self.workflows.clone();
         let skills_home = self.paths.skills_home.clone();
-        self.blocking(move || {
-            let query = match &project.profile {
-                Some(p) => format!("{} {}", p.name, p.frameworks.join(" ")),
-                None => project.name.clone(),
-            };
-            let mut hits = memories.recall(&RecallQuery {
-                query, limit: 20, scope: None, list_scope: MemoryScopeFilter::All, project_id: Some(project.id), kinds: vec![], tags: vec![],
-            })?;
-            // Recall is a search, so a project whose memories don't happen to match its own
-            // name would come back empty. Top it up with the newest project-scoped memories
-            // (score 0.0: they were not ranked, they were appended) so context is never bare.
-            let seen: std::collections::HashSet<Uuid> = hits.iter().map(|h| h.memory.id).collect();
-            let recent = memories.list(MemoryStatus::Active, Some(MemoryScope::Project), Some(project.id))?;
-            hits.extend(recent.into_iter().filter(|m| !seen.contains(&m.id)).take(10).map(|memory| RecallHit { memory, score: 0.0 }));
-            // The skills an agent may actually use here, so the context says what is in
-            // play rather than everything that exists. Discovery reads directories, so a
-            // failure to read one must not cost the caller its whole context: an error
-            // leaves the list empty rather than failing the call.
-            let skills = crate::skills::list_skills(&db, Some(&project), &skills_home)
-                .map(|l| l.skills.into_iter().filter(|s| s.enabled_here != Some(false)).collect())
-                .unwrap_or_else(|e| {
-                    tracing::warn!("skills unavailable for project context: {e}");
-                    vec![]
-                });
-            Ok(ProjectContext {
-                practices: docs_repo(&db, DocKind::Practice).list(Some(project.id))?,
-                workflows: workflows.list(Some(project.id))?.iter().map(WorkflowSummary::from).collect(),
-                skills,
-                project,
-                memories: hits,
-                personas: None,
-            })
-        }).await
+        self.blocking(move || crate::projects::context::build(&db, &memories, &workflows, &skills_home, project)).await
     }
 
     async fn list_projects(&self) -> Result<Vec<Project>> {
@@ -773,31 +731,14 @@ impl ProjectBackend for LocalBackend {
     /// repository lookup each and stay inline.
     async fn sync(&self, req: SyncRequest) -> Result<SyncReport> {
         let db = self.db.clone();
-        let requested = if req.targets.is_empty() { DEFAULT_TARGETS.to_vec() } else { req.targets.clone() };
+        let requested = sync::requested_targets(&req.targets);
+        // What the pass writes into and what it names: the sync home for a global pass,
+        // the connected project otherwise. `sync::global_scope` decides which targets a
+        // global pass keeps and reports the rest as skips.
         let (root, targets, block, skipped, project_id) = if req.global {
             let home = sync_home()?;
-            // Home is not a project, so only the per-tool exporters apply: splicing a managed
-            // block into ~/AGENTS.md would name practices and a project that aren't there.
-            // The dropped targets are still reported, so a caller who asked for one is told
-            // why nothing was written for it instead of reading a silent success.
-            let (targets, filtered): (Vec<SyncKind>, Vec<SyncKind>) = requested
-                .into_iter()
-                .partition(|t| matches!(t, SyncKind::Claude | SyncKind::Codex | SyncKind::ClaudeHook | SyncKind::CodexHook));
-            let skipped = filtered
-                .into_iter()
-                .map(|kind| SyncOp {
-                    path: home.join(match kind {
-                        SyncKind::AgentsMd => "AGENTS.md",
-                        SyncKind::TasksMd => "TASKS.md",
-                        _ => "CLAUDE.md",
-                    }),
-                    kind,
-                    content: String::new(),
-                    action: SyncAction::Skip(GLOBAL_SKIP.into()),
-                    delete: false,
-                })
-                .collect();
-            let block = BlockContext { mcp_command: MCP_COMMAND.into(), practices: vec![], project_name: None };
+            let (targets, skipped) = sync::global_scope(requested, &home);
+            let block = BlockContext { mcp_command: sync::MCP_COMMAND.into(), practices: vec![], project_name: None };
             (home, targets, block, skipped, None)
         } else {
             let requested_root = req.root.clone().ok_or_else(|| AtlasError::Invalid("sync requires a root unless global is set".into()))?;
@@ -811,7 +752,7 @@ impl ProjectBackend for LocalBackend {
             let project = self.connect_project(detected.root, "sync").await?;
             let pid = project.id;
             let practices = self.blocking({ let db = db.clone(); move || docs_repo(&db, DocKind::Practice).list(Some(pid)) }).await?;
-            let block = BlockContext { mcp_command: MCP_COMMAND.into(), practices, project_name: Some(project.name.clone()) };
+            let block = BlockContext { mcp_command: sync::MCP_COMMAND.into(), practices, project_name: Some(project.name.clone()) };
             (PathBuf::from(project.root_path), requested, block, vec![], Some(project.id))
         };
         // The hooks feed transcripts to a model, so they are installed only once the
@@ -836,9 +777,9 @@ impl ProjectBackend for LocalBackend {
         } else {
             (Vec::new(), Vec::new())
         };
-        // The roster, resolved in roster order, each persona with its references so the
+        // The roster, resolved in roster order, each agent with its references so the
         // export can name them. A project without a roster (and a global sync) resolves
-        // nothing and writes exactly what it wrote before personas existed.
+        // nothing and writes no subagent files.
         let (personas, default_persona) = match project_id {
             Some(pid) => {
                 let roster = self.project_roster(pid).await?;
@@ -851,25 +792,25 @@ impl ProjectBackend for LocalBackend {
             None => (Vec::new(), None),
         };
         let (global, check_only) = (req.global, req.check_only);
+        // The filesystem pass runs off the runtime thread (PERF-10).
         let report = self.blocking(move || {
-            let mut ops = sync::plan_sync(&SyncInputs {
-                root: &root,
-                block,
-                targets: &targets,
-                home: &home,
-                hooks,
-                global,
-                mirror_tasks_md,
-                board_stages: &board_stages,
-                board_tasks: &board_tasks,
-                personas: &personas,
-                default_persona,
-            })?;
-            ops.extend(skipped);
-            if check_only {
-                return Ok(sync::summarize(&ops));
-            }
-            sync::apply(&ops)
+            sync::run(
+                &SyncInputs {
+                    root: &root,
+                    block,
+                    targets: &targets,
+                    home: &home,
+                    hooks,
+                    global,
+                    mirror_tasks_md,
+                    board_stages: &board_stages,
+                    board_tasks: &board_tasks,
+                    personas: &personas,
+                    default_persona,
+                },
+                skipped,
+                check_only,
+            )
         }).await?;
         if check_only {
             return Ok(report);

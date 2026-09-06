@@ -38,6 +38,59 @@ fn is_other_atlas_ingest(command: &str) -> bool {
 /// Why a Claude Code hook op leaves an existing `atlas ingest` entry alone.
 const CLAUDE_HOOK_TAKEN: &str = "a different atlas ingest hook is present";
 
+/// How the managed block tells an agent to reach Atlas.
+pub const MCP_COMMAND: &str = "atlas mcp";
+
+/// Targets a sync writes when the request names none.
+pub const DEFAULT_TARGETS: &[SyncKind] =
+    &[SyncKind::Claude, SyncKind::Codex, SyncKind::AgentsMd, SyncKind::ClaudeMd, SyncKind::ClaudeHook, SyncKind::CodexHook, SyncKind::TasksMd];
+
+/// Why a global sync reports a managed-block target as skipped.
+pub const GLOBAL_SKIP: &str = "global sync writes agent files only";
+
+/// The targets a request asks for: its own list, or [`DEFAULT_TARGETS`] when it names none.
+pub fn requested_targets(requested: &[SyncKind]) -> Vec<SyncKind> {
+    if requested.is_empty() { DEFAULT_TARGETS.to_vec() } else { requested.to_vec() }
+}
+
+/// Narrows a global sync to the per-tool targets. Home is not a project, so splicing
+/// a managed block into `~/AGENTS.md` would name practices and a project that aren't
+/// there. The dropped targets come back as skip ops rather than vanishing, so a caller
+/// who asked for one is told why nothing was written for it instead of reading a
+/// silent success.
+pub fn global_scope(requested: Vec<SyncKind>, home: &Path) -> (Vec<SyncKind>, Vec<SyncOp>) {
+    let (targets, filtered): (Vec<SyncKind>, Vec<SyncKind>) = requested
+        .into_iter()
+        .partition(|t| matches!(t, SyncKind::Claude | SyncKind::Codex | SyncKind::ClaudeHook | SyncKind::CodexHook));
+    let skipped = filtered
+        .into_iter()
+        .map(|kind| SyncOp {
+            path: home.join(match kind {
+                SyncKind::AgentsMd => "AGENTS.md",
+                SyncKind::TasksMd => "TASKS.md",
+                _ => "CLAUDE.md",
+            }),
+            kind,
+            content: String::new(),
+            action: SyncAction::Skip(GLOBAL_SKIP.into()),
+            delete: false,
+        })
+        .collect();
+    (targets, skipped)
+}
+
+/// One whole pass over the filesystem: plan every op, add the ones the scope already
+/// skipped, then either summarise (`check_only`) or write. Runs on a blocking thread;
+/// the backend gathers the inputs and hands them over.
+pub fn run(inputs: &SyncInputs, skipped: Vec<SyncOp>, check_only: bool) -> Result<SyncReport> {
+    let mut ops = plan_sync(inputs)?;
+    ops.extend(skipped);
+    if check_only {
+        return Ok(summarize(&ops));
+    }
+    apply(&ops)
+}
+
 /// The `notify` argv Codex runs when a turn completes. Codex appends the
 /// notification JSON as the last element, which is why the command ends on a
 /// flag: `atlas ingest --tool codex --hook-arg <json>`.
@@ -975,6 +1028,47 @@ mod tests {
 
         let again = plan_sync(&inputs).unwrap();
         assert!(again.iter().filter(|o| !matches!(o.action, SyncAction::Skip(_))).all(|o| o.action == SyncAction::Unchanged && !o.delete), "{again:?}");
+    }
+
+    /// A global sync keeps the four per-tool targets and reports every managed-block
+    /// target as a skip at the path it would have written, so the caller sees why.
+    #[test]
+    fn global_scope_keeps_per_tool_targets_and_reports_the_rest_as_skips() {
+        let home = Path::new("/home/x");
+        let (targets, skipped) = global_scope(requested_targets(&[]), home);
+        assert_eq!(targets, vec![SyncKind::Claude, SyncKind::Codex, SyncKind::ClaudeHook, SyncKind::CodexHook]);
+        let reported: Vec<(SyncKind, PathBuf)> = skipped.iter().map(|o| (o.kind, o.path.clone())).collect();
+        assert_eq!(reported, vec![(SyncKind::AgentsMd, home.join("AGENTS.md")), (SyncKind::ClaudeMd, home.join("CLAUDE.md")), (SyncKind::TasksMd, home.join("TASKS.md"))]);
+        assert!(skipped.iter().all(|o| o.action == SyncAction::Skip(GLOBAL_SKIP.into()) && !o.delete && o.content.is_empty()));
+        let (only, none) = global_scope(vec![SyncKind::Claude], home);
+        assert_eq!((only, none.len()), (vec![SyncKind::Claude], 0));
+    }
+
+    /// `run` with `check_only` counts the skips it was handed beside the planned ops
+    /// and writes nothing; without it the planned ops land and the skips still count.
+    #[test]
+    fn run_counts_handed_in_skips_and_only_writes_when_asked() {
+        let d = tempfile::tempdir().unwrap();
+        let inputs = SyncInputs {
+            root: d.path(),
+            block: BlockContext { mcp_command: "atlas mcp".into(), practices: vec![], project_name: Some("p".into()) },
+            targets: &[SyncKind::ClaudeMd],
+            home: d.path(),
+            hooks: false,
+            global: false,
+            mirror_tasks_md: false,
+            board_stages: &[],
+            board_tasks: &[],
+            personas: &[],
+            default_persona: None,
+        };
+        let skip = || vec![SyncOp { kind: SyncKind::AgentsMd, path: d.path().join("AGENTS.md"), content: String::new(), action: SyncAction::Skip(GLOBAL_SKIP.into()), delete: false }];
+        let checked = run(&inputs, skip(), true).unwrap();
+        assert_eq!((checked.created, checked.skipped), (1, 1), "{checked:?}");
+        assert!(!d.path().join("CLAUDE.md").exists(), "check_only must not write");
+        let written = run(&inputs, skip(), false).unwrap();
+        assert_eq!((written.created, written.skipped), (1, 1), "{written:?}");
+        assert!(d.path().join("CLAUDE.md").exists());
     }
 
     /// No roster, no agent output: the managed block carries no roster section and
