@@ -1099,3 +1099,28 @@ fn a_parent_hears_when_a_subtask_is_added_moved_and_removed() {
     assert_eq!(last.body, format!("removed subtask {} child", child.key));
     assert_eq!(last.detail.as_ref().unwrap()["subtask"], child.key);
 }
+
+#[test]
+fn placing_a_task_orders_the_column_by_position_and_a_reorder_writes_no_moved_event() {
+    let (db, repo) = repo();
+    let p = project(&db, "/tmp/atlas");
+    let a = repo.create(&new_task(Some(p.id), "a"), "t").unwrap();
+    let b = repo.create(&new_task(Some(p.id), "b"), "t").unwrap();
+    let c = repo.create(&new_task(Some(p.id), "c"), "t").unwrap();
+    assert_eq!((a.position, b.position, c.position), (a.seq as f64, b.seq as f64, c.seq as f64), "new tasks take their seq as position");
+
+    // Drag c above a: a position below a's.
+    let placed = repo.place_as(&c.key, "Backlog", Some(a.position - 1.0), None, "t", None).unwrap();
+    assert_eq!(placed.stage, "Backlog");
+    let keys: Vec<String> = repo.list(&TaskFilter { project_id: Some(p.id), ..Default::default() }).unwrap().into_iter().map(|t| t.key).collect();
+    assert_eq!(keys, vec![c.key.clone(), a.key.clone(), b.key.clone()]);
+    assert!(events(&db, c.id).iter().all(|(k, _)| k != "moved"), "a reorder within the column is not a move");
+
+    // Drag b into the next column between nothing: it moves and takes the position.
+    let moved = repo.place_as(&b.key, "In Progress", Some(0.5), None, "t", None).unwrap();
+    assert_eq!(moved.stage, "In Progress");
+    assert_eq!(moved.position, 0.5);
+    assert!(events(&db, b.id).iter().any(|(k, _)| k == "moved"));
+
+    assert!(repo.place_as(&a.key, "Backlog", Some(f64::NAN), None, "t", None).is_err());
+}

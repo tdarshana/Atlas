@@ -58,7 +58,8 @@ macro_rules! task_cols {
             "id::text, key, project_id::text, seq, title, ", $description, ", stage, kind, priority, \
              assignee, labels::text, parent_id::text, created_by, epoch_us(created_at), epoch_us(updated_at), epoch_us(closed_at), ", $source_ref, ", \
              (select p.key from tasks p where p.id = tasks.parent_id), (select p.title from tasks p where p.id = tasks.parent_id), \
-             persona_id::text, (select q.name from personas q where q.id = tasks.persona_id), (select q.slug from personas q where q.id = tasks.persona_id)"
+             persona_id::text, (select q.name from personas q where q.id = tasks.persona_id), (select q.slug from personas q where q.id = tasks.persona_id), \
+             coalesce(position, seq)::double"
         )
     };
 }
@@ -109,6 +110,7 @@ fn row_to_task(r: &Row) -> duckdb::Result<Task> {
         persona_id: parse_uuid(19, r.get::<_, Option<String>>(19)?)?,
         persona_name: r.get(20)?,
         persona_slug: r.get(21)?,
+        position: r.get(22)?,
         created_by: r.get(12)?,
         created_at: ts(13, r.get(13)?)?,
         updated_at: ts(14, r.get(14)?)?,
@@ -431,7 +433,7 @@ impl TaskRepo {
             let id = self.resolve(c, id_or_key)?;
             let task = self.load_one(c, id)?;
             let mut children = {
-                let mut st = c.prepare(&format!("select {TASK_COLS} from tasks where parent_id = ? order by seq"))?;
+                let mut st = c.prepare(&format!("select {TASK_COLS} from tasks where parent_id = ? order by coalesce(position, seq), seq"))?;
                 let rows = st.query_map(params![id.to_string()], row_to_task)?;
                 rows.collect::<duckdb::Result<Vec<_>>>()?
             };
@@ -488,7 +490,7 @@ impl TaskRepo {
             // By project, then by the numeric sequence. Ordering by the key text would
             // interleave `ATL-10` between `ATL-1` and `ATL-2`, and ordering by
             // `created_at` alone has no tie-break inside one microsecond.
-            sql.push_str(" order by project_id nulls first, seq");
+            sql.push_str(" order by project_id nulls first, coalesce(position, seq), seq");
             let mut st = c.prepare(&sql)?;
             let mut tasks: Vec<Task> = st.query_map(params_from_iter(args.iter()), row_to_task)?.collect::<duckdb::Result<Vec<_>>>()?;
             let done = self.decorate(c, &mut tasks)?;
@@ -744,14 +746,15 @@ impl TaskRepo {
             let closed = if stage.done { "now()" } else { "null" };
             c.execute(
                 &format!(
-                    "insert into tasks (id, key, project_id, seq, title, description, stage, kind, priority, assignee, labels, parent_id, created_by, source_ref, persona_id, created_at, updated_at, closed_at) \
-                     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::json, ?, ?, ?::json, ?, now(), now(), {closed})"
+                    "insert into tasks (id, key, project_id, seq, position, title, description, stage, kind, priority, assignee, labels, parent_id, created_by, source_ref, persona_id, created_at, updated_at, closed_at) \
+                     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::json, ?, ?, ?::json, ?, now(), now(), {closed})"
                 ),
                 params![
                     id.to_string(),
                     key,
                     new.project_id.map(|p| p.to_string()),
                     seq,
+                    seq as f64,
                     title,
                     new.description.clone().unwrap_or_default(),
                     stage.name,
@@ -906,6 +909,14 @@ impl TaskRepo {
     /// `move_stage` for an actor bound by a persona: the `moved` event's detail names
     /// the persona slug, since the actor label never carries it.
     pub fn move_stage_as(&self, id_or_key: &str, stage: &str, expected: Option<DateTime<Utc>>, actor: &str, persona: Option<&str>) -> Result<Task> {
+        self.place_as(id_or_key, stage, None, expected, actor, persona)
+    }
+
+    /// `move_stage_as` with a place in the target column: a drag lands between two
+    /// cards and sends a position between their positions. A same-stage call with a
+    /// position is a reorder, which updates the row without a `moved` event (the
+    /// column did not change); one without a position is the existing no-op.
+    pub fn place_as(&self, id_or_key: &str, stage: &str, position: Option<f64>, expected: Option<DateTime<Utc>>, actor: &str, persona: Option<&str>) -> Result<Task> {
         let _gate = self.gate();
         self.db.with_conn(|c| {
             let id = self.resolve(c, id_or_key)?;
@@ -913,13 +924,21 @@ impl TaskRepo {
             Self::check_expected(&task, expected)?;
             let stages = self.stages_for(c, task.project_id)?.stages;
             let target = find_stage(&stages, stage).ok_or_else(|| unknown_stage(stage, &stages))?.clone();
+            if let Some(p) = position {
+                if !p.is_finite() {
+                    return Err(AtlasError::Invalid("position must be a finite number".into()));
+                }
+            }
             // `find_stage` matches case-insensitively on trimmed names, so compare the
             // same way: moving from `in progress` to `In Progress` is the stage the
             // task is already in, and writing a `moved` event for it reads as a no-op.
-            if target.name.trim().eq_ignore_ascii_case(task.stage.trim()) {
-                return self.load_one(c, id);
+            let same_stage = target.name.trim().eq_ignore_ascii_case(task.stage.trim());
+            if !same_stage {
+                self.move_gated(c, &task, &target, actor, persona)?;
             }
-            self.move_gated(c, &task, &target, actor, persona)?;
+            if let Some(p) = position {
+                c.execute("update tasks set position = ?, updated_at = now() where id = ?", params![p, id.to_string()])?;
+            }
             self.load_one(c, id)
         })
     }

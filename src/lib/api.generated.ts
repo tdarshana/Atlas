@@ -326,9 +326,12 @@ export abstract class GeneratedApi {
 		return this.req('DELETE', `/api/v1/tasks/${encodeURIComponent(key)}`, undefined, ACTOR);
 	}
 
-	/** `expectedUpdatedAt` turns a concurrent edit into a 409 instead of a clobber. */
-	moveTask(key: string, stage: string, expectedUpdatedAt?: Timestamp): Promise<Task> {
-		const payload: MoveBody = { stage, expected_updated_at: expectedUpdatedAt };
+	/**
+	 * `expectedUpdatedAt` turns a concurrent edit into a 409 instead of a clobber.
+	 * `position` places the task in the column (a drag); the same stage with a position is a reorder.
+	 */
+	moveTask(key: string, stage: string, expectedUpdatedAt?: Timestamp, position?: number): Promise<Task> {
+		const payload: MoveBody = { stage, expected_updated_at: expectedUpdatedAt, position };
 		return this.req('POST', `/api/v1/tasks/${encodeURIComponent(key)}/move`, payload, ACTOR);
 	}
 

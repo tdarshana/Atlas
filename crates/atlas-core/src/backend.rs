@@ -533,6 +533,11 @@ impl LocalBackend {
     }
 
     pub async fn move_task_as(&self, id_or_key: &str, stage: &str, expected: Option<DateTime<Utc>>, actor: &str, persona: Option<PersonaRef>) -> Result<Task> {
+        self.place_task_as(id_or_key, stage, None, expected, actor, persona).await
+    }
+
+    /// `move_task_as` with a place in the column (a drag); see `TaskRepo::place_as`.
+    pub async fn place_task_as(&self, id_or_key: &str, stage: &str, position: Option<f64>, expected: Option<DateTime<Utc>>, actor: &str, persona: Option<PersonaRef>) -> Result<Task> {
         let db = self.db.clone();
         let tasks = self.tasks.clone();
         let id_or_key = id_or_key.to_string();
@@ -541,7 +546,7 @@ impl LocalBackend {
         let actor = Actor::parse(&label).with_persona(persona);
         self.blocking(move || {
             task_move_gate(&db, &tasks, &id_or_key, &actor)?;
-            tasks.move_stage_as(&id_or_key, &stage, expected, &label, persona_slug(&actor))
+            tasks.place_as(&id_or_key, &stage, position, expected, &label, persona_slug(&actor))
         }).await
     }
 

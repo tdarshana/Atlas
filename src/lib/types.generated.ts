@@ -378,6 +378,12 @@ export interface Task {
 	key: string;
 	project_id: Uuid | null;
 	seq: number;
+	/**
+	 * Where the task sits among its column's cards: cards sort by this, then `seq`.
+	 * Backfilled from `seq`, so an untouched board keeps creation order; a drag sets a
+	 * fraction between its new neighbours.
+	 */
+	position: number;
 	title: string;
 	description: string;
 	stage: string;
@@ -1439,6 +1445,11 @@ export interface IngestBody {
 export interface MoveBody {
 	stage: string;
 	expected_updated_at?: Timestamp | null;
+	/**
+	 * Where to place the task in the target column (a drag's spot between neighbours);
+	 * left out, a move keeps the task's position and a same-stage move does nothing.
+	 */
+	position?: number | null;
 }
 
 export interface CommentBody {

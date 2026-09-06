@@ -31,6 +31,7 @@
 		onresize: (stage: string, width: number) => void;
 		onexpand: () => void;
 		ontoggle: (stage: string) => void;
+		ondragstart?: (event: PointerEvent, task: Task) => void;
 	}
 
 	let {
@@ -44,8 +45,14 @@
 		onmove,
 		onresize,
 		onexpand,
-		ontoggle
+		ontoggle,
+		ondragstart
 	}: Props = $props();
+
+	/** The cards drawn: the one being dragged is lifted out, and the drop line stands
+	 * where it would land. */
+	const others = $derived(drag.key ? column.tasks.filter((t) => t.key !== drag.key) : column.tasks);
+	const dropAt = $derived(drag.key && drag.overStage === column.stage.name ? drag.overIndex : -1);
 
 	const stage = $derived(column.stage.name);
 	/** Its own tasks. Strays stand in the first lane and are counted in its title. */
@@ -58,6 +65,8 @@
 	function paint(live: number) {
 		node?.style.setProperty('--lane-w', `${live}px`);
 	}
+	import type { Task } from '$lib/types';
+	import { drag } from './dnd.svelte';
 </script>
 
 {#if collapsed || folded}
@@ -118,18 +127,21 @@
 			/>
 		</header>
 
-		<div class="body">
-			{#each column.tasks as task (task.id)}
+		<div class="body" data-lane={column.stage.name}>
+			{#each others as task, i (task.id)}
+				{#if dropAt === i}<div class="drop-line" data-testid="drop-line-{column.stage.name}"></div>{/if}
 				<TaskCard
 					{task}
 					{stageOptions}
 					selected={selected === task.key}
 					{onopen}
 					{onmove}
+					{ondragstart}
 				/>
 			{:else}
-				<p class="empty">Nothing here</p>
+				{#if dropAt === 0}<div class="drop-line" data-testid="drop-line-{column.stage.name}"></div>{:else}<p class="empty">Nothing here</p>{/if}
 			{/each}
+			{#if others.length > 0 && dropAt === others.length}<div class="drop-line" data-testid="drop-line-{column.stage.name}"></div>{/if}
 		</div>
 
 		<ResizeBar
@@ -233,5 +245,13 @@
 
 	.spacer {
 		flex: 1;
+	}
+	.drop-line {
+		flex: none;
+		height: 2px;
+		margin: 0 2px;
+		border-radius: 1px;
+		background: var(--accent);
+		box-shadow: 0 0 0 1px var(--accent-muted);
 	}
 </style>

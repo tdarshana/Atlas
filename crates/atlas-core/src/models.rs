@@ -499,6 +499,10 @@ pub struct Task {
     pub key: String,
     pub project_id: Option<Uuid>,
     pub seq: i64,
+    /// Where the task sits among its column's cards: cards sort by this, then `seq`.
+    /// Backfilled from `seq`, so an untouched board keeps creation order; a drag sets a
+    /// fraction between its new neighbours.
+    #[serde(default)] pub position: f64,
     pub title: String,
     pub description: String,
     pub stage: String,
@@ -1438,7 +1442,13 @@ pub struct IngestBody {
     #[serde(default)] pub project_root: Option<PathBuf>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct MoveBody { pub stage: String, #[serde(default)] pub expected_updated_at: Option<DateTime<Utc>> }
+pub struct MoveBody {
+    pub stage: String,
+    #[serde(default)] pub expected_updated_at: Option<DateTime<Utc>>,
+    /// Where to place the task in the target column (a drag's spot between neighbours);
+    /// left out, a move keeps the task's position and a same-stage move does nothing.
+    #[serde(default)] pub position: Option<f64>,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CommentBody { pub body: String }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]

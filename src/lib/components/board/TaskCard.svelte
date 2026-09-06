@@ -9,6 +9,7 @@
 	import { kindMeta } from './kind';
 	import KindIcon from './KindIcon.svelte';
 	import { personaRole } from '$lib/stores/personas.svelte';
+	import { justDropped } from './dnd.svelte';
 	import type { Task } from '$lib/types';
 	import { priorityTone } from './card';
 
@@ -19,9 +20,19 @@
 		selected: boolean;
 		onopen: (key: string) => void;
 		onmove: (key: string, stage: string) => void;
+		/** A press on the card's own surface (not its select or buttons); the lane strip
+		 * turns it into a drag once the pointer travels. */
+		ondragstart?: (event: PointerEvent, task: Task) => void;
 	}
 
-	let { task, stageOptions, selected, onopen, onmove }: Props = $props();
+	let { task, stageOptions, selected, onopen, onmove, ondragstart }: Props = $props();
+
+	function onpointerdown(event: PointerEvent): void {
+		if (event.button !== 0 || !ondragstart) return;
+		const target = event.target as HTMLElement;
+		if (target.closest('button, select, a, input, textarea, [role="combobox"], [role="listbox"]')) return;
+		ondragstart(event, task);
+	}
 
 	// Selection can come from somewhere other than a click on this card (a subtask row in
 	// the detail, `?task=` in the URL), so the selected card brings itself on screen.
@@ -53,9 +64,13 @@
 	role="button"
 	tabindex="0"
 	data-testid="task-open-{task.key}"
+	data-card-key={task.key}
 	aria-label="{task.key} {task.title}"
-	onclick={() => onopen(task.key)}
+	onclick={() => {
+		if (!justDropped()) onopen(task.key);
+	}}
 	onkeydown={activate}
+	{onpointerdown}
 >
 	<div class="top">
 		<span class="key">{task.key}</span>

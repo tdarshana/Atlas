@@ -9,6 +9,7 @@ function task(over: Partial<Task>): Task {
 		key: 'ATL-1',
 		project_id: null,
 		seq: 1,
+		position: 1,
 		title: 'A task',
 		description: '',
 		stage: 'Backlog',

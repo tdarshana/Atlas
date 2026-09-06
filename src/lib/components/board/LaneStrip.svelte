@@ -4,8 +4,10 @@
 	// scrolls its cards rather than the whole board.
 	import { Icon } from '$lib/ds';
 	import type { SelectOption } from '$lib/ds';
-	import { laneWidth, type LaneView } from '$lib/stores/board.svelte';
+	import { laneWidth, place, type LaneView } from '$lib/stores/board.svelte';
+	import type { Task } from '$lib/types';
 	import Lane from './Lane.svelte';
+	import { clearDrag, drag, DRAG_THRESHOLD_PX, indexForY, isSameSpot, markDropped, targetPosition } from './dnd.svelte';
 
 	interface Props {
 		lanes: LaneView[];
@@ -33,7 +35,80 @@
 		ontoggle,
 		onaddcolumn
 	}: Props = $props();
+
+	/** A press that may become a drag: the card and where the pointer started. */
+	let pending: { task: Task; x: number; y: number } | null = null;
+
+	function zoom(): number {
+		return parseFloat(document.documentElement.style.zoom) || 1;
+	}
+
+	function onCardPress(event: PointerEvent, task: Task): void {
+		pending = { task, x: event.clientX, y: event.clientY };
+	}
+
+	/** The lane and insertion index under the pointer, from the cards' rectangles. */
+	function locate(x: number, y: number): { stage: string; index: number } | null {
+		const el = document.elementFromPoint(x, y) as HTMLElement | null;
+		const body = el?.closest<HTMLElement>('[data-lane]') ?? el?.closest<HTMLElement>('.lane')?.querySelector<HTMLElement>('[data-lane]') ?? null;
+		if (!body) return null;
+		const stage = body.dataset.lane ?? '';
+		const mids = [...body.querySelectorAll<HTMLElement>('[data-card-key]')]
+			.filter((c) => c.dataset.cardKey !== drag.key)
+			.map((c) => {
+				const r = c.getBoundingClientRect();
+				return r.top + r.height / 2;
+			});
+		return { stage, index: indexForY(mids, y) };
+	}
+
+	function onPointerMove(event: PointerEvent): void {
+		if (pending && !drag.key) {
+			if (Math.hypot(event.clientX - pending.x, event.clientY - pending.y) < DRAG_THRESHOLD_PX) return;
+			drag.key = pending.task.key;
+			drag.title = pending.task.title;
+			drag.fromStage = pending.task.stage;
+		}
+		if (!drag.key) return;
+		event.preventDefault();
+		drag.x = event.clientX / zoom();
+		drag.y = event.clientY / zoom();
+		const at = locate(event.clientX, event.clientY);
+		drag.overStage = at?.stage ?? null;
+		drag.overIndex = at?.index ?? -1;
+	}
+
+	function onPointerUp(): void {
+		const key = drag.key;
+		if (key && drag.overStage !== null) {
+			const stage = drag.overStage;
+			const column = lanes.find((l) => l.column.stage.name === stage)?.column;
+			const tasks = column?.tasks ?? [];
+			if (!isSameSpot(tasks, stage, drag.overIndex, key)) {
+				void place(key, stage, targetPosition(tasks, drag.overIndex, key));
+			}
+			markDropped();
+		}
+		pending = null;
+		if (key) clearDrag();
+	}
+
+	function onKeydown(event: KeyboardEvent): void {
+		if (event.key === 'Escape' && drag.key) {
+			pending = null;
+			clearDrag();
+		}
+	}
 </script>
+
+<svelte:window onpointermove={onPointerMove} onpointerup={onPointerUp} onpointercancel={onPointerUp} onkeydown={onKeydown} />
+
+{#if drag.key}
+	<div class="ghost" style="left:{drag.x + 12}px;top:{drag.y + 8}px" data-testid="drag-ghost" aria-hidden="true">
+		<span class="ghost-key">{drag.key}</span>
+		<span class="ghost-title">{drag.title}</span>
+	</div>
+{/if}
 
 <div class="strip" data-testid="board-lanes">
 	{#each lanes as lane (lane.column.stage.name)}
@@ -49,6 +124,7 @@
 			{onresize}
 			{onexpand}
 			{ontoggle}
+			ondragstart={onCardPress}
 		/>
 	{/each}
 
@@ -60,6 +136,7 @@
 
 <style>
 	.strip {
+		user-select: none;
 		display: flex;
 		align-items: flex-start;
 		gap: 12px;
@@ -93,5 +170,32 @@
 	.add:hover {
 		border-color: var(--border-strong);
 		color: var(--text-secondary);
+	}
+	.ghost {
+		position: fixed;
+		z-index: 2000;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		max-width: 260px;
+		padding: 8px 10px;
+		border: 1px solid var(--accent);
+		border-radius: 5px;
+		background: var(--bg-raised);
+		box-shadow: var(--shadow-lg);
+		pointer-events: none;
+		font-size: var(--text-sm);
+	}
+
+	.ghost-key {
+		font-family: var(--font-mono);
+		font-size: var(--mono-sm);
+		color: var(--text-secondary);
+	}
+
+	.ghost-title {
+		overflow: hidden;
+		white-space: nowrap;
+		text-overflow: ellipsis;
 	}
 </style>

@@ -44,6 +44,7 @@ function task(key: string, stage = 'Backlog'): Task {
 		key,
 		project_id: null,
 		seq: 1,
+		position: 1,
 		title: `Title of ${key}`,
 		description: '',
 		stage,

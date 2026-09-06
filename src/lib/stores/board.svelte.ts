@@ -375,6 +375,11 @@ export function deriveColumns(stages: Stage[], tasks: Task[]): BoardColumn[] {
 			columns[0].strayCount++;
 		}
 	}
+	// The daemon lists by position already; sorting here keeps an optimistic drag in
+	// order before the reply lands, and a task with no position yet falls back to seq.
+	for (const column of columns) {
+		column.tasks.sort((a, b) => (a.position ?? a.seq) - (b.position ?? b.seq) || a.seq - b.seq);
+	}
 	return columns;
 }
 
@@ -706,6 +711,38 @@ export async function move(key: string, stage: string): Promise<void> {
 		// a stage someone else set, and that is fresher than the one we started from.
 		const current = board.tasks.find((t) => t.key === key);
 		if (previous !== null && current && current.stage === stage) current.stage = previous;
+		if (e instanceof ApiError && e.status === 409) {
+			push('error', CONFLICT_MESSAGE);
+			await reload();
+		} else {
+			push('error', errorMessage(e));
+		}
+	}
+}
+
+/**
+ * Drops a card at a place in a column: the stage it was dragged into (or its own) and
+ * the position between its new neighbours. Optimistic like `move`, so the card lands
+ * the moment it is released; the daemon's row replaces it, or the drag is undone.
+ */
+export async function place(key: string, stage: string, position: number): Promise<void> {
+	const task = board.tasks.find((t) => t.key === key);
+	if (!task) return;
+	const previous = { stage: task.stage, position: task.position };
+	const expected = task.updated_at;
+	task.stage = stage;
+	task.position = position;
+	try {
+		const moved = await api().moveTask(key, stage, expected, position);
+		const i = board.tasks.findIndex((t) => t.key === key);
+		if (i >= 0) board.tasks[i] = moved;
+		if (board.selected === key) void loadDetail(key);
+	} catch (e) {
+		const current = board.tasks.find((t) => t.key === key);
+		if (current && current.stage === stage && current.position === position) {
+			current.stage = previous.stage;
+			current.position = previous.position;
+		}
 		if (e instanceof ApiError && e.status === 409) {
 			push('error', CONFLICT_MESSAGE);
 			await reload();

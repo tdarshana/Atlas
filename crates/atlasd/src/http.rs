@@ -684,7 +684,7 @@ async fn update_task(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Ac
     Ok(Json(s.backend.update_task(&id, u, &actor).await?))
 }
 async fn move_task(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor, persona): Actor, ApiJson(b): ApiJson<MoveBody>) -> Result<Json<Task>, ApiError> {
-    Ok(Json(s.backend.move_task_as(&id, &b.stage, b.expected_updated_at, &actor, persona).await?))
+    Ok(Json(s.backend.place_task_as(&id, &b.stage, b.position, b.expected_updated_at, &actor, persona).await?))
 }
 async fn comment_task(State(s): State<AppState>, ApiPath(id): ApiPath<String>, Actor(actor, _): Actor, ApiJson(b): ApiJson<CommentBody>) -> Result<Json<TaskEvent>, ApiError> {
     Ok(Json(s.backend.comment_task(&id, &b.body, &actor).await?))

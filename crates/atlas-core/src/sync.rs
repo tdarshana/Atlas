@@ -673,6 +673,7 @@ mod tests {
             key: key.into(),
             project_id: None,
             seq: 1,
+            position: 0.0,
             title: "example task".into(),
             description: String::new(),
             stage: stage.into(),

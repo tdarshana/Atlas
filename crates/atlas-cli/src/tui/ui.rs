@@ -647,6 +647,7 @@ mod tests {
             key: key.into(),
             project_id: None,
             seq: 1,
+            position: 0.0,
             title: format!("{key} needs doing"),
             description: "the long form".into(),
             stage: stage.into(),
