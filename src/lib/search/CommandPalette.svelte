@@ -379,6 +379,8 @@
 				</span>
 			{/each}
 			<input
+				autocorrect="off"
+				autocapitalize="off"
 				bind:this={box}
 				class="field"
 				type="text"
