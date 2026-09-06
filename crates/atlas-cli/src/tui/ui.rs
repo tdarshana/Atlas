@@ -5,7 +5,7 @@
 //! the left and the selected item's detail on the right.
 
 use super::state::{App, BoardMode, Focus, Tab};
-use atlas_core::models::{Agent, Doc, Memory, Project, RecallHit, Task, TaskDetail};
+use atlas_core::models::{Doc, Memory, Persona, Project, RecallHit, Task, TaskDetail};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
@@ -190,9 +190,13 @@ fn agents(f: &mut Frame, app: &App, area: Rect) {
     detail(f, right, "Agent", lines);
 }
 
-fn agent_detail(a: &Agent) -> Vec<Line<'static>> {
+fn agent_detail(a: &Persona) -> Vec<Line<'static>> {
     let mut lines = vec![Line::styled(a.name.clone(), bold())];
-    if let Some(model) = &a.model_hint {
+    lines.push(Line::from(format!("slug        {}", a.slug)));
+    if !a.role.trim().is_empty() {
+        lines.push(Line::from(format!("role        {}", a.role)));
+    }
+    if let Some(model) = a.models.get(&atlas_core::models::Case::Default) {
         lines.push(Line::from(format!("model       {model}")));
     }
     if !a.tools.is_empty() {
@@ -202,7 +206,7 @@ fn agent_detail(a: &Agent) -> Vec<Line<'static>> {
         lines.push(Line::from(format!("tags        #{}", a.tags.join(" #"))));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(a.description.clone()));
+    lines.push(Line::from(a.summary.clone()));
     lines.push(Line::from(""));
     lines.push(Line::styled("instructions", bold()));
     lines.extend(body_lines(&a.instructions));
@@ -506,16 +510,22 @@ mod tests {
         }
     }
 
-    fn agent(name: &str) -> Agent {
-        Agent {
+    fn agent(name: &str) -> Persona {
+        Persona {
             id: Uuid::new_v4(),
             name: name.into(),
-            description: "reviews code".into(),
+            slug: name.into(),
+            role: "reviews code".into(),
+            summary: "Reviews code.".into(),
             instructions: "be terse".into(),
-            model_hint: None,
+            skills: vec![],
+            workflows: vec![],
+            practices: vec![],
+            mcp_servers: vec![],
             tools: vec![],
+            access: Default::default(),
+            models: Default::default(),
             tags: vec![],
-            version: 1,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

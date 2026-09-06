@@ -15,9 +15,9 @@ fn remember_and_recall_via_cli_starting_daemon() {
     assert!(daemon.cmd().args(["daemon", "stop"]).status().unwrap().success());
 }
 
-/// The whole project workflow from the command line: connect a repository, save an
-/// agent, write the agent files into the repository, confirm a second sync has
-/// nothing to do, and export and re-import the library.
+/// The whole project workflow from the command line: connect a repository, put an
+/// agent on its roster, write the subagent file into the repository, confirm a
+/// second sync has nothing to do, and export and re-import the library.
 #[test]
 fn project_agent_sync_export_and_import_round_trip() {
     let daemon = TestDaemon::new();
@@ -48,10 +48,27 @@ fn project_agent_sync_export_and_import_round_trip() {
     assert!(out.contains("ID"), "list should have an ID column: {out}");
     assert!(out.contains(&project_id[..8]), "list should print the project's short id: {out}");
 
-    let instructions = work.path().join("reviewer.md");
-    std::fs::write(&instructions, "Review the diff and report only real defects.\n").unwrap();
-    let (code, _, err) = run(&["agent", "save", "reviewer", "--description", "Reviews", "--instructions-file", instructions.to_str().unwrap(), "--tag", "qa"]);
-    assert_eq!(code, 0, "{err}");
+    // Agents are created through the API (the CLI only lists and reads them) and
+    // reach the repository through the project's roster.
+    let api = format!("http://127.0.0.1:{}/api/v1", daemon.port);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let add_agent = |name: &str, instructions: &str| -> String {
+        rt.block_on(async {
+            let c = daemon.client();
+            let created: serde_json::Value = c.post(format!("{api}/agents"))
+                .json(&serde_json::json!({"name": name, "role": "Reviews", "instructions": instructions, "tags": ["qa"]}))
+                .send().await.unwrap().json().await.unwrap();
+            let roster: Vec<serde_json::Value> = c.get(format!("{api}/projects/{project_id}/agents")).send().await.unwrap().json().await.unwrap();
+            let mut entries: Vec<serde_json::Value> = roster.iter().enumerate()
+                .map(|(i, r)| serde_json::json!({"persona_id": r["persona_id"], "is_default": r["is_default"], "position": i}))
+                .collect();
+            entries.push(serde_json::json!({"persona_id": created["id"], "is_default": entries.is_empty(), "position": entries.len()}));
+            let r = c.put(format!("{api}/projects/{project_id}/agents")).json(&entries).send().await.unwrap();
+            assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
+            created["slug"].as_str().unwrap().to_string()
+        })
+    };
+    assert_eq!(add_agent("Reviewer", "Review the diff and report only real defects.\n"), "reviewer");
 
     let (code, out, err) = run(&["sync", "--project", repo_path]);
     assert_eq!(code, 0, "{err}");
@@ -64,16 +81,26 @@ fn project_agent_sync_export_and_import_round_trip() {
     assert_eq!(code, 0, "a second sync should have nothing to do: {out}{err}");
     assert!(out.contains("unchanged"), "check should list each op: {out}");
 
-    // An agent saved but not synced is what --check exists to catch, and its
-    // non-zero exit is what lets a hook or a CI job fail on the difference.
-    let (code, _, err) = run(&["agent", "save", "linter", "--description", "Lints", "--instructions-file", instructions.to_str().unwrap()]);
-    assert_eq!(code, 0, "{err}");
+    // An agent put on the roster but not synced is what --check exists to catch, and
+    // its non-zero exit is what lets a hook or a CI job fail on the difference.
+    assert_eq!(add_agent("Linter", "Lint it.\n"), "linter");
     let (code, out, err) = run(&["sync", "--project", repo_path, "--check"]);
     assert_eq!(code, 1, "check should fail while a change is pending: {out}{err}");
     assert!(
         out.lines().any(|l| l.starts_with("create") && l.contains(".claude/agents/linter.md")),
         "check should name the file it would create: {out}"
     );
+
+    // `atlas agent` reads the library; `atlas persona` is its alias for one release.
+    let (code, out, err) = run(&["agent", "list"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("reviewer") && out.contains("linter"), "agent list should show both slugs: {out}");
+    let (code, out, err) = run(&["agent", "show", "reviewer"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("Review the diff") && out.contains("\"qa\""), "agent show prints the bundle: {out}");
+    let (code, out, _) = run(&["persona", "list"]);
+    assert_eq!(code, 0);
+    assert!(out.contains("reviewer"), "the persona alias still lists agents: {out}");
 
     // Practices and workflows, with the practice body read from standard input.
     let (code, _, err) = run_stdin(&["practice", "save", "commits", "--body-file", "-", "--project", repo_path], "Imperative mood, one change per commit.\n");
@@ -106,30 +133,15 @@ fn project_agent_sync_export_and_import_round_trip() {
     let dump = work.path().join("dump");
     let (code, _, err) = run(&["export", dump.to_str().unwrap()]);
     assert_eq!(code, 0, "{err}");
-    assert!(dump.join("agents/reviewer.md").exists(), "export should write agents/reviewer.md");
-    assert!(dump.join("agents/linter.md").exists(), "export should write agents/linter.md");
+    assert!(!dump.join("agents").exists(), "agents live in the store and reach repositories through sync, not the export bundle");
     assert!(dump.join("practices/commits.md").exists(), "export should write practices/commits.md");
     assert!(std::fs::read_to_string(dump.join("memories.jsonl")).unwrap().contains("fly.io"));
 
-    // Exporting again over the same directory has to drop the file of an agent
-    // that has since been deleted, or the next import would bring it back.
-    let (code, _, err) = run(&["agent", "delete", "linter"]);
-    assert_eq!(code, 0, "{err}");
-    let (code, _, err) = run(&["export", dump.to_str().unwrap()]);
-    assert_eq!(code, 0, "{err}");
-    assert!(!dump.join("agents/linter.md").exists(), "a second export should prune the deleted agent's file");
-    assert!(dump.join("agents/reviewer.md").exists(), "a second export should keep the agents that remain");
-
-    let (code, _, err) = run(&["agent", "delete", "reviewer"]);
-    assert_eq!(code, 0, "{err}");
     let (code, _, err) = run(&["import", dump.to_str().unwrap()]);
     assert_eq!(code, 0, "{err}");
-    let (code, out, err) = run(&["agent", "show", "reviewer"]);
-    assert_eq!(code, 0, "import should have restored the agent: {err}");
-    assert!(out.contains("Review the diff"), "{out}");
-    assert!(out.contains("\"qa\""), "import should restore the agent's tags: {out}");
-    let (_, out, _) = run(&["agent", "list"]);
-    assert!(!out.contains("linter"), "import should not resurrect an agent the export pruned: {out}");
+    let (code, out, err) = run(&["practice", "show", "commits"]);
+    assert_eq!(code, 0, "import should have kept the practice: {err}");
+    assert!(out.contains("Imperative mood"), "{out}");
     let (_, out, _) = run(&["recall", "deploy target"]);
     assert_eq!(out.lines().filter(|l| l.contains("fly.io")).count(), 1, "import should not duplicate an existing memory: {out}");
 }
@@ -276,12 +288,12 @@ fn mcp_stdio_shim_lists_tools() {
     for t in ["memory_remember", "memory_search", "memory_forget", "status"] { assert!(listing.contains(&format!("\"name\":\"{t}\"")), "tools/list missing {t}: {listing}"); }
 }
 
-/// `atlas persona list` prints the library as a table, `atlas persona show` prints
-/// the bundle as JSON, and `atlas project personas <root>` reads and edits the roster
-/// with `--add`, `--default` and `--remove`. Personas are seeded over the HTTP API,
-/// since the CLI has no `persona create`.
+/// `atlas agent list` prints the library as a table, `atlas agent show` prints the
+/// bundle as JSON, and `atlas project agents <root>` reads and edits the roster with
+/// `--add`, `--default` and `--remove`. Agents are seeded over the HTTP API, since the
+/// CLI has no `agent create`.
 #[test]
-fn persona_list_show_and_project_roster_via_the_cli() {
+fn agent_list_show_and_project_roster_via_the_cli() {
     let daemon = TestDaemon::new();
     assert!(daemon.cmd().args(["daemon", "start"]).status().unwrap().success());
     let repo = tempfile::tempdir().unwrap();
@@ -301,27 +313,27 @@ fn persona_list_show_and_project_roster_via_the_cli() {
         }
     });
 
-    let (code, out, err) = run(&["persona", "list"]);
+    let (code, out, err) = run(&["agent", "list"]);
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("NAME") && out.contains("SLUG") && out.contains("ROLE"), "list should print a table: {out}");
     assert!(out.contains("mobile-developer") && out.contains("Reads every diff"), "{out}");
 
-    let (code, out, err) = run(&["persona", "show", "mobile developer"]);
+    let (code, out, err) = run(&["agent", "show", "mobile developer"]);
     assert_eq!(code, 0, "{err}");
     let bundle: serde_json::Value = serde_json::from_str(&out).expect("show prints the bundle as JSON");
     assert_eq!(bundle["persona"]["slug"], "mobile-developer", "{out}");
     assert!(bundle["warnings"].as_array().unwrap().iter().any(|w| w == "skill plugin:gone/gone/gone not found"), "{out}");
-    let (code, _, err) = run(&["persona", "show", "nobody"]);
+    let (code, _, err) = run(&["agent", "show", "nobody"]);
     assert_ne!(code, 0);
     assert!(err.contains("not found"), "{err}");
 
     let (code, _, err) = run(&["project", "connect", repo_path]);
     assert_eq!(code, 0, "{err}");
-    let (code, out, err) = run(&["project", "personas", repo_path]);
+    let (code, out, err) = run(&["project", "agents", repo_path]);
     assert_eq!(code, 0, "{err}");
     assert!(!out.contains("mobile-developer"), "an empty roster lists nothing: {out}");
 
-    let (code, out, err) = run(&["project", "personas", repo_path, "--add", "mobile-developer", "--add", "Security Reviewer", "--default", "security-reviewer"]);
+    let (code, out, err) = run(&["project", "agents", repo_path, "--add", "mobile-developer", "--add", "Security Reviewer", "--default", "security-reviewer"]);
     assert_eq!(code, 0, "{err}");
     let mobile = out.lines().find(|l| l.contains("mobile-developer")).unwrap_or_else(|| panic!("{out}"));
     let security = out.lines().find(|l| l.contains("security-reviewer")).unwrap_or_else(|| panic!("{out}"));

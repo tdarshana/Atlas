@@ -108,7 +108,7 @@
 			const [active, projectList, agentList, facets] = await Promise.all([
 				client.listMemories('active', projectId, projectId ? 'project_only' : undefined, { limit: RECENT }),
 				client.listProjects(),
-				client.listPersonas(),
+				client.listAgents(),
 				projectId ? client.memoryFacets(projectId, 'project_only') : Promise.resolve(null)
 			]);
 			counts = { projects: projectList.length, agents: agentList.length };

@@ -777,14 +777,13 @@ async fn stub_llm_recording_models(reply: &str) -> (String, Arc<Mutex<Vec<String
 /// `case`, the persona's `default`, the agent's `model_hint`, the extraction model.
 /// The same workflow run twice, once attributed to a persona and once not, shows
 /// every rung: with the persona, `review` picks `model-r` and the two uncased actions
-/// pick `model-d` (over the agent's own hint); without it, the agent's hint and then
-/// the extraction model apply exactly as before personas existed.
+/// pick `model-d` (over the named agent's own default model); without it, the named
+/// agent's default model and then the extraction model apply.
 #[tokio::test]
 async fn a_persona_attributed_run_picks_the_model_by_case() {
     use crate::backend::LocalBackend;
     use crate::jobs::Job;
-    use crate::library::AgentRepo;
-    use crate::models::{NewAgent, NewPersona, TriggerKind};
+    use crate::models::{NewPersona, TriggerKind};
 
     let (stub, models) = stub_llm_recording_models("step done").await;
     let dir = tempfile::tempdir().unwrap();
@@ -792,8 +791,17 @@ async fn a_persona_attributed_run_picks_the_model_by_case() {
     let backend = LocalBackend::open(&paths, None, false).unwrap();
     let settings = json!({"extraction.enabled": true, "extraction.base_url": stub, "extraction.model": "stub", "extraction.api_key": "k"});
     SettingsRepo::new(&backend.db).set_many(settings.as_object().unwrap(), "t").unwrap();
-    AgentRepo::new(&backend.db)
-        .save(&NewAgent { name: "planner".into(), description: "d".into(), instructions: "Do it.".into(), model_hint: Some("planner-model".into()), tools: vec![], tags: vec![] }, "t")
+    backend
+        .personas
+        .create(
+            &NewPersona {
+                name: "planner".into(),
+                instructions: "Do it.".into(),
+                models: std::collections::BTreeMap::from([(Case::Default, "planner-model".to_string())]),
+                ..Default::default()
+            },
+            "t",
+        )
         .unwrap();
     let persona = backend
         .personas
@@ -807,7 +815,7 @@ async fn a_persona_attributed_run_picks_the_model_by_case() {
         )
         .unwrap();
 
-    // review (planner) -> uncased (planner) -> uncased (desktop, not a saved agent).
+    // review (planner) -> uncased (planner) -> uncased (desktop, not a saved agent row).
     let mut graph = Graph {
         nodes: vec![trigger_node("t"), action_node("a", "review", at(200.0, 0.0)), action_node("b", "plan", at(400.0, 0.0)), action_node("c", "wrap", at(600.0, 0.0)), output_node("o")],
         edges: vec![edge("t", "a"), edge("a", "b"), edge("b", "c"), edge("c", "o")],

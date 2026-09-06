@@ -285,33 +285,31 @@ async fn mcp_over_http_lists_and_calls_tools() {
     // project_connect and memory_review are disabled by default (mcp.disabled_tools),
     // so they are not in this list; see atlas-mcp's own gating tests for that.
     for t in ["memory_remember", "memory_search", "memory_forget", "status", "project_context", "agent_list",
-              "agent_get", "agent_save", "practice_list", "practice_get", "workflow_list", "workflow_get"] {
+              "agent_get", "agent_use", "practice_list", "practice_get", "workflow_list", "workflow_get"] {
         assert!(body.contains(&format!("\"name\":\"{t}\"")), "tools/list missing {t}: {body}");
     }
 
     let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"memory_remember","arguments":{"text":"mcp round trip works","kind":"insight"}}})).await;
     assert!(body.contains("mcp round trip works"), "{body}");
 
-    // Agents reach MCP through the same store the JSON API writes, so save one there and
-    // expect it to show up as a resource and as a prompt.
+    // Agents reach MCP through the same store the JSON API writes, so create one there
+    // and expect `agent_list` to answer with it.
     let saved = c.post(format!("{api}/agents")).json(&serde_json::json!({
-        "name": "reviewer", "description": "Reviews diffs for regressions",
-        "instructions": "Read the diff and name the riskiest change.", "tools": ["Read"], "tags": ["review"],
+        "name": "Reviewer", "role": "Reviews diffs for regressions",
+        "instructions": "Read the diff and name the riskiest change.", "tags": ["review"],
     })).send().await.unwrap();
-    assert_eq!(saved.status(), 201, "save_agent failed");
+    assert_eq!(saved.status(), 201, "create agent failed");
 
-    let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":4,"method":"resources/list"})).await;
-    assert!(body.contains("atlas://agents/reviewer"), "resources/list missing the agent: {body}");
-
-    let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":5,"method":"resources/read","params":{"uri":"atlas://agents/reviewer"}})).await;
-    assert!(body.contains("name: reviewer"), "resources/read did not return the Claude export: {body}");
+    let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"agent_list","arguments":{}}})).await;
+    assert!(body.contains("reviewer"), "agent_list missing the agent: {body}");
 
     let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":6,"method":"prompts/list"})).await;
-    assert!(body.contains("\"name\":\"reviewer\""), "prompts/list missing the agent: {body}");
+    assert!(body.contains("atlas.bootstrap"), "prompts/list missing the bootstrap prompt: {body}");
 
-    let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":7,"method":"prompts/get","params":{"name":"reviewer"}})).await;
-    assert!(body.contains("Adopt the following agent role"), "prompts/get lost the preamble: {body}");
-    assert!(body.contains("name the riskiest change"), "prompts/get lost the instructions: {body}");
+    let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":7,"method":"prompts/get","params":{"name":"atlas.bootstrap"}})).await;
+    assert!(body.contains("memory_search"), "prompts/get lost the bootstrap text: {body}");
+    let body = rpc(&c, &url, &session, serde_json::json!({"jsonrpc":"2.0","id":8,"method":"prompts/get","params":{"name":"reviewer"}})).await;
+    assert!(body.contains("unknown prompt"), "an agent is not a prompt any more: {body}");
 
     // project_context takes an explicit root, which is how an MCP client that cannot set
     // ATLAS_PROJECT_ROOT still scopes its session to a project.
@@ -342,11 +340,11 @@ async fn mcp_status_reports_transports_counts_and_an_http_client_after_a_call() 
     assert!(status["transports"]["http"]["url"].as_str().unwrap().ends_with("/mcp"), "{status}");
     assert!(!status["transports"]["http"]["protocol_version"].as_str().unwrap().is_empty(), "{status}");
     let tools = status["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 35, "{tools:?}");
+    assert_eq!(tools.len(), 32, "{tools:?}");
     let disabled: Vec<&str> = tools.iter().filter(|t| t["enabled"].as_bool() == Some(false)).map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(disabled.len(), 2, "{disabled:?}");
     assert!(disabled.contains(&"project_connect") && disabled.contains(&"memory_review"), "{disabled:?}");
-    assert_eq!(status["counts"]["tools"], 35, "{status}");
+    assert_eq!(status["counts"]["tools"], 32, "{status}");
     assert_eq!(status["counts"]["resources"].as_u64().unwrap(), status["resources"].as_array().unwrap().len() as u64, "{status}");
     assert_eq!(status["counts"]["prompts"].as_u64().unwrap(), status["prompts"].as_array().unwrap().len() as u64, "{status}");
     assert!(status["clients"].as_array().unwrap().is_empty(), "{status}");
@@ -618,10 +616,15 @@ async fn projects_agents_docs_and_sync() {
     let refreshed: serde_json::Value = c.post(format!("{base}/projects/{pid}/refresh")).send().await.unwrap().json().await.unwrap();
     assert_eq!(refreshed["name"], "fixture");
 
-    let a: serde_json::Value = c.post(format!("{base}/agents")).json(&serde_json::json!({"name":"reviewer","description":"Reviews PRs","instructions":"Be strict.","tools":["Read"],"tags":[]})).send().await.unwrap().json().await.unwrap();
-    assert_eq!(a["version"], 1);
+    // The agent routes and the `/personas` alias answer the same rows (ATL-427).
+    let a: serde_json::Value = c.post(format!("{base}/agents")).json(&serde_json::json!({"name":"Reviewer","role":"Reviews PRs","instructions":"Be strict.","tags":[]})).send().await.unwrap().json().await.unwrap();
+    assert_eq!(a["slug"], "reviewer");
     let agents: serde_json::Value = c.get(format!("{base}/agents")).send().await.unwrap().json().await.unwrap();
     assert_eq!(agents.as_array().unwrap().len(), 1);
+    let aliased: serde_json::Value = c.get(format!("{base}/personas")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(aliased, agents, "the old path is an alias");
+    let roster: serde_json::Value = c.put(format!("{base}/projects/{pid}/agents")).json(&serde_json::json!([{"persona_id": a["id"], "is_default": true, "position": 0}])).send().await.unwrap().json().await.unwrap();
+    assert_eq!(roster.as_array().unwrap().len(), 1, "{roster}");
 
     let r = c.post(format!("{base}/practices")).json(&serde_json::json!({"name":"commits","body":"imperative","tags":[],"project_id": pid})).send().await.unwrap();
     assert_eq!(r.status(), 201);
@@ -643,32 +646,37 @@ async fn projects_agents_docs_and_sync() {
 
     let targets = serde_json::json!(["claude", "codex", "agents_md", "claude_md"]);
     let check: serde_json::Value = c.post(format!("{base}/sync")).json(&serde_json::json!({"root": repo.path(), "global": false, "targets": targets, "check_only": true})).send().await.unwrap().json().await.unwrap();
-    assert_eq!(check["created"], 4, "{check}");
+    assert_eq!(check["created"], 3, "{check}");
     assert!(!repo.path().join(".claude/agents/reviewer.md").exists(), "check_only must not write");
 
     let rep: serde_json::Value = c.post(format!("{base}/sync")).json(&serde_json::json!({"root": repo.path(), "global": false, "targets": targets, "check_only": false})).send().await.unwrap().json().await.unwrap();
-    assert_eq!(rep["created"], 4);
-    assert!(repo.path().join(".claude/agents/reviewer.md").exists() && repo.path().join(".codex/agents/reviewer.toml").exists());
+    assert_eq!(rep["created"], 3);
+    assert!(repo.path().join(".claude/agents/reviewer.md").exists(), "the roster agent is exported as a subagent file");
+    assert!(!repo.path().join(".codex/agents").exists(), "Codex gets no per-agent file");
     let agents_md = std::fs::read_to_string(repo.path().join("AGENTS.md")).unwrap();
-    assert!(agents_md.contains("- `reviewer`: Reviews PRs"), "{agents_md}");
+    assert!(agents_md.contains("## Agent: Reviewer"), "{agents_md}");
     assert!(agents_md.contains("fixture"), "the block names the connected project: {agents_md}");
 
     let again: serde_json::Value = c.post(format!("{base}/sync")).json(&serde_json::json!({"root": repo.path(), "global": false, "targets": targets, "check_only": false})).send().await.unwrap().json().await.unwrap();
-    assert_eq!(again["unchanged"], 4);
+    assert_eq!(again["unchanged"], 3);
 
     let del = c.delete(format!("{base}/practices/commits")).send().await.unwrap();
     assert_eq!(del.status(), 204);
     assert_eq!(c.get(format!("{base}/practices/commits")).send().await.unwrap().status(), 404);
-    assert_eq!(c.delete(format!("{base}/agents/reviewer")).send().await.unwrap().status(), 204);
+    // Delete takes the id, not the slug; the roster row goes with it.
+    let agent_id = a["id"].as_str().unwrap();
+    assert_eq!(c.delete(format!("{base}/agents/{agent_id}")).send().await.unwrap().status(), 204);
+    assert_eq!(c.get(format!("{base}/agents/reviewer")).send().await.unwrap().status(), 404);
 
-    let bad = c.post(format!("{base}/agents")).json(&serde_json::json!({"name":"Bad Name","description":"x","instructions":"y"})).send().await.unwrap();
-    assert_eq!(bad.status(), 400);
+    let bad = c.post(format!("{base}/agents")).json(&serde_json::json!({"name":"","instructions":"y"})).send().await.unwrap();
+    assert_eq!(bad.status(), 400, "an empty name is refused");
     let no_root = c.post(format!("{base}/sync")).json(&serde_json::json!({"global": false, "targets": targets, "check_only": true})).send().await.unwrap();
     assert_eq!(no_root.status(), 400, "a project sync needs a root");
 }
 
 /// A global sync must write into the home `ATLAS_SYNC_HOME` names, not the real one, and
-/// must write agent files only: home has no project to name in a managed block.
+/// must write the per-tool files only: home has no project to name in a managed block
+/// and no roster, so with extraction on that is the two transcript hooks.
 #[tokio::test]
 async fn global_sync_honours_the_sync_home_override() {
     let home = tempfile::tempdir().unwrap();
@@ -676,16 +684,17 @@ async fn global_sync_honours_the_sync_home_override() {
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
     let c = d.client();
 
-    let saved = c.post(format!("{base}/agents")).json(&serde_json::json!({"name":"reviewer","description":"Reviews PRs","instructions":"Be strict.","tools":["Read"],"tags":[]})).send().await.unwrap();
-    assert_eq!(saved.status(), 201);
+    let put = c.put(format!("{base}/settings")).json(&serde_json::json!({"extraction.enabled": true})).send().await.unwrap();
+    assert_eq!(put.status(), 200);
 
-    let targets = serde_json::json!(["claude", "codex", "agents_md", "claude_md"]);
+    let targets = serde_json::json!(["claude", "codex", "claude_hook", "codex_hook", "agents_md", "claude_md"]);
     let rep: serde_json::Value = c.post(format!("{base}/sync")).json(&serde_json::json!({"global": true, "targets": targets, "check_only": false})).send().await.unwrap().json().await.unwrap();
     assert_eq!(rep["created"], 2, "{rep}");
     assert_eq!(rep["skipped"], 2, "the two managed-block targets are reported, not dropped: {rep}");
 
-    assert!(home.path().join(".claude/agents/reviewer.md").exists(), "no Claude agent file under the override home");
-    assert!(home.path().join(".codex/agents/reviewer.toml").exists(), "no Codex agent file under the override home");
+    assert!(home.path().join(".claude/settings.json").exists(), "no Claude hook under the override home");
+    assert!(home.path().join(".codex/config.toml").exists(), "no Codex hook under the override home");
+    assert!(!home.path().join(".claude/agents").exists(), "no roster, so no subagent files");
     assert!(!home.path().join("AGENTS.md").exists(), "a global sync must not write AGENTS.md");
     assert!(!home.path().join("CLAUDE.md").exists(), "a global sync must not write CLAUDE.md");
 
@@ -698,8 +707,8 @@ async fn global_sync_honours_the_sync_home_override() {
     })).send().await.unwrap().json().await.unwrap();
     assert_eq!(rep2["created"], 0, "{rep2}");
     assert_eq!(rep2["unchanged"], 2, "a second sync still lands in the ATLAS_SYNC_HOME override: {rep2}");
-    assert!(!elsewhere.path().join(".claude/agents/reviewer.md").exists(), "a `home` field in the request body must not redirect the sync");
-    assert!(!elsewhere.path().join(".codex/agents/reviewer.toml").exists(), "a `home` field in the request body must not redirect the sync");
+    assert!(!elsewhere.path().join(".claude/settings.json").exists(), "a `home` field in the request body must not redirect the sync");
+    assert!(!elsewhere.path().join(".codex/config.toml").exists(), "a `home` field in the request body must not redirect the sync");
 }
 
 /// The transcript hooks are installed only once extraction is switched on, and the
@@ -1754,7 +1763,7 @@ async fn project_mcp_route_reports_and_gates_a_project_override() {
     assert!(before["connect"]["http"]["url"].as_str().unwrap().ends_with("/mcp"), "{before}");
     assert_eq!(before["connect"]["project_root"], project["root_path"], "{before}");
     let tools = before["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 35, "{tools:?}");
+    assert_eq!(tools.len(), 32, "{tools:?}");
     let task_move = tools.iter().find(|t| t["name"] == "task_move").unwrap();
     assert_eq!(task_move["enabled_globally"], true, "{task_move}");
     assert_eq!(task_move["enabled_here"], true, "{task_move}");
@@ -2458,7 +2467,7 @@ async fn stub_llm_recording_models(reply: &str) -> (String, std::sync::Arc<std::
 /// An action whose agent carries a `model_hint` runs on that model; an agent saved
 /// without one, and the unsaved `desktop` fallback, both run on the extraction model.
 #[tokio::test]
-async fn workflow_actions_run_on_the_agents_model_hint_when_it_has_one() {
+async fn workflow_actions_run_on_the_agents_default_model_when_it_has_one() {
     let (stub, models) = stub_llm_recording_models("step done").await;
     let d = start().await;
     let base = format!("http://127.0.0.1:{}/api/v1", d.port);
@@ -2468,8 +2477,9 @@ async fn workflow_actions_run_on_the_agents_model_hint_when_it_has_one() {
     })).send().await.unwrap();
     assert_eq!(put.status(), 200);
     for (name, hint) in [("planner", Some("planner-model")), ("reviewer", None)] {
+        let models = hint.map(|h| serde_json::json!({"default": h})).unwrap_or_else(|| serde_json::json!({}));
         let r = c.post(format!("{base}/agents")).json(&serde_json::json!({
-            "name": name, "description": "d", "instructions": "Do it.", "model_hint": hint,
+            "name": name, "role": "d", "instructions": "Do it.", "models": models,
         })).send().await.unwrap();
         assert_eq!(r.status(), 201, "{}", r.text().await.unwrap());
     }
@@ -3749,7 +3759,9 @@ async fn every_route_in_the_table_is_served() {
     // with as many methods as the table lists for it.
     let http = include_str!("../src/http.rs");
     let mut missing = Vec::new();
-    for line in http.lines().map(str::trim_start).filter(|l| l.starts_with(".route(\"/api/v1")) {
+    // A line marked `// alias` mounts an old path onto a listed route's handlers and is
+    // deliberately absent from the table, so the generated client has one name per route.
+    for line in http.lines().map(str::trim_start).filter(|l| l.starts_with(".route(\"/api/v1") && !l.contains("// alias")) {
         let path = line.split('"').nth(1).unwrap();
         let mounted = ["get(", "post(", "put(", "patch(", "delete("].iter().filter(|m| line.contains(*m)).count();
         let listed = routes::ROUTES.iter().filter(|r| r.path == path).count();

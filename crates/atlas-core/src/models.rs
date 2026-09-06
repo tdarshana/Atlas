@@ -240,30 +240,6 @@ pub struct LogFilter {
     #[serde(default)] pub limit: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct NewAgent {
-    pub name: String,
-    pub description: String,
-    pub instructions: String,
-    pub model_hint: Option<String>,
-    #[serde(default)] pub tools: Vec<String>,
-    #[serde(default)] pub tags: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct Agent {
-    pub id: Uuid,
-    pub name: String,
-    pub description: String,
-    pub instructions: String,
-    pub model_hint: Option<String>,
-    pub tools: Vec<String>,
-    pub tags: Vec<String>,
-    pub version: i32,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
 str_enum!(DocKind { Practice => "practice", Workflow => "workflow" });
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1151,7 +1127,7 @@ impl Default for PersonaAccess {
 
 /// A library persona: a role an agent adopts, bundling what it works with and how.
 /// Global and unique by name (compared without case); `slug` is derived from the name
-/// and is the export file name and the `persona_use` key.
+/// and is the export file name and the `agent_use` key.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Persona {
     pub id: Uuid,

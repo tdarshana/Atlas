@@ -31,7 +31,8 @@ enum Cmd {
     Recall { query: String, #[arg(long, default_value_t = 10)] limit: usize, #[arg(long = "kind")] kinds: Vec<String>, #[arg(long = "tag")] tags: Vec<String>, #[arg(long)] project_id: Option<uuid::Uuid> },
     /// Connect and inspect projects
     Project { #[command(subcommand)] action: commands::project::ProjectCmd },
-    /// Manage the agents Atlas exports to Claude Code and Codex
+    /// List and read the agents a session can adopt (`persona` still works as an alias)
+    #[command(alias = "persona")]
     Agent { #[command(subcommand)] action: commands::agent::AgentCmd },
     /// Work with the task board
     Task {
@@ -53,8 +54,6 @@ enum Cmd {
     Framework { #[command(subcommand)] action: commands::framework::FrameworkCmd },
     /// List, read and gate the skills agents can use
     Skill { #[command(subcommand)] action: commands::skill::SkillCmd },
-    /// List and read the personas agents can adopt
-    Persona { #[command(subcommand)] action: commands::persona::PersonaCmd },
     /// Write agent files and managed instruction blocks into a project or the home directory
     Sync(commands::sync::SyncArgs),
     /// Write the whole library to DIR as JSONL and Markdown
@@ -210,7 +209,6 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Workflow { action } => commands::workflow::run(action, &backend(&paths, cli.port).await?).await?,
         Cmd::Framework { action } => commands::framework::run(action, &backend(&paths, cli.port).await?).await?,
         Cmd::Skill { action } => commands::skill::run(action, &backend(&paths, cli.port).await?).await?,
-        Cmd::Persona { action } => commands::persona::run(action, &backend(&paths, cli.port).await?).await?,
         Cmd::Sync(args) => commands::sync::run(args, &backend(&paths, cli.port).await?).await?,
         Cmd::Export { dir, force } => commands::export::run(dir, force, &backend(&paths, cli.port).await?).await?,
         Cmd::Import { dir } => commands::import::run(dir, &backend(&paths, cli.port).await?).await?,

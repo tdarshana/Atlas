@@ -85,19 +85,12 @@ describe('AtlasApi', () => {
 	});
 
 	it('posts an agent to /api/v1/agents', async () => {
-		const agent = {
-			name: 'writer',
-			description: 'writes',
-			instructions: 'write well',
-			model_hint: null,
-			tools: [],
-			tags: []
-		};
-		const calls = stubFetch([{ status: 201, body: { ...agent, id: 'a', version: 1 } }]);
+		const agent = { name: 'Writer', role: 'writes', instructions: 'write well', tags: [] };
+		const calls = stubFetch([{ status: 201, body: { ...agent, id: 'a', slug: 'writer' } }]);
 
-		const saved = await api().saveAgent(agent);
+		const saved = await api().createAgent(agent);
 
-		expect(saved.name).toBe('writer');
+		expect(saved.slug).toBe('writer');
 		expect(calls[0].url).toBe('http://127.0.0.1:7433/api/v1/agents');
 		expect(calls[0].init.method).toBe('POST');
 		expect(JSON.parse(calls[0].init.body as string)).toEqual(agent);
@@ -106,9 +99,9 @@ describe('AtlasApi', () => {
 	it('deletes an agent and resolves on 204 with no body to parse', async () => {
 		const calls = stubFetch([{ status: 204 }]);
 
-		await expect(api().deleteAgent('writer')).resolves.toBeUndefined();
+		await expect(api().deleteAgent('a')).resolves.toBeUndefined();
 
-		expect(calls[0].url).toBe('http://127.0.0.1:7433/api/v1/agents/writer');
+		expect(calls[0].url).toBe('http://127.0.0.1:7433/api/v1/agents/a');
 		expect(calls[0].init.method).toBe('DELETE');
 	});
 

@@ -59,8 +59,10 @@ pub enum ProjectCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Show a project's persona roster, or change it with --add, --remove and --default
-    Personas {
+    /// Show a project's agent roster, or change it with --add, --remove and --default
+    /// (`personas` still works as an alias)
+    #[command(alias = "personas")]
+    Agents {
         /// The project's UUID, or the root path it was connected at
         target: String,
         /// Put a persona (by name or slug) on the roster; repeatable
@@ -222,7 +224,7 @@ pub async fn run(cmd: ProjectCmd, backend: &RemoteBackend) -> anyhow::Result<()>
             super::print_table(&["TIME", "SOURCE", "EVENT", "DETAIL", "REF"], &rows);
             Ok(())
         }
-        ProjectCmd::Personas { target, add, remove, default } => {
+        ProjectCmd::Agents { target, add, remove, default } => {
             let id = resolve(&target, backend).await?;
             let current = backend.project_roster(id).await?;
             if add.is_empty() && remove.is_empty() && default.is_none() {

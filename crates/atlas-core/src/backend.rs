@@ -8,7 +8,7 @@ use crate::workflow::WorkflowRepo;
 use crate::db::Db;
 use crate::export::BlockContext;
 use crate::jobs::{Job, JobQueue, JobRepo};
-use crate::library::{AgentRepo, DocRepo};
+use crate::library::DocRepo;
 use crate::models::*;
 use crate::paths::AtlasPaths;
 use crate::personas::PersonaRepo;
@@ -154,14 +154,9 @@ pub trait ProjectBackend: Send + Sync + 'static {
     async fn import_framework(&self, project_id: Uuid, kind: FrameworkKind, what: ImportWhat, actor: &str) -> Result<ImportReport>;
 }
 
-/// The library: agents and documents.
+/// The library: practice and workflow documents.
 #[async_trait::async_trait]
 pub trait LibraryBackend: Send + Sync + 'static {
-    async fn list_agents(&self) -> Result<Vec<Agent>>;
-    async fn get_agent(&self, name: &str) -> Result<Agent>;
-    async fn save_agent(&self, a: NewAgent, actor: &str) -> Result<Agent>;
-    async fn delete_agent(&self, name: &str, actor: &str) -> Result<()>;
-
     async fn list_docs(&self, kind: DocKind, project_id: Option<Uuid>) -> Result<Vec<Doc>>;
     async fn get_doc(&self, kind: DocKind, name: &str) -> Result<Doc>;
     async fn save_doc(&self, kind: DocKind, d: NewDoc, actor: &str) -> Result<Doc>;
@@ -349,7 +344,6 @@ pub struct LocalBackend {
 /// `db`, so building it inside a `blocking` closure (which owns a cloned `Arc<Db>`,
 /// not a borrow of `self`) is cheaper than threading a stored repo through.
 fn projects_repo(db: &Db) -> ProjectRepo<'_> { ProjectRepo::new(db) }
-fn agents_repo(db: &Db) -> AgentRepo<'_> { AgentRepo::new(db) }
 fn docs_repo(db: &Db, kind: DocKind) -> DocRepo<'_> { DocRepo::new(db, kind) }
 fn settings_repo(db: &Db) -> crate::settings::SettingsRepo<'_> { crate::settings::SettingsRepo::new(db) }
 
@@ -779,11 +773,10 @@ impl ProjectBackend for LocalBackend {
     /// repository lookup each and stay inline.
     async fn sync(&self, req: SyncRequest) -> Result<SyncReport> {
         let db = self.db.clone();
-        let agents = self.blocking({ let db = db.clone(); move || agents_repo(&db).list() }).await?;
         let requested = if req.targets.is_empty() { DEFAULT_TARGETS.to_vec() } else { req.targets.clone() };
         let (root, targets, block, skipped, project_id) = if req.global {
             let home = sync_home()?;
-            // Home is not a project, so only the agent exporters apply: splicing a managed
+            // Home is not a project, so only the per-tool exporters apply: splicing a managed
             // block into ~/AGENTS.md would name practices and a project that aren't there.
             // The dropped targets are still reported, so a caller who asked for one is told
             // why nothing was written for it instead of reading a silent success.
@@ -804,7 +797,7 @@ impl ProjectBackend for LocalBackend {
                     delete: false,
                 })
                 .collect();
-            let block = BlockContext { mcp_command: MCP_COMMAND.into(), agents: agents.clone(), practices: vec![], project_name: None };
+            let block = BlockContext { mcp_command: MCP_COMMAND.into(), practices: vec![], project_name: None };
             (home, targets, block, skipped, None)
         } else {
             let requested_root = req.root.clone().ok_or_else(|| AtlasError::Invalid("sync requires a root unless global is set".into()))?;
@@ -818,7 +811,7 @@ impl ProjectBackend for LocalBackend {
             let project = self.connect_project(detected.root, "sync").await?;
             let pid = project.id;
             let practices = self.blocking({ let db = db.clone(); move || docs_repo(&db, DocKind::Practice).list(Some(pid)) }).await?;
-            let block = BlockContext { mcp_command: MCP_COMMAND.into(), agents: agents.clone(), practices, project_name: Some(project.name.clone()) };
+            let block = BlockContext { mcp_command: MCP_COMMAND.into(), practices, project_name: Some(project.name.clone()) };
             (PathBuf::from(project.root_path), requested, block, vec![], Some(project.id))
         };
         // The hooks feed transcripts to a model, so they are installed only once the
@@ -861,7 +854,6 @@ impl ProjectBackend for LocalBackend {
         let report = self.blocking(move || {
             let mut ops = sync::plan_sync(&SyncInputs {
                 root: &root,
-                agents: &agents,
                 block,
                 targets: &targets,
                 home: &home,
@@ -956,27 +948,6 @@ impl ProjectBackend for LocalBackend {
 
 #[async_trait::async_trait]
 impl LibraryBackend for LocalBackend {
-    async fn list_agents(&self) -> Result<Vec<Agent>> {
-        let db = self.db.clone();
-        self.blocking(move || agents_repo(&db).list()).await
-    }
-    async fn get_agent(&self, name: &str) -> Result<Agent> {
-        let db = self.db.clone();
-        let name = name.to_string();
-        self.blocking(move || agents_repo(&db).get(&name)).await
-    }
-    async fn save_agent(&self, a: NewAgent, actor: &str) -> Result<Agent> {
-        let db = self.db.clone();
-        let actor = actor.to_string();
-        self.blocking(move || agents_repo(&db).save(&a, &actor)).await
-    }
-    async fn delete_agent(&self, name: &str, actor: &str) -> Result<()> {
-        let db = self.db.clone();
-        let name = name.to_string();
-        let actor = actor.to_string();
-        self.blocking(move || agents_repo(&db).delete(&name, &actor)).await
-    }
-
     async fn list_docs(&self, kind: DocKind, project_id: Option<Uuid>) -> Result<Vec<Doc>> {
         let db = self.db.clone();
         self.blocking(move || docs_repo(&db, kind).list(project_id)).await
@@ -1506,7 +1477,9 @@ mod tests {
         let b = LocalBackend::open(&paths, None, false).unwrap();
         let project_root = tempfile::tempdir().unwrap();
         git2::Repository::init(project_root.path()).unwrap();
-        b.save_agent(NewAgent { name: "reviewer".into(), description: "Reviews.".into(), instructions: "Review.".into(), model_hint: None, tools: vec![], tags: vec![] }, "t").await.unwrap();
+        let reviewer = b.personas.create(&NewPersona { name: "Reviewer".into(), instructions: "Review.".into(), ..Default::default() }, "t").unwrap();
+        let project = b.connect_project(project_root.path().to_path_buf(), "t").await.unwrap();
+        b.personas.set_roster(project.id, &[RosterEntry { persona_id: reviewer.id, is_default: true, position: 0 }], "t").unwrap();
 
         let req = SyncRequest { root: Some(project_root.path().to_path_buf()), global: false, targets: vec![SyncKind::Claude], check_only: false };
         let report = b.sync(req).await.unwrap();

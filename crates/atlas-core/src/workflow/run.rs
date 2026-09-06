@@ -25,7 +25,8 @@ use crate::backend::{BoardBackend, LocalBackend, MemoryBackend};
 use crate::db::Db;
 use crate::extract::{self, ExtractionConfig};
 use crate::jobs::Job;
-use crate::library::{AgentRepo, DocRepo};
+use crate::library::DocRepo;
+use crate::personas::PersonaRepo;
 use crate::llm::{LlmClient, ModelProfile};
 use crate::models::*;
 use crate::service::MemoryService;
@@ -131,18 +132,18 @@ fn memories_section(memories: &MemoryService, workflow_project_id: Option<Uuid>,
     memories.iter().map(|m| format!("- ({}) {}", m.kind, m.text)).collect::<Vec<_>>().join("\n")
 }
 
-/// The system prompt for one action: a saved agent's instructions, or a generic
-/// fallback naming the label the graph gave it, followed by one `## Practice: <name>`
+/// The system prompt for one action: the instructions of the agent the action names
+/// (by name or slug), or a generic fallback naming the label the graph gave it, followed by one `## Practice: <name>`
 /// section per attached practice that actually resolves. A practice that does not
 /// resolve produces a WARN line rather than failing the step: the action still runs,
 /// just without that guidance. Returns the warnings instead of pushing into a
 /// caller's `log` so this can run inside a `blocking` closure that owns no borrow of
 /// the caller's state; the caller extends its own log with what comes back.
-fn system_prompt(db: &Db, agent: &str, practices: &[String]) -> (String, Vec<LogLine>) {
+fn system_prompt(personas: &PersonaRepo, db: &Db, agent: &str, practices: &[String]) -> (String, Vec<LogLine>) {
     let mut warnings = Vec::new();
-    let mut system = match AgentRepo::new(db).get(agent) {
-        Ok(a) => a.instructions,
-        Err(_) => format!("You are {agent}, an agent working inside Atlas."),
+    let mut system = match personas.get(agent) {
+        Ok(a) if !a.instructions.trim().is_empty() => a.instructions,
+        _ => format!("You are {agent}, an agent working inside Atlas."),
     };
     let docs = DocRepo::new(db, DocKind::Practice);
     for name in practices {
@@ -344,18 +345,19 @@ pub async fn run_workflow(job: &Job, backend: &LocalBackend) -> Result<Value> {
         let mut log: Vec<LogLine> = persona_warning.take().into_iter().collect();
 
         // The model, in order: the run's persona's model for the action's `case`, then
-        // the persona's `default` case, then the agent's `model_hint` when the agent is
-        // saved and names one, then the scope's extraction model. The hint goes through
+        // the persona's `default` case, then the `default` model of the agent the action
+        // names when that agent exists and has one, then the scope's extraction model. The hint goes through
         // `ExtractionConfig::model_profile`, which is what `extract::resolve_model` does
         // once the config is resolved, so the endpoint and key are the scope's either way.
         let (cfg, profile): (ExtractionConfig, ModelProfile) = {
             let db = backend.db.clone();
             let project_id = workflow.project_id;
             let agent = agent.clone();
+            let personas = backend.personas.clone();
             let persona_hint = persona_model_hint(persona_models.as_ref(), case.as_ref());
             let resolved = backend.blocking(move || {
                 let cfg = extract::resolve_extraction(&db, project_id)?;
-                let hint = persona_hint.or_else(|| AgentRepo::new(&db).get(&agent).ok().and_then(|a| a.model_hint));
+                let hint = persona_hint.or_else(|| personas.get(&agent).ok().and_then(|a| a.models.get(&Case::Default).cloned()));
                 let profile = cfg.model_profile(hint.as_deref());
                 Ok((cfg, profile))
             }).await;
@@ -388,12 +390,13 @@ pub async fn run_workflow(job: &Job, backend: &LocalBackend) -> Result<Value> {
         let (system, prompt_warnings, memories_block) = {
             let db = backend.db.clone();
             let memories_svc = backend.memories.clone();
+            let personas = backend.personas.clone();
             let agent = agent.clone();
             let practices = practices.clone();
             let source = memory_source.clone();
             let project_id = workflow.project_id;
             backend.blocking(move || {
-                let (system, prompt_warnings) = system_prompt(&db, &agent, &practices);
+                let (system, prompt_warnings) = system_prompt(&personas, &db, &agent, &practices);
                 let memories_block = memories_section(&memories_svc, project_id, &source);
                 Ok((system, prompt_warnings, memories_block))
             }).await?

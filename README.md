@@ -52,7 +52,7 @@ Any MCP client that speaks streamable HTTP can use `http://127.0.0.1:7433/mcp` o
     atlas remember "we deploy to fly.io" --kind decision --tag infra
     atlas recall "where do we deploy"
     atlas task create "Add board export"
-    atlas persona list
+    atlas agent list
     atlas daemon status
     atlas tui
 

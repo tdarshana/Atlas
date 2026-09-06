@@ -1,21 +1,6 @@
 use atlas_core::export::*;
 use atlas_core::models::*;
 
-fn agent() -> Agent {
-    Agent {
-        id: uuid::Uuid::nil(),
-        name: "reviewer".into(),
-        description: "Reviews pull requests for correctness and risk".into(),
-        instructions: "You are a strict reviewer.\n\nReport findings with file:line.".into(),
-        model_hint: Some("opus".into()),
-        tools: vec!["Read".into(), "Grep".into()],
-        tags: vec!["qa".into()],
-        version: 3,
-        created_at: Default::default(),
-        updated_at: Default::default(),
-    }
-}
-
 fn practice() -> Doc {
     Doc {
         id: uuid::Uuid::nil(),
@@ -39,20 +24,10 @@ fn check(name: &str, actual: &str) {
 }
 
 #[test]
-fn claude_md_matches_golden() {
-    check("reviewer.claude.md", &claude_agent_md(&agent()));
-}
-
-#[test]
-fn codex_toml_matches_golden() {
-    check("reviewer.codex.toml", &codex_agent_toml(&agent()));
-}
-
-#[test]
 fn managed_block_matches_golden() {
     check(
         "managed_block.md",
-        &render_block(&BlockContext { mcp_command: "atlas mcp".into(), agents: vec![agent()], practices: vec![practice()], project_name: Some("fixture".into()) }),
+        &render_block(&BlockContext { mcp_command: "atlas mcp".into(), practices: vec![practice()], project_name: Some("fixture".into()) }),
     );
 }
 
@@ -66,7 +41,6 @@ fn splice_replaces_only_between_markers() {
 
 #[test]
 fn generated_header_detection() {
-    assert!(is_generated(&claude_agent_md(&agent())));
-    assert!(is_generated(&codex_agent_toml(&agent())));
+    assert!(is_generated(&format!("---\n# {GENERATED_HEADER}\nname: x\n---\n")));
     assert!(!is_generated("---\nname: x\n---\n"));
 }

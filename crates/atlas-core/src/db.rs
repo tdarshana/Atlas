@@ -230,6 +230,10 @@ alter table tasks_v13 rename to tasks;
 -- moves until someone drags.
 alter table tasks add column position double;
 update tasks set position = seq;
+"#), (15, r#"
+-- ATL-427: the agent roles table predates personas, which took the name agent on
+-- 2026-09-07. Nothing reads it any more.
+drop table if exists agents;
 "#)];
 
 /// Moves the Markdown workflow documents aside so migration 6 can give the name
@@ -350,18 +354,18 @@ mod tests {
     #[test]
     fn migrate_creates_tables_and_is_idempotent() {
         let db = Db::open_in_memory().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 14);
+        assert_eq!(db.schema_version().unwrap(), 15);
         let n: i64 = db.with_conn(|c| Ok(c.query_row(
-            "select count(*) from information_schema.tables where table_name in ('memories','memory_embeddings','audit','settings','projects','agents','practices','workflow_docs','sync_targets','jobs','tasks','task_blockers','task_events','board_counters','workflows','workflow_runs','workflow_steps','skills','personas','project_personas')",
+            "select count(*) from information_schema.tables where table_name in ('memories','memory_embeddings','audit','settings','projects','practices','workflow_docs','sync_targets','jobs','tasks','task_blockers','task_events','board_counters','workflows','workflow_runs','workflow_steps','skills','personas','project_personas')",
             [], |r| r.get(0))?)).unwrap();
-        assert_eq!(n, 20);
+        assert_eq!(n, 19);
         // Migrations 3, 5, 8 and 9 widen `projects` in place.
         let cols: i64 = db.with_conn(|c| Ok(c.query_row(
             "select count(*) from information_schema.columns where table_name='projects' and column_name in ('board_key','board_stages','agent_access','extraction','mcp_disabled_tools','skills_disabled')",
             [], |r| r.get(0))?)).unwrap();
         assert_eq!(cols, 6);
         db.migrate().unwrap(); // second run is a no-op
-        assert_eq!(db.schema_version().unwrap(), 14);
+        assert_eq!(db.schema_version().unwrap(), 15);
     }
 
     /// Migration 6 renames the Markdown doc table out of the way and puts the real
@@ -404,7 +408,7 @@ mod tests {
         .unwrap();
         assert_eq!(db.schema_version().unwrap(), 4);
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 14);
+        assert_eq!(db.schema_version().unwrap(), 15);
     }
 
     /// A database stamped 3 by the build that shipped migration 3 without
@@ -421,7 +425,7 @@ mod tests {
         assert_eq!(db.schema_version().unwrap(), 3);
 
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 14);
+        assert_eq!(db.schema_version().unwrap(), 15);
         let n: i64 = db
             .with_conn(|c| {
                 Ok(c.query_row("select count(*) from information_schema.tables where table_name = 'board_counters'", [], |r| r.get(0))?)
@@ -442,7 +446,7 @@ mod tests {
         .unwrap();
         assert_eq!(db.schema_version().unwrap(), 7);
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 14);
+        assert_eq!(db.schema_version().unwrap(), 15);
         let n: i64 = db
             .with_conn(|c| {
                 Ok(c.query_row(
@@ -468,7 +472,7 @@ mod tests {
         .unwrap();
         assert_eq!(db.schema_version().unwrap(), 8);
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 14);
+        assert_eq!(db.schema_version().unwrap(), 15);
         let n: i64 = db
             .with_conn(|c| {
                 Ok(c.query_row(
@@ -507,7 +511,7 @@ mod tests {
         .unwrap();
         assert_eq!(db.schema_version().unwrap(), 11);
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 14);
+        assert_eq!(db.schema_version().unwrap(), 15);
         assert_eq!(index_count(&db, "task_events", "task_events_task_id_idx"), 1);
         db.migrate().unwrap();
         assert_eq!(index_count(&db, "task_events", "task_events_task_id_idx"), 1, "a replay is a no-op");
@@ -551,7 +555,7 @@ mod tests {
         });
         assert!(refused.is_err(), "the v12 check refuses epic");
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 14);
+        assert_eq!(db.schema_version().unwrap(), 15);
         let (count, title): (i64, String) = db
             .with_conn(|c| Ok(c.query_row("select count(*), min(title) from tasks", [], |r| Ok((r.get(0)?, r.get(1)?)))?))
             .unwrap();
@@ -562,7 +566,7 @@ mod tests {
         })
         .expect("the rebuilt table accepts feature_request");
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 14, "a replay is a no-op");
+        assert_eq!(db.schema_version().unwrap(), 15, "a replay is a no-op");
     }
 
     /// Migration 10 adds the `jobs(status)` index with `if not exists`: a fresh
@@ -580,7 +584,7 @@ mod tests {
         assert_eq!(db.schema_version().unwrap(), 9);
         assert_eq!(jobs_status_index_count(&db), 0);
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 14);
+        assert_eq!(db.schema_version().unwrap(), 15);
         assert_eq!(jobs_status_index_count(&db), 1);
 
         // Replaying over a database that already has the index is a no-op.
@@ -590,7 +594,7 @@ mod tests {
         })
         .unwrap();
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 14);
+        assert_eq!(db.schema_version().unwrap(), 15);
         assert_eq!(jobs_status_index_count(&db), 1);
     }
 
@@ -619,7 +623,7 @@ mod tests {
         assert_eq!(db.schema_version().unwrap(), 10);
         assert_eq!(persona_object_count(&db), 0);
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 14);
+        assert_eq!(db.schema_version().unwrap(), 15);
         assert_eq!(persona_object_count(&db), 3);
 
         db.with_conn(|c| {
@@ -628,7 +632,7 @@ mod tests {
         })
         .unwrap();
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 14);
+        assert_eq!(db.schema_version().unwrap(), 15);
         assert_eq!(persona_object_count(&db), 3);
     }
 

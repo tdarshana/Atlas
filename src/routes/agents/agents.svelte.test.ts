@@ -17,11 +17,11 @@ beforeAll(() => {
 });
 
 const mocks = vi.hoisted(() => ({
-	listPersonas: vi.fn(),
-	getPersona: vi.fn(),
-	createPersona: vi.fn(),
-	updatePersona: vi.fn(),
-	deletePersona: vi.fn(),
+	listAgents: vi.fn(),
+	getAgent: vi.fn(),
+	createAgent: vi.fn(),
+	updateAgent: vi.fn(),
+	deleteAgent: vi.fn(),
 	getProjectRoster: vi.fn(),
 	listProjects: vi.fn(),
 	listSkills: vi.fn(),
@@ -66,11 +66,11 @@ const library = [persona('Reviewer', { skills: ['s-1', 's-2'], workflows: ['Nigh
 
 beforeEach(() => {
 	for (const fn of Object.values(mocks)) fn.mockReset();
-	mocks.listPersonas.mockResolvedValue(library);
-	mocks.getPersona.mockImplementation(
+	mocks.listAgents.mockResolvedValue(library);
+	mocks.getAgent.mockImplementation(
 		async (id: string) => library.find((p) => p.id === id || p.slug === id) ?? library[0]
 	);
-	mocks.deletePersona.mockResolvedValue(undefined);
+	mocks.deleteAgent.mockResolvedValue(undefined);
 	mocks.listProjects.mockResolvedValue([{ id: 'p-1', name: 'atlas' }]);
 	mocks.getProjectRoster.mockResolvedValue([]);
 	mocks.listSkills.mockResolvedValue({ skills: [], warnings: [] });
@@ -99,7 +99,7 @@ describe('the Personas view', () => {
 		await fireEvent.click(screen.getByTestId('persona-row-reviewer'));
 
 		await waitFor(() => screen.getByTestId('persona-detail'));
-		expect(mocks.getPersona).toHaveBeenCalledWith('id-Reviewer');
+		expect(mocks.getAgent).toHaveBeenCalledWith('id-Reviewer');
 		const models = screen.getAllByTestId(/^persona-model-/);
 		expect(models.map((m) => m.getAttribute('data-testid'))).toEqual([
 			'persona-model-plan',
@@ -135,10 +135,10 @@ describe('the Personas view', () => {
 		await waitFor(() => screen.getByTestId('persona-delete'));
 
 		await fireEvent.click(screen.getByTestId('persona-delete'));
-		expect(mocks.deletePersona).not.toHaveBeenCalled();
+		expect(mocks.deleteAgent).not.toHaveBeenCalled();
 
 		await waitFor(() => screen.getByTestId('persona-delete-confirm'));
 		await fireEvent.click(screen.getByTestId('persona-delete-confirm'));
-		await waitFor(() => expect(mocks.deletePersona).toHaveBeenCalledWith('id-Reviewer'));
+		await waitFor(() => expect(mocks.deleteAgent).toHaveBeenCalledWith('id-Reviewer'));
 	});
 });

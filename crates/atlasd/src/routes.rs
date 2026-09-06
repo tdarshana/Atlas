@@ -127,12 +127,6 @@ pub const ROUTES: &[Route] = &[
     route!("projectLogExport", "GET", "/api/v1/projects/{id}/log/export", [p("id", "Uuid", Kind::Path)], body: None, response: "text",
         doc: "The whole log as JSONL, no filter and no cap. Returned as text, not parsed."),
 
-    // ---- agents ----
-    route!("listAgents", "GET", "/api/v1/agents", [], body: None, response: "Agent[]"),
-    route!("saveAgent", "POST", "/api/v1/agents", [p("a", "NewAgent", Kind::Body)], body: Some("NewAgent"), response: "Agent"),
-    route!("getAgent", "GET", "/api/v1/agents/{name}", [p("name", "string", Kind::Path)], body: None, response: "Agent"),
-    route!("deleteAgent", "DELETE", "/api/v1/agents/{name}", [p("name", "string", Kind::Path)], body: None, response: "void"),
-
     // ---- practices: `api.ts` picks the collection from a `DocKind`, so these stay hand-written ----
     route!("listDocs", "GET", "/api/v1/practices", [PROJECT_Q], body: None, response: "Doc[]", client: Client::HandWritten),
     route!("saveDoc", "POST", "/api/v1/practices", [p("d", "NewDoc", Kind::Body)], body: Some("NewDoc"), response: "Doc", client: Client::HandWritten),
@@ -233,19 +227,19 @@ pub const ROUTES: &[Route] = &[
     route!("setProjectSkills", "PUT", "/api/v1/projects/{id}/skills", [p("id", "Uuid", Kind::Path), p("disabled", "string[]", Kind::Field("disabled"))], body: Some("SkillsDisabledBody"), response: "Project",
         doc: "Replaces the project's disabled skill list wholesale; an empty list clears it."),
 
-    // ---- personas ----
-    route!("listPersonas", "GET", "/api/v1/personas", [], body: None, response: "Persona[]"),
-    route!("createPersona", "POST", "/api/v1/personas", [p("input", "NewPersona", Kind::Body)], body: Some("NewPersona"), response: "Persona", actor: true,
-        doc: "Every persona write is audited against this app's actor, like a board write."),
-    route!("getPersona", "GET", "/api/v1/personas/{id}", [p("idOrSlug", "string", Kind::Path)], body: None, response: "Persona",
+    // ---- agents (the `Persona` rows; `/api/v1/personas` answers the same, ATL-427) ----
+    route!("listAgents", "GET", "/api/v1/agents", [], body: None, response: "Persona[]"),
+    route!("createAgent", "POST", "/api/v1/agents", [p("input", "NewPersona", Kind::Body)], body: Some("NewPersona"), response: "Persona", actor: true,
+        doc: "Every agent write is audited against this app's actor, like a board write."),
+    route!("getAgent", "GET", "/api/v1/agents/{id}", [p("idOrSlug", "string", Kind::Path)], body: None, response: "Persona",
         doc: "Takes an id, a slug or a name."),
-    route!("updatePersona", "PUT", "/api/v1/personas/{id}", [p("id", "Uuid", Kind::Path), p("patch", "PersonaPatch", Kind::Body)], body: Some("PersonaPatch"), response: "Persona", actor: true,
+    route!("updateAgent", "PUT", "/api/v1/agents/{id}", [p("id", "Uuid", Kind::Path), p("patch", "PersonaPatch", Kind::Body)], body: Some("PersonaPatch"), response: "Persona", actor: true,
         doc: "Only the fields in `patch` change. Takes the id, not the slug."),
-    route!("deletePersona", "DELETE", "/api/v1/personas/{id}", [p("id", "Uuid", Kind::Path)], body: None, response: "void", actor: true),
-    route!("getPersonaBundle", "GET", "/api/v1/personas/{id}/bundle", [p("id", "string", Kind::Path), PROJECT_Q], body: None, response: "PersonaBundle",
-        doc: "The persona with everything it references resolved; missing references are warnings."),
-    route!("getProjectRoster", "GET", "/api/v1/projects/{id}/personas", [p("projectId", "Uuid", Kind::Path)], body: None, response: "RosterRow[]"),
-    route!("setProjectRoster", "PUT", "/api/v1/projects/{id}/personas", [p("projectId", "Uuid", Kind::Path), p("entries", "RosterEntry[]", Kind::Body)], body: Some("RosterEntry[]"), response: "RosterRow[]", actor: true,
+    route!("deleteAgent", "DELETE", "/api/v1/agents/{id}", [p("id", "Uuid", Kind::Path)], body: None, response: "void", actor: true),
+    route!("getAgentBundle", "GET", "/api/v1/agents/{id}/bundle", [p("id", "string", Kind::Path), PROJECT_Q], body: None, response: "PersonaBundle",
+        doc: "The agent with everything it references resolved; missing references are warnings."),
+    route!("getProjectRoster", "GET", "/api/v1/projects/{id}/agents", [p("projectId", "Uuid", Kind::Path)], body: None, response: "RosterRow[]"),
+    route!("setProjectRoster", "PUT", "/api/v1/projects/{id}/agents", [p("projectId", "Uuid", Kind::Path), p("entries", "RosterEntry[]", Kind::Body)], body: Some("RosterEntry[]"), response: "RosterRow[]", actor: true,
         doc: "Replaces the project's roster wholesale: ids, the default and the order."),
 
     // ---- global search ----

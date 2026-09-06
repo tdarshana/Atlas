@@ -4,7 +4,7 @@
 
 use super::state::{Action, Effect};
 use crate::remote::RemoteBackend;
-use atlas_core::backend::{StatusBackend, MemoryBackend, ProjectBackend, LibraryBackend, BoardBackend};
+use atlas_core::backend::{StatusBackend, MemoryBackend, ProjectBackend, LibraryBackend, BoardBackend, PersonaBackend};
 use atlas_core::models::{MemoryStatus, NewTask, RecallHit, RecallQuery, SyncRequest, TaskFilter};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -43,7 +43,7 @@ async fn run(effect: Effect, backend: Arc<RemoteBackend>, cwd: PathBuf) -> atlas
             Ok(Action::ProjectsLoaded(backend.list_projects().await?))
         }
         Effect::ProjectContext(root) => Ok(Action::ProjectContextLoaded(Box::new(backend.project_context(root, ACTOR).await?))),
-        Effect::ListAgents => Ok(Action::AgentsLoaded(backend.list_agents().await?)),
+        Effect::ListAgents => Ok(Action::AgentsLoaded(backend.list_personas().await?)),
         Effect::Sync(root) => {
             let global = root.is_none();
             let report = backend.sync(SyncRequest { root, global, targets: vec![], check_only: false }).await?;

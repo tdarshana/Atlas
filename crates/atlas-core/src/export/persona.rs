@@ -1,7 +1,8 @@
-//! Renders a roster persona for the agents' own files: a Claude Code subagent file
-//! under `.claude/agents/<slug>.md`, a `## Persona: <name>` section for the managed
-//! block in `AGENTS.md` (Codex has no per-agent file that carries a body), and the
-//! `## Personas` roster section for the managed block in `CLAUDE.md`.
+//! Renders a roster agent (the `Persona` row) for the coding tools' own files: a
+//! Claude Code subagent file under `.claude/agents/<slug>.md`, a `## Agent: <name>`
+//! section for the managed block in `AGENTS.md` (Codex has no per-agent file that
+//! carries a body), and the `## Agents` roster section for the managed block in
+//! `CLAUDE.md`.
 
 use super::claude::yaml_scalar;
 use super::managed_block::neutralize;
@@ -9,15 +10,19 @@ use super::GENERATED_HEADER;
 use crate::models::{Case, PersonaBundle};
 use uuid::Uuid;
 
-/// The second comment line of an exported persona file, followed by the slug. It is
-/// what tells a persona export apart from an agent export: `sync` may delete the
-/// former when the persona leaves the roster, and must never touch the latter.
-pub const PERSONA_MARKER: &str = "atlas persona:";
+/// The second comment line of an exported agent file, followed by the slug. It is
+/// what tells an Atlas export apart from a hand-written subagent file: `sync` may
+/// delete the former when the agent leaves the roster, and must never touch the latter.
+pub const AGENT_MARKER: &str = "atlas agent:";
 
-/// True when the first few lines carry [`GENERATED_HEADER`] and [`PERSONA_MARKER`],
-/// meaning the file is a persona export this exporter owns outright.
-pub fn is_persona_export(content: &str) -> bool {
-    super::is_generated(content) && content.lines().take(4).any(|l| l.contains(PERSONA_MARKER))
+/// The marker files exported before 2026-09-07 carry. Still recognised, so a sync
+/// after the rename cleans those files up instead of leaving them behind.
+pub const LEGACY_MARKER: &str = "atlas persona:";
+
+/// True when the first few lines carry [`GENERATED_HEADER`] and [`AGENT_MARKER`] (or
+/// [`LEGACY_MARKER`]), meaning the file is an agent export this exporter owns outright.
+pub fn is_agent_export(content: &str) -> bool {
+    super::is_generated(content) && content.lines().take(4).any(|l| l.contains(AGENT_MARKER) || l.contains(LEGACY_MARKER))
 }
 
 /// The `tools:` value: the persona's Atlas tools as `mcp__atlas__<tool>` and each
@@ -52,7 +57,7 @@ fn first_line(s: &str) -> &str {
 }
 
 /// The `Skills`, `Practices`, `Workflows` and `Models by case` sections, at heading
-/// `level` (`##` in the subagent file, `###` under a `## Persona:` heading). An empty
+/// `level` (`##` in the subagent file, `###` under a `## Agent:` heading). An empty
 /// list renders no section at all.
 fn sections(b: &PersonaBundle, level: &str) -> String {
     let mut out = String::new();
@@ -89,7 +94,7 @@ pub fn claude_subagent(b: &PersonaBundle) -> String {
     let mut out = String::new();
     out.push_str("---\n");
     out.push_str(&format!("# {GENERATED_HEADER}\n"));
-    out.push_str(&format!("# {PERSONA_MARKER} {}\n", p.slug));
+    out.push_str(&format!("# {AGENT_MARKER} {}\n", p.slug));
     out.push_str(&format!("name: {}\n", yaml_scalar(&p.slug)));
     out.push_str(&format!("description: {}\n", yaml_scalar(&description(b))));
     let tools = tools_value(b);
@@ -106,12 +111,12 @@ pub fn claude_subagent(b: &PersonaBundle) -> String {
     out
 }
 
-/// The same content as [`claude_subagent`], as one `## Persona: <name>` section for
+/// The same content as [`claude_subagent`], as one `## Agent: <name>` section for
 /// the managed block Codex reads in `AGENTS.md`. Every interpolated value goes
 /// through `neutralize` so a body cannot close the block early.
 pub fn agents_md_section(b: &PersonaBundle) -> String {
     let p = &b.persona;
-    let mut out = format!("## Persona: {}\n\n", neutralize(&p.name));
+    let mut out = format!("## Agent: {}\n\n", neutralize(&p.name));
     let description = description(b);
     if !description.is_empty() {
         out.push_str(&neutralize(&description));
@@ -134,7 +139,7 @@ pub fn agents_md_section(b: &PersonaBundle) -> String {
     out
 }
 
-/// Every roster persona as one `## Persona:` section after another, in roster order.
+/// Every roster persona as one `## Agent:` section after another, in roster order.
 /// Empty for an empty roster, so a project without personas renders as before.
 pub fn agents_md_sections(bundles: &[PersonaBundle]) -> String {
     bundles.iter().map(agents_md_section).collect::<Vec<_>>().join("\n")
@@ -147,8 +152,8 @@ pub fn claude_md_personas(bundles: &[PersonaBundle], default: Option<Uuid>) -> S
     if bundles.is_empty() {
         return String::new();
     }
-    let mut out = String::from("## Personas\n\n");
-    out.push_str("This project's roster, in order. A persona is adopted for a session by claiming a task that names one (`task_claim`) or by calling `persona_use` with its slug; `persona_use` with an empty name clears it.\n\n");
+    let mut out = String::from("## Agents\n\n");
+    out.push_str("This project's roster, in order. An agent is adopted for a session by claiming a task that names one (`task_claim`) or by calling `agent_use` with its slug; `agent_use` with an empty name clears it.\n\n");
     for b in bundles {
         let p = &b.persona;
         let mut line = format!("- `{}` ({})", neutralize(&p.slug), neutralize(&p.name));
@@ -248,7 +253,7 @@ mod tests {
     fn a_full_bundle_renders_the_frontmatter_and_every_section() {
         let expected = "---\n\
 # generated by atlas; edit in Atlas, not here\n\
-# atlas persona: mobile-developer\n\
+# atlas agent: mobile-developer\n\
 name: mobile-developer\n\
 description: Builds the app. Owns the mobile client end to end.\n\
 tools: mcp__atlas__task_list, mcp__atlas__memory_search, mcp__context7__*\n\
@@ -276,8 +281,8 @@ Ask before adding a dependency.\n\
 - `review`: opus\n\
 - `default`: sonnet\n";
         assert_eq!(claude_subagent(&full_bundle()), expected);
-        assert!(is_persona_export(&claude_subagent(&full_bundle())));
-        assert!(!is_persona_export("---\n# generated by atlas; edit in Atlas, not here\nname: reviewer\n---\n"), "an agent export is not a persona export");
+        assert!(is_agent_export(&claude_subagent(&full_bundle())));
+        assert!(!is_agent_export("---\n# generated by atlas; edit in Atlas, not here\nname: reviewer\n---\n"), "a file without the marker is not an Atlas export");
     }
 
     #[test]
@@ -285,7 +290,7 @@ Ask before adding a dependency.\n\
         let bundle = PersonaBundle { persona: persona("Ops", "ops"), skills: vec![], workflows: vec![], practices: vec![], mcp_servers: vec![], warnings: vec![] };
         let md = claude_subagent(&bundle);
         assert!(!md.contains("tools:"), "{md}");
-        assert_eq!(md, "---\n# generated by atlas; edit in Atlas, not here\n# atlas persona: ops\nname: ops\ndescription: Builds the app. Owns the mobile client end to end.\n---\n\nPrefer small commits.\n\nAsk before adding a dependency.\n");
+        assert_eq!(md, "---\n# generated by atlas; edit in Atlas, not here\n# atlas agent: ops\nname: ops\ndescription: Builds the app. Owns the mobile client end to end.\n---\n\nPrefer small commits.\n\nAsk before adding a dependency.\n");
     }
 
     /// A persona that may use every Atlas tool but names another server still gets
@@ -310,7 +315,7 @@ Ask before adding a dependency.\n\
     #[test]
     fn the_agents_md_section_carries_the_same_content_under_one_heading() {
         let section = agents_md_section(&full_bundle());
-        let expected = "## Persona: Mobile Developer\n\
+        let expected = "## Agent: Mobile Developer\n\
 \n\
 Builds the app. Owns the mobile client end to end.\n\
 \n\
@@ -357,9 +362,9 @@ Ask before adding a dependency.\n\
         second.persona.slug = "security-reviewer".into();
         second.persona.role = "Reviews for risk".into();
         let text = claude_md_personas(&[full_bundle(), second], Some(Uuid::from_u128(2)));
-        let expected = "## Personas\n\
+        let expected = "## Agents\n\
 \n\
-This project's roster, in order. A persona is adopted for a session by claiming a task that names one (`task_claim`) or by calling `persona_use` with its slug; `persona_use` with an empty name clears it.\n\
+This project's roster, in order. An agent is adopted for a session by claiming a task that names one (`task_claim`) or by calling `agent_use` with its slug; `agent_use` with an empty name clears it.\n\
 \n\
 - `mobile-developer` (Mobile Developer): Builds the app\n\
 - `security-reviewer` (Security Reviewer): Reviews for risk (default)\n";

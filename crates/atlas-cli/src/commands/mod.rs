@@ -6,7 +6,6 @@ pub mod framework;
 pub mod import;
 pub mod ingest;
 pub mod mcp;
-pub mod persona;
 pub mod project;
 pub mod skill;
 pub mod sync;

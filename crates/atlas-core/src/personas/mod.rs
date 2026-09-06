@@ -25,7 +25,7 @@ const PERSONA_COLS: &str = "id::text, name, slug, role, summary, instructions, t
 
 const ROSTER_COLS: &str = "r.persona_id::text, p.name, p.slug, p.role, p.summary, to_json(p.tags)::text, r.is_default, r.\"position\", r.project_id::text";
 
-/// The `persona_use` key and the export file name: lower case, every run of
+/// The `agent_use` key and the export file name: lower case, every run of
 /// non-alphanumerics folded to one `-`, none at either end.
 pub fn slugify(name: &str) -> String {
     let mut out = String::new();

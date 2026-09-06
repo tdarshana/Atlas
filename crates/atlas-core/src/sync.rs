@@ -2,7 +2,7 @@ use crate::board::render::render_board_markdown;
 use crate::export::{self, BlockContext};
 use crate::frameworks;
 use crate::mcp_servers::edit;
-use crate::models::{Agent, PersonaBundle, Stage, SyncAction, SyncKind, SyncOp, SyncReport, Task};
+use crate::models::{PersonaBundle, Stage, SyncAction, SyncKind, SyncOp, SyncReport, Task};
 use crate::{AtlasError, Result};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -47,11 +47,9 @@ const CODEX_NOTIFY: &[&str] = &["atlas", "ingest", "--tool", "codex", "--hook-ar
 const CODEX_NOTIFY_TAKEN: &str = "notify already set to another command";
 
 /// Inputs describing one sync pass: the repo (or, for a global sync, home
-/// directory) root, the agents to export, the managed-block context, and
-/// which targets to write.
+/// directory) root, the managed-block context, and which targets to write.
 pub struct SyncInputs<'a> {
     pub root: &'a Path,
-    pub agents: &'a [Agent],
     pub block: BlockContext,
     pub targets: &'a [SyncKind],
     /// The directory holding `.codex`. Codex reads one config file per user
@@ -83,7 +81,7 @@ pub struct SyncInputs<'a> {
     pub default_persona: Option<Uuid>,
 }
 
-/// The persona text the managed block in `path` carries: the full `## Persona:`
+/// The agent text the managed block in `path` carries: the full `## Agent:`
 /// sections for `AGENTS.md` (Codex has no per-agent file to put them in) and the
 /// roster summary for every other instruction file.
 fn persona_sections(i: &SyncInputs, path: &Path) -> String {
@@ -130,9 +128,6 @@ pub fn plan_sync(i: &SyncInputs) -> Result<Vec<SyncOp>> {
         match kind {
             SyncKind::Claude => {
                 let dir = i.root.join(".claude/agents");
-                for a in i.agents {
-                    plan_target(&mut ops, *kind, i.root, dir.join(format!("{}.md", a.name)), |p| agent_op(*kind, p, export::claude_agent_md(a)))?;
-                }
                 for b in i.personas {
                     plan_target(&mut ops, *kind, i.root, dir.join(format!("{}.md", b.persona.slug)), |p| agent_op(*kind, p, export::claude_subagent(b)))?;
                 }
@@ -140,12 +135,9 @@ pub fn plan_sync(i: &SyncInputs) -> Result<Vec<SyncOp>> {
                     ops.extend(stale_persona_exports(&dir, i.personas)?);
                 }
             }
-            SyncKind::Codex => {
-                for a in i.agents {
-                    let path = i.root.join(".codex/agents").join(format!("{}.toml", a.name));
-                    plan_target(&mut ops, *kind, i.root, path, |p| agent_op(*kind, p, export::codex_agent_toml(a)))?;
-                }
-            }
+            // Codex has no per-agent file: the roster reaches it through the `AGENTS.md`
+            // sections. The target stays accepted so a stored target list keeps working.
+            SyncKind::Codex => {}
             SyncKind::AgentsMd => {
                 plan_target(&mut ops, *kind, i.root, i.root.join("AGENTS.md"), |p| block_op(*kind, p.clone(), &i.block, &persona_sections(i, &p)))?;
             }
@@ -213,9 +205,8 @@ fn escape_reason(base: &Path, path: &Path) -> Option<String> {
     (!inside).then(|| "resolves outside the project".into())
 }
 
-/// An exporter-owned file (`.claude/agents/*.md`, `.codex/agents/*.toml`):
-/// refuses to overwrite a hand-written file that doesn't carry the generated
-/// header.
+/// An exporter-owned file (`.claude/agents/*.md`): refuses to overwrite a
+/// hand-written file that doesn't carry the generated header.
 fn agent_op(kind: SyncKind, path: PathBuf, content: String) -> Result<SyncOp> {
     let action = if !path.exists() {
         SyncAction::Create
@@ -232,9 +223,9 @@ fn agent_op(kind: SyncKind, path: PathBuf, content: String) -> Result<SyncOp> {
     Ok(SyncOp { kind, path, content, action, delete: false })
 }
 
-/// The persona exports in `dir` whose persona is no longer on the roster, each as a
-/// delete op. Only a file carrying the persona marker qualifies: an agent export or
-/// a hand-written subagent file is never removed, whatever its name. The roster's
+/// The agent exports in `dir` whose agent is no longer on the roster, each as a
+/// delete op. Only a file carrying the agent marker qualifies: a hand-written
+/// subagent file is never removed, whatever its name. The roster's
 /// own files are planned by `plan_sync` and are not stale, even before they exist.
 fn stale_persona_exports(dir: &Path, personas: &[PersonaBundle]) -> Result<Vec<SyncOp>> {
     let mut ops = Vec::new();
@@ -252,7 +243,7 @@ fn stale_persona_exports(dir: &Path, personas: &[PersonaBundle]) -> Result<Vec<S
             continue;
         }
         let existing = std::fs::read_to_string(&path)?;
-        if export::is_persona_export(&existing) {
+        if export::is_agent_export(&existing) {
             ops.push(SyncOp { kind: SyncKind::Claude, path, content: String::new(), action: SyncAction::Update, delete: true });
         }
     }
@@ -452,32 +443,16 @@ mod tests {
     use crate::export::BlockContext;
     use crate::models::*;
 
-    fn agent(name: &str) -> Agent {
-        Agent {
-            id: uuid::Uuid::nil(),
-            name: name.into(),
-            description: "d".into(),
-            instructions: "i".into(),
-            model_hint: None,
-            tools: vec![],
-            tags: vec![],
-            version: 1,
-            created_at: Default::default(),
-            updated_at: Default::default(),
-        }
-    }
-
     #[test]
     fn plan_apply_and_replan_is_unchanged() {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("AGENTS.md"), "# Repo rules\n\nkeep\n").unwrap();
         std::fs::create_dir_all(d.path().join(".claude/agents")).unwrap();
         std::fs::write(d.path().join(".claude/agents/handwritten.md"), "---\nname: handwritten\n---\nmine\n").unwrap();
-        let agents = vec![agent("reviewer"), agent("handwritten")];
+        let roster = vec![persona_bundle("Reviewer", "reviewer", 1), persona_bundle("Handwritten", "handwritten", 2)];
         let inputs = SyncInputs {
             root: d.path(),
-            agents: &agents,
-            block: BlockContext { mcp_command: "atlas mcp".into(), agents: agents.clone(), practices: vec![], project_name: Some("p".into()) },
+            block: BlockContext { mcp_command: "atlas mcp".into(), practices: vec![], project_name: Some("p".into()) },
             targets: &[SyncKind::Claude, SyncKind::Codex, SyncKind::AgentsMd, SyncKind::ClaudeMd],
             home: d.path(),
             hooks: false,
@@ -485,7 +460,7 @@ mod tests {
             mirror_tasks_md: false,
             board_stages: &[],
             board_tasks: &[],
-            personas: &[],
+            personas: &roster,
             default_persona: None,
         };
         let ops = plan_sync(&inputs).unwrap();
@@ -520,8 +495,7 @@ mod tests {
         };
         let inputs = SyncInputs {
             root: d.path(),
-            agents: &[],
-            block: BlockContext { mcp_command: "atlas mcp".into(), agents: vec![], practices: vec![practice], project_name: Some("p".into()) },
+            block: BlockContext { mcp_command: "atlas mcp".into(), practices: vec![practice], project_name: Some("p".into()) },
             targets: &[SyncKind::AgentsMd],
             home: d.path(),
             hooks: false,
@@ -540,13 +514,12 @@ mod tests {
         assert!(again.iter().all(|o| o.action == SyncAction::Unchanged), "a second plan should be a no-op: {again:?}");
     }
 
-    /// The hook targets in isolation: no agents, no managed block, just the two
+    /// The hook targets in isolation: no roster, no managed block, just the two
     /// files a hook install touches.
     fn hook_inputs<'a>(root: &'a Path, hooks: bool) -> SyncInputs<'a> {
         SyncInputs {
             root,
-            agents: &[],
-            block: BlockContext { mcp_command: "atlas mcp".into(), agents: vec![], practices: vec![], project_name: None },
+            block: BlockContext { mcp_command: "atlas mcp".into(), practices: vec![], project_name: None },
             targets: &[SyncKind::ClaudeHook, SyncKind::CodexHook],
             home: root,
             hooks,
@@ -784,8 +757,7 @@ mod tests {
 
         let inputs = SyncInputs {
             root: d.path(),
-            agents: &[],
-            block: BlockContext { mcp_command: "atlas mcp".into(), agents: vec![], practices: vec![], project_name: Some("p".into()) },
+            block: BlockContext { mcp_command: "atlas mcp".into(), practices: vec![], project_name: Some("p".into()) },
             targets: &[SyncKind::FrameworkInstructions],
             home: d.path(),
             hooks: false,
@@ -824,8 +796,7 @@ mod tests {
         std::fs::write(d.path().join("AGENTS.md"), "# Repo rules\n").unwrap();
         let inputs = SyncInputs {
             root: d.path(),
-            agents: &[],
-            block: BlockContext { mcp_command: "atlas mcp".into(), agents: vec![], practices: vec![], project_name: None },
+            block: BlockContext { mcp_command: "atlas mcp".into(), practices: vec![], project_name: None },
             targets: &[SyncKind::FrameworkInstructions],
             home: d.path(),
             hooks: false,
@@ -860,8 +831,7 @@ mod tests {
 
         let inputs = SyncInputs {
             root: repo.path(),
-            agents: &[],
-            block: BlockContext { mcp_command: "atlas mcp".into(), agents: vec![], practices: vec![], project_name: None },
+            block: BlockContext { mcp_command: "atlas mcp".into(), practices: vec![], project_name: None },
             targets: &[SyncKind::ClaudeMd, SyncKind::ClaudeHook],
             home: repo.path(),
             hooks: true,
@@ -934,23 +904,22 @@ mod tests {
         }
     }
 
-    /// Two roster personas become two subagent files beside the agent files and one
-    /// section each in the managed blocks; a second plan is a no-op; a persona that
-    /// leaves the roster has its file deleted, and only its file: the agent export and
-    /// a hand-written subagent file with no marker stay where they are.
+    /// Two roster agents become two subagent files and one section each in the
+    /// managed blocks; a second plan is a no-op; an agent that leaves the roster has
+    /// its file deleted, and only its file: a legacy export carrying the old marker is
+    /// pruned too, while a hand-written subagent file with no marker stays put.
     #[test]
     fn roster_personas_are_exported_and_pruned_when_they_leave() {
         let d = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(d.path().join(".claude/agents")).unwrap();
         std::fs::write(d.path().join(".claude/agents/handwritten.md"), "---\nname: handwritten\n---\nmine\n").unwrap();
-        let agents = vec![agent("reviewer")];
+        std::fs::write(d.path().join(".claude/agents/legacy.md"), "---\n# generated by atlas; edit in Atlas, not here\n# atlas persona: legacy\nname: legacy\n---\nold\n").unwrap();
         let mobile = persona_bundle("Mobile Developer", "mobile-developer", 1);
         let security = persona_bundle("Security Reviewer", "security-reviewer", 2);
         let roster = vec![mobile.clone(), security.clone()];
-        let block = || BlockContext { mcp_command: "atlas mcp".into(), agents: agents.clone(), practices: vec![], project_name: Some("p".into()) };
+        let block = || BlockContext { mcp_command: "atlas mcp".into(), practices: vec![], project_name: Some("p".into()) };
         let inputs = SyncInputs {
             root: d.path(),
-            agents: &agents,
             block: block(),
             targets: &[SyncKind::Claude, SyncKind::Codex, SyncKind::AgentsMd, SyncKind::ClaudeMd],
             home: d.path(),
@@ -966,20 +935,22 @@ mod tests {
         for slug in ["mobile-developer", "security-reviewer"] {
             let op = ops.iter().find(|o| o.path.ends_with(format!(".claude/agents/{slug}.md"))).unwrap_or_else(|| panic!("no op for {slug}: {ops:?}"));
             assert_eq!((op.kind, &op.action, op.delete), (SyncKind::Claude, &SyncAction::Create, false));
-            assert!(export::is_persona_export(&op.content), "{}", op.content);
+            assert!(export::is_agent_export(&op.content), "{}", op.content);
         }
         assert!(!ops.iter().any(|o| o.kind == SyncKind::Codex && o.path.to_string_lossy().contains("developer")), "Codex gets no per-persona file: {ops:?}");
-        assert!(!ops.iter().any(|o| o.delete), "nothing to prune on a first sync: {ops:?}");
+        let pruned: Vec<&SyncOp> = ops.iter().filter(|o| o.delete).collect();
+        assert!(pruned.len() == 1 && pruned[0].path.ends_with(".claude/agents/legacy.md"), "only the legacy export is pruned on a first sync: {ops:?}");
         let report = apply(&ops).unwrap();
-        assert_eq!(report.deleted, 0);
+        assert_eq!(report.deleted, 1);
+        assert!(!d.path().join(".claude/agents/legacy.md").exists(), "the legacy marker is pruned on the first pass");
 
         let claude_md = std::fs::read_to_string(d.path().join("CLAUDE.md")).unwrap();
-        assert_eq!(claude_md.matches("## Personas").count(), 1, "{claude_md}");
+        assert_eq!(claude_md.matches("## Agents").count(), 1, "{claude_md}");
         assert!(claude_md.contains("- `security-reviewer` (Security Reviewer): Does things (default)\n"), "{claude_md}");
         assert!(claude_md.contains("- `mobile-developer` (Mobile Developer): Does things\n"), "{claude_md}");
-        assert!(claude_md.find("## Personas") < claude_md.find(export::END), "the section sits inside the block: {claude_md}");
+        assert!(claude_md.find("## Agents") < claude_md.find(export::END), "the section sits inside the block: {claude_md}");
         let agents_md = std::fs::read_to_string(d.path().join("AGENTS.md")).unwrap();
-        assert!(agents_md.contains("## Persona: Mobile Developer\n") && agents_md.contains("## Persona: Security Reviewer\n"), "{agents_md}");
+        assert!(agents_md.contains("## Agent: Mobile Developer\n") && agents_md.contains("## Agent: Security Reviewer\n"), "{agents_md}");
         assert_eq!(agents_md.matches(export::END).count(), 1, "{agents_md}");
 
         let again = plan_sync(&inputs).unwrap();
@@ -997,26 +968,23 @@ mod tests {
         assert_eq!(report.deleted, 1);
         assert!(!d.path().join(".claude/agents/security-reviewer.md").exists());
         assert!(d.path().join(".claude/agents/mobile-developer.md").exists());
-        assert!(d.path().join(".claude/agents/reviewer.md").exists(), "an agent export is never pruned");
         assert_eq!(std::fs::read_to_string(d.path().join(".claude/agents/handwritten.md")).unwrap(), "---\nname: handwritten\n---\nmine\n");
         let claude_md = std::fs::read_to_string(d.path().join("CLAUDE.md")).unwrap();
-        assert_eq!(claude_md.matches("## Personas").count(), 1, "{claude_md}");
+        assert_eq!(claude_md.matches("## Agents").count(), 1, "{claude_md}");
         assert!(!claude_md.contains("security-reviewer"), "{claude_md}");
 
         let again = plan_sync(&inputs).unwrap();
         assert!(again.iter().filter(|o| !matches!(o.action, SyncAction::Skip(_))).all(|o| o.action == SyncAction::Unchanged && !o.delete), "{again:?}");
     }
 
-    /// No roster, no persona output: the managed block and the agent directory read
-    /// exactly as they did before personas existed.
+    /// No roster, no agent output: the managed block carries no roster section and
+    /// no subagent directory is created.
     #[test]
-    fn no_roster_plans_no_persona_output() {
+    fn no_roster_plans_no_agent_output() {
         let d = tempfile::tempdir().unwrap();
-        let agents = vec![agent("reviewer")];
         let inputs = SyncInputs {
             root: d.path(),
-            agents: &agents,
-            block: BlockContext { mcp_command: "atlas mcp".into(), agents: agents.clone(), practices: vec![], project_name: Some("p".into()) },
+            block: BlockContext { mcp_command: "atlas mcp".into(), practices: vec![], project_name: Some("p".into()) },
             targets: &[SyncKind::Claude, SyncKind::AgentsMd, SyncKind::ClaudeMd],
             home: d.path(),
             hooks: false,
@@ -1028,12 +996,12 @@ mod tests {
             default_persona: None,
         };
         let ops = plan_sync(&inputs).unwrap();
-        assert_eq!(ops.len(), 3, "{ops:?}");
+        assert_eq!(ops.len(), 2, "{ops:?}");
         apply(&ops).unwrap();
         let claude_md = std::fs::read_to_string(d.path().join("CLAUDE.md")).unwrap();
         let expected = export::splice_block("", export::render_block(&inputs.block).trim_end());
         assert_eq!(claude_md, expected);
-        assert!(!claude_md.contains("Persona"), "{claude_md}");
-        assert_eq!(std::fs::read_dir(d.path().join(".claude/agents")).unwrap().count(), 1);
+        assert!(!claude_md.contains("## Agents"), "{claude_md}");
+        assert!(!d.path().join(".claude/agents").exists());
     }
 }

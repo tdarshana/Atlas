@@ -1,4 +1,4 @@
-use crate::models::{Agent, Doc};
+use crate::models::Doc;
 
 pub const START: &str = "<!-- atlas:start -->";
 pub const END: &str = "<!-- atlas:end -->";
@@ -7,18 +7,17 @@ pub const END: &str = "<!-- atlas:end -->";
 /// `CLAUDE.md`.
 pub struct BlockContext {
     pub mcp_command: String,
-    pub agents: Vec<Agent>,
     pub practices: Vec<Doc>,
     pub project_name: Option<String>,
 }
 
-/// Renders the managed block, markers included. Empty `agents`/`practices`
-/// omit their section entirely.
+/// Renders the managed block, markers included. Empty `practices` omits its
+/// section entirely.
 pub fn render_block(ctx: &BlockContext) -> String {
     render_block_with(ctx, "")
 }
 
-/// [`render_block`] with `extra` (already rendered Markdown, such as the persona
+/// [`render_block`] with `extra` (already rendered Markdown, such as the agent
 /// sections from [`super::persona`]) placed after the practices and before the end
 /// marker. An empty `extra` renders exactly what `render_block` does.
 pub fn render_block_with(ctx: &BlockContext, extra: &str) -> String {
@@ -30,13 +29,6 @@ pub fn render_block_with(ctx: &BlockContext, extra: &str) -> String {
     };
     lines.push(sentence);
     lines.push("Call `memory_search` before starting a task and `memory_remember` when you learn a durable fact, make a decision, or notice a preference.".to_string());
-    if !ctx.agents.is_empty() {
-        lines.push(String::new());
-        lines.push("### Agents".to_string());
-        for a in &ctx.agents {
-            lines.push(format!("- `{}`: {}", neutralize(&a.name), neutralize(&a.description)));
-        }
-    }
     if !ctx.practices.is_empty() {
         lines.push(String::new());
         lines.push("### Practices".to_string());
@@ -54,7 +46,7 @@ pub fn render_block_with(ctx: &BlockContext, extra: &str) -> String {
 }
 
 /// Defuses a managed-block marker inside an interpolated value by putting a
-/// zero-width space after `atlas`. A practice body or agent description
+/// zero-width space after `atlas`. A practice body or agent instruction
 /// containing `<!-- atlas:end -->` would otherwise close the block early, and
 /// every later sync would splice into a shorter span and leave the tail behind,
 /// growing the file a copy at a time.

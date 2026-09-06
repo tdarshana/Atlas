@@ -4,9 +4,6 @@
 This project is connected to Atlas as `fixture`. Atlas is available as the MCP server `atlas` (`atlas mcp`).
 Call `memory_search` before starting a task and `memory_remember` when you learn a durable fact, make a decision, or notice a preference.
 
-### Agents
-- `reviewer`: Reviews pull requests for correctness and risk
-
 ### Practices
 - **commits**: Imperative mood, one change per commit.
 <!-- atlas:end -->

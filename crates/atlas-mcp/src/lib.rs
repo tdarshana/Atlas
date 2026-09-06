@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use atlas_core::backend::{Backend, LibraryBackend, ProjectBackend, StatusBackend, WorkflowBackend};
 use atlas_core::board::render::render_board_markdown;
-use atlas_core::export::claude_agent_md;
 use atlas_core::models::*;
 use atlas_core::projects::PersonaRef;
 use chrono::{DateTime, Utc};
@@ -120,29 +119,6 @@ pub struct ProjectConnectArgs {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct NameArgs { pub name: String }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct SaveAgentArgs {
-    /// Short kebab-case identifier, unique across agents.
-    pub name: String,
-    /// One line saying when this agent should be used.
-    pub description: String,
-    /// The agent's system prompt, in Markdown.
-    pub instructions: String,
-    /// Preferred model, e.g. sonnet or opus.
-    pub model_hint: Option<String>,
-    /// Tools the agent is allowed to use.
-    pub tools: Option<Vec<String>>,
-    pub tags: Option<Vec<String>>,
-}
-
-/// `agent_list`'s arguments. Agents are global today, not scoped to a project, so
-/// `project_root` has no effect yet; it is accepted now for the same shape as
-/// `practice_list` and to leave room for project-scoped agents later.
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct AgentListArgs {
-    pub project_root: Option<PathBuf>,
-}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct PracticeListArgs {
@@ -279,7 +255,7 @@ pub struct SkillGetArgs {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct PersonaGetArgs {
-    /// The persona's name or slug, from a prior `persona_list` call.
+    /// The agent's name or slug, from a prior `agent_list` call.
     pub name_or_slug: String,
     /// Absolute path to the project to resolve the persona's references in. Defaults
     /// to the root this server was started in.
@@ -378,9 +354,6 @@ pub const TOOL_TABLE: &[ToolMeta] = &[
     ToolMeta { name: "board_stages", description: "List the stages this project's board moves tasks through, in order. Call before task_move so you never invent a stage name.", args: "project_root", scope: ToolScope::Read },
     ToolMeta { name: "practice_list", description: "List the coding practices that apply here: the global ones plus any scoped to this project, optionally narrowed by tag. Call before writing code so the work follows the house style.", args: "project_root, tags", scope: ToolScope::Read },
     ToolMeta { name: "practice_get", description: "Fetch the full text of one practice by name. Call after practice_list when a practice looks relevant to the task.", args: "name*", scope: ToolScope::Read },
-    ToolMeta { name: "agent_list", description: "List the agent roles stored in Atlas, with their descriptions. Call this to see which specialist role fits the task before doing the work yourself.", args: "project_root", scope: ToolScope::Read },
-    ToolMeta { name: "agent_get", description: "Fetch one agent role by name, including its full instructions. Call after agent_list to adopt the role.", args: "name*", scope: ToolScope::Read },
-    ToolMeta { name: "agent_save", description: "Create or update an agent role so every coding agent on this machine can use it. Call when the user describes a repeatable specialist role worth keeping.", args: "name*, description*, instructions*, model_hint, tools, tags", scope: ToolScope::Write },
     ToolMeta { name: "workflow_list", description: "List the workflows that apply here: the global ones plus any scoped to this project. Call when the user asks for a multi-step process such as a release or a review.", args: "project_root", scope: ToolScope::Read },
     ToolMeta { name: "workflow_get", description: "Fetch one workflow by name, including its full graph. Call after workflow_list to see its trigger and actions.", args: "name*", scope: ToolScope::Read },
     ToolMeta { name: "workflow_run", description: "Start a workflow run by name and answer with its run id and number. Call workflow_status to follow it. Fails with a conflict if the workflow already has a run queued or running.", args: "name*, input", scope: ToolScope::Write },
@@ -390,14 +363,14 @@ pub const TOOL_TABLE: &[ToolMeta] = &[
     ToolMeta { name: "framework_docs", description: "List the planning frameworks detected in a project (Superpowers, OpenSpec, SpecKit, GSD) with the documents each holds, or fetch one document's text. Pass kind and path together, from a prior listing, to read a document.", args: "project_root, kind, path", scope: ToolScope::Read },
     ToolMeta { name: "skill_list", description: "List the skills that apply here: the SKILL.md folders Claude Code and Codex read, the ones installed plugins carry, and Atlas's own. A project's switched-off skills are left out. Call before starting work to see which skills are in play.", args: "project_root", scope: ToolScope::Read },
     ToolMeta { name: "skill_get", description: "Fetch one skill's full text by id, from a prior skill_list. Call when a listed skill looks relevant to the task. A skill this project switched off is not found here either.", args: "id*, project_root", scope: ToolScope::Read },
-    ToolMeta { name: "persona_list", description: "List the personas in play: the project's roster when a project resolves (with its default marked), else the whole library. Each row carries the name, slug, role and summary. Call before persona_use to pick one.", args: "project_root", scope: ToolScope::Read },
-    ToolMeta { name: "persona_get", description: "Fetch one persona by name or slug as a bundle: its instructions and access block plus the skills, workflows, practices and MCP servers it names, resolved here, with a warning for each one that no longer exists.", args: "name_or_slug*, project_root", scope: ToolScope::Read },
-    ToolMeta { name: "persona_use", description: "Adopt a persona for this session, or pass \"\" to clear it. Answers with the bundle. Refuses a persona that is not on the project's roster when this session has a project. While set, every write is gated by the persona's access block and the tool list narrows to its tools.", args: "name_or_slug*", scope: ToolScope::Read },
+    ToolMeta { name: "agent_list", description: "List the agents in play: the project's roster when a project resolves (with its default marked), else the whole library. Each row carries the name, slug, role and summary. Call before agent_use to pick one.", args: "project_root", scope: ToolScope::Read },
+    ToolMeta { name: "agent_get", description: "Fetch one agent by name or slug as a bundle: its instructions and access block plus the skills, workflows, practices and MCP servers it names, resolved here, with a warning for each one that no longer exists.", args: "name_or_slug*, project_root", scope: ToolScope::Read },
+    ToolMeta { name: "agent_use", description: "Adopt an agent for this session, or pass \"\" to clear it. Answers with the bundle. Refuses an agent that is not on the project's roster when this session has a project. While set, every write is gated by the agent's access block and the tool list narrows to its tools.", args: "name_or_slug*", scope: ToolScope::Read },
 ];
 
 /// The tools a session always sees, whatever its persona's `tools` list says: the
 /// ones it needs to change or drop the persona, read its context and check the daemon.
-const ALWAYS_VISIBLE_TOOLS: &[&str] = &["persona_use", "persona_list", "persona_get", "project_context", "status"];
+const ALWAYS_VISIBLE_TOOLS: &[&str] = &["agent_use", "agent_list", "agent_get", "project_context", "status"];
 
 /// Called on every accepted `call_tool`, so the daemon and the stdio shim can each
 /// track connected MCP clients (`atlasd::mcp_clients`) without this crate knowing
@@ -424,7 +397,7 @@ pub struct AtlasMcp<B: Backend> {
     /// Roots already connected by this server, so a read never writes. Shared across
     /// clones because rmcp builds one handler per session from a shared factory.
     projects: Arc<Mutex<HashMap<PathBuf, Project>>>,
-    /// The persona this session has adopted (`persona_use`) or was handed by the task
+    /// The persona this session has adopted (`agent_use`) or was handed by the task
     /// it claimed (`task_claim`), `None` until then. One router instance is one
     /// session: `atlas mcp` runs one per agent process. It never persists.
     session_persona: Arc<Mutex<Option<PersonaRef>>>,
@@ -840,8 +813,8 @@ impl<B: Backend> AtlasMcp<B> {
         json_result(&skill)
     }
 
-    #[tool(description = "List the personas in play: the project's roster when a project resolves (with its default marked), else the whole library. Each row carries the name, slug, role and summary. Call before persona_use to pick one.")]
-    async fn persona_list(&self, Parameters(a): Parameters<ProjectRootArgs>) -> Result<CallToolResult, McpError> {
+    #[tool(description = "List the agents in play: the project's roster when a project resolves (with its default marked), else the whole library. Each row carries the name, slug, role and summary. Call before agent_use to pick one.")]
+    async fn agent_list(&self, Parameters(a): Parameters<ProjectRootArgs>) -> Result<CallToolResult, McpError> {
         match self.resolve_project(a.project_root).await? {
             Some(p) => json_result(&self.backend.project_roster(p.id).await.map_err(err)?),
             None => {
@@ -853,14 +826,14 @@ impl<B: Backend> AtlasMcp<B> {
         }
     }
 
-    #[tool(description = "Fetch one persona by name or slug as a bundle: its instructions and access block plus the skills, workflows, practices and MCP servers it names, resolved here, with a warning for each one that no longer exists.")]
-    async fn persona_get(&self, Parameters(a): Parameters<PersonaGetArgs>) -> Result<CallToolResult, McpError> {
+    #[tool(description = "Fetch one agent by name or slug as a bundle: its instructions and access block plus the skills, workflows, practices and MCP servers it names, resolved here, with a warning for each one that no longer exists.")]
+    async fn agent_get(&self, Parameters(a): Parameters<PersonaGetArgs>) -> Result<CallToolResult, McpError> {
         let project_id = self.resolve_project(a.project_root).await?.map(|p| p.id);
         json_result(&self.backend.resolve_persona(&a.name_or_slug, project_id).await.map_err(err)?)
     }
 
-    #[tool(description = "Adopt a persona for this session, or pass \"\" to clear it. Answers with the bundle. Refuses a persona that is not on the project's roster when this session has a project. While set, every write is gated by the persona's access block and the tool list narrows to its tools.")]
-    async fn persona_use(&self, Parameters(a): Parameters<PersonaUseArgs>) -> Result<CallToolResult, McpError> {
+    #[tool(description = "Adopt an agent for this session, or pass \"\" to clear it. Answers with the bundle. Refuses an agent that is not on the project's roster when this session has a project. While set, every write is gated by the agent's access block and the tool list narrows to its tools.")]
+    async fn agent_use(&self, Parameters(a): Parameters<PersonaUseArgs>) -> Result<CallToolResult, McpError> {
         if a.name_or_slug.trim().is_empty() {
             self.set_persona(None);
             return json_result(&serde_json::Value::Null);
@@ -872,7 +845,7 @@ impl<B: Backend> AtlasMcp<B> {
         if let Some(p) = &project {
             let roster = self.backend.project_roster(p.id).await.map_err(err)?;
             if !roster.iter().any(|r| r.persona_id == bundle.persona.id) {
-                return Err(McpError::invalid_params(format!("persona '{}' is not on the roster of project {}", bundle.persona.slug, p.name), None));
+                return Err(McpError::invalid_params(format!("agent '{}' is not on the roster of project {}", bundle.persona.slug, p.name), None));
             }
         }
         self.set_persona(Some(PersonaRef { id: bundle.persona.id, slug: bundle.persona.slug.clone() }));
@@ -1056,22 +1029,6 @@ impl<B: Backend> AtlasMcp<B> {
         json_result(&project)
     }
 
-    #[tool(description = "List the agent roles stored in Atlas, with their descriptions. Call this to see which specialist role fits the task before doing the work yourself.")]
-    async fn agent_list(&self, Parameters(_a): Parameters<AgentListArgs>) -> Result<CallToolResult, McpError> {
-        json_result(&self.backend.list_agents().await.map_err(err)?)
-    }
-
-    #[tool(description = "Fetch one agent role by name, including its full instructions. Call after agent_list to adopt the role.")]
-    async fn agent_get(&self, Parameters(a): Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
-        json_result(&self.backend.get_agent(&a.name).await.map_err(err)?)
-    }
-
-    #[tool(description = "Create or update an agent role so every coding agent on this machine can use it. Call when the user describes a repeatable specialist role worth keeping.")]
-    async fn agent_save(&self, Parameters(a): Parameters<SaveAgentArgs>) -> Result<CallToolResult, McpError> {
-        let agent = NewAgent { name: a.name, description: a.description, instructions: a.instructions, model_hint: a.model_hint, tools: a.tools.unwrap_or_default(), tags: a.tags.unwrap_or_default() };
-        json_result(&self.backend.save_agent(agent, "mcp").await.map_err(err)?)
-    }
-
     #[tool(description = "List the coding practices that apply here: the global ones plus any scoped to this project, optionally narrowed by tag. Call before writing code so the work follows the house style.")]
     async fn practice_list(&self, Parameters(a): Parameters<PracticeListArgs>) -> Result<CallToolResult, McpError> {
         let mut docs = self.docs_here(DocKind::Practice, a.project_root).await?;
@@ -1142,7 +1099,6 @@ impl<B: Backend> AtlasMcp<B> {
     }
 }
 
-const AGENTS: &str = "atlas://agents/";
 const PRACTICES: &str = "atlas://practices/";
 const WORKFLOWS: &str = "atlas://workflows/";
 const PROJECTS: &str = "atlas://projects/";
@@ -1333,9 +1289,6 @@ fn project_resources(p: &Project) -> [Resource; 3] {
 /// without a live session.
 pub async fn resources_for<B: LibraryBackend + WorkflowBackend + ProjectBackend>(backend: &B) -> atlas_core::Result<Vec<Resource>> {
     let mut out = vec![];
-    for a in backend.list_agents().await? {
-        out.push(Resource::new(format!("{AGENTS}{}", a.name), a.name.clone()).with_description(a.description).with_mime_type(MARKDOWN));
-    }
     for d in backend.list_docs(DocKind::Practice, None).await? {
         out.push(Resource::new(format!("{PRACTICES}{}", d.name), d.name.clone()).with_mime_type(MARKDOWN));
     }
@@ -1370,11 +1323,10 @@ pub fn resources_for_project(p: &Project) -> Vec<Resource> {
     project_resources(p).into_iter().collect()
 }
 
-/// Every prompt `list_prompts` would return, from the same backend call the router
-/// itself makes. Free of `self` so `GET /api/v1/mcp/status` can count them without a
-/// live session.
-pub async fn prompts_for<B: LibraryBackend>(backend: &B) -> atlas_core::Result<Vec<Prompt>> {
-    let mut prompts = vec![
+/// Every prompt `list_prompts` would return. Free of `self` so `GET /api/v1/mcp/status`
+/// can count them without a live session.
+pub fn prompts_for() -> Vec<Prompt> {
+    vec![
         Prompt::new(BOOTSTRAP_PROMPT, Some(BOOTSTRAP_DESCRIPTION), None),
         Prompt::new(HANDOFF_PROMPT, Some(HANDOFF_DESCRIPTION), None),
         Prompt::new(
@@ -1384,9 +1336,7 @@ pub async fn prompts_for<B: LibraryBackend>(backend: &B) -> atlas_core::Result<V
                 .with_description("Absolute path to the project whose board to work, or \"global\" for the project-less board. Defaults to the root this server was started in.")
                 .with_required(false)]),
         ),
-    ];
-    prompts.extend(backend.list_agents().await?.into_iter().map(|a| Prompt::new(a.name, Some(a.description), None)));
-    Ok(prompts)
+    ]
 }
 
 /// Resources and prompts are written by hand rather than by the static macros: both
@@ -1443,8 +1393,8 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
         // project. `resolve_project_for_gating`, not `resolve_project`, is what looks
         // it up: this check must never connect an unknown project, upsert a row, or
         // write an audit entry as a side effect of gating alone, for a tool that never
-        // touched the project store before (`agent_list` names `project_root` in its
-        // schema but never reads it). A resolution error (a malformed root, say) is not
+        // touched the project store before (`status` takes no `project_root` of its own
+        // and never reads one). A resolution error (a malformed root, say) is not
         // this check's to report, so it is treated as "no project" and left for the
         // tool's own logic to surface if it needs one.
         let project_root = request.arguments.as_ref().and_then(|a| a.get("project_root")).and_then(|v| v.as_str()).map(PathBuf::from);
@@ -1494,9 +1444,7 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
 
     async fn read_resource(&self, request: ReadResourceRequestParams, _context: RequestContext<RoleServer>) -> Result<ReadResourceResponse, McpError> {
         let uri = request.uri;
-        let (text, mime) = if let Some(name) = uri.strip_prefix(AGENTS) {
-            (claude_agent_md(&self.backend.get_agent(name).await.map_err(|e| resource_err(&uri, e))?), MARKDOWN)
-        } else if let Some(name) = uri.strip_prefix(PRACTICES) {
+        let (text, mime) = if let Some(name) = uri.strip_prefix(PRACTICES) {
             (self.backend.get_doc(DocKind::Practice, name).await.map_err(|e| resource_err(&uri, e))?.body, MARKDOWN)
         } else if let Some(name) = uri.strip_prefix(WORKFLOWS) {
             (workflow_markdown(&self.backend.get_workflow(name).await.map_err(|e| resource_err(&uri, e))?), MARKDOWN)
@@ -1564,7 +1512,7 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
     }
 
     async fn list_prompts(&self, _request: Option<PaginatedRequestParams>, _context: RequestContext<RoleServer>) -> Result<ListPromptsResult, McpError> {
-        Ok(ListPromptsResult::with_all_items(prompts_for(&*self.backend).await.map_err(err)?))
+        Ok(ListPromptsResult::with_all_items(prompts_for()))
     }
 
     async fn get_prompt(&self, request: GetPromptRequestParams, _context: RequestContext<RoleServer>) -> Result<GetPromptResponse, McpError> {
@@ -1588,11 +1536,7 @@ impl<B: Backend> ServerHandler for AtlasMcp<B> {
             result.description = Some("Work the task board: claim ready work, move it through the stages, and comment as you go.".into());
             return Ok(result.into());
         }
-        let agent = self.backend.get_agent(&request.name).await.map_err(err)?;
-        let text = format!("Adopt the following agent role:\n\n{}", agent.instructions);
-        let mut result = GetPromptResult::new(vec![PromptMessage::new_text(Role::User, text)]);
-        result.description = Some(agent.description);
-        Ok(result.into())
+        Err(McpError::invalid_params(format!("unknown prompt '{}'", request.name), None))
     }
 }
 
@@ -1622,7 +1566,7 @@ mod tests {
         let names: Vec<String> = s.tool_router.list_all().into_iter().map(|t| t.name.to_string()).collect();
         for n in ["memory_remember", "memory_search", "memory_list", "memory_forget", "memory_review",
                   "status", "project_context", "project_connect", "project_list", "project_get",
-                  "agent_list", "agent_get", "agent_save", "practice_list", "practice_get",
+                  "agent_list", "agent_get", "agent_use", "practice_list", "practice_get",
                   "workflow_list", "workflow_get", "ingest_transcript", "workflow_run", "workflow_status"] {
             assert!(names.contains(&n.to_string()), "missing {n}");
         }
@@ -1787,9 +1731,9 @@ mod tests {
     }
 
     /// Fix round 1: the gating check itself must never connect an unknown project or
-    /// write an audit row, only the tool's own logic may do that. `agent_list` names
-    /// `project_root` in its schema (`TOOL_TABLE`) but its handler never reads it
-    /// (`Parameters(_a)`), so it never touched the project store before this task; it
+    /// write an audit row, only the tool's own logic may do that. `status` takes no
+    /// `project_root` of its own and never reads one, while the gating step reads the
+    /// argument for every call, so it never touched the project store before this task; it
     /// must not start now just because gating resolves a project on every call. True
     /// whether `project_connect` is disabled (the default) or enabled: `resolve_project`
     /// would connect (and audit) an uncached root once `project_connect` is enabled, so
@@ -1813,14 +1757,14 @@ mod tests {
         args.insert("project_root".into(), serde_json::json!(repo.path().to_string_lossy()));
 
         // project_connect disabled (the default).
-        client.call_tool(CallToolRequestParams::new("agent_list").with_arguments(args.clone())).await.unwrap();
+        client.call_tool(CallToolRequestParams::new("status").with_arguments(args.clone())).await.unwrap();
         assert!(backend.list_projects().await.unwrap().is_empty(), "an unknown project must not be connected by gating alone");
         assert_eq!(project_writes(&backend), 0, "gating must write no audit row");
 
         // project_connect enabled: the branch that would make `resolve_project` connect
         // an uncached root is now live; gating must still avoid it.
         backend.set_settings(serde_json::Map::from_iter([("mcp.disabled_tools".to_string(), serde_json::json!([]))]), "t").await.unwrap();
-        client.call_tool(CallToolRequestParams::new("agent_list").with_arguments(args)).await.unwrap();
+        client.call_tool(CallToolRequestParams::new("status").with_arguments(args)).await.unwrap();
         assert!(
             backend.list_projects().await.unwrap().is_empty(),
             "an unknown project must not be connected by gating alone, even with project_connect enabled"
@@ -3087,18 +3031,18 @@ mod tests {
         (backend, s, project, on_roster, off_roster, dir, repo)
     }
 
-    /// `persona_use` refuses a persona the project has not put on its roster, adopts
+    /// `agent_use` refuses an agent the project has not put on its roster, adopts
     /// one it has (answering with the bundle), and the next `project_context` reports
     /// the roster, its default and the adopted persona as `current`; `""` clears it.
     #[tokio::test]
-    async fn persona_use_is_bound_by_the_roster_and_shows_in_project_context() {
+    async fn agent_use_is_bound_by_the_roster_and_shows_in_project_context() {
         let (_backend, s, project, on_roster, off_roster, _dir, _repo) = persona_fixture().await;
 
-        let refused = s.persona_use(Parameters(PersonaUseArgs { name_or_slug: off_roster.slug.clone() })).await.unwrap_err();
+        let refused = s.agent_use(Parameters(PersonaUseArgs { name_or_slug: off_roster.slug.clone() })).await.unwrap_err();
         assert!(refused.message.contains("is not on the roster of project"), "{refused:?}");
         assert!(s.persona().is_none());
 
-        let adopted = s.persona_use(Parameters(PersonaUseArgs { name_or_slug: "mobile developer".into() })).await.unwrap();
+        let adopted = s.agent_use(Parameters(PersonaUseArgs { name_or_slug: "mobile developer".into() })).await.unwrap();
         let bundle: PersonaBundle = serde_json::from_str(&text_of(&adopted)).unwrap();
         assert_eq!(bundle.persona.id, on_roster.id);
         assert_eq!(s.persona().map(|p| p.slug), Some("mobile-developer".to_string()));
@@ -3111,7 +3055,7 @@ mod tests {
         assert_eq!(personas.current.map(|b| b.persona.id), Some(on_roster.id));
         assert_eq!(ctx.project.id, project.id);
 
-        let cleared = s.persona_use(Parameters(PersonaUseArgs { name_or_slug: String::new() })).await.unwrap();
+        let cleared = s.agent_use(Parameters(PersonaUseArgs { name_or_slug: String::new() })).await.unwrap();
         assert_eq!(text_of(&cleared), "null");
         assert!(s.persona().is_none());
         let ctx = s.project_context(Parameters(ProjectRootArgs { project_root: None })).await.unwrap();
@@ -3119,14 +3063,14 @@ mod tests {
         assert!(ctx.personas.unwrap().current.is_none());
 
         // The library, not the roster, is what a session with no project lists.
-        let listed = s.persona_list(Parameters(ProjectRootArgs { project_root: None })).await.unwrap();
+        let listed = s.agent_list(Parameters(ProjectRootArgs { project_root: None })).await.unwrap();
         let rows: Vec<RosterRow> = serde_json::from_str(&text_of(&listed)).unwrap();
         assert_eq!(rows.len(), 1, "a project session lists the roster");
         let bare = AtlasMcp::new(_backend.clone()).with_env_project_root(false);
-        let listed = bare.persona_list(Parameters(ProjectRootArgs { project_root: None })).await.unwrap();
+        let listed = bare.agent_list(Parameters(ProjectRootArgs { project_root: None })).await.unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&text_of(&listed)).unwrap();
         assert_eq!(rows.len(), 2, "no project lists the library: {rows:?}");
-        let got = bare.persona_get(Parameters(PersonaGetArgs { name_or_slug: "security-reviewer".into(), project_root: None })).await.unwrap();
+        let got = bare.agent_get(Parameters(PersonaGetArgs { name_or_slug: "security-reviewer".into(), project_root: None })).await.unwrap();
         let got: PersonaBundle = serde_json::from_str(&text_of(&got)).unwrap();
         assert_eq!(got.persona.id, off_roster.id);
     }
@@ -3156,9 +3100,9 @@ mod tests {
 
     /// With a persona whose `tools` list is non-empty, `tools/list` hides every tool
     /// the list leaves out and `tools/call` refuses it, while the always-visible set
-    /// (`persona_use` among them) stays; clearing the persona restores the full list.
+    /// (`agent_use` among them) stays; clearing the persona restores the full list.
     #[tokio::test]
-    async fn a_persona_narrows_the_tool_list_but_never_hides_persona_use() {
+    async fn a_persona_narrows_the_tool_list_but_never_hides_agent_use() {
         let (_backend, s, _project, _on_roster, _off_roster, _dir, _repo) = persona_fixture().await;
         let (server_io, client_io) = tokio::io::duplex(16 * 1024);
         let handle = tokio::spawn(async move {
@@ -3170,9 +3114,9 @@ mod tests {
         let names = |tools: ListToolsResult| tools.tools.iter().map(|t| t.name.to_string()).collect::<Vec<_>>();
         let before = names(client.list_tools(None).await.unwrap());
         assert!(before.contains(&"memory_remember".to_string()), "{before:?}");
-        assert!(before.contains(&"persona_use".to_string()), "{before:?}");
+        assert!(before.contains(&"agent_use".to_string()), "{before:?}");
 
-        let mut adopt = CallToolRequestParams::new("persona_use");
+        let mut adopt = CallToolRequestParams::new("agent_use");
         adopt.arguments = Some(serde_json::Map::from_iter([("name_or_slug".to_string(), serde_json::json!("mobile-developer"))]));
         client.call_tool(adopt).await.unwrap();
         let narrowed = names(client.list_tools(None).await.unwrap());
@@ -3185,7 +3129,7 @@ mod tests {
         let refused = client.call_tool(CallToolRequestParams::new("memory_remember")).await.unwrap_err();
         assert!(matches!(&refused, rmcp::service::ServiceError::McpError(e) if e.code == rmcp::model::ErrorCode::METHOD_NOT_FOUND), "{refused:?}");
 
-        let mut clear = CallToolRequestParams::new("persona_use");
+        let mut clear = CallToolRequestParams::new("agent_use");
         clear.arguments = Some(serde_json::Map::from_iter([("name_or_slug".to_string(), serde_json::json!(""))]));
         client.call_tool(clear).await.unwrap();
         let after = names(client.list_tools(None).await.unwrap());

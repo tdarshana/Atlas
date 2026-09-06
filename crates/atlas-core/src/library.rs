@@ -5,7 +5,7 @@ use duckdb::types::Type;
 use duckdb::{params, Row};
 use uuid::Uuid;
 
-/// Validates agent/doc names: lowercase letters, digits, `-` or `_`, starting
+/// Validates doc names: lowercase letters, digits, `-` or `_`, starting
 /// with a letter or digit, max 64 chars. Implemented without the `regex`
 /// crate since the alphabet is tiny.
 pub fn validate_name(name: &str) -> Result<()> {
@@ -20,17 +20,6 @@ pub fn validate_name(name: &str) -> Result<()> {
             "invalid name '{name}': use lowercase letters, digits, - or _, max 64 chars, starting with a letter or digit"
         )))
     }
-}
-
-/// Rejects a newline in a field the exporters write as a single frontmatter line.
-/// A value carrying one would end that line early and the rest would be read back
-/// by `import` as a different key, so an agent could rewrite its own `tools` or
-/// `model` through its description.
-fn single_line(field: &str, value: &str) -> Result<()> {
-    if value.contains('\n') || value.contains('\r') {
-        return Err(AtlasError::Invalid(format!("{field} must not contain a line break")));
-    }
-    Ok(())
 }
 
 /// Wraps a column-conversion failure so a malformed value fails the query instead of
@@ -49,121 +38,6 @@ fn parse_list_col(col: usize, json: &str) -> duckdb::Result<Vec<String>> {
 
 fn list_literal(items: &[String]) -> String {
     format!("[{}]", items.iter().map(|t| format!("'{}'", t.replace('\'', "''"))).collect::<Vec<_>>().join(","))
-}
-
-// ---- agents ----
-
-pub struct AgentRepo<'a> {
-    db: &'a Db,
-}
-
-const AGENT_SEL: &str =
-    "id::text, name, description, instructions, model_hint, to_json(tools)::text, to_json(tags)::text, version, created_at::text, updated_at::text";
-
-fn row_to_agent(r: &Row) -> duckdb::Result<Agent> {
-    let tools_json: String = r.get(5)?;
-    let tags_json: String = r.get(6)?;
-    Ok(Agent {
-        id: parse_uuid_col(0, r.get::<_, String>(0)?)?,
-        name: r.get(1)?,
-        description: r.get(2)?,
-        instructions: r.get(3)?,
-        model_hint: r.get(4)?,
-        tools: parse_list_col(5, &tools_json)?,
-        tags: parse_list_col(6, &tags_json)?,
-        version: r.get(7)?,
-        created_at: crate::memories::parse_ts_pub(r.get::<_, String>(8)?)?,
-        updated_at: crate::memories::parse_ts_pub(r.get::<_, String>(9)?)?,
-    })
-}
-
-impl<'a> AgentRepo<'a> {
-    pub fn new(db: &'a Db) -> Self {
-        Self { db }
-    }
-
-    /// Inserts a new agent (version 1) or, when `name` already exists, updates
-    /// its fields and bumps `version`.
-    pub fn save(&self, a: &NewAgent, actor: &str) -> Result<Agent> {
-        validate_name(&a.name)?;
-        single_line("agent name", &a.name)?;
-        single_line("agent description", &a.description)?;
-        if let Some(hint) = &a.model_hint {
-            single_line("agent model hint", hint)?;
-        }
-        for tool in &a.tools {
-            single_line("agent tool", tool)?;
-        }
-        for tag in &a.tags {
-            single_line("agent tag", tag)?;
-        }
-        let tools_list = list_literal(&a.tools);
-        let tags_list = list_literal(&a.tags);
-        let existing: Option<Uuid> = self.db.with_conn(|c| {
-            let mut st = c.prepare("select id::text from agents where name = ?")?;
-            let mut rows = st.query(params![a.name])?;
-            match rows.next()? {
-                Some(r) => Ok(Some(parse_uuid_col(0, r.get::<_, String>(0)?)?)),
-                None => Ok(None),
-            }
-        })?;
-        let (id, action) = match existing {
-            Some(id) => {
-                self.db.with_conn(|c| {
-                    c.execute(
-                        &format!(
-                            "update agents set description = ?, instructions = ?, model_hint = ?, tools = {tools_list}::text[], tags = {tags_list}::text[], version = version + 1, updated_at = now() where id = ?"
-                        ),
-                        params![a.description, a.instructions, a.model_hint, id.to_string()],
-                    )?;
-                    Ok(())
-                })?;
-                (id, "update")
-            }
-            None => {
-                let id = Uuid::new_v4();
-                self.db.with_conn(|c| {
-                    c.execute(
-                        &format!(
-                            "insert into agents (id, name, description, instructions, model_hint, tools, tags, version) values (?, ?, ?, ?, ?, {tools_list}::text[], {tags_list}::text[], 1)"
-                        ),
-                        params![id.to_string(), a.name, a.description, a.instructions, a.model_hint],
-                    )?;
-                    Ok(())
-                })?;
-                (id, "insert")
-            }
-        };
-        crate::memories::MemoryRepo::new(self.db).audit(actor, action, "agent", Some(id), serde_json::json!({"name": a.name}))?;
-        self.get(&a.name)
-    }
-
-    pub fn get(&self, name: &str) -> Result<Agent> {
-        self.db.with_conn(|c| {
-            let mut st = c.prepare(&format!("select {AGENT_SEL} from agents where name = ?"))?;
-            let mut rows = st.query(params![name])?;
-            match rows.next()? {
-                Some(r) => Ok(row_to_agent(r)?),
-                None => Err(AtlasError::NotFound(format!("agent {name}"))),
-            }
-        })
-    }
-
-    pub fn list(&self) -> Result<Vec<Agent>> {
-        self.db.with_conn(|c| {
-            let mut st = c.prepare(&format!("select {AGENT_SEL} from agents order by name"))?;
-            Ok(st.query_map([], row_to_agent)?.collect::<duckdb::Result<Vec<_>>>()?)
-        })
-    }
-
-    pub fn delete(&self, name: &str, actor: &str) -> Result<()> {
-        let a = self.get(name)?;
-        self.db.with_conn(|c| {
-            c.execute("delete from agents where id = ?", params![a.id.to_string()])?;
-            Ok(())
-        })?;
-        crate::memories::MemoryRepo::new(self.db).audit(actor, "delete", "agent", Some(a.id), serde_json::json!({"name": name}))
-    }
 }
 
 // ---- practices / workflows ----
@@ -315,55 +189,9 @@ mod tests {
     use super::*;
     use crate::db::Db;
 
-    #[test]
-    fn agent_save_is_upsert_with_version_bump() {
-        let db = Db::open_in_memory().unwrap();
-        let r = AgentRepo::new(&db);
-        let a = r
-            .save(
-                &NewAgent { name: "reviewer".into(), description: "reviews PRs".into(), instructions: "Be strict.".into(), model_hint: None, tools: vec!["Read".into()], tags: vec![] },
-                "t",
-            )
-            .unwrap();
-        assert_eq!(a.version, 1);
-        let b = r
-            .save(
-                &NewAgent {
-                    name: "reviewer".into(),
-                    description: "reviews PRs carefully".into(),
-                    instructions: "Be strict.".into(),
-                    model_hint: Some("opus".into()),
-                    tools: vec![],
-                    tags: vec!["qa".into()],
-                },
-                "t",
-            )
-            .unwrap();
-        assert_eq!(b.id, a.id);
-        assert_eq!(b.version, 2);
-        assert_eq!(b.model_hint.as_deref(), Some("opus"));
-        assert_eq!(r.list().unwrap().len(), 1);
-        r.delete("reviewer", "t").unwrap();
-        assert!(matches!(r.get("reviewer"), Err(crate::AtlasError::NotFound(_))));
-    }
-
-    /// A newline in an exported field would break the Claude frontmatter, so it is
+        /// A newline in an exported field would break the Claude frontmatter, so it is
     /// refused at the door rather than escaped in each exporter.
-    #[test]
-    fn agent_fields_reject_line_breaks() {
-        let db = Db::open_in_memory().unwrap();
-        let r = AgentRepo::new(&db);
-        let base = NewAgent { name: "reviewer".into(), description: "reviews PRs".into(), instructions: "Be strict.".into(), model_hint: None, tools: vec![], tags: vec![] };
-        let err = r.save(&NewAgent { description: "reviews PRs\ntools: Bash".into(), ..base.clone() }, "t").unwrap_err();
-        assert!(matches!(err, AtlasError::Invalid(ref m) if m.contains("line break")), "{err}");
-        assert!(r.save(&NewAgent { model_hint: Some("opus\nx".into()), ..base.clone() }, "t").is_err());
-        assert!(r.save(&NewAgent { tools: vec!["Read\nx".into()], ..base.clone() }, "t").is_err());
-        assert!(r.save(&NewAgent { tags: vec!["qa\rx".into()], ..base.clone() }, "t").is_err());
-        // The instructions are the file body, not a frontmatter line, so they may wrap.
-        assert!(r.save(&NewAgent { instructions: "Be strict.\n\nAlways.".into(), ..base }, "t").is_ok());
-    }
-
-    #[test]
+        #[test]
     fn names_are_validated() {
         assert!(validate_name("ok-name_1").is_ok());
         for bad in ["", "Bad", "has space", "-lead", &"a".repeat(65)] {

@@ -1,57 +1,42 @@
+//! `atlas agent ...`: list the library and read one agent as a bundle. The CLI has no
+//! session, so it never adopts an agent; adoption is an MCP session concern
+//! (`agent_use`). `atlas persona` is a hidden alias for one release (ATL-427).
+
 use crate::remote::RemoteBackend;
-use atlas_core::backend::LibraryBackend;
-use atlas_core::models::NewAgent;
+use atlas_core::backend::PersonaBackend;
 use clap::Subcommand;
-use std::path::PathBuf;
 
 #[derive(Subcommand)]
 pub enum AgentCmd {
-    /// List every agent
+    /// List every agent in the library
     List,
-    /// Print one agent as JSON
-    Show { name: String },
-    /// Create or replace an agent
-    Save {
+    /// Print one agent as a bundle: the agent plus the skills, workflows,
+    /// practices and MCP servers it names, with a warning for each missing one
+    Show {
+        /// The agent's name or slug
         name: String,
-        #[arg(long)]
-        description: String,
-        /// File holding the agent's instructions; `-` reads standard input
-        #[arg(long)]
-        instructions_file: PathBuf,
-        #[arg(long)]
-        model: Option<String>,
-        /// Tool the agent may use; repeatable
-        #[arg(long = "tool")]
-        tools: Vec<String>,
-        /// Tag to file the agent under; repeatable
-        #[arg(long = "tag")]
-        tags: Vec<String>,
     },
-    /// Remove an agent
-    Delete { name: String },
 }
 
 pub async fn run(cmd: AgentCmd, backend: &RemoteBackend) -> anyhow::Result<()> {
     match cmd {
         AgentCmd::List => {
-            let agents = backend.list_agents().await?;
+            let agents = backend.list_personas().await?;
             let rows: Vec<Vec<String>> = agents
                 .iter()
-                .map(|a| vec![a.name.clone(), a.description.clone(), a.model_hint.clone().unwrap_or_default(), a.tags.join(",")])
+                .map(|p| vec![p.name.clone(), p.slug.clone(), p.role.clone(), truncate(&p.summary, 60)])
                 .collect();
-            super::print_table(&["NAME", "DESCRIPTION", "MODEL", "TAGS"], &rows);
+            super::print_table(&["NAME", "SLUG", "ROLE", "SUMMARY"], &rows);
             Ok(())
         }
-        AgentCmd::Show { name } => super::print_json(&backend.get_agent(&name).await?),
-        AgentCmd::Save { name, description, instructions_file, model, tools, tags } => {
-            let instructions = super::read_source(&instructions_file)?;
-            let agent = NewAgent { name, description, instructions, model_hint: model, tools, tags };
-            super::print_json(&backend.save_agent(agent, "cli").await?)
-        }
-        AgentCmd::Delete { name } => {
-            backend.delete_agent(&name, "cli").await?;
-            println!("deleted agent {name}");
-            Ok(())
-        }
+        AgentCmd::Show { name } => super::print_json(&backend.resolve_persona(&name, None).await?),
     }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    let flat = s.replace('\n', " ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    flat.chars().take(max.saturating_sub(1)).chain(std::iter::once('…')).collect()
 }

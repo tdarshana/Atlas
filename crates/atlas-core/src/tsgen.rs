@@ -35,7 +35,7 @@ fn outputs(g: &mut SchemaGenerator) -> Vec<&'static str> {
         FrameworkKind, FrameworkInventory, FrameworkDocType, FrameworkDoc, SourceRef, FrameworkListing,
         ImportWhat, ImportReport, ImportedTask, ImportedDecision,
         ProjectProfile, Project, AgentAccess, ProjectAccess, LogRef, LogEntry, ProjectContext,
-        Agent, DocKind, Doc,
+        DocKind, Doc,
         SyncKind, SyncAction, SyncOp, SyncReport,
         TaskKind, TaskPriority, Stage, StageList, Task, TaskEvent, TaskDetail, Change,
         TriggerKind, NodeKind, RunStatus, StepStatus, LogLevel, Trigger, Position, MemorySource,
@@ -57,7 +57,7 @@ fn outputs(g: &mut SchemaGenerator) -> Vec<&'static str> {
 fn inputs(g: &mut SchemaGenerator) -> Vec<&'static str> {
     macro_rules! list { ($($t:ident),* $(,)?) => {{ $(g.subschema_for::<$t>();)* vec![$(stringify!($t)),*] }}; }
     list![
-        NewMemory, RecallQuery, ProjectExtraction, ProjectPatch, LogFilter, NewAgent, NewDoc,
+        NewMemory, RecallQuery, ProjectExtraction, ProjectPatch, LogFilter, NewDoc,
         SyncRequest, NewTask, TaskUpdate, TaskFilter, NewWorkflow, WorkflowPatch, SearchQuery,
         McpTransportInput, NewMcpServer, NewSkill, SkillUpdate,
         NewPersona, PersonaUpdate, RosterEntry,

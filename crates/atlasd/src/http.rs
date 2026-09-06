@@ -374,8 +374,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/projects/{id}/extraction", put(put_project_extraction))
         .route("/api/v1/projects/{id}/log", get(get_project_log))
         .route("/api/v1/projects/{id}/log/export", get(export_project_log))
-        .route("/api/v1/agents", get(list_agents).post(save_agent))
-        .route("/api/v1/agents/{name}", get(get_agent).delete(delete_agent))
         .route("/api/v1/practices", get(list_practices).post(save_practice))
         .route("/api/v1/practices/{name}", get(get_practice).delete(delete_practice))
         .route("/api/v1/workflows", get(list_workflows).post(create_workflow))
@@ -406,10 +404,16 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/skills", get(list_skills).post(create_skill))
         .route("/api/v1/skills/{*id}", get(get_skill).put(put_skill_body).patch(patch_skill).delete(delete_skill))
         .route("/api/v1/projects/{id}/skills", put(put_project_skills))
-        .route("/api/v1/personas", get(list_personas).post(create_persona))
-        .route("/api/v1/personas/{id}", get(get_persona).put(put_persona).delete(delete_persona))
-        .route("/api/v1/personas/{id}/bundle", get(persona_bundle))
-        .route("/api/v1/projects/{id}/personas", get(project_roster).put(put_project_roster))
+        // Agents are the `Persona` rows (ATL-427). The old `/personas` paths answer the
+        // same handlers so a client built before the rename keeps working.
+        .route("/api/v1/agents", get(list_personas).post(create_persona))
+        .route("/api/v1/agents/{id}", get(get_persona).put(put_persona).delete(delete_persona))
+        .route("/api/v1/agents/{id}/bundle", get(persona_bundle))
+        .route("/api/v1/projects/{id}/agents", get(project_roster).put(put_project_roster))
+        .route("/api/v1/personas", get(list_personas).post(create_persona)) // alias
+        .route("/api/v1/personas/{id}", get(get_persona).put(put_persona).delete(delete_persona)) // alias
+        .route("/api/v1/personas/{id}/bundle", get(persona_bundle)) // alias
+        .route("/api/v1/projects/{id}/personas", get(project_roster).put(put_project_roster)) // alias
         .route("/api/v1/search", get(global_search))
         .route("/api/v1/mcp/status", get(mcp_status))
         .route("/api/v1/mcp/clients", post(register_mcp_client))
@@ -544,18 +548,6 @@ async fn connect_project(State(s): State<AppState>, ApiQuery(q): ApiQuery<ActorQ
 }
 async fn project_context(State(s): State<AppState>, ApiQuery(q): ApiQuery<ActorQ>, ApiJson(b): ApiJson<RootBody>) -> Result<Json<ProjectContext>, ApiError> {
     Ok(Json(s.backend.project_context(b.root, actor(&q)).await?))
-}
-
-// ---- agents ----
-
-async fn list_agents(State(s): State<AppState>) -> Result<Json<Vec<Agent>>, ApiError> { Ok(Json(s.backend.list_agents().await?)) }
-async fn get_agent(State(s): State<AppState>, ApiPath(name): ApiPath<String>) -> Result<Json<Agent>, ApiError> { Ok(Json(s.backend.get_agent(&name).await?)) }
-async fn save_agent(State(s): State<AppState>, ApiQuery(q): ApiQuery<ActorQ>, ApiJson(a): ApiJson<NewAgent>) -> Result<(StatusCode, Json<Agent>), ApiError> {
-    Ok((StatusCode::CREATED, Json(s.backend.save_agent(a, actor(&q)).await?)))
-}
-async fn delete_agent(State(s): State<AppState>, ApiPath(name): ApiPath<String>, ApiQuery(q): ApiQuery<ActorQ>) -> Result<StatusCode, ApiError> {
-    s.backend.delete_agent(&name, actor(&q)).await?;
-    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---- practices / workflows ----
@@ -956,7 +948,7 @@ async fn mcp_status(State(s): State<AppState>) -> Result<Json<McpStatusReport>, 
         .map(|r| McpToolRow { name: r.name, description: r.description, args: r.args, scope: r.scope, enabled: r.enabled_globally, source: r.source })
         .collect();
     let resources: Vec<McpResource> = atlas_mcp::resources_for(&*s.backend).await?.into_iter().map(mcp_resource).collect();
-    let prompts: Vec<McpPrompt> = atlas_mcp::prompts_for(&*s.backend).await?.into_iter().map(mcp_prompt).collect();
+    let prompts: Vec<McpPrompt> = atlas_mcp::prompts_for().into_iter().map(mcp_prompt).collect();
     let clients = s.mcp_clients.live();
     let port = s.backend.port.unwrap_or(0);
     Ok(Json(McpStatusReport {
@@ -986,7 +978,7 @@ async fn project_mcp(State(s): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> R
     // project tab never lights.
     let tools = atlas_mcp::effective_tools(&disabled_globally, Some(&project), &s.plugin_tools.list());
     let resources = atlas_mcp::resources_for_project(&project).into_iter().map(mcp_resource).collect();
-    let prompts = atlas_mcp::prompts_for(&*s.backend).await?.into_iter().map(mcp_prompt).collect();
+    let prompts = atlas_mcp::prompts_for().into_iter().map(mcp_prompt).collect();
     let clients = s.mcp_clients.live().into_iter().filter(|c| c.last_project_id == Some(id)).collect();
     let port = s.backend.port.unwrap_or(0);
     Ok(Json(ProjectMcpReport {

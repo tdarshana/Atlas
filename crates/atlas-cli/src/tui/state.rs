@@ -5,7 +5,7 @@
 //! and runs whatever [`Effect`]s come back.
 
 use atlas_core::models::{
-    Agent, Doc, DocKind, Memory, MemoryStatus, Project, ProjectContext, RecallHit, Stage,
+    Doc, DocKind, Memory, MemoryStatus, Persona, Project, ProjectContext, RecallHit, Stage,
     StatusReport, SyncReport, Task, TaskDetail,
 };
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -128,7 +128,7 @@ pub struct App {
     pub projects: Vec<Project>,
     pub projects_sel: usize,
     pub project_context: Option<ProjectContext>,
-    pub agents: Vec<Agent>,
+    pub agents: Vec<Persona>,
     pub agents_sel: usize,
     pub last_sync: Option<SyncReport>,
     pub practices: Vec<Doc>,
@@ -191,7 +191,7 @@ pub enum Action {
     /// Boxed: `ProjectContext` carries a whole `Project` and its memories, and an
     /// unboxed variant makes every `Action` as large as the biggest one.
     ProjectContextLoaded(Box<ProjectContext>),
-    AgentsLoaded(Vec<Agent>),
+    AgentsLoaded(Vec<Persona>),
     SyncDone(SyncReport),
     DocsLoaded(DocKind, Vec<Doc>),
     PendingLoaded(Vec<Memory>),

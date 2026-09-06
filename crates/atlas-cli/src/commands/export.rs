@@ -1,6 +1,5 @@
 use crate::remote::RemoteBackend;
 use atlas_core::backend::{MemoryBackend, ProjectBackend, LibraryBackend};
-use atlas_core::export::claude_agent_md;
 use atlas_core::library::validate_name;
 use atlas_core::models::{Doc, DocKind, MemoryStatus};
 use std::path::{Path, PathBuf};
@@ -38,9 +37,6 @@ pub async fn run(dir: PathBuf, force: bool, backend: &RemoteBackend) -> anyhow::
     }
     std::fs::write(dir.join("projects.jsonl"), lines)?;
 
-    let agents = backend.list_agents().await?;
-    write_all(&dir.join("agents"), force, agents.iter().map(|a| (a.name.as_str(), claude_agent_md(a))))?;
-
     let practices = backend.list_docs(DocKind::Practice, None).await?;
     let workflows = backend.list_docs(DocKind::Workflow, None).await?;
     for (kind, docs) in [(DocKind::Practice, &practices), (DocKind::Workflow, &workflows)] {
@@ -48,9 +44,8 @@ pub async fn run(dir: PathBuf, force: bool, backend: &RemoteBackend) -> anyhow::
     }
 
     println!(
-        "exported {memory_count} memories, {} projects, {} agents, {} practices, {} workflows to {}",
+        "exported {memory_count} memories, {} projects, {} practices, {} workflows to {}",
         projects.len(),
-        agents.len(),
         practices.len(),
         workflows.len(),
         dir.display()
@@ -116,7 +111,7 @@ pub(super) fn doc_md(doc: &Doc) -> String {
     }
     out.push_str("---\n\n");
     out.push_str(&doc.body);
-    // Always one closing newline, matching the agent exporter, so `import` can
+    // Always one closing newline, so `import` can
     // undo the framing without having to guess how the body ended.
     out.push('\n');
     out

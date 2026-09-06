@@ -62,7 +62,7 @@ export type McpCheckTool = McpToolInfo;
 /** `PATCH /api/v1/skills/{id}`, native skills only. */
 export type SkillPatch = SkillUpdate;
 export type SkillScope = MemoryScope;
-/** `PUT /api/v1/personas/{id}`. */
+/** `PUT /api/v1/agents/{id}`. */
 export type PersonaPatch = PersonaUpdate;
 /** The case a persona's `models` map is keyed by. */
 export type PersonaCase = Case;

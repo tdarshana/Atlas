@@ -70,7 +70,7 @@ export function projectsUsing(personaId: Uuid): number {
 export async function loadPersonas(): Promise<void> {
 	personas.loading = true;
 	try {
-		personas.items = await api().listPersonas();
+		personas.items = await api().listAgents();
 		personas.error = null;
 	} catch (e) {
 		personas.items = [];
@@ -85,7 +85,7 @@ export async function openPersona(idOrSlug: string): Promise<void> {
 	personas.openLoading = true;
 	personas.openError = null;
 	try {
-		const p = await api().getPersona(idOrSlug);
+		const p = await api().getAgent(idOrSlug);
 		personas.open = p;
 		personas.selectedId = p.id;
 	} catch (e) {
@@ -110,8 +110,8 @@ export function closePersona(): void {
 export async function savePersona(id: Uuid | null, patch: PersonaPatch): Promise<Persona> {
 	const saved =
 		id === null
-			? await api().createPersona(patch as NewPersona)
-			: await api().updatePersona(id, patch);
+			? await api().createAgent(patch as NewPersona)
+			: await api().updateAgent(id, patch);
 	personas.open = saved;
 	personas.selectedId = saved.id;
 	await loadPersonas();
@@ -119,7 +119,7 @@ export async function savePersona(id: Uuid | null, patch: PersonaPatch): Promise
 }
 
 export async function removePersona(id: Uuid): Promise<void> {
-	await api().deletePersona(id);
+	await api().deleteAgent(id);
 	if (personas.selectedId === id) closePersona();
 	await loadPersonas();
 }

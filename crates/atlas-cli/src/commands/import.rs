@@ -1,17 +1,11 @@
 use crate::remote::RemoteBackend;
 use atlas_core::backend::{MemoryBackend, LibraryBackend, WorkflowBackend};
-use atlas_core::models::{DocKind, Memory, NewAgent, NewDoc, NewMemory, NewWorkflow, Trigger};
+use atlas_core::models::{DocKind, Memory, NewDoc, NewMemory, NewWorkflow, Trigger};
 use atlas_core::workflow::migrate_docs::single_action_graph;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub async fn run(dir: PathBuf, backend: &RemoteBackend) -> anyhow::Result<()> {
-    let mut agents = 0usize;
-    for path in md_files(&dir.join("agents"))? {
-        backend.save_agent(read_agent(&path)?, "import").await?;
-        agents += 1;
-    }
-
     let mut docs = 0usize;
     for path in md_files(&dir.join(super::export::doc_dir(DocKind::Practice)))? {
         backend.save_doc(DocKind::Practice, read_doc(&path)?, "import").await?;
@@ -82,7 +76,7 @@ pub async fn run(dir: PathBuf, backend: &RemoteBackend) -> anyhow::Result<()> {
         }
     }
 
-    println!("imported {agents} agents, {docs} practices and workflows, {imported} memories ({skipped} already present)");
+    println!("imported {docs} practices and workflows, {imported} memories ({skipped} already present)");
     Ok(())
 }
 
@@ -108,20 +102,6 @@ fn md_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     }
     paths.sort();
     Ok(paths)
-}
-
-/// Reads an agent file in the Claude export format, including the `tags` line
-/// the exporter adds beyond what Claude Code itself defines.
-fn read_agent(path: &Path) -> anyhow::Result<NewAgent> {
-    let (front, body) = split_frontmatter(&std::fs::read_to_string(path)?).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
-    Ok(NewAgent {
-        name: name_of(&front, path),
-        description: front.get("description").cloned().unwrap_or_default(),
-        instructions: body,
-        model_hint: front.get("model").cloned(),
-        tools: comma_list(front.get("tools")),
-        tags: comma_list(front.get("tags")),
-    })
 }
 
 fn read_doc(path: &Path) -> anyhow::Result<NewDoc> {
@@ -190,30 +170,20 @@ fn unquote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atlas_core::export::claude_agent_md;
-    use atlas_core::models::{Agent, Doc};
+    use atlas_core::models::Doc;
 
+    /// A quoted scalar comes back unquoted, colon and all, and a colon inside a
+    /// comma list does not split the line.
     #[test]
-    fn agent_frontmatter_round_trips() {
-        let agent = Agent {
-            id: uuid::Uuid::nil(),
-            name: "reviewer".into(),
-            description: "note: careful".into(),
-            instructions: "Review the diff.\n".into(),
-            model_hint: Some("sonnet".into()),
-            tools: vec!["read".into(), "mcp: grep".into()],
-            tags: vec!["qa".into(), "slow".into()],
-            version: 1,
-            created_at: Default::default(),
-            updated_at: Default::default(),
-        };
-        let (front, body) = split_frontmatter(&claude_agent_md(&agent)).unwrap();
+    fn quoted_frontmatter_round_trips() {
+        let text = "---\nname: reviewer\ndescription: \"note: careful\"\nmodel: sonnet\ntools: \"read, mcp: grep\"\ntags: qa, slow\n---\n\nReview the diff.\n";
+        let (front, body) = split_frontmatter(text).unwrap();
         assert_eq!(front.get("name").unwrap(), "reviewer");
-        assert_eq!(front.get("description").unwrap(), "note: careful", "a quoted scalar is unquoted, colon and all");
+        assert_eq!(front.get("description").unwrap(), "note: careful");
         assert_eq!(front.get("model").unwrap(), "sonnet");
-        assert_eq!(comma_list(front.get("tools")), vec!["read", "mcp: grep"], "a colon in a tool must not split the line");
-        assert_eq!(comma_list(front.get("tags")), vec!["qa", "slow"], "tags must survive the round trip");
-        assert_eq!(body, "Review the diff.\n");
+        assert_eq!(comma_list(front.get("tools")), vec!["read", "mcp: grep"]);
+        assert_eq!(comma_list(front.get("tags")), vec!["qa", "slow"]);
+        assert_eq!(body, "Review the diff.", "the exporter's closing newline is dropped");
     }
 
     /// The body has to survive the trip byte for byte, or a repeated export and

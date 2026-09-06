@@ -298,19 +298,6 @@ export interface ProjectContext {
 	personas?: PersonaContext | null;
 }
 
-export interface Agent {
-	id: Uuid;
-	name: string;
-	description: string;
-	instructions: string;
-	model_hint: string | null;
-	tools: string[];
-	tags: string[];
-	version: number;
-	created_at: Timestamp;
-	updated_at: Timestamp;
-}
-
 export type DocKind = 'practice' | 'workflow';
 
 export interface Doc {
@@ -865,7 +852,7 @@ export interface PersonaAccess {
 /**
  * A library persona: a role an agent adopts, bundling what it works with and how.
  * Global and unique by name (compared without case); `slug` is derived from the name
- * and is the export file name and the `persona_use` key.
+ * and is the export file name and the `agent_use` key.
  */
 export interface Persona {
 	id: Uuid;
@@ -1194,15 +1181,6 @@ export interface LogFilter {
 	q?: string | null;
 	after?: Timestamp | null;
 	limit?: number | null;
-}
-
-export interface NewAgent {
-	name: string;
-	description: string;
-	instructions: string;
-	model_hint?: string | null;
-	tools?: string[];
-	tags?: string[];
 }
 
 export interface NewDoc {

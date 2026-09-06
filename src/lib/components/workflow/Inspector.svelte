@@ -4,7 +4,7 @@
 	// fields; an action gets the full form plus Practices and Source memories.
 	import { onMount } from 'svelte';
 	import { Badge, Button, Checkbox, Icon, Input, Select, type IconName } from '$lib/ds';
-	import { agents, loadAgents } from '$lib/stores/agents.svelte';
+	import { personas, loadPersonas } from '$lib/stores/personas.svelte';
 	import { practices } from '$lib/stores/docs.svelte';
 	import { loadProjects, projects } from '$lib/stores/projects.svelte';
 	import {
@@ -31,7 +31,7 @@
 	let confirming = $state(false);
 
 	onMount(() => {
-		if (!agents.loaded) void loadAgents();
+		if (!personas.items.length && !personas.loading) void loadPersonas();
 		if (!practices.state.loaded) void practices.load();
 		if (!projects.items.length) void loadProjects();
 	});
@@ -49,7 +49,7 @@
 	const agentOptions = $derived.by(() => {
 		const seen = new Set<string>();
 		const options: { value: string; label: string }[] = [];
-		for (const a of [...RAW_AGENTS, ...agents.list.map((a) => a.name)]) {
+		for (const a of [...RAW_AGENTS, ...personas.items.map((a) => a.slug)]) {
 			if (seen.has(a)) continue;
 			seen.add(a);
 			options.push({ value: a, label: a });

@@ -47,7 +47,7 @@ impl Http {
 impl RemoteBackend {
     /// Binds every later request to the persona `slug` names (sent as
     /// `X-Atlas-Persona`, which the daemon's gates read), or unbinds it with `None`.
-    /// The MCP router calls this from `persona_use` and `task_claim`.
+    /// The MCP router calls this from `agent_use` and `task_claim`.
     pub fn set_persona(&self, slug: Option<String>) {
         *self.client.persona.lock().unwrap_or_else(|e| e.into_inner()) = slug;
     }
@@ -192,7 +192,7 @@ impl RemoteBackend {
     /// slashes between its marketplace, plugin and skill names, and those have to stay
     /// structural for the daemon's wildcard route (`{*id}`) to read them back, while
     /// everything within a part is percent-encoded.
-    /// `/personas/<id or slug>` with `id_or_slug` as one encoded segment, plus any query pairs.
+    /// `/agents/<id or slug>` with `id_or_slug` as one encoded segment, plus any query pairs.
     fn persona_url(base: &str, id_or_slug: &str, pairs: &[(&str, String)]) -> Result<reqwest::Url> {
         let mut url = reqwest::Url::parse(&format!("{base}/personas")).map_err(|e| AtlasError::Other(e.to_string()))?;
         url.path_segments_mut().map_err(|_| AtlasError::Other("the daemon base URL cannot be a base".into()))?.push(id_or_slug);
@@ -389,10 +389,6 @@ impl ProjectBackend for RemoteBackend {
 
 #[async_trait::async_trait]
 impl LibraryBackend for RemoteBackend {
-    async fn list_agents(&self) -> Result<Vec<Agent>> { Self::handle(self.client.get(format!("{}/agents", self.base)).send().await.map_err(Self::net)?).await }
-    async fn get_agent(&self, name: &str) -> Result<Agent> { Self::handle(self.client.get(format!("{}/agents/{name}", self.base)).send().await.map_err(Self::net)?).await }
-    async fn save_agent(&self, a: NewAgent, actor: &str) -> Result<Agent> { Self::handle(self.client.post(format!("{}/agents?actor={actor}", self.base)).json(&a).send().await.map_err(Self::net)?).await }
-    async fn delete_agent(&self, name: &str, actor: &str) -> Result<()> { Self::handle_empty(self.client.delete(format!("{}/agents/{name}?actor={actor}", self.base)).send().await.map_err(Self::net)?).await }
 
     // `DocKind::Workflow` used to be a Markdown document, served at `/api/v1/workflows`.
     // The Phase 9 migration (run once at daemon startup) turns every one of those into a
@@ -653,7 +649,7 @@ impl PersonaBackend for RemoteBackend {
         self.set_persona(slug);
     }
     async fn list_personas(&self) -> Result<Vec<Persona>> {
-        Self::handle(self.client.get(format!("{}/personas", self.base)).send().await.map_err(Self::net)?).await
+        Self::handle(self.client.get(format!("{}/agents", self.base)).send().await.map_err(Self::net)?).await
     }
     /// A slug or a name can carry characters a path segment cannot, so it goes through
     /// the URL encoder rather than string interpolation.
@@ -662,13 +658,13 @@ impl PersonaBackend for RemoteBackend {
         Self::handle(self.client.get(url).send().await.map_err(Self::net)?).await
     }
     async fn create_persona(&self, p: NewPersona, actor: &str) -> Result<Persona> {
-        Self::handle(self.client.post(format!("{}/personas", self.base)).header("X-Atlas-Actor", actor).json(&p).send().await.map_err(Self::net)?).await
+        Self::handle(self.client.post(format!("{}/agents", self.base)).header("X-Atlas-Actor", actor).json(&p).send().await.map_err(Self::net)?).await
     }
     async fn update_persona(&self, id: Uuid, patch: PersonaUpdate, actor: &str) -> Result<Persona> {
-        Self::handle(self.client.put(format!("{}/personas/{id}", self.base)).header("X-Atlas-Actor", actor).json(&patch).send().await.map_err(Self::net)?).await
+        Self::handle(self.client.put(format!("{}/agents/{id}", self.base)).header("X-Atlas-Actor", actor).json(&patch).send().await.map_err(Self::net)?).await
     }
     async fn delete_persona(&self, id: Uuid, actor: &str) -> Result<()> {
-        Self::handle_empty(self.client.delete(format!("{}/personas/{id}", self.base)).header("X-Atlas-Actor", actor).send().await.map_err(Self::net)?).await
+        Self::handle_empty(self.client.delete(format!("{}/agents/{id}", self.base)).header("X-Atlas-Actor", actor).send().await.map_err(Self::net)?).await
     }
     async fn project_roster(&self, project_id: Uuid) -> Result<Vec<RosterRow>> {
         Self::handle(self.client.get(format!("{}/projects/{project_id}/personas", self.base)).send().await.map_err(Self::net)?).await

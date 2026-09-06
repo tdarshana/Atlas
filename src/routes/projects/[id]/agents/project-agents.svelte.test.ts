@@ -17,7 +17,7 @@ beforeAll(() => {
 });
 
 const mocks = vi.hoisted(() => ({
-	listPersonas: vi.fn(),
+	listAgents: vi.fn(),
 	getProjectRoster: vi.fn(),
 	setProjectRoster: vi.fn()
 }));
@@ -77,7 +77,7 @@ function row(name: string, position: number, is_default = false): RosterRow {
 
 beforeEach(() => {
 	for (const fn of Object.values(mocks)) fn.mockReset();
-	mocks.listPersonas.mockResolvedValue([persona('Reviewer'), persona('Builder'), persona('Tester')]);
+	mocks.listAgents.mockResolvedValue([persona('Reviewer'), persona('Builder'), persona('Tester')]);
 	mocks.getProjectRoster.mockResolvedValue([row('Reviewer', 0, true), row('Builder', 1)]);
 	mocks.setProjectRoster.mockImplementation(async () => [
 		row('Reviewer', 0, true),

@@ -6,11 +6,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Persona, RosterRow } from '$lib/types';
 
 const mocks = vi.hoisted(() => ({
-	listPersonas: vi.fn(),
-	getPersona: vi.fn(),
-	createPersona: vi.fn(),
-	updatePersona: vi.fn(),
-	deletePersona: vi.fn(),
+	listAgents: vi.fn(),
+	getAgent: vi.fn(),
+	createAgent: vi.fn(),
+	updateAgent: vi.fn(),
+	deleteAgent: vi.fn(),
 	getProjectRoster: vi.fn(),
 	setProjectRoster: vi.fn(),
 	listProjects: vi.fn()
@@ -81,11 +81,11 @@ const builder = persona('Builder');
 
 beforeEach(() => {
 	for (const fn of Object.values(mocks)) fn.mockReset();
-	mocks.listPersonas.mockResolvedValue([reviewer, builder]);
-	mocks.getPersona.mockResolvedValue(reviewer);
-	mocks.createPersona.mockResolvedValue(builder);
-	mocks.updatePersona.mockResolvedValue({ ...reviewer, role: 'Careful reviewer' });
-	mocks.deletePersona.mockResolvedValue(undefined);
+	mocks.listAgents.mockResolvedValue([reviewer, builder]);
+	mocks.getAgent.mockResolvedValue(reviewer);
+	mocks.createAgent.mockResolvedValue(builder);
+	mocks.updateAgent.mockResolvedValue({ ...reviewer, role: 'Careful reviewer' });
+	mocks.deleteAgent.mockResolvedValue(undefined);
 	mocks.getProjectRoster.mockResolvedValue([row('Reviewer', 0, true), row('Builder', 1)]);
 	mocks.setProjectRoster.mockResolvedValue([row('Reviewer', 0, true), row('Builder', 1)]);
 	mocks.listProjects.mockResolvedValue([
@@ -109,14 +109,14 @@ describe('loadPersonas and openPersona', () => {
 	it('lists the library and clears the error', async () => {
 		personas.error = 'stale';
 		await loadPersonas();
-		expect(mocks.listPersonas).toHaveBeenCalledTimes(1);
+		expect(mocks.listAgents).toHaveBeenCalledTimes(1);
 		expect(personas.items.map((p) => p.name)).toEqual(['Reviewer', 'Builder']);
 		expect(personas.error).toBeNull();
 		expect(personas.loading).toBe(false);
 	});
 
 	it('keeps the error message and an empty list when the daemon fails', async () => {
-		mocks.listPersonas.mockRejectedValue(new Error('down'));
+		mocks.listAgents.mockRejectedValue(new Error('down'));
 		await loadPersonas();
 		expect(personas.items).toEqual([]);
 		expect(personas.error).toBe('down');
@@ -124,7 +124,7 @@ describe('loadPersonas and openPersona', () => {
 
 	it('opens one persona by id or slug and closes it again', async () => {
 		await openPersona('reviewer');
-		expect(mocks.getPersona).toHaveBeenCalledWith('reviewer');
+		expect(mocks.getAgent).toHaveBeenCalledWith('reviewer');
 		expect(personas.open?.id).toBe('id-Reviewer');
 		expect(personas.selectedId).toBe('id-Reviewer');
 		closePersona();
@@ -136,16 +136,16 @@ describe('loadPersonas and openPersona', () => {
 describe('savePersona and removePersona', () => {
 	it('creates when there is no id, then reloads the library', async () => {
 		const created = await savePersona(null, { name: 'Builder', role: 'Builds' });
-		expect(mocks.createPersona).toHaveBeenCalledWith({ name: 'Builder', role: 'Builds' });
+		expect(mocks.createAgent).toHaveBeenCalledWith({ name: 'Builder', role: 'Builds' });
 		expect(created.id).toBe('id-Builder');
-		expect(mocks.listPersonas).toHaveBeenCalledTimes(1);
+		expect(mocks.listAgents).toHaveBeenCalledTimes(1);
 		expect(personas.open?.id).toBe('id-Builder');
 	});
 
 	it('updates by id and takes the saved persona from the daemon', async () => {
 		await openPersona('id-Reviewer');
 		const saved = await savePersona('id-Reviewer', { role: 'Careful reviewer' });
-		expect(mocks.updatePersona).toHaveBeenCalledWith('id-Reviewer', { role: 'Careful reviewer' });
+		expect(mocks.updateAgent).toHaveBeenCalledWith('id-Reviewer', { role: 'Careful reviewer' });
 		expect(saved.role).toBe('Careful reviewer');
 		expect(personas.open?.role).toBe('Careful reviewer');
 	});
@@ -153,9 +153,9 @@ describe('savePersona and removePersona', () => {
 	it('deletes, closes the detail if it was open, and reloads', async () => {
 		await openPersona('id-Reviewer');
 		await removePersona('id-Reviewer');
-		expect(mocks.deletePersona).toHaveBeenCalledWith('id-Reviewer');
+		expect(mocks.deleteAgent).toHaveBeenCalledWith('id-Reviewer');
 		expect(personas.open).toBeNull();
-		expect(mocks.listPersonas).toHaveBeenCalled();
+		expect(mocks.listAgents).toHaveBeenCalled();
 	});
 });
 
@@ -209,9 +209,9 @@ describe('followPersonaChanges', () => {
 		dispatch(change);
 		dispatch(change);
 		dispatch(change);
-		expect(mocks.listPersonas).not.toHaveBeenCalled();
+		expect(mocks.listAgents).not.toHaveBeenCalled();
 		await vi.advanceTimersByTimeAsync(PERSONA_CHANGE_DEBOUNCE_MS + 5);
-		expect(mocks.listPersonas).toHaveBeenCalledTimes(1);
+		expect(mocks.listAgents).toHaveBeenCalledTimes(1);
 		stop();
 	});
 
@@ -231,6 +231,6 @@ describe('followPersonaChanges', () => {
 		stop();
 		dispatch({ entity: 'persona', action: 'create', id: 'x', key: null, project_id: null, at: 'now' });
 		await vi.advanceTimersByTimeAsync(PERSONA_CHANGE_DEBOUNCE_MS + 5);
-		expect(mocks.listPersonas).not.toHaveBeenCalled();
+		expect(mocks.listAgents).not.toHaveBeenCalled();
 	});
 });

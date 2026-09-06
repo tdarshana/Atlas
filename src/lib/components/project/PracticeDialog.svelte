@@ -5,7 +5,7 @@
 	// already has; only creation is fixed.
 	import { Button, Input } from '$lib/ds';
 	import { errorMessage } from '$lib/errors';
-	import { nameError, parseList } from '$lib/stores/agents.svelte';
+	import { nameError, parseList } from '$lib/names';
 	import type { Doc, NewDoc, Uuid } from '$lib/types';
 	import Dialog from '$lib/ui/Dialog.svelte';
 	import MarkdownView from '$lib/ui/MarkdownView.svelte';

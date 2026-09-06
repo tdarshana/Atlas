@@ -5,7 +5,6 @@
 // routes the table marks hand-written stay in `./api`.
 
 import type {
-	Agent,
 	AgentAccess,
 	BlockersBody,
 	ClaimBody,
@@ -34,7 +33,6 @@ import type {
 	MemoryPage,
 	MemoryStatus,
 	MoveBody,
-	NewAgent,
 	NewMcpServer,
 	NewMemory,
 	NewPersona,
@@ -220,22 +218,6 @@ export abstract class GeneratedApi {
 	/** The whole log as JSONL, no filter and no cap. Returned as text, not parsed. */
 	projectLogExport(id: Uuid): Promise<string> {
 		return this.text('GET', `/api/v1/projects/${encodeURIComponent(id)}/log/export`);
-	}
-
-	listAgents(): Promise<Agent[]> {
-		return this.req('GET', '/api/v1/agents');
-	}
-
-	saveAgent(a: NewAgent): Promise<Agent> {
-		return this.req('POST', '/api/v1/agents', a);
-	}
-
-	getAgent(name: string): Promise<Agent> {
-		return this.req('GET', `/api/v1/agents/${encodeURIComponent(name)}`);
-	}
-
-	deleteAgent(name: string): Promise<void> {
-		return this.req('DELETE', `/api/v1/agents/${encodeURIComponent(name)}`);
 	}
 
 	listWorkflows(projectId?: Uuid | null): Promise<Workflow[]> {
@@ -434,41 +416,41 @@ export abstract class GeneratedApi {
 		return this.req('PUT', `/api/v1/projects/${encodeURIComponent(id)}/skills`, payload);
 	}
 
-	listPersonas(): Promise<Persona[]> {
-		return this.req('GET', '/api/v1/personas');
+	listAgents(): Promise<Persona[]> {
+		return this.req('GET', '/api/v1/agents');
 	}
 
-	/** Every persona write is audited against this app's actor, like a board write. */
-	createPersona(input: NewPersona): Promise<Persona> {
-		return this.req('POST', '/api/v1/personas', input, ACTOR);
+	/** Every agent write is audited against this app's actor, like a board write. */
+	createAgent(input: NewPersona): Promise<Persona> {
+		return this.req('POST', '/api/v1/agents', input, ACTOR);
 	}
 
 	/** Takes an id, a slug or a name. */
-	getPersona(idOrSlug: string): Promise<Persona> {
-		return this.req('GET', `/api/v1/personas/${encodeURIComponent(idOrSlug)}`);
+	getAgent(idOrSlug: string): Promise<Persona> {
+		return this.req('GET', `/api/v1/agents/${encodeURIComponent(idOrSlug)}`);
 	}
 
 	/** Only the fields in `patch` change. Takes the id, not the slug. */
-	updatePersona(id: Uuid, patch: PersonaPatch): Promise<Persona> {
-		return this.req('PUT', `/api/v1/personas/${encodeURIComponent(id)}`, patch, ACTOR);
+	updateAgent(id: Uuid, patch: PersonaPatch): Promise<Persona> {
+		return this.req('PUT', `/api/v1/agents/${encodeURIComponent(id)}`, patch, ACTOR);
 	}
 
-	deletePersona(id: Uuid): Promise<void> {
-		return this.req('DELETE', `/api/v1/personas/${encodeURIComponent(id)}`, undefined, ACTOR);
+	deleteAgent(id: Uuid): Promise<void> {
+		return this.req('DELETE', `/api/v1/agents/${encodeURIComponent(id)}`, undefined, ACTOR);
 	}
 
-	/** The persona with everything it references resolved; missing references are warnings. */
-	getPersonaBundle(id: string, projectId?: Uuid | null): Promise<PersonaBundle> {
-		return this.req('GET', `/api/v1/personas/${encodeURIComponent(id)}/bundle${query({ project_id: projectId })}`);
+	/** The agent with everything it references resolved; missing references are warnings. */
+	getAgentBundle(id: string, projectId?: Uuid | null): Promise<PersonaBundle> {
+		return this.req('GET', `/api/v1/agents/${encodeURIComponent(id)}/bundle${query({ project_id: projectId })}`);
 	}
 
 	getProjectRoster(projectId: Uuid): Promise<RosterRow[]> {
-		return this.req('GET', `/api/v1/projects/${encodeURIComponent(projectId)}/personas`);
+		return this.req('GET', `/api/v1/projects/${encodeURIComponent(projectId)}/agents`);
 	}
 
 	/** Replaces the project's roster wholesale: ids, the default and the order. */
 	setProjectRoster(projectId: Uuid, entries: RosterEntry[]): Promise<RosterRow[]> {
-		return this.req('PUT', `/api/v1/projects/${encodeURIComponent(projectId)}/personas`, entries, ACTOR);
+		return this.req('PUT', `/api/v1/projects/${encodeURIComponent(projectId)}/agents`, entries, ACTOR);
 	}
 
 	/**
