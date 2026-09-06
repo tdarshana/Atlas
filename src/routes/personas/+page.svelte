@@ -449,7 +449,7 @@
 				{/if}
 			</div>
 			{#if instructionsEditing}
-				<textarea
+				<textarea autocorrect="off" autocapitalize="off" spellcheck="false"
 					{@attach focusOnMount}
 					bind:value={draft.instructions}
 					use:autogrow

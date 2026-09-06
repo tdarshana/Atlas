@@ -51,7 +51,7 @@
 </script>
 
 {#snippet control()}
-	<input {...rest} id={fid} class={cls} aria-invalid={error ? true : undefined} {value} {oninput} />
+	<input autocorrect="off" autocapitalize="off" spellcheck="false" {...rest} id={fid} class={cls} aria-invalid={error ? true : undefined} {value} {oninput} />
 {/snippet}
 
 {#snippet field()}

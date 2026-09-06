@@ -9,7 +9,7 @@
 	let { value = $bindable(''), mono = false, rows = 6, class: klass = '', ...rest }: Props = $props();
 </script>
 
-<textarea {...rest} {rows} class="textarea {klass}" class:mono bind:value></textarea>
+<textarea autocorrect="off" autocapitalize="off" spellcheck="false" {...rest} {rows} class="textarea {klass}" class:mono bind:value></textarea>
 
 <style>
 	.textarea {

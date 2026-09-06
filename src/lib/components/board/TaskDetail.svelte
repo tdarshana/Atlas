@@ -793,7 +793,7 @@
 			{/if}
 			<div class="field">
 				{#if titleEditing}
-					<textarea
+					<textarea autocorrect="off" autocapitalize="off" spellcheck="false"
 						bind:this={titleEditorEl}
 						bind:value={titleDraft}
 						use:autogrow
@@ -880,7 +880,7 @@
 					<span>Description</span>
 				</div>
 				{#if descriptionEditing}
-					<textarea
+					<textarea autocorrect="off" autocapitalize="off" spellcheck="false"
 						bind:this={descriptionEditorEl}
 						bind:value={descriptionDraft}
 						use:autogrow
@@ -1159,7 +1159,7 @@
 						<EmptyState icon="list-clock" title="No history yet" class="tab-empty" />
 					{/if}
 				{:else}
-					<textarea
+					<textarea autocorrect="off" autocapitalize="off" spellcheck="false"
 						bind:value={comment}
 						class="area"
 						rows="2"

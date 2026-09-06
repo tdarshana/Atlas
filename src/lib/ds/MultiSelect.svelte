@@ -176,7 +176,7 @@
 			<div class="dbm-menu menu" style={place} role="group" aria-label={label ?? placeholder}>
 				<span class="filter">
 					<Icon name="search" size={12} />
-					<input
+					<input autocorrect="off" autocapitalize="off" spellcheck="false"
 						{@attach focusOnMount}
 						type="text"
 						placeholder="Filter"

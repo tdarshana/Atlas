@@ -82,7 +82,7 @@
 				</button>
 			</Badge>
 		{/each}
-		<input
+		<input autocorrect="off" autocapitalize="off" spellcheck="false"
 			id={fid}
 			type="text"
 			{placeholder}
