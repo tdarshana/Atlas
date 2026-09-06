@@ -91,7 +91,7 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
-describe('the project Personas tab', () => {
+describe('the project Agents tab', () => {
 	it('draws the roster in position order with the default radio on the default', async () => {
 		render(ProjectPersonasPage);
 		await waitFor(() => screen.getByTestId('roster-row-reviewer'));
@@ -101,7 +101,7 @@ describe('the project Personas tab', () => {
 		expect(mocks.getProjectRoster).toHaveBeenCalledWith('p-1');
 		expect((screen.getByTestId('roster-default-reviewer') as HTMLInputElement).checked).toBe(true);
 		expect((screen.getByTestId('roster-default-builder') as HTMLInputElement).checked).toBe(false);
-		expect(screen.getByTestId('roster-sync-link').getAttribute('href')).toBe('/projects/p-1/agents');
+		expect(screen.getByTestId('roster-sync-link').getAttribute('href')).toBe('#project-sync');
 	});
 
 	it('registers Add from library… as the tab header action, once', () => {

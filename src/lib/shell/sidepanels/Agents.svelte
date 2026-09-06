@@ -1,38 +1,54 @@
 <script lang="ts">
-	// The saved agents, and the tags they carry.
+	// Two groups over the same list the `/agents` table draws: a row per tag that
+	// narrows the table, and a row per project with how many agents its roster holds.
+	// Counts come from the store, so an agent saved on the route is counted here
+	// without a second fetch.
 	import { onMount } from 'svelte';
-	import { goto } from '$app/navigation';
-	import { agents, loadAgents } from '$lib/stores/agents.svelte';
+	import { loadPersonas, loadUsage, personas } from '$lib/stores/personas.svelte';
 	import TreeGroup from '../TreeGroup.svelte';
 	import TreeRow from '../TreeRow.svelte';
 
 	onMount(() => {
-		if (!agents.loaded) void loadAgents();
+		// The route loads the same lists; only fetch what nothing has yet.
+		if (personas.items.length === 0 && !personas.loading) void loadPersonas();
+		if (personas.rosters.length === 0) void loadUsage();
 	});
 
 	const tags = $derived.by(() => {
-		const counts = new Map<string, number>();
-		for (const agent of agents.list) {
-			for (const tag of agent.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1);
+		const counts: Record<string, number> = {};
+		for (const p of personas.items) {
+			for (const t of p.tags) counts[t] = (counts[t] ?? 0) + 1;
 		}
-		return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+		return Object.entries(counts)
+			.map(([tag, count]) => ({ tag, count }))
+			.sort((a, b) => a.tag.localeCompare(b.tag));
 	});
 </script>
 
-<TreeGroup label="Agents" count={agents.list.length}>
-	{#each agents.list as agent (agent.id)}
+<TreeGroup label="Tags" count={personas.items.length}>
+	<TreeRow
+		icon="filter"
+		label="All"
+		meta={personas.items.length}
+		selected={personas.tagFilter === null}
+		onclick={() => (personas.tagFilter = null)}
+	/>
+	{#each tags as row (row.tag)}
 		<TreeRow
-			icon="bot"
-			label={agent.name}
+			icon="tag"
+			label={row.tag}
 			mono
-			meta={`v${agent.version}`}
-			onclick={() => goto(`/agents?edit=${encodeURIComponent(agent.name)}`)}
+			meta={row.count}
+			selected={personas.tagFilter === row.tag}
+			onclick={() => (personas.tagFilter = row.tag)}
 		/>
 	{/each}
 </TreeGroup>
 
-<TreeGroup label="Tags" count={tags.length}>
-	{#each tags as [tag, count] (tag)}
-		<TreeRow icon="tag" label={tag} mono meta={count} />
-	{/each}
-</TreeGroup>
+{#if personas.rosters.length > 0}
+	<TreeGroup label="Projects" count={personas.rosters.length}>
+		{#each personas.rosters as roster (roster.project_id)}
+			<TreeRow icon="folder" label={roster.project_name} mono meta={roster.persona_ids.length} />
+		{/each}
+	</TreeGroup>
+{/if}

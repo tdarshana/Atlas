@@ -1027,7 +1027,7 @@
 						<span class="fixed" title={fixedTime(task.created_at)} data-testid="task-created">{fixedTime(task.created_at)}</span>
 					</div>
 					<MenuSelect
-						label="Persona"
+						label="Agent"
 						value={persona}
 						options={personaOptions}
 						searchable

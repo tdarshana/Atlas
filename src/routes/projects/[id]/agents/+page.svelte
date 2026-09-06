@@ -1,115 +1,385 @@
 <script lang="ts">
-	// The Agents tab (frame 02.4): agents tagged with this project's name (see
-	// `agents.ts` for why a tag stands in for a `project_id` the daemon does not have),
-	// plus the Sync card scoped to this root.
-	import { Badge, Button, Table, type TableColumn } from '$lib/ds';
-	import { daemon } from '$lib/daemon.svelte';
-	import { plural } from '$lib/format';
-	import { setStatusItems } from '$lib/shell';
-	import { agents, loadAgents, saveAgent } from '$lib/stores/agents.svelte';
+	// The project Personas tab: this project's roster in position order, with one default
+	// radio, up and down to reorder and a remove per row, plus `Add from library…`. Every
+	// change writes the whole list back, the same way the Skills tab writes its disabled
+	// list, so the daemon's answer is always the truth on screen.
+	import { onMount } from 'svelte';
+	import { Button, IconButton, Input } from '$lib/ds';
+	import { errorMessage } from '$lib/errors';
+	import {
+		followPersonaChanges,
+		loadPersonas,
+		loadRoster,
+		personas,
+		saveRoster
+	} from '$lib/stores/personas.svelte';
 	import { project, setHeaderActions } from '$lib/stores/project.svelte';
-	import type { Agent } from '$lib/types';
-	import AgentDialog from '$lib/components/project/AgentDialog.svelte';
+	import type { Persona, RosterRow } from '$lib/types';
 	import ProjectSync from '$lib/components/project/ProjectSync.svelte';
-	import { projectAgents } from '$lib/components/project/agents';
-	import ErrorState from '$lib/ui/ErrorState.svelte';
+	import Dialog from '$lib/ui/Dialog.svelte';
+	import EmptyState from '$lib/ui/EmptyState.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
 
-	let open = $state(false);
-
-	const name = $derived(project.current?.name ?? 'Project');
+	const id = $derived(project.current?.id ?? '');
+	const projectName = $derived(project.current?.name ?? 'Project');
 	const root = $derived(project.current?.root_path ?? '');
-	const mine = $derived(projectAgents(agents.list, name));
 
-	const columns: TableColumn<Agent>[] = [
-		{ key: 'name', label: 'Name', width: '180px', sortable: true },
-		{ key: 'description', label: 'Description' },
-		{ key: 'version', label: 'Version', width: '90px', align: 'right' },
-		{ key: 'tags', label: 'Tags', width: '120px' }
-	];
+	let adding = $state(false);
+	let pickSearch = $state('');
 
-	function openNew(): void {
-		open = true;
+	const rosterIds = $derived(new Set(personas.roster.map((r) => r.persona_id)));
+	const available = $derived(
+		personas.items.filter((p) => {
+			if (rosterIds.has(p.id)) return false;
+			const q = pickSearch.trim().toLowerCase();
+			return !q || p.name.toLowerCase().includes(q) || p.role.toLowerCase().includes(q);
+		})
+	);
+
+	type Entry = Pick<RosterRow, 'persona_id' | 'is_default'>;
+
+	/** Writes `rows` as the whole roster, positions from their order. */
+	async function write(rows: Entry[]): Promise<void> {
+		if (!id) return;
+		const entries = rows.map((r, i) => ({
+			persona_id: r.persona_id,
+			is_default: r.is_default,
+			position: i
+		}));
+		try {
+			await saveRoster(id, entries);
+		} catch (e) {
+			push('error', errorMessage(e));
+			// The control already moved, so put the truth back on screen.
+			await loadRoster(id);
+		}
+	}
+
+	function move(index: number, delta: -1 | 1): void {
+		const rows = [...personas.roster];
+		const other = index + delta;
+		if (other < 0 || other >= rows.length) return;
+		[rows[index], rows[other]] = [rows[other], rows[index]];
+		void write(rows);
+	}
+
+	function makeDefault(row: RosterRow): void {
+		void write(
+			personas.roster.map((r) => ({ ...r, is_default: r.persona_id === row.persona_id }))
+		);
+	}
+
+	function remove(row: RosterRow): void {
+		void write(personas.roster.filter((r) => r.persona_id !== row.persona_id));
+	}
+
+	function pick(p: Persona): void {
+		// The first persona on an empty roster is the one agents adopt, so it is the default.
+		const entry: Entry = { persona_id: p.id, is_default: personas.roster.length === 0 };
+		closePicker();
+		void write([...personas.roster, entry]);
+	}
+
+	function closePicker(): void {
+		adding = false;
+		pickSearch = '';
 	}
 
 	$effect(() => {
-		void loadAgents();
+		if (!id) return;
+		void loadRoster(id);
+		void loadPersonas();
 	});
+
+	onMount(() => followPersonaChanges());
 
 	$effect(() => {
 		setHeaderActions(headerActions);
 		return () => setHeaderActions(null);
 	});
-
-	$effect(() => {
-		setStatusItems({ right: [{ text: `${name} · ${plural(mine.length, 'agent')}` }] });
-	});
 </script>
 
 {#snippet headerActions()}
-	<Button variant="primary" data-testid="agents-new" onclick={openNew}>New agent</Button>
+	<Button size="sm" data-testid="roster-add" onclick={() => (adding = true)}>
+		Add from library…
+	</Button>
 {/snippet}
 
-{#if agents.error}
-	<ErrorState message={agents.error} logPath={daemon.logPath || undefined}>
-		<Button variant="primary" onclick={() => loadAgents()}>Retry</Button>
-	</ErrorState>
-{:else}
-	<div class="stack">
-		<Table id="project-agents" {columns} rows={mine} rowKey={(a: Agent) => a.id}>
-			{#snippet cell(agent: Agent, column: TableColumn<Agent>)}
-				{#if column.key === 'name'}
-					<strong>{agent.name}</strong>
-				{:else if column.key === 'description'}
-					{agent.description}
-				{:else if column.key === 'version'}
-					{agent.version}
-				{:else}
-					<span class="tags">
-						{#each agent.tags as tag (tag)}<Badge mono>{tag}</Badge>{/each}
-					</span>
-				{/if}
-			{/snippet}
-			{#snippet empty()}
-				<div class="empty">
-					<span class="title">No project agents yet</span>
-					<span class="hint">Project agents are exported into this root only. Global agents still apply.</span>
-					<Button variant="primary" onclick={openNew}>New agent</Button>
-				</div>
-			{/snippet}
-		</Table>
+<div class="pane" data-testid="project-agents-page">
+	{#if personas.rosterError}
+		<p class="bad" role="alert" data-testid="roster-error">{personas.rosterError}</p>
+	{/if}
 
-		<ProjectSync projectName={name} {root} />
+	<div class="line">
+		<p class="hint" data-testid="roster-explain">
+			Agents on this project adopt the default agent unless a task names another; the
+			roster is what atlas sync exports.
+			<a href="#project-sync" data-testid="roster-sync-link">Sync now</a>
+		</p>
 	</div>
-{/if}
 
-<AgentDialog {open} projectName={name} onclose={() => (open = false)} onsave={saveAgent} />
+	{#if personas.roster.length === 0 && !personas.rosterError}
+		<EmptyState
+			title="This project has no agents yet"
+			hint="Use Add from library… to put one on the roster."
+		>
+			<Button size="sm" data-testid="roster-add-empty" onclick={() => (adding = true)}>
+				Add from library…
+			</Button>
+		</EmptyState>
+	{:else}
+		<div class="table" role="grid" data-testid="roster-table">
+			<div class="header-row" role="row">
+				<div class="header-cell group-heading" role="columnheader">Name</div>
+				<div class="header-cell group-heading" role="columnheader">Role</div>
+				<div class="header-cell group-heading" role="columnheader">Default</div>
+				<div class="header-cell group-heading" role="columnheader">Order</div>
+				<div class="header-cell" role="columnheader"><span class="sr-only">Remove</span></div>
+			</div>
+			<div class="body" role="rowgroup">
+				{#each personas.roster as row, i (row.persona_id)}
+					<div class="row" role="row" data-testid="roster-row-{row.slug}">
+						<div class="cell mono" role="gridcell">{row.name}</div>
+						<div class="cell" role="gridcell">{row.role}</div>
+						<div class="cell" role="gridcell">
+							<input
+								type="radio"
+								name="roster-default"
+								aria-label="Make {row.name} the default"
+								checked={row.is_default}
+								data-testid="roster-default-{row.slug}"
+								onchange={() => makeDefault(row)}
+							/>
+						</div>
+						<div class="cell order" role="gridcell">
+							<IconButton
+								icon="arrow-up"
+								label="Move up"
+								size="sm"
+								disabled={i === 0}
+								data-testid="roster-up-{row.slug}"
+								onclick={() => move(i, -1)}
+							/>
+							<IconButton
+								icon="arrow-down"
+								label="Move down"
+								size="sm"
+								disabled={i === personas.roster.length - 1}
+								data-testid="roster-down-{row.slug}"
+								onclick={() => move(i, 1)}
+							/>
+						</div>
+						<div class="cell order" role="gridcell">
+							<IconButton
+								icon="x"
+								label="Remove from roster"
+								size="sm"
+								data-testid="roster-remove-{row.slug}"
+								onclick={() => remove(row)}
+							/>
+						</div>
+					</div>
+				{/each}
+			</div>
+		</div>
+	{/if}
+</div>
+
+<Dialog open={adding} title="Add from library" onclose={closePicker}>
+	<div class="picker">
+		<Input
+			placeholder="Search by name or role"
+			aria-label="Search agents"
+			icon="search"
+			bind:value={pickSearch}
+			data-testid="roster-pick-search"
+		/>
+		{#if available.length === 0}
+			<p class="hint" data-testid="roster-pick-empty">
+				{personas.items.length > rosterIds.size
+					? 'No persona matches this search.'
+					: 'Every persona in the library is already on this roster.'}
+			</p>
+		{:else}
+			<ul class="picks">
+				{#each available as p (p.id)}
+					<li>
+						<button
+							type="button"
+							class="pick"
+							data-testid="roster-pick-{p.slug}"
+							onclick={() => pick(p)}
+						>
+							<span class="mono">{p.name}</span>
+							<span class="role">{p.role}</span>
+						</button>
+					</li>
+				{/each}
+			</ul>
+		{/if}
+	</div>
+</Dialog>
+
+<div id="project-sync">
+	<ProjectSync {projectName} {root} />
+</div>
 
 <style>
-	.stack {
+	.pane {
+		flex: 1;
+		min-height: 0;
 		display: flex;
 		flex-direction: column;
+		gap: 8px;
+	}
+
+	.line {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
 		gap: 12px;
 	}
 
-	.tags {
-		display: inline-flex;
-		flex-wrap: wrap;
-		gap: 4px;
+	.hint {
+		margin: 0;
+		font-size: 11px;
+		color: var(--text-tertiary);
 	}
 
-	.empty {
+	.hint a {
+		color: var(--accent);
+	}
+
+	.bad {
+		margin: 0;
+		color: var(--danger-text);
+		font-size: 13px;
+	}
+
+	/* The same 28px header and rows as the ds Table, without its sorting and column
+	   drag: a roster is ordered by hand, so the order the store holds is the order shown. */
+	.table {
 		display: flex;
 		flex-direction: column;
+		min-height: 0;
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md);
+	}
+
+	.header-row,
+	.row {
+		display: grid;
+		grid-template-columns: minmax(0, 1.2fr) minmax(0, 2fr) 64px 64px 32px;
 		align-items: center;
-		gap: 6px;
-		padding: 28px 0;
+		height: 28px;
+		padding: 0 12px;
+		column-gap: 12px;
+		border-bottom: 1px solid var(--border-subtle);
 	}
 
-	.title {
-		font-weight: 600;
+	.header-row {
+		flex: 0 0 28px;
+		user-select: none;
 	}
 
-	.hint {
+	.header-cell {
+		display: flex;
+		align-items: center;
+		height: 100%;
+		padding: 0 8px 0 0;
+		border-right: 1px solid var(--border-subtle);
+	}
+
+	.header-cell:last-child {
+		border-right: 0;
+		padding-right: 0;
+	}
+
+	.body {
+		overflow-y: auto;
+		min-height: 0;
+	}
+
+	.row:last-child {
+		border-bottom: 0;
+	}
+
+	.cell {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.cell.order {
+		display: flex;
+		align-items: center;
+		gap: 2px;
+	}
+
+	.mono {
+		font-family: var(--font-mono);
+		font-variant-numeric: var(--tabular);
+	}
+
+	.sr-only {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		overflow: hidden;
+		clip: rect(0 0 0 0);
+		white-space: nowrap;
+	}
+
+	.picker {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.picks {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		max-height: 320px;
+		overflow-y: auto;
+		display: flex;
+		flex-direction: column;
+	}
+
+	.pick {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+		width: 100%;
+		height: 28px;
+		padding: 0 8px;
+		border: 0;
+		border-bottom: 1px solid var(--border-subtle);
+		background: transparent;
+		color: var(--text-primary);
+		font: inherit;
+		text-align: left;
+		cursor: pointer;
+	}
+
+	.picks li:last-child .pick {
+		border-bottom: 0;
+	}
+
+	.pick:hover {
+		background: var(--bg-hover);
+	}
+
+	.pick:focus-visible {
+		outline: 1px solid var(--accent);
+		outline-offset: -2px;
+	}
+
+	.pick .role {
 		color: var(--text-secondary);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 </style>

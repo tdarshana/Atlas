@@ -117,7 +117,7 @@
 	/>
 </TreeGroup>
 
-<TreeGroup label="Personas">
+<TreeGroup label="Agents">
 	{#each personaGroups as group (group.slug)}
 		<TreeRow
 			icon="users"

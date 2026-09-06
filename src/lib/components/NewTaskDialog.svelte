@@ -122,7 +122,7 @@
 				onchange={(p) => (priority = p)}
 			/>
 			<MenuSelect
-				label="Persona"
+				label="Agent"
 				value={persona}
 				options={personaOptions}
 				searchable

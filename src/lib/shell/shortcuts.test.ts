@@ -46,9 +46,9 @@ describe('installShortcuts', () => {
 		expect(goto).toHaveBeenCalledTimes(9);
 	});
 
-	it('maps Mod+0 to the tenth main view', () => {
+	it('leaves Mod+0 alone now that the rail has nine main views', () => {
 		press('0');
-		expect(goto).toHaveBeenCalledWith('/personas');
+		expect(goto).not.toHaveBeenCalled();
 	});
 
 	it('maps Mod+, to settings', () => {

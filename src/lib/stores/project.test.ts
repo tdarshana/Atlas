@@ -87,7 +87,6 @@ describe('project tabs', () => {
 			'board',
 			'memories',
 			'skills',
-			'personas',
 			'agents',
 			'workflows',
 			'frameworks',
