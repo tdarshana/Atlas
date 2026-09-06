@@ -142,7 +142,7 @@
 		<div class="pair">
 			<label class="field">
 				<span>Model hint</span>
-				<Input bind:value={modelHint} mono placeholder="claude-sonnet" />
+				<Input bind:value={modelHint} mono placeholder="claude-sonnet-5" />
 			</label>
 			<label class="field">
 				<span>Tools</span>
@@ -171,7 +171,7 @@
 		<Button
 			variant="primary"
 			data-testid="agent-save"
-			disabled={saving || loading}
+			disabled={saving || loading || name.trim() === ''}
 			onclick={save}
 		>
 			{saving ? 'Saving…' : 'Save'}

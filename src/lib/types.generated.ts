@@ -58,6 +58,11 @@ export interface StatusReport {
 	memories_active: number;
 	memories_pending: number;
 	embedding: string;
+	/**
+	 * The embedding model in use (the configured `embedding.model` or the default), so
+	 * a client can show it even when the setting is unset.
+	 */
+	embedding_model: string;
 	port: number | null;
 	/**
 	 * Lower-case hex SHA-256 of the daemon token (SEC-5). Only the daemon sets it; a

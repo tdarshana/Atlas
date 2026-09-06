@@ -97,7 +97,7 @@
 	{#snippet head()}
 		<span class="spacer"></span>
 		<Badge tone={vault === 'unlocked' ? 'success' : vault === 'locked' ? 'warning' : 'neutral'}>
-			{vault}
+			{vault === 'missing' ? 'no vault' : vault}
 		</Badge>
 	{/snippet}
 

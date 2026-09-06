@@ -48,7 +48,9 @@ export function statusLabel(): string {
 	if (!status.report) return 'connecting…';
 	const embedding = status.report.embedding.split(':')[0].trim();
 	const n = status.report.memories_active;
-	return `${n} ${n === 1 ? 'memory' : 'memories'} · embedding ${embedding}`;
+	const pending = status.report.memories_pending;
+	const count = `${n} ${n === 1 ? 'memory' : 'memories'}${pending > 0 ? ` · ${pending} pending` : ''}`;
+	return `${count} · embedding ${embedding}`;
 }
 
 /** The full embedding string when it carries a reason, otherwise the error. */

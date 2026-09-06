@@ -7,11 +7,15 @@
 	import { inTauri } from '$lib/shell';
 	import { desktop } from '$lib/shell/platform';
 	import { settingString } from '$lib/stores/settings.svelte';
+	import { status } from '$lib/stores/status.svelte';
 	import { push } from '$lib/platform/toasts.svelte';
 	import SettingsCard from './SettingsCard.svelte';
 
 	const port = $derived(settingString('daemon.port', String(daemon.port)));
-	const embeddingModel = $derived(settingString('embedding.model', 'not set') || 'not set');
+	/** The configured model, or the daemon's own default marked as such. */
+	const embeddingModel = $derived(
+		settingString('embedding.model') || (status.report?.embedding_model ? `${status.report.embedding_model} (default)` : 'not set')
+	);
 
 	// The checkbox reflects the actual launch-agent state (`autostart_get`), not the
 	// mirrored `ui.autostart` setting: another client's read of that mirror is a

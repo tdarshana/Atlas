@@ -1,9 +1,14 @@
 <script lang="ts">
+	/** A scan warning with the home directory folded to `~`, so the line reads as a note
+	 * rather than a path dump. */
+	function tidyWarning(w: string): string {
+		return w.replace(/\/Users\/[^/\s]+/g, '~');
+	}
 	// The project Skills tab: the global skills plus the ones found under this project's
 	// own `.claude/skills` and `.codex/skills`, each with an `Enabled here` checkbox. The
 	// checkbox writes the project's whole disabled list, the same way the MCP tab writes
 	// its tool override, so one project's choices never touch another's.
-	import { Button, Input, Select } from '$lib/ds';
+	import { Button, Input, Select, Icon } from '$lib/ds';
 	import NewSkillDialog from '$lib/components/skills/NewSkillDialog.svelte';
 	import SkillDetail from '$lib/components/skills/SkillDetail.svelte';
 	import SkillTable from '$lib/components/skills/SkillTable.svelte';
@@ -111,7 +116,7 @@
 	<div class="line">
 		<span class="hint" data-testid="project-skills-summary">{summary}</span>
 		{#if skills.warnings.length > 0}
-			<span class="hint" data-testid="skills-warnings">{skills.warnings.join(' · ')}</span>
+			<span class="hint warn" role="status" data-testid="skills-warnings"><Icon name="alert-triangle" size={12} />{skills.warnings.map(tidyWarning).join(' · ')}</span>
 		{/if}
 	</div>
 
@@ -190,5 +195,11 @@
 		margin: 0;
 		color: var(--danger-text);
 		font-size: 13px;
+	}
+	.warn {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		color: var(--warning-text);
 	}
 </style>

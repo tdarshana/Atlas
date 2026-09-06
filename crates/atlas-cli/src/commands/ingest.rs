@@ -359,9 +359,10 @@ mod tests {
         std::fs::write(&path, jsonl).unwrap();
 
         let streamed = stream_transcript(&path).unwrap();
+        // The whole directory goes, so a run under a TMPDIR pointing at the repo leaves
+        // nothing behind.
+        std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(streamed, transcript_to_text(jsonl));
-
-        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
@@ -436,6 +437,6 @@ mod tests {
             "the converted text must end with the transcript's last line"
         );
 
-        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -750,6 +750,7 @@ mod tests {
                 memories_active: 42,
                 memories_pending: 3,
                 embedding: "off".into(),
+                embedding_model: String::new(),
                 port: Some(7433),
                 token_sha256: None,
             }),

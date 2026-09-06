@@ -1,11 +1,16 @@
 <script lang="ts">
+	/** A scan warning with the home directory folded to `~`, so the line reads as a note
+	 * rather than a path dump. */
+	function tidyWarning(w: string): string {
+		return w.replace(/\/Users\/[^/\s]+/g, '~');
+	}
 	// The Skills view: every skill an agent can reach globally, whether it is an Atlas
 	// native skill or a `SKILL.md` folder the daemon found under `~/.claude/skills`,
 	// `~/.codex/skills` or an installed plugin. Search and the Source select narrow the
 	// table client-side; a row opens the skill in the panel on the right, which reads it
 	// and, where Atlas may write, edits it in place.
 	import { onMount } from 'svelte';
-	import { Button, Input, Select } from '$lib/ds';
+	import { Button, Input, Select, Icon } from '$lib/ds';
 	import NewSkillDialog from '$lib/components/skills/NewSkillDialog.svelte';
 	import SkillDetail from '$lib/components/skills/SkillDetail.svelte';
 	import SkillTable from '$lib/components/skills/SkillTable.svelte';
@@ -79,7 +84,7 @@
 	{/if}
 
 	{#if skills.warnings.length > 0}
-		<span class="hint" data-testid="skills-warnings">{skills.warnings.join(' · ')}</span>
+		<span class="hint warn" role="status" data-testid="skills-warnings"><Icon name="alert-triangle" size={12} />{skills.warnings.map(tidyWarning).join(' · ')}</span>
 	{/if}
 
 	<div class="split">
@@ -180,5 +185,11 @@
 		margin: 0;
 		color: var(--danger-text);
 		font-size: 13px;
+	}
+	.warn {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		color: var(--warning-text);
 	}
 </style>

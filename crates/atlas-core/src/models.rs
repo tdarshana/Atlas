@@ -106,6 +106,9 @@ pub struct StatusReport {
     pub memories_active: i64,
     pub memories_pending: i64,
     pub embedding: String,
+    /// The embedding model in use (the configured `embedding.model` or the default), so
+    /// a client can show it even when the setting is unset.
+    #[serde(default)] pub embedding_model: String,
     pub port: Option<u16>,
     /// Lower-case hex SHA-256 of the daemon token (SEC-5). Only the daemon sets it; a
     /// local backend has no token and leaves it out.
