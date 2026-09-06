@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render } from '@testing-library/svelte';
+import { cleanup, fireEvent, render } from '@testing-library/svelte';
 import { createRawSnippet } from 'svelte';
 
 import Badge from './Badge.svelte';
@@ -92,6 +92,34 @@ describe('Select', () => {
 		expect(select.value).toBe('vector');
 		expect(select.className).toBe('dbm-select dbm-select--sm');
 		expect(container.querySelectorAll('option')[0].textContent).toBe('Keyword');
+	});
+
+	it('opens its own menu instead of the native popup, and a pick fires change on the carrier', async () => {
+		const seen: string[] = [];
+		const { container, queryByRole, getAllByRole } = render(Select, {
+			props: {
+				options: ['hybrid', 'bm25', 'vector'],
+				'data-testid': 'search-mode',
+				onchange: (e: Event) => seen.push((e.currentTarget as HTMLSelectElement).value)
+			}
+		});
+		const trigger = container.querySelector('button.dbm-select')!;
+		expect(trigger.textContent?.trim()).toBe('hybrid');
+		expect(queryByRole('listbox')).toBeNull();
+
+		await fireEvent.click(trigger);
+		const options = getAllByRole('option');
+		expect(options.map((o) => o.textContent?.trim())).toEqual(['hybrid', 'bm25', 'vector']);
+		expect(options[0].getAttribute('aria-selected')).toBe('true');
+
+		await fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+		expect(options[1].classList.contains('active')).toBe(true);
+
+		await fireEvent.click(options[2]);
+		expect(queryByRole('listbox')).toBeNull();
+		expect(container.querySelector('select')!.value).toBe('vector');
+		expect(trigger.textContent?.trim()).toBe('vector');
+		expect(seen).toEqual(['vector']);
 	});
 });
 
