@@ -19,7 +19,14 @@ export const drag = $state({
 	overIndex: -1,
 	/** Ghost position, in CSS pixels. */
 	x: 0,
-	y: 0
+	y: 0,
+	/** The lifted card's own markup and size, so the ghost is the card, not a stand-in,
+	 * and where inside it the pointer took hold. */
+	html: '',
+	width: 0,
+	height: 0,
+	grabX: 0,
+	grabY: 0
 });
 
 /** When the last drop ended, so the click a pointer release also raises is ignored. */
@@ -39,6 +46,9 @@ export function clearDrag(): void {
 	drag.fromStage = null;
 	drag.overStage = null;
 	drag.overIndex = -1;
+	drag.html = '';
+	drag.width = 0;
+	drag.height = 0;
 }
 
 /** A position strictly between two neighbours; past either end steps one further

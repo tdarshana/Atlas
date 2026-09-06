@@ -36,15 +36,17 @@
 		onaddcolumn
 	}: Props = $props();
 
-	/** A press that may become a drag: the card and where the pointer started. */
-	let pending: { task: Task; x: number; y: number } | null = null;
+	/** A press that may become a drag: the card, its element and where the pointer started. */
+	let pending: { task: Task; el: HTMLElement; x: number; y: number } | null = null;
 
 	function zoom(): number {
 		return parseFloat(document.documentElement.style.zoom) || 1;
 	}
 
 	function onCardPress(event: PointerEvent, task: Task): void {
-		pending = { task, x: event.clientX, y: event.clientY };
+		const el = (event.currentTarget as HTMLElement | null) ?? (event.target as HTMLElement).closest<HTMLElement>('[data-card-key]');
+		if (!el) return;
+		pending = { task, el, x: event.clientX, y: event.clientY };
 	}
 
 	/** The lane and insertion index under the pointer, from the cards' rectangles. */
@@ -65,6 +67,15 @@
 	function onPointerMove(event: PointerEvent): void {
 		if (pending && !drag.key) {
 			if (Math.hypot(event.clientX - pending.x, event.clientY - pending.y) < DRAG_THRESHOLD_PX) return;
+			// The ghost is the card: its markup as it stands, at its own size, held where
+			// the pointer pressed it. Rects are zoomed pixels; the ghost is fixed in unzoomed.
+			const z = zoom();
+			const r = pending.el.getBoundingClientRect();
+			drag.html = pending.el.outerHTML;
+			drag.width = r.width / z;
+			drag.height = r.height / z;
+			drag.grabX = (pending.x - r.left) / z;
+			drag.grabY = (pending.y - r.top) / z;
 			drag.key = pending.task.key;
 			drag.title = pending.task.title;
 			drag.fromStage = pending.task.stage;
@@ -104,9 +115,14 @@
 <svelte:window onpointermove={onPointerMove} onpointerup={onPointerUp} onpointercancel={onPointerUp} onkeydown={onKeydown} />
 
 {#if drag.key}
-	<div class="ghost" style="left:{drag.x + 12}px;top:{drag.y + 8}px" data-testid="drag-ghost" aria-hidden="true">
-		<span class="ghost-key">{drag.key}</span>
-		<span class="ghost-title">{drag.title}</span>
+	<!-- The card's own markup, inert: nothing inside it can be clicked mid-drag. -->
+	<div
+		class="ghost"
+		style="left:{drag.x - drag.grabX}px;top:{drag.y - drag.grabY}px;width:{drag.width}px;height:{drag.height}px"
+		data-testid="drag-ghost"
+		aria-hidden="true"
+	>
+		{@html drag.html}
 	</div>
 {/if}
 
@@ -174,28 +190,15 @@
 	.ghost {
 		position: fixed;
 		z-index: 2000;
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-		max-width: 260px;
-		padding: 8px 10px;
-		border: 1px solid var(--accent);
-		border-radius: 5px;
-		background: var(--bg-raised);
-		box-shadow: var(--shadow-lg);
 		pointer-events: none;
-		font-size: var(--text-sm);
+		box-shadow: var(--shadow-lg);
+		border-radius: 5px;
 	}
 
-	.ghost-key {
-		font-family: var(--font-mono);
-		font-size: var(--mono-sm);
-		color: var(--text-secondary);
-	}
-
-	.ghost-title {
-		overflow: hidden;
-		white-space: nowrap;
-		text-overflow: ellipsis;
+	/* The cloned card fills the ghost exactly. */
+	.ghost :global(> [data-card-key]) {
+		width: 100%;
+		height: 100%;
+		margin: 0;
 	}
 </style>
