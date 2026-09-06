@@ -6,23 +6,22 @@
 	}
 	// The Skills view: every skill an agent can reach globally, whether it is an Atlas
 	// native skill or a `SKILL.md` folder the daemon found under `~/.claude/skills`,
-	// `~/.codex/skills` or an installed plugin. Search and the Source select narrow the
-	// table client-side; a row opens the skill in the panel on the right, which reads it
-	// and, where Atlas may write, edits it in place.
+	// `~/.codex/skills` or an installed plugin, and the global practices as rows of the
+	// same table (source Practice). Search and the Source select narrow the table
+	// client-side; a row opens in the panel on the right, which reads it and, where Atlas
+	// may write, edits it in place.
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
-	import { replaceState } from '$app/navigation';
-	import DocsPage from '$lib/components/DocsPage.svelte';
-	import { practices } from '$lib/stores/docs.svelte';
-	import { TabStrip, type Tab } from '$lib/shell';
 	import { Button, Input, Select, Icon } from '$lib/ds';
 	import NewSkillDialog from '$lib/components/skills/NewSkillDialog.svelte';
+	import PracticeDialog from '$lib/components/skills/PracticeDialog.svelte';
 	import SkillDetail from '$lib/components/skills/SkillDetail.svelte';
 	import SkillTable from '$lib/components/skills/SkillTable.svelte';
 	import { setStatusItems } from '$lib/shell';
 	import { filterSkills, SOURCE_OPTIONS, type SourceFilter } from '$lib/skills';
 	import {
 		closeSkill,
+		createPractice,
 		createSkill,
 		deleteSkill,
 		loadSkills,
@@ -31,31 +30,22 @@
 		setDetailWidth,
 		skills
 	} from '$lib/stores/skills.svelte';
-	import type { NewSkill, SkillSummary } from '$lib/types';
+	import type { NewSkill } from '$lib/types';
+	import type { SkillRow } from '$lib/skills';
 	import EmptyState from '$lib/ui/EmptyState.svelte';
 	import { push } from '$lib/platform/toasts.svelte';
 
 	let search = $state('');
 
-	/** Skills and Practices share this view (2026-09-06): `?tab=practices` opens the
-	 * rules, anything else the skill folders. */
-	const STRIP: Tab[] = [
-		{ id: 'skills', label: 'Skills', icon: 'graduation-cap' },
-		{ id: 'practices', label: 'Practices', icon: 'book-open' }
-	];
-	let tab = $state<'skills' | 'practices'>(page.url.searchParams.get('tab') === 'practices' ? 'practices' : 'skills');
-	// A deep link or a redirect that lands with `?tab=practices` selects that strip.
-	$effect(() => {
-		if (page.url.searchParams.get('tab') === 'practices') tab = 'practices';
-	});
-	function selectTab(id: string): void {
-		tab = id === 'practices' ? 'practices' : 'skills';
-		const url = new URL(page.url);
-		if (id === 'practices') url.searchParams.set('tab', 'practices');
-		else url.searchParams.delete('tab');
-		replaceState(url, {});
-	}
 	let creating = $state(false);
+	let creatingPractice = $state(false);
+
+	// `/skills?source=practice` (and the older `?tab=practices` the redirects used) opens
+	// the view narrowed to the practices.
+	$effect(() => {
+		const q = page.url.searchParams;
+		if (q.get('source') === 'practice' || q.get('tab') === 'practices') skills.source = 'practice';
+	});
 
 	const rows = $derived(filterSkills(skills.items, search, skills.source));
 
@@ -72,19 +62,20 @@
 		await deleteSkill(id);
 	}
 
-	function open(row: SkillSummary): void {
+	function open(row: SkillRow): void {
 		void openSkill(row.id, null);
 	}
 
 	$effect(() => {
-		setStatusItems({ right: [{ text: `${skills.items.length} skills` }] });
+		const practices = skills.practices.length;
+		const count = skills.items.length - practices;
+		setStatusItems({ right: [{ text: `${count} skills, ${practices} practices` }] });
 	});
 </script>
 
 <div class="title-row">
 	<span class="title">Skills</span>
 	<span class="spacer"></span>
-	{#if tab === 'skills'}
 	<Input
 		placeholder="Search skills"
 		aria-label="Search skills"
@@ -101,25 +92,12 @@
 		data-testid="skills-source"
 	/>
 	<Button size="sm" data-testid="skills-new" onclick={() => (creating = true)}>New skill</Button>
-	{/if}
+	<Button size="sm" data-testid="practices-new" onclick={() => (creatingPractice = true)}>New practice</Button>
 </div>
-<div class="strip-row">
-	<TabStrip items={STRIP} active={tab} onselect={selectTab} testid="skills-tab" />
-</div>
-
-{#if tab === 'practices'}
-<div class="pane" data-testid="practices-pane">
-	<DocsPage
-		store={practices}
-		title="Practices"
-		noun="practice"
-		hint="A practice is a standing rule agents always follow, written in Markdown. Instructions agents load on demand are the Skills beside it."
-	/>
-</div>
-{:else}
 <span class="hint" data-testid="skills-note">
-	Skills are SKILL.md folders agents load on demand. Rules that always apply are the
-	<a href="/skills?tab=practices">Practices</a> on the next tab.
+	Skills are SKILL.md folders agents load on demand. Practices are standing rules that
+	always apply; they sit in the same list under the source
+	<button type="button" class="link" onclick={() => (skills.source = 'practice')}>Practice</button>.
 </span>
 
 <div class="pane" data-testid="skills-page">
@@ -145,7 +123,7 @@
 				{rows}
 				loading={skills.loading}
 				selectedId={skills.open?.id ?? null}
-				emptyText="No skill matches this search."
+				emptyText="Nothing matches this search."
 				onopen={open}
 			/>
 		{/if}
@@ -165,13 +143,18 @@
 	</div>
 </div>
 
-{/if}
-
 <NewSkillDialog
 	open={creating}
 	projectId={null}
 	onclose={() => (creating = false)}
 	oncreate={create}
+/>
+<PracticeDialog
+	open={creatingPractice}
+	editing={null}
+	projectId={null}
+	onclose={() => (creatingPractice = false)}
+	onsave={createPractice}
 />
 
 <style>
@@ -238,9 +221,12 @@
 		gap: 6px;
 		color: var(--warning-text);
 	}
-	.strip-row {
-		display: flex;
-		align-items: center;
-		margin: 2px 0 8px;
+	.link {
+		border: 0;
+		background: none;
+		padding: 0;
+		font: inherit;
+		color: var(--accent);
+		cursor: default;
 	}
 </style>

@@ -127,3 +127,13 @@ When spawning subagents (Agent/Task tool), the routing block is automatically in
 | `ctx stats` | Call the `ctx_stats` MCP tool and display the full output verbatim |
 | `ctx doctor` | Call the `ctx_doctor` MCP tool, run the returned shell command, display as checklist |
 | `ctx upgrade` | Call the `ctx_upgrade` MCP tool, run the returned shell command, display as checklist |
+
+<!-- atlas:start -->
+## Atlas (shared memory and agents)
+
+This project is connected to Atlas as `atlas`. Atlas is available as the MCP server `atlas` (`atlas mcp`).
+Call `memory_search` before starting a task and `memory_remember` when you learn a durable fact, make a decision, or notice a preference.
+
+### Practices
+- **project-rule**: Local to this project.
+<!-- atlas:end -->

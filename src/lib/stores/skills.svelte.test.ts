@@ -4,20 +4,34 @@
 // save that forgets the project id cannot find the file it is meant to rewrite.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Skill, SkillSummary } from '$lib/types';
+import type { Doc, Skill, SkillSummary } from '$lib/types';
+
+const commits: Doc = {
+	id: 'doc-1',
+	kind: 'practice',
+	name: 'commits',
+	body: 'Imperative mood.',
+	tags: ['git'],
+	project_id: null,
+	created_at: '2026-09-01T00:00:00Z',
+	updated_at: '2026-09-02T00:00:00Z'
+};
 
 const updateSkillBody = vi.fn(async (): Promise<Skill> => saved);
 const listSkills = vi.fn(async () => ({ skills: [] as SkillSummary[], warnings: [] }));
+const listDocs = vi.fn(async (): Promise<Doc[]> => [commits]);
+const saveDoc = vi.fn(async (_kind: string, d: { body: string }): Promise<Doc> => ({ ...commits, body: d.body }));
+const deleteDoc = vi.fn(async () => undefined);
 const setProjectSkills = vi.fn(async () => ({}));
 
 vi.mock('$lib/daemon.svelte', () => ({
-	api: () => ({ updateSkillBody, listSkills, setProjectSkills }),
+	api: () => ({ updateSkillBody, listSkills, listDocs, saveDoc, deleteDoc, setProjectSkills }),
 	daemon: { port: 7433, ready: true, error: null, logPath: '~/.atlas/atlasd.log' },
 	baseUrl: () => 'http://127.0.0.1:7433',
 	boot: async () => {}
 }));
 
-import { loadSkills, saveBody, setDisabled, skills } from './skills.svelte';
+import { deleteSkill, loadSkills, openSkill, saveBody, setDisabled, skills } from './skills.svelte';
 
 const saved: Skill = {
 	id: 'claude-project:deployer',
@@ -38,6 +52,9 @@ const saved: Skill = {
 beforeEach(() => {
 	updateSkillBody.mockClear();
 	listSkills.mockClear();
+	listDocs.mockClear();
+	saveDoc.mockClear();
+	deleteDoc.mockClear();
 	setProjectSkills.mockClear();
 });
 
@@ -75,5 +92,43 @@ describe('setDisabled', () => {
 		await setDisabled('p-1', ['claude-project:deployer']);
 		expect(setProjectSkills).toHaveBeenCalledWith('p-1', ['claude-project:deployer']);
 		expect(listSkills).toHaveBeenLastCalledWith('p-1');
+	});
+});
+
+// Practices ride in the same list (2026-09-07): fetched beside the skills for the same
+// scope, opened without a fetch, and written through the practice routes.
+describe('practices in the list', () => {
+	it('loads the practices for the same scope and folds them in as rows', async () => {
+		await loadSkills('p-1');
+		expect(listDocs).toHaveBeenCalledWith('practice', 'p-1');
+		expect(skills.items.map((r) => [r.id, r.source])).toEqual([['practice:commits', 'practice']]);
+		expect(skills.practices).toEqual([commits]);
+	});
+
+	it('opens a practice from the loaded docs, with its body and tags', async () => {
+		await loadSkills(null);
+		await openSkill('practice:commits', null);
+		expect(skills.open?.body).toBe('Imperative mood.');
+		expect(skills.open?.tags).toEqual(['git']);
+		expect(skills.openError).toBeNull();
+		await openSkill('practice:nobody', null);
+		expect(skills.open).toBeNull();
+		expect(skills.openError).toBe('No practice named nobody');
+	});
+
+	it('saves a practice body through the practice route, keeping its tags and scope', async () => {
+		await loadSkills(null);
+		await saveBody('practice:commits', 'Present tense.');
+		expect(saveDoc).toHaveBeenCalledWith('practice', { name: 'commits', body: 'Present tense.', tags: ['git'], project_id: null });
+		expect(updateSkillBody).not.toHaveBeenCalled();
+		expect(skills.open?.body).toBe('Present tense.');
+	});
+
+	it('deletes a practice by name and closes it', async () => {
+		await loadSkills(null);
+		await openSkill('practice:commits', null);
+		await deleteSkill('practice:commits');
+		expect(deleteDoc).toHaveBeenCalledWith('practice', 'commits');
+		expect(skills.open).toBeNull();
 	});
 });

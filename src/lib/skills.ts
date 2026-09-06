@@ -4,17 +4,19 @@
 // sends, and the counts the side panel groups by. No Svelte here, so these are plain
 // unit tests.
 
-import type { SkillSource, SkillSummary } from './types';
+import type { Doc, Skill, SkillSource, SkillSummary } from './types';
 
 /** The value the Source select uses for "no filter". */
 export const ALL_SOURCES = 'all';
 
 /**
- * The Source select's five choices. `claude` and `codex` each cover both the project
+ * The Source select's six choices. `claude` and `codex` each cover both the project
  * and the user root, because a person picking "Claude Code" means the tool, not one of
- * its two folders.
+ * its two folders. `practice` is the standing rules, which sit in the same table since
+ * 2026-09-07: a practice is guidance an agent reads, like a skill, that happens to live
+ * in the managed instruction block rather than in a folder.
  */
-export type SourceFilter = 'all' | 'native' | 'claude' | 'codex' | 'plugin';
+export type SourceFilter = 'all' | 'native' | 'claude' | 'codex' | 'plugin' | 'practice';
 
 /** Every filter but "All": the groups a row can actually belong to. */
 export type SourceGroup = Exclude<SourceFilter, 'all'>;
@@ -23,8 +25,58 @@ export const SOURCE_GROUPS: { source: SourceGroup; label: string }[] = [
 	{ source: 'native', label: 'Native' },
 	{ source: 'claude', label: 'Claude Code' },
 	{ source: 'codex', label: 'Codex' },
-	{ source: 'plugin', label: 'Plugins' }
+	{ source: 'plugin', label: 'Plugins' },
+	{ source: 'practice', label: 'Practices' }
 ];
+
+/** A row's source: one of the daemon's skill sources, or a practice folded in client-side. */
+export type ListedSource = SkillSource | 'practice';
+
+/** What the table draws: a skill summary, or a practice in the same shape. */
+export type SkillRow = Omit<SkillSummary, 'source'> & { source: ListedSource };
+
+/** What the detail panel shows: a skill, or a practice in the same shape (with its tags). */
+export type OpenSkill = Omit<Skill, 'source'> & { source: ListedSource; tags?: string[] };
+
+/** A practice row's id: the daemon addresses a practice by name, so the row does too. */
+export const PRACTICE_PREFIX = 'practice:';
+
+export function isPracticeId(id: string): boolean {
+	return id.startsWith(PRACTICE_PREFIX);
+}
+
+/** The practice name inside a practice row id. */
+export function practiceName(id: string): string {
+	return id.slice(PRACTICE_PREFIX.length);
+}
+
+/** The first line of a practice body, which is what the table shows as its description. */
+function practiceDescription(body: string): string {
+	const line = body.split('\n').find((l) => l.trim() !== '')?.trim() ?? '';
+	return line.replace(/^#+\s*/, '');
+}
+
+/** A practice as a table row: same columns as a skill, source `practice`. */
+export function practiceRow(doc: Doc): SkillRow {
+	return {
+		id: PRACTICE_PREFIX + doc.name,
+		source: 'practice',
+		name: doc.name,
+		description: practiceDescription(doc.body),
+		scope: doc.project_id ? 'project' : 'global',
+		project_id: doc.project_id,
+		path: null,
+		plugin: null,
+		editable: true,
+		updated_at: doc.updated_at,
+		enabled_here: null
+	};
+}
+
+/** A practice as the detail panel shows it: its body is the whole document. */
+export function practiceSkill(doc: Doc): OpenSkill {
+	return { ...practiceRow(doc), body: doc.body, files: [], tags: doc.tags };
+}
 
 export const SOURCE_OPTIONS: { value: SourceFilter; label: string }[] = [
 	{ value: 'all', label: 'All' },
@@ -32,23 +84,25 @@ export const SOURCE_OPTIONS: { value: SourceFilter; label: string }[] = [
 ];
 
 /** The badge a row draws, one per wire source. */
-const SOURCE_LABELS: Record<SkillSource, string> = {
+const SOURCE_LABELS: Record<ListedSource, string> = {
 	native: 'Native',
 	'claude-project': 'Claude Code',
 	'claude-user': 'Claude Code',
 	'codex-project': 'Codex',
 	'codex-user': 'Codex',
-	plugin: 'Plugin'
+	plugin: 'Plugin',
+	practice: 'Practice'
 };
 
-export function sourceLabel(source: SkillSource): string {
+export function sourceLabel(source: ListedSource): string {
 	return SOURCE_LABELS[source] ?? source;
 }
 
 /** Which select option a row belongs to. */
-export function sourceGroup(source: SkillSource): SourceGroup {
+export function sourceGroup(source: ListedSource): SourceGroup {
 	if (source === 'native') return 'native';
 	if (source === 'plugin') return 'plugin';
+	if (source === 'practice') return 'practice';
 	return source.startsWith('claude-') ? 'claude' : 'codex';
 }
 
@@ -58,10 +112,10 @@ export function sourceGroup(source: SkillSource): SourceGroup {
  * empty or blank search matches everything.
  */
 export function filterSkills(
-	items: SkillSummary[],
+	items: SkillRow[],
 	text: string,
 	source: SourceFilter = 'all'
-): SkillSummary[] {
+): SkillRow[] {
 	const needle = text.trim().toLowerCase();
 	return items.filter((s) => {
 		if (source !== 'all' && sourceGroup(s.source) !== source) return false;
@@ -89,7 +143,7 @@ export interface SkillCounts {
 	byPlugin: { plugin: string; count: number }[];
 }
 
-export function skillCounts(items: SkillSummary[]): SkillCounts {
+export function skillCounts(items: SkillRow[]): SkillCounts {
 	const bySource = SOURCE_GROUPS.map((g) => ({
 		source: g.source,
 		label: g.label,
@@ -111,11 +165,15 @@ export function skillCounts(items: SkillSummary[]): SkillCounts {
 	};
 }
 
-/** "3 of 7 skills enabled for this project", for the project tab's summary line. */
-export function enabledSummary(items: SkillSummary[]): string {
-	const enabled = items.filter((s) => s.enabled_here !== false).length;
-	const noun = items.length === 1 ? 'skill' : 'skills';
-	return `${enabled} of ${items.length} ${noun} enabled for this project`;
+/** "3 of 7 skills enabled for this project, 2 practices", for the project tab's summary
+ * line. Practices have no switch, so they are counted beside the skills, not among them. */
+export function enabledSummary(items: SkillRow[]): string {
+	const skills = items.filter((s) => s.source !== 'practice');
+	const practices = items.length - skills.length;
+	const enabled = skills.filter((s) => s.enabled_here !== false).length;
+	const noun = skills.length === 1 ? 'skill' : 'skills';
+	const tail = practices === 0 ? '' : `, ${practices} ${practices === 1 ? 'practice' : 'practices'}`;
+	return `${enabled} of ${skills.length} ${noun} enabled for this project${tail}`;
 }
 
 // ---- the SKILL.md frontmatter ------------------------------------------------------

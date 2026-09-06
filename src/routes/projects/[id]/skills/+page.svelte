@@ -5,11 +5,13 @@
 		return w.replace(/\/Users\/[^/\s]+/g, '~');
 	}
 	// The project Skills tab: the global skills plus the ones found under this project's
-	// own `.claude/skills` and `.codex/skills`, each with an `Enabled here` checkbox. The
-	// checkbox writes the project's whole disabled list, the same way the MCP tab writes
-	// its tool override, so one project's choices never touch another's.
+	// own `.claude/skills` and `.codex/skills`, each with an `Enabled here` checkbox, and
+	// the practices in play here (the project's own plus the global ones) as rows of the
+	// same table. The checkbox writes the project's whole disabled list, the same way the
+	// MCP tab writes its tool override, so one project's choices never touch another's.
 	import { Button, Input, Select, Icon } from '$lib/ds';
 	import NewSkillDialog from '$lib/components/skills/NewSkillDialog.svelte';
+	import PracticeDialog from '$lib/components/skills/PracticeDialog.svelte';
 	import SkillDetail from '$lib/components/skills/SkillDetail.svelte';
 	import SkillTable from '$lib/components/skills/SkillTable.svelte';
 	import { errorMessage } from '$lib/errors';
@@ -22,11 +24,9 @@
 	} from '$lib/skills';
 	import { project, setHeaderActions } from '$lib/stores/project.svelte';
 	import { page } from '$app/state';
-	import { replaceState } from '$app/navigation';
-	import ProjectPractices from '$lib/components/project/ProjectPractices.svelte';
-	import { TabStrip, type Tab } from '$lib/shell';
 	import {
 		closeSkill,
+		createPractice,
 		createSkill,
 		deleteSkill,
 		disabledIds,
@@ -37,7 +37,8 @@
 		setDisabled,
 		skills
 	} from '$lib/stores/skills.svelte';
-	import type { NewSkill, SkillSummary } from '$lib/types';
+	import type { NewSkill } from '$lib/types';
+	import type { SkillRow } from '$lib/skills';
 	import EmptyState from '$lib/ui/EmptyState.svelte';
 	import { push } from '$lib/platform/toasts.svelte';
 
@@ -45,12 +46,13 @@
 
 	let search = $state('');
 	let creating = $state(false);
+	let creatingPractice = $state(false);
 	let toggling = $state<string | null>(null);
 
 	const rows = $derived(filterSkills(skills.items, search, skills.source));
 	const summary = $derived(enabledSummary(skills.items));
 
-	async function toggle(row: SkillSummary, enabled: boolean): Promise<void> {
+	async function toggle(row: SkillRow, enabled: boolean): Promise<void> {
 		if (!id) return;
 		toggling = row.id;
 		try {
@@ -84,28 +86,15 @@
 		void loadSkills(id);
 	});
 
-	/** Skills and the project's practices share this tab (2026-09-06). */
-	const STRIP: Tab[] = [
-		{ id: 'skills', label: 'Skills', icon: 'graduation-cap' },
-		{ id: 'practices', label: 'Practices', icon: 'book-open' }
-	];
-	let tab = $state<'skills' | 'practices'>(page.url.searchParams.get('tab') === 'practices' ? 'practices' : 'skills');
-	// A deep link or a redirect that lands with `?tab=practices` selects that strip.
+	// `?source=practice` (and the older `?tab=practices` the redirects used) opens the
+	// tab narrowed to the practices.
 	$effect(() => {
-		if (page.url.searchParams.get('tab') === 'practices') tab = 'practices';
+		const q = page.url.searchParams;
+		if (q.get('source') === 'practice' || q.get('tab') === 'practices') skills.source = 'practice';
 	});
-	function selectTab(id: string): void {
-		tab = id === 'practices' ? 'practices' : 'skills';
-		const url = new URL(page.url);
-		if (id === 'practices') url.searchParams.set('tab', 'practices');
-		else url.searchParams.delete('tab');
-		replaceState(url, {});
-	}
 
-	// The header lends its actions to the skills strip only; the practices strip carries
-	// its own New practice button inline.
 	$effect(() => {
-		setHeaderActions(tab === 'skills' ? headerActions : null);
+		setHeaderActions(headerActions);
 		return () => setHeaderActions(null);
 	});
 </script>
@@ -118,27 +107,23 @@
 		bind:value={search}
 		data-testid="skills-search"
 	/>
-	<Select
-		size="sm"
-		aria-label="Source"
-		options={SOURCE_OPTIONS}
-		value={skills.source}
-		onchange={(e) => (skills.source = e.currentTarget.value as SourceFilter)}
-		data-testid="skills-source"
-	/>
+	<span class="source">
+		<Select
+			size="sm"
+			aria-label="Source"
+			options={SOURCE_OPTIONS}
+			value={skills.source}
+			onchange={(e) => (skills.source = e.currentTarget.value as SourceFilter)}
+			data-testid="skills-source"
+		/>
+	</span>
 	<Button variant="ghost" size="sm" data-testid="project-skills-reset" onclick={resetToGlobal}>
 		Reset to global
 	</Button>
 	<Button size="sm" data-testid="skills-new" onclick={() => (creating = true)}>New skill</Button>
+	<Button size="sm" data-testid="practices-new" onclick={() => (creatingPractice = true)}>New practice</Button>
 {/snippet}
 
-<div class="strip-row">
-	<TabStrip items={STRIP} active={tab} onselect={selectTab} testid="project-skills-tab" />
-</div>
-
-{#if tab === 'practices'}
-<ProjectPractices />
-{:else}
 <div class="pane" data-testid="project-skills-page">
 	{#if skills.error}
 		<p class="bad" role="alert" data-testid="skills-error">{skills.error}</p>
@@ -166,7 +151,7 @@
 				showScope
 				loading={skills.loading}
 				selectedId={skills.open?.id ?? null}
-				emptyText="No skill matches this search."
+				emptyText="Nothing matches this search."
 				onopen={(row) => void openSkill(row.id, id)}
 				ontoggle={toggle}
 				{toggling}
@@ -188,13 +173,18 @@
 	</div>
 </div>
 
-{/if}
-
 <NewSkillDialog
 	open={creating}
 	projectId={id || null}
 	onclose={() => (creating = false)}
 	oncreate={create}
+/>
+<PracticeDialog
+	open={creatingPractice}
+	editing={null}
+	projectId={id || null}
+	onclose={() => (creatingPractice = false)}
+	onsave={createPractice}
 />
 
 <style>
@@ -235,9 +225,15 @@
 		gap: 6px;
 		color: var(--warning-text);
 	}
-	.strip-row {
-		display: flex;
-		align-items: center;
-		margin-bottom: 8px;
+
+	/* The source filter is one short word; the header would otherwise hand the select
+	   whatever width the row leaves it, as the global view's title row also guards. */
+	.source {
+		display: inline-flex;
+		width: 160px;
+		flex: 0 0 160px;
+	}
+	.source :global(.dbm-select-wrap) {
+		width: 100%;
 	}
 </style>

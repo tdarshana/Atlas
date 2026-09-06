@@ -1,8 +1,7 @@
 <script lang="ts">
-	// The Practices tab's "New practice" dialog (frame 02.3): the same doc editor the
-	// global Practices screen uses, minus the project picker, since a doc created here is
-	// always scoped to this project. Editing an existing doc keeps whatever scope it
-	// already has; only creation is fixed.
+	// The "New practice" dialog on the Skills view and the project Skills tab: name, body
+	// and tags. A practice created on the project tab is scoped to that project; one
+	// created on the global view is global. Editing keeps whatever scope the doc has.
 	import { Button, Input } from '$lib/ds';
 	import { errorMessage } from '$lib/errors';
 	import { nameError, parseList } from '$lib/names';
@@ -14,9 +13,10 @@
 
 	interface Props {
 		open: boolean;
-		/** The doc to edit, or null for a new project-scoped practice. */
+		/** The doc to edit, or null for a new practice. */
 		editing: Doc | null;
-		projectId: Uuid;
+		/** The scope a new practice gets: this project, or null for global. */
+		projectId: Uuid | null;
 		onclose: () => void;
 		onsave: (doc: NewDoc) => Promise<Doc>;
 	}

@@ -1,17 +1,16 @@
 <script lang="ts">
-	// Two groups over the same list the `/skills` table draws: a row per source that sets
-	// the Source select, and a row per plugin that contributes skills. Counts come from
-	// the store, so a skill created on the route is counted here without a second fetch.
+	// Two groups over the same list the `/skills` table draws: a row per source (the
+	// practices among them) that sets the Source select, and a row per plugin that
+	// contributes skills. Counts come from the store, so a skill created on the route is
+	// counted here without a second fetch.
 	import { onMount } from 'svelte';
 	import type { IconName } from '$lib/ds';
 	import { skillCounts, type SourceGroup } from '$lib/skills';
 	import { loadSkills, skills } from '$lib/stores/skills.svelte';
-	import { practices } from '$lib/stores/docs.svelte';
 	import TreeGroup from '../TreeGroup.svelte';
 	import TreeRow from '../TreeRow.svelte';
 
 	onMount(() => {
-		void practices.load();
 		// The route loads the same list; only fetch when nothing has yet.
 		if (skills.items.length === 0 && !skills.loading) void loadSkills(skills.projectId);
 	});
@@ -22,7 +21,8 @@
 		native: 'database',
 		claude: 'bot',
 		codex: 'terminal',
-		plugin: 'plug'
+		plugin: 'plug',
+		practice: 'book-open'
 	};
 </script>
 
@@ -59,7 +59,3 @@
 		{/each}
 	</TreeGroup>
 {/if}
-
-<TreeGroup label="Practices" count={practices.state.list.length}>
-	<TreeRow icon="book-open" label="All practices" meta={practices.state.list.length} href="/skills?tab=practices" />
-</TreeGroup>

@@ -8,8 +8,7 @@
 	import { errorMessage } from '$lib/errors';
 	import { relativeAge } from '$lib/format';
 	import { copyText } from '$lib/shell';
-	import { DETAIL_MAX, DETAIL_MIN, sourceLabel, splitFrontmatter } from '$lib/skills';
-	import type { Skill } from '$lib/types';
+	import { DETAIL_MAX, DETAIL_MIN, sourceLabel, splitFrontmatter, type OpenSkill as Skill } from '$lib/skills';
 	import MarkdownView from '$lib/ui/MarkdownView.svelte';
 	import ResizeBar from '$lib/ui/ResizeBar.svelte';
 	import Textarea from '$lib/ui/Textarea.svelte';
@@ -38,7 +37,10 @@
 	let copied = $state(false);
 	let copyTimer: ReturnType<typeof setTimeout> | null = null;
 
-	const canDelete = $derived(!!ondelete && !!skill && skill.source === 'native');
+	// Only what Atlas itself stores can be deleted here: a native skill or a practice. A
+	// discovered folder is the user's own file.
+	const canDelete = $derived(!!ondelete && !!skill && (skill.source === 'native' || skill.source === 'practice'));
+	const noun = $derived(skill?.source === 'practice' ? 'practice' : 'skill');
 
 	// A second skill picked while the first is being edited refills the panel rather than
 	// leaving the previous body in the textarea under the new name.
@@ -67,7 +69,7 @@
 		try {
 			await onsave(skill.id, draft);
 			editing = false;
-			push('success', 'Skill saved');
+			push('success', noun === 'practice' ? 'Practice saved' : 'Skill saved');
 		} catch (e) {
 			push('error', errorMessage(e));
 		} finally {
@@ -144,6 +146,12 @@
 				</div>
 			{/if}
 
+			{#if skill.tags && skill.tags.length > 0}
+				<div class="tags" data-testid="skill-detail-tags">
+					{#each skill.tags as tag (tag)}<Badge mono>{tag}</Badge>{/each}
+				</div>
+			{/if}
+
 			<div class="meta">
 				<span class="hint">Scope {skill.scope}</span>
 				{#if skill.plugin}<span class="hint">Plugin {skill.plugin}</span>{/if}
@@ -174,7 +182,7 @@
 				<span class="spacer"></span>
 				{#if canDelete}
 					{#if confirming}
-						<span class="hint">Delete this skill?</span>
+						<span class="hint">Delete this {noun}?</span>
 						<Button size="sm" variant="danger" data-testid="skill-delete-confirm" onclick={remove}>
 							Delete
 						</Button>
@@ -247,6 +255,12 @@
 		border: 1px solid var(--border-subtle);
 		border-radius: 3px;
 		background: var(--bg-raised);
+	}
+
+	.tags {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px;
 	}
 
 	header {

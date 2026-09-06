@@ -3,13 +3,17 @@ import {
 	clampDetail,
 	enabledSummary,
 	filterSkills,
+	isPracticeId,
 	nextDisabled,
+	practiceName,
+	practiceRow,
+	practiceSkill,
 	skillCounts,
 	sourceGroup,
 	sourceLabel,
 	splitFrontmatter
 } from './skills';
-import type { SkillSource, SkillSummary } from './types';
+import type { Doc, SkillSource, SkillSummary } from './types';
 
 function skill(
 	name: string,
@@ -41,6 +45,38 @@ const ITEMS: SkillSummary[] = [
 	skill('poster', 'plugin', { plugin: 'anthropics/example-skills' }),
 	skill('rust-rules', 'plugin', { plugin: 'sm/rust' })
 ];
+
+function doc(name: string, body: string, project_id: string | null = null): Doc {
+	return { id: `id-${name}`, kind: 'practice', name, body, tags: ['git'], project_id, created_at: '2026-09-01T00:00:00Z', updated_at: '2026-09-02T00:00:00Z' };
+}
+
+describe('practiceRow', () => {
+	it('draws a practice as a row whose description is its first line, heading marks dropped', () => {
+		const row = practiceRow(doc('commits', '# Commits\n\nImperative mood, one change per commit.'));
+		expect(row).toMatchObject({ id: 'practice:commits', source: 'practice', name: 'commits', description: 'Commits', scope: 'global', editable: true, enabled_here: null, path: null, plugin: null });
+		expect(practiceRow(doc('scoped', 'Local rule.', 'p-1')).scope).toBe('project');
+		expect(isPracticeId(row.id)).toBe(true);
+		expect(practiceName(row.id)).toBe('commits');
+		expect(isPracticeId('native:x')).toBe(false);
+	});
+
+	it('opens as a skill whose body is the whole document and carries the tags', () => {
+		const open = practiceSkill(doc('commits', 'Imperative mood.'));
+		expect(open.body).toBe('Imperative mood.');
+		expect(open.files).toEqual([]);
+		expect(open.tags).toEqual(['git']);
+		expect(sourceLabel(open.source)).toBe('Practice');
+		expect(sourceGroup(open.source)).toBe('practice');
+	});
+});
+
+describe('enabledSummary', () => {
+	it('counts the switches on the skills and names the practices beside them', () => {
+		const rows = [...ITEMS, practiceRow(doc('commits', 'x'))];
+		expect(enabledSummary(rows)).toBe('7 of 7 skills enabled for this project, 1 practice');
+		expect(enabledSummary(ITEMS)).toBe('7 of 7 skills enabled for this project');
+	});
+});
 
 describe('sourceLabel', () => {
 	it('names the tool, not the folder', () => {
@@ -115,8 +151,18 @@ describe('skillCounts', () => {
 			{ source: 'native', label: 'Native', count: 1 },
 			{ source: 'claude', label: 'Claude Code', count: 2 },
 			{ source: 'codex', label: 'Codex', count: 1 },
-			{ source: 'plugin', label: 'Plugins', count: 3 }
+			{ source: 'plugin', label: 'Plugins', count: 3 },
+			{ source: 'practice', label: 'Practices', count: 0 }
 		]);
+	});
+
+	it('counts practice rows under their own source', () => {
+		const rows = [...ITEMS, practiceRow(doc('commits', 'Imperative mood.')), practiceRow(doc('review', 'Two eyes.'))];
+		const counts = skillCounts(rows);
+		expect(counts.total).toBe(9);
+		expect(counts.bySource.find((s) => s.source === 'practice')?.count).toBe(2);
+		expect(filterSkills(rows, '', 'practice').map((r) => r.name)).toEqual(['commits', 'review']);
+		expect(filterSkills(rows, 'imperative').map((r) => r.name)).toEqual(['commits']);
 	});
 
 	it('counts each plugin once, in name order', () => {

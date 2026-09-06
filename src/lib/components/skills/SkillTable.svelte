@@ -1,11 +1,11 @@
 <script lang="ts">
 	// The skills table, drawn the same way in the global view and the project tab. The
 	// project tab is the only caller that asks for the Scope and `Enabled here` columns,
-	// so both are optional rather than two near-identical tables.
+	// so both are optional rather than two near-identical tables. A practice row draws
+	// the same columns; it has no switch, so its `Enabled here` cell stays empty.
 	import { Badge, Checkbox, Table, type TableColumn } from '$lib/ds';
 	import { relativeAge } from '$lib/format';
-	import { sourceLabel } from '$lib/skills';
-	import type { SkillSummary } from '$lib/types';
+	import { sourceLabel, type SkillRow as SkillSummary } from '$lib/skills';
 
 	interface Props {
 		id: string;
@@ -79,6 +79,9 @@
 			{:else if column.key === 'updated_at'}
 				{row.updated_at ? `${relativeAge(row.updated_at)} ago` : '—'}
 			{:else if column.key === 'enabled_here'}
+				{#if row.source === 'practice'}
+					<span class="hint" title="A practice always applies">—</span>
+				{:else}
 				<Checkbox
 					checked={row.enabled_here !== false}
 					disabled={toggling === row.id}
@@ -87,6 +90,7 @@
 					onclick={(e) => e.stopPropagation()}
 					onchange={(e) => ontoggle?.(row, e.currentTarget.checked)}
 				/>
+				{/if}
 			{/if}
 		{/snippet}
 		{#snippet empty()}
