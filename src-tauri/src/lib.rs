@@ -16,7 +16,7 @@ mod scratch;
 use atlas_client::remote::RemoteBackend;
 use atlas_core::backend::StatusBackend;
 use commands::{
-    cli_install, cli_status,
+    cli_install, cli_status, list_fonts,
     about_info, about_menu_refresh, app_exit, app_relaunch, autostart_get, autostart_set, clipboard_write,
     install_shortcut, log_dir, notification_permission, notification_request_permission, notify,
     open_log_folder, shortcut_set, ui_state_all, ui_state_get, ui_state_set, update_check,
@@ -259,6 +259,7 @@ pub fn run() {
             open_log_folder,
             cli_status,
             cli_install,
+            list_fonts,
             vault_status,
             vault_set_passphrase,
             vault_unlock,

@@ -7,7 +7,7 @@
 
 import type { ThemePack } from '$lib/types';
 import type { FontMono, FontSize, FontUi } from './fonts';
-import { applyFonts } from './fonts';
+import { applyFonts, applySmoothing } from './fonts';
 import { persistSet } from '$lib/platform/persist';
 import { shell, THEME_KEY, type Theme } from './shell.svelte';
 import { applyThemePack, clearThemePack } from './theme-pack';
@@ -16,6 +16,8 @@ export const THEME_PACK_KEY = 'atlas.theme_pack';
 export const FONT_UI_KEY = 'atlas.font_ui';
 export const FONT_MONO_KEY = 'atlas.font_mono';
 export const FONT_SIZE_KEY = 'atlas.font_size';
+export const MONO_SIZE_KEY = 'atlas.font_mono_size';
+export const SMOOTHING_KEY = 'atlas.font_smoothing';
 export const SCALE_KEY = 'atlas.scale';
 
 /** The whole app's zoom level, an integer percent. Not a font concern, so it lives here
@@ -57,6 +59,13 @@ export function applyScale(scale: UiScale): void {
 	writeStored(SCALE_KEY, scale === 100 ? null : String(scale));
 }
 
+/** Applies the smoothing switch to the document at once and remembers it for the boot
+ * script; the daemon's `ui.font_smoothing` is the caller's to save. */
+export function setSmoothing(on: boolean): void {
+	applySmoothing(on);
+	writeStored(SMOOTHING_KEY, on ? null : 'off');
+}
+
 /** The stop after (or before) the current one, or null at either end of the list. */
 export function nextScale(direction: 1 | -1): UiScale | null {
 	return SCALE_STOPS[SCALE_STOPS.indexOf(currentScale()) + direction] ?? null;
@@ -85,18 +94,22 @@ export function applyAppearance(
 	fontUi: FontUi,
 	fontMono: FontMono,
 	fontSize: FontSize,
-	scale: UiScale
+	scale: UiScale,
+	monoSize: FontSize = 12,
+	smoothing = true
 ): void {
 	shell.theme = base;
 	if (typeof document !== 'undefined') document.documentElement.dataset.theme = base;
 	applyScale(scale);
 	if (pack) applyThemePack(pack);
 	else clearThemePack();
-	applyFonts(fontUi, fontMono, fontSize);
+	applyFonts(fontUi, fontMono, fontSize, monoSize, smoothing);
 
 	writeStored(THEME_KEY, base);
 	writeStored(THEME_PACK_KEY, pack ? JSON.stringify(pack) : null);
 	writeStored(FONT_UI_KEY, fontUi);
 	writeStored(FONT_MONO_KEY, fontMono);
 	writeStored(FONT_SIZE_KEY, String(fontSize));
+	writeStored(MONO_SIZE_KEY, String(monoSize));
+	writeStored(SMOOTHING_KEY, smoothing ? null : 'off');
 }

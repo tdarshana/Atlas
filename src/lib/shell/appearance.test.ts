@@ -12,7 +12,9 @@ import {
 	FONT_UI_KEY,
 	SCALE_KEY,
 	SCALE_OPTIONS,
-	THEME_PACK_KEY
+	THEME_PACK_KEY,
+	setSmoothing,
+	SMOOTHING_KEY
 } from './appearance';
 import { THEME_KEY, shell } from './shell.svelte';
 
@@ -86,5 +88,16 @@ describe('SCALE_OPTIONS', () => {
 			{ value: '125', label: '125%' },
 			{ value: '150', label: '150%' }
 		]);
+	});
+});
+
+describe('setSmoothing', () => {
+	it('marks the document and the boot mirror when off, and clears both when on', () => {
+		setSmoothing(false);
+		expect(document.documentElement.dataset.smoothing).toBe('off');
+		expect(localStorage.getItem(SMOOTHING_KEY)).toBe('off');
+		setSmoothing(true);
+		expect(document.documentElement.dataset.smoothing).toBeUndefined();
+		expect(localStorage.getItem(SMOOTHING_KEY)).toBeNull();
 	});
 });

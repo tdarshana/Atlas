@@ -48,13 +48,25 @@
           'jetbrains-mono': '"JetBrains Mono","SF Mono","Cascadia Code",Menlo,Consolas,monospace',
           'system-mono': 'ui-monospace,"SF Mono","Cascadia Code",Menlo,Consolas,monospace'
         };
-        var fontUi = fontUiStacks[localStorage.getItem('atlas.font_ui')];
+        // A stored value is a preset name or an installed family, which goes ahead of
+        // the system stack (mirrors `fontUiStack`/`fontMonoStack` in src/lib/shell/fonts.ts).
+        var quote = function (f) { return '"' + f.replace(/["\\]/g, '\\$&') + '"'; };
+        var storedUi = localStorage.getItem('atlas.font_ui');
+        var fontUi = storedUi && (fontUiStacks[storedUi] || quote(storedUi) + ',' + fontUiStacks.system);
         if (fontUi) document.documentElement.style.setProperty('--font-ui', fontUi);
-        var fontMono = fontMonoStacks[localStorage.getItem('atlas.font_mono')];
+        var storedMono = localStorage.getItem('atlas.font_mono');
+        var fontMono = storedMono && (fontMonoStacks[storedMono] || quote(storedMono) + ',' + fontMonoStacks['system-mono']);
         if (fontMono) document.documentElement.style.setProperty('--font-mono', fontMono);
-        var fontSize = localStorage.getItem('atlas.font_size');
-        if (fontSize === '11' || fontSize === '12' || fontSize === '13') {
+        var fontSize = Number(localStorage.getItem('atlas.font_size'));
+        if (fontSize >= 11 && fontSize <= 16) {
           document.documentElement.style.setProperty('--text-sm', fontSize + 'px');
+        }
+        var monoSize = Number(localStorage.getItem('atlas.font_mono_size'));
+        if (monoSize >= 10 && monoSize <= 16) {
+          document.documentElement.style.setProperty('--mono-sm', monoSize + 'px');
+        }
+        if (localStorage.getItem('atlas.font_smoothing') === 'off') {
+          document.documentElement.dataset.smoothing = 'off';
         }
         var scale = localStorage.getItem('atlas.scale');
         if (

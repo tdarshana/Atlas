@@ -135,6 +135,10 @@ export const UI_FONT_UI_KEY = 'ui.font_ui';
 export const UI_FONT_MONO_KEY = 'ui.font_mono';
 /** The UI size scale's base step: 11, 12 or 13. */
 export const UI_FONT_SIZE_KEY = 'ui.font_size';
+/** Code text size in px (`ui.font_mono_size`), 12 by default. */
+export const UI_FONT_MONO_SIZE_KEY = 'ui.font_mono_size';
+/** Thinner grayscale anti-aliasing on (`true`, the default) or WebKit's default off. */
+export const UI_FONT_SMOOTHING_KEY = 'ui.font_smoothing';
 /** The whole app's zoom level, an integer percent: 80, 90, 100, 110, 125 or 150. */
 export const UI_SCALE_KEY = 'ui.scale';
 

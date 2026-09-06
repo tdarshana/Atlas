@@ -29,6 +29,8 @@ pub const SETTING_KEYS: &[&str] = &[
     "ui.font_ui",
     "ui.font_mono",
     "ui.font_size",
+    "ui.font_mono_size",
+    "ui.font_smoothing",
     "ui.scale",
     "ui.autostart",
     "ui.global_shortcut",

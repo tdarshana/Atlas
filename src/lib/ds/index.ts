@@ -13,6 +13,7 @@ export { default as Select } from './Select.svelte';
 export { default as Skeleton } from './Skeleton.svelte';
 export { default as Table } from './Table.svelte';
 export { default as TagInput } from './TagInput.svelte';
+export { default as Switch } from './Switch.svelte';
 export { default as Tooltip } from './Tooltip.svelte';
 
 export type { Platform } from './KeyHint.svelte';

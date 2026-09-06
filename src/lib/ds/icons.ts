@@ -48,6 +48,7 @@ import GitBranch from '@lucide/svelte/icons/git-branch';
 import GitCommitHorizontal from '@lucide/svelte/icons/git-commit-horizontal';
 import GraduationCap from '@lucide/svelte/icons/graduation-cap';
 import History from '@lucide/svelte/icons/history';
+import Undo2 from '@lucide/svelte/icons/undo-2';
 import Activity from '@lucide/svelte/icons/activity';
 import Info from '@lucide/svelte/icons/info';
 import Keyboard from '@lucide/svelte/icons/keyboard';
@@ -101,6 +102,7 @@ export const icons = {
 	'corner-down-right': CornerDownRight,
 	'graduation-cap': GraduationCap,
 	history: History,
+	'undo-2': Undo2,
 	activity: Activity,
 	'list-checks': ListChecks,
 	'list-clock': ListClock,

@@ -3,6 +3,7 @@
 
 pub mod about;
 pub mod cli;
+pub mod fonts;
 pub mod notify;
 pub mod permissions;
 pub mod platform;
@@ -12,6 +13,7 @@ pub mod window;
 
 pub use about::{about_info, about_menu_refresh, log_dir, open_log_folder};
 pub use cli::{cli_install, cli_status};
+pub use fonts::list_fonts;
 #[cfg(target_os = "macos")]
 pub use about::install_app_menu;
 pub use notify::{notification_permission, notification_request_permission, notify};

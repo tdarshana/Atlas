@@ -4,29 +4,42 @@
 	// localStorage or the daemon until Save; the live preview strip below reflects the
 	// draft immediately, scoped to itself via `data-theme` and inline custom properties
 	// rather than the real window.
-	import { Button, Select } from '$lib/ds';
+	import { onMount } from 'svelte';
+	import { Button, Icon, IconButton, Select, Switch } from '$lib/ds';
 	import { api } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
 	import { inTauri, type Theme } from '$lib/shell';
-	import { applyAppearance, SCALE_OPTIONS, type UiScale } from '$lib/shell/appearance';
+	import { applyAppearance, SCALE_OPTIONS, setSmoothing, type UiScale } from '$lib/shell/appearance';
 	import {
+		DEFAULT_FONT_MONO,
+		DEFAULT_FONT_SIZE,
+		DEFAULT_FONT_UI,
+		DEFAULT_MONO_SIZE,
 		FONT_MONO_OPTIONS,
 		FONT_SIZE_OPTIONS,
+		FONT_SIZES,
 		FONT_UI_OPTIONS,
 		fontMonoStack,
 		fontUiStack,
+		loadInstalledFonts,
+		MONO_SIZE_OPTIONS,
+		MONO_SIZES,
 		type FontMono,
 		type FontSize,
-		type FontUi
+		type FontUi,
+		type InstalledFont
 	} from '$lib/shell/fonts';
+	import MenuSelect from '$lib/components/board/MenuSelect.svelte';
 	import { validateThemePack } from '$lib/shell/theme-pack';
 	import { THEME_PRESETS, themePreset } from '$lib/shell/theme-presets';
 	import { contributions } from '$lib/plugins/host.svelte';
 	import { loadPluginThemes } from '$lib/plugins/themes';
-	import { loadSettings, settingNumber, settingString } from '$lib/stores/settings.svelte';
+	import { loadSettings, saveSettings, settingBool, settingNumber, settingString } from '$lib/stores/settings.svelte';
 	import {
 		UI_FONT_MONO_KEY,
+		UI_FONT_MONO_SIZE_KEY,
 		UI_FONT_SIZE_KEY,
+		UI_FONT_SMOOTHING_KEY,
 		UI_FONT_UI_KEY,
 		UI_SCALE_KEY,
 		UI_THEME_PACK_KEY
@@ -37,9 +50,51 @@
 
 	let draftTheme = $state<Theme>('dark');
 	let draftPack = $state<ThemePack | null>(null);
-	let draftFontUi = $state<FontUi>('system');
-	let draftFontMono = $state<FontMono>('jetbrains-mono');
+	let draftFontUi = $state<FontUi>(DEFAULT_FONT_UI);
+	let draftFontMono = $state<FontMono>(DEFAULT_FONT_MONO);
 	let draftFontSize = $state<FontSize>(12);
+	let draftMonoSize = $state<FontSize>(12);
+	let draftSmoothing = $state(true);
+
+	/** Each Typography row shows a reset arrow only while it differs from the default. */
+	const uiFontChanged = $derived(draftFontUi !== DEFAULT_FONT_UI || draftFontSize !== DEFAULT_FONT_SIZE);
+	const monoFontChanged = $derived(draftFontMono !== DEFAULT_FONT_MONO || draftMonoSize !== DEFAULT_MONO_SIZE);
+
+	/** Smoothing applies the moment it is flipped, unlike the rest of the card, which
+	 * waits for Save: the change is easiest to judge on the text around the switch. */
+	function onSmoothingChange(on: boolean): void {
+		draftSmoothing = on;
+		setSmoothing(on);
+		saveSettings({ [UI_FONT_SMOOTHING_KEY]: on }).catch((e) => push('error', errorMessage(e)));
+	}
+
+	/** The machine's font families, from the host; empty in a plain browser. */
+	let installedFonts = $state<InstalledFont[]>([]);
+	onMount(() => {
+		void loadInstalledFonts().then((fonts) => (installedFonts = fonts));
+	});
+
+	/** Presets first, then every installed family drawn in its own face. A stored family
+	 * the machine no longer has still appears, so the trigger never shows a blank. */
+	const uiFontOptions = $derived.by(() => {
+		const rows = [
+			...FONT_UI_OPTIONS,
+			...installedFonts.map((f) => ({ value: f.family, label: f.family, font: fontUiStack(f.family) }))
+		];
+		if (!rows.some((r) => r.value === draftFontUi)) rows.push({ value: draftFontUi, label: draftFontUi });
+		return rows;
+	});
+	/** Same for code, with the monospace families ahead of the rest. */
+	const monoFontOptions = $derived.by(() => {
+		const rows = [
+			...FONT_MONO_OPTIONS,
+			...[...installedFonts]
+				.sort((a, b) => Number(b.monospace) - Number(a.monospace))
+				.map((f) => ({ value: f.family, label: f.family, font: fontMonoStack(f.family), hint: f.monospace ? 'mono' : undefined }))
+		];
+		if (!rows.some((r) => r.value === draftFontMono)) rows.push({ value: draftFontMono, label: draftFontMono });
+		return rows;
+	});
 	let draftScale = $state<UiScale>(100);
 
 	let appearanceSaving = $state(false);
@@ -109,11 +164,13 @@
 		draftTheme = settingString('ui.theme') === 'light' ? 'light' : 'dark';
 		const packRaw = settingString(UI_THEME_PACK_KEY);
 		draftPack = packRaw ? parseStoredPack(packRaw) : null;
-		const fontUi = settingString(UI_FONT_UI_KEY);
-		draftFontUi = fontUi === 'inter' || fontUi === 'jetbrains-mono' ? fontUi : 'system';
-		draftFontMono = settingString(UI_FONT_MONO_KEY) === 'system-mono' ? 'system-mono' : 'jetbrains-mono';
+		draftFontUi = settingString(UI_FONT_UI_KEY) || DEFAULT_FONT_UI;
+		draftFontMono = settingString(UI_FONT_MONO_KEY) || DEFAULT_FONT_MONO;
 		const size = settingNumber(UI_FONT_SIZE_KEY, 12);
-		draftFontSize = size === 11 || size === 13 ? size : 12;
+		draftFontSize = FONT_SIZES.includes(size) ? size : 12;
+		const monoSize = settingNumber(UI_FONT_MONO_SIZE_KEY, 12);
+		draftMonoSize = MONO_SIZES.includes(monoSize) ? monoSize : 12;
+		draftSmoothing = settingBool(UI_FONT_SMOOTHING_KEY, true);
 		const scale = settingNumber(UI_SCALE_KEY, 100);
 		draftScale = scale === 80 || scale === 90 || scale === 110 || scale === 125 || scale === 150 ? scale : 100;
 	}
@@ -171,11 +228,13 @@
 				[UI_FONT_UI_KEY]: draftFontUi,
 				[UI_FONT_MONO_KEY]: draftFontMono,
 				[UI_FONT_SIZE_KEY]: draftFontSize,
+				[UI_FONT_MONO_SIZE_KEY]: draftMonoSize,
+				[UI_FONT_SMOOTHING_KEY]: draftSmoothing,
 				[UI_SCALE_KEY]: draftScale
 			};
 			await api().setSettings(partial);
 			await loadSettings();
-			applyAppearance(base, draftPack, draftFontUi, draftFontMono, draftFontSize, draftScale);
+			applyAppearance(base, draftPack, draftFontUi, draftFontMono, draftFontSize, draftScale, draftMonoSize, draftSmoothing);
 			push('success', 'Appearance saved');
 		} catch (e) {
 			appearanceError = errorMessage(e);
@@ -241,17 +300,6 @@
 			onchange={(e) => onThemeChange(e.currentTarget.value)}
 		/>
 		<Select
-			label="UI size"
-			options={FONT_SIZE_OPTIONS}
-			value={String(draftFontSize)}
-			data-testid="appearance-font-size"
-			onchange={(e) => {
-				draftFontSize = Number(e.currentTarget.value) as FontSize;
-			}}
-		/>
-	</div>
-	<div class="pair">
-		<Select
 			label="UI scale"
 			options={SCALE_OPTIONS}
 			value={String(draftScale)}
@@ -261,32 +309,12 @@
 			}}
 		/>
 	</div>
-	<div class="pair">
-		<Select
-			label="UI family"
-			options={FONT_UI_OPTIONS}
-			value={draftFontUi}
-			data-testid="appearance-font-ui"
-			onchange={(e) => {
-				draftFontUi = e.currentTarget.value as FontUi;
-			}}
-		/>
-		<Select
-			label="Mono family"
-			options={FONT_MONO_OPTIONS}
-			value={draftFontMono}
-			data-testid="appearance-font-mono"
-			onchange={(e) => {
-				draftFontMono = e.currentTarget.value as FontMono;
-			}}
-		/>
-	</div>
 
 	<div class="preview" data-testid="appearance-preview" data-theme={previewBase} style={previewTokenStyle}>
 		<span class="preview-ui" style={`font-family:${fontUiStack(draftFontUi)};font-size:${draftFontSize}px`}>
 			Atlas keeps every agent's memory in one place.
 		</span>
-		<span class="preview-mono" style={`font-family:${fontMonoStack(draftFontMono)}`}>
+		<span class="preview-mono" style={`font-family:${fontMonoStack(draftFontMono)};font-size:${draftMonoSize}px`}>
 			atlas recall "duckdb schema"
 		</span>
 		<div class="swatches">
@@ -302,6 +330,131 @@
 		theme. Import a JSON file shaped
 		<span class="mono">{'{ "name", "base": "dark"|"light", "tokens": { "--token": "value" } }'}</span>.
 	</span>
+
+	<h4 class="subheading">Typography</h4>
+
+	<div class="typo-row">
+		<div class="typo-text">
+			<span class="typo-label">
+				Interface font
+				{#if uiFontChanged}
+					<IconButton
+						size="sm"
+						icon="undo-2"
+						label="Reset interface font"
+						data-testid="appearance-font-ui-reset"
+						onclick={() => {
+							draftFontUi = DEFAULT_FONT_UI;
+							draftFontSize = DEFAULT_FONT_SIZE;
+						}}
+					/>
+				{/if}
+			</span>
+			<span class="typo-hint">Everything outside code blocks and the terminal.</span>
+		</div>
+		<div class="typo-controls">
+			<MenuSelect
+				value={draftFontUi}
+				options={uiFontOptions}
+				searchable
+				placeholder="System"
+				testId="appearance-font-ui"
+				onchange={(v) => (draftFontUi = v)}
+			/>
+			<Select
+				options={FONT_SIZE_OPTIONS}
+				value={String(draftFontSize)}
+				aria-label="Interface font size"
+				data-testid="appearance-font-size"
+				onchange={(e) => (draftFontSize = Number(e.currentTarget.value))}
+			/>
+		</div>
+	</div>
+	<div
+		class="typo-preview"
+		data-testid="appearance-ui-preview"
+		style={`font-family:${fontUiStack(draftFontUi)};font-size:${draftFontSize}px`}
+	>
+		Ask <span class="chip chip-persona"><Icon name="user-round" size={12} /> Reviewer</span> to recall
+		<span class="chip"><span class="chip-mono">duckdb schema</span></span> and move
+		<span class="chip"><span class="chip-mono">ATL-42</span></span> to Testing before shipping.
+	</div>
+
+	<div class="typo-row">
+		<div class="typo-text">
+			<span class="typo-label">
+				Monospace font
+				{#if monoFontChanged}
+					<IconButton
+						size="sm"
+						icon="undo-2"
+						label="Reset monospace font"
+						data-testid="appearance-font-mono-reset"
+						onclick={() => {
+							draftFontMono = DEFAULT_FONT_MONO;
+							draftMonoSize = DEFAULT_MONO_SIZE;
+						}}
+					/>
+				{/if}
+			</span>
+			<span class="typo-hint">Code blocks, diffs, file previews and the terminal.</span>
+		</div>
+		<div class="typo-controls">
+			<MenuSelect
+				value={draftFontMono}
+				options={monoFontOptions}
+				searchable
+				placeholder="JetBrains Mono"
+				testId="appearance-font-mono"
+				onchange={(v) => (draftFontMono = v)}
+			/>
+			<Select
+				options={MONO_SIZE_OPTIONS}
+				value={String(draftMonoSize)}
+				aria-label="Monospace font size"
+				data-testid="appearance-mono-size"
+				onchange={(e) => (draftMonoSize = Number(e.currentTarget.value))}
+			/>
+		</div>
+	</div>
+	<div
+		class="typo-preview code"
+		data-testid="appearance-mono-preview"
+		style={`font-family:${fontMonoStack(draftFontMono)};font-size:${draftMonoSize}px`}
+	>
+		<div class="code-head">
+			<span class="code-file">crates/atlas-core/src/board/mod.rs</span>
+			<span class="code-stat"><span class="del">-1</span> <span class="add">+1</span></span>
+		</div>
+		<div class="code-line"><span class="ln">1</span><span>pub fn ready(task: &Task) -&gt; bool {'{'}</span></div>
+		<div class="code-line removed"><span class="ln">2</span><span>    task.blocked_by.is_empty()</span></div>
+		<div class="code-line added"><span class="ln">2</span><span>    task.open_blockers == 0 // 0O 1lI</span></div>
+		<div class="code-line"><span class="ln">3</span><span>{'}'}</span></div>
+	</div>
+
+	<div class="typo-row toggle">
+		<div class="typo-text">
+			<span class="typo-label">
+				Font smoothing
+				{#if !draftSmoothing}
+					<IconButton
+						size="sm"
+						icon="undo-2"
+						label="Reset font smoothing"
+						data-testid="appearance-smoothing-reset"
+						onclick={() => onSmoothingChange(true)}
+					/>
+				{/if}
+			</span>
+			<span class="typo-hint">Render text with thinner grayscale anti-aliasing instead of macOS's heavier default. Applies as you flip it.</span>
+		</div>
+		<Switch
+			checked={draftSmoothing}
+			aria-label="Font smoothing"
+			data-testid="appearance-smoothing"
+			onchange={(e) => onSmoothingChange(e.currentTarget.checked)}
+		/>
+	</div>
 
 	<input
 		bind:this={fileInput}
@@ -366,5 +519,127 @@
 		height: 20px;
 		border-radius: var(--radius-sm);
 		border: 1px solid var(--border-subtle);
+	}
+
+	.subheading {
+		margin: 8px 0 0;
+		font-size: 13px;
+		font-weight: var(--weight-semibold);
+	}
+
+	.typo-row {
+		display: grid;
+		grid-template-columns: 1fr minmax(280px, 42%);
+		gap: 12px;
+		align-items: start;
+	}
+
+	.typo-row.toggle {
+		grid-template-columns: 1fr auto;
+		align-items: center;
+	}
+
+	.typo-text {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+
+	.typo-label {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		min-height: 20px;
+		font-size: var(--text-sm);
+		font-weight: var(--weight-medium);
+	}
+
+	.typo-hint {
+		font-size: 11px;
+		color: var(--text-tertiary);
+	}
+
+	.typo-controls {
+		display: grid;
+		grid-template-columns: 1fr 96px;
+		gap: 8px;
+		align-items: end;
+	}
+
+	/* The previews wear the draft font and size inline; everything else is the app's. */
+	.typo-preview {
+		padding: 10px 12px;
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-md);
+		background: var(--bg-raised);
+		color: var(--text-primary);
+		line-height: 1.6;
+	}
+
+	.chip {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		padding: 0 6px;
+		border: 1px solid var(--border-default);
+		border-radius: 999px;
+		background: var(--bg-surface);
+		vertical-align: baseline;
+	}
+
+	.chip-persona {
+		color: var(--accent);
+		border-color: var(--accent-muted);
+		background: var(--accent-muted);
+	}
+
+	.chip-mono {
+		font-family: var(--font-mono);
+		font-size: 0.92em;
+	}
+
+	.typo-preview.code {
+		padding: 8px 0;
+		line-height: 1.7;
+	}
+
+	.code-head {
+		display: flex;
+		justify-content: space-between;
+		padding: 0 12px 6px;
+	}
+
+	.code-file {
+		color: var(--text-secondary);
+	}
+
+	.del {
+		color: var(--danger-text);
+	}
+
+	.add {
+		color: var(--success-text);
+	}
+
+	.code-line {
+		display: flex;
+		gap: 12px;
+		padding: 0 12px;
+		white-space: pre;
+	}
+
+	.ln {
+		flex: none;
+		width: 2ch;
+		text-align: right;
+		color: var(--text-tertiary);
+	}
+
+	.removed {
+		background: var(--danger-muted);
+	}
+
+	.added {
+		background: var(--success-muted);
 	}
 </style>

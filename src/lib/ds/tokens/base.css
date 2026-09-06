@@ -1,6 +1,8 @@
 /* Minimal global baseline. Density-first: nothing here adds whitespace. */
 *,*::before,*::after{box-sizing:border-box}
 html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+/* Settings > Appearance > Font smoothing off: back to the platform's own rendering. */
+html[data-smoothing="off"]{-webkit-font-smoothing:auto;-moz-osx-font-smoothing:auto}
 body{margin:0;background:var(--bg-base);color:var(--text-primary);font:var(--type-ui);font-variant-numeric:var(--tabular)}
 a{color:var(--accent);text-decoration:none}
 a:hover{color:var(--accent-hover);text-decoration:underline}

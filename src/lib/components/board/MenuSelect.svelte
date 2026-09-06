@@ -16,6 +16,8 @@
 		color?: string;
 		/** A second, dimmer line of text. */
 		hint?: string;
+		/** A `font-family` list to draw this option\'s label in, for a font picker. */
+		font?: string;
 	}
 
 	interface Props {
@@ -125,7 +127,7 @@
 							onclick={() => pick(o.value)}
 						>
 							{@render mark(o, 14)}
-							<span class="text">
+							<span class="text" style={o.font ? `font-family:${o.font}` : undefined}>
 								{o.label}
 								{#if o.hint}<span class="hint">{o.hint}</span>{/if}
 							</span>
