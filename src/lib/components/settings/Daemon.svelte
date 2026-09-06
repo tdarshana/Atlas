@@ -63,6 +63,7 @@
 		title={inTauri() ? undefined : 'Only available in the desktop app'}
 		data-testid="settings-autostart"
 		onchange={() => toggleAutostart(!autostart)}
+		onreset={autostart && inTauri() && !autostartBusy ? () => toggleAutostart(false) : undefined}
 	/>
 </SettingsCard>
 

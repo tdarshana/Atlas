@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { HTMLInputAttributes } from 'svelte/elements';
+	import IconButton from './IconButton.svelte';
 
 	// Rest props land on the input, as in the React original.
 	interface Props extends Omit<HTMLInputAttributes, 'type' | 'checked'> {
@@ -8,6 +9,9 @@
 		indeterminate?: boolean;
 		/** Renders the radio variant: a round box with a dot instead of a tick. */
 		radio?: boolean;
+		/** When given, a reset arrow follows the label; the caller passes it only while the
+		 * value differs from its default, and it puts the default back. */
+		onreset?: () => void;
 	}
 
 	let {
@@ -16,6 +20,7 @@
 		indeterminate = false,
 		disabled = false,
 		radio = false,
+		onreset,
 		...rest
 	}: Props = $props();
 
@@ -53,4 +58,18 @@
 		{/if}
 	</span>
 	{#if label}<span>{label}</span>{/if}
+	{#if onreset}
+		<!-- A button is interactive content, so the label does not toggle the box for it. -->
+		<IconButton
+			size="sm"
+			icon="undo-2"
+			label="Reset {label ?? 'setting'}"
+			data-testid={(rest as Record<string, unknown>)['data-testid'] ? `${(rest as Record<string, unknown>)['data-testid']}-reset` : undefined}
+			onclick={(e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				onreset();
+			}}
+		/>
+	{/if}
 </label>

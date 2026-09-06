@@ -105,18 +105,21 @@
 		checked={notifyFlag('ui.notify.review_pending')}
 		data-testid="settings-notify-review-pending"
 		onchange={() => setNotifyFlag('ui.notify.review_pending', !notifyFlag('ui.notify.review_pending'))}
+		onreset={notifyFlag('ui.notify.review_pending') ? () => setNotifyFlag('ui.notify.review_pending', false) : undefined}
 	/>
 	<Checkbox
 		label="Workflow runs finished or failed"
 		checked={notifyFlag('ui.notify.workflow_runs')}
 		data-testid="settings-notify-workflow-runs"
 		onchange={() => setNotifyFlag('ui.notify.workflow_runs', !notifyFlag('ui.notify.workflow_runs'))}
+		onreset={notifyFlag('ui.notify.workflow_runs') ? () => setNotifyFlag('ui.notify.workflow_runs', false) : undefined}
 	/>
 	<Checkbox
 		label="Daemon unreachable"
 		checked={notifyFlag('ui.notify.daemon_errors')}
 		data-testid="settings-notify-daemon-errors"
 		onchange={() => setNotifyFlag('ui.notify.daemon_errors', !notifyFlag('ui.notify.daemon_errors'))}
+		onreset={notifyFlag('ui.notify.daemon_errors') ? () => setNotifyFlag('ui.notify.daemon_errors', false) : undefined}
 	/>
 	<span class="hint">
 		A background check every 30 seconds; each kind is off until you turn it on.

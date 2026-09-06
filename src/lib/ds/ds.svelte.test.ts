@@ -67,6 +67,30 @@ describe('Input', () => {
 	});
 });
 
+describe('reset arrow on fields', () => {
+	it('Input shows the arrow only with onreset and calls it', async () => {
+		const reset = vi.fn();
+		const plain = render(Input, { props: { label: 'Model', 'data-testid': 'model' } });
+		expect(plain.queryByTestId('model-reset')).toBeNull();
+		cleanup();
+		const { getByTestId } = render(Input, { props: { label: 'Model', 'data-testid': 'model', onreset: reset } });
+		const arrow = getByTestId('model-reset');
+		expect(arrow.getAttribute('aria-label')).toBe('Reset Model');
+		await fireEvent.click(arrow);
+		expect(reset).toHaveBeenCalledTimes(1);
+	});
+
+	it('Checkbox reset does not toggle the box', async () => {
+		const reset = vi.fn();
+		const { getByTestId, container } = render(Checkbox, {
+			props: { label: 'Enable', checked: true, 'data-testid': 'enable', onreset: reset }
+		});
+		await fireEvent.click(getByTestId('enable-reset'));
+		expect(reset).toHaveBeenCalledTimes(1);
+		expect((container.querySelector('input') as HTMLInputElement).checked).toBe(true);
+	});
+});
+
 describe('Select', () => {
 	it('shows the first option when nothing is bound', () => {
 		const { container } = render(Select, { props: { options: ['hybrid', 'bm25', 'vector'] } });

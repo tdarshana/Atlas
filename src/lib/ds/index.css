@@ -141,3 +141,11 @@
 .dbm-menu__item--danger:hover {
 	background: var(--danger-muted);
 }
+
+/* A field label with the reset arrow beside it (see the `onreset` prop on the fields). */
+.dbm-field__labelrow {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	min-height: 20px;
+}

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { HTMLInputAttributes } from 'svelte/elements';
 	import Icon from './Icon.svelte';
+	import IconButton from './IconButton.svelte';
 
 	interface Props extends Omit<HTMLInputAttributes, 'class' | 'value'> {
 		label?: string;
@@ -13,6 +14,9 @@
 		icon?: string;
 		value?: string;
 		class?: string;
+		/** When given, a reset arrow follows the label; the caller passes it only while the
+		 * value differs from its default, and it puts the default back. */
+		onreset?: () => void;
 	}
 
 	let {
@@ -22,6 +26,7 @@
 		mono = false,
 		icon,
 		id,
+		onreset,
 		value = $bindable(''),
 		class: className = '',
 		...rest
@@ -29,6 +34,7 @@
 
 	const uid = $props.id();
 	const fid = $derived(id ?? uid);
+	const testid = $derived((rest as Record<string, unknown>)['data-testid'] as string | undefined);
 
 	const cls = $derived(
 		['dbm-input', mono && 'dbm-input--mono', error && 'dbm-input--invalid', className]
@@ -61,7 +67,14 @@
 
 {#if label || hint || error}
 	<span class="dbm-field">
-		{#if label}<label class="dbm-field__label" for={fid}>{label}</label>{/if}
+		{#if label}
+			<span class="dbm-field__labelrow">
+				<label class="dbm-field__label" for={fid}>{label}</label>
+				{#if onreset}
+					<IconButton size="sm" icon="undo-2" label="Reset {label}" data-testid={testid ? `${testid}-reset` : undefined} onclick={onreset} />
+				{/if}
+			</span>
+		{/if}
 		{@render field()}
 		{#if error || hint}
 			<span class="dbm-field__hint{error ? ' dbm-field__hint--error' : ''}">{error || hint}</span>

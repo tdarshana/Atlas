@@ -6,6 +6,7 @@
 	import { untrack } from 'svelte';
 	import type { HTMLSelectAttributes } from 'svelte/elements';
 	import Icon from './Icon.svelte';
+	import IconButton from './IconButton.svelte';
 
 	// The visible control is a button that opens the design system's own menu, so no
 	// native popup appears anywhere in the app. A native <select> stays in the DOM,
@@ -20,6 +21,9 @@
 		label?: string;
 		value?: string;
 		class?: string;
+		/** When given, a reset arrow follows the label; the caller passes it only while the
+		 * value differs from its default, and it puts the default back. */
+		onreset?: () => void;
 	}
 
 	let {
@@ -27,6 +31,7 @@
 		size = 'md',
 		label,
 		id,
+		onreset,
 		value = $bindable(),
 		class: className = '',
 		disabled = false,
@@ -195,7 +200,12 @@
 
 {#if label}
 	<span class="dbm-field">
-		<label class="dbm-field__label" for={fid}>{label}</label>
+		<span class="dbm-field__labelrow">
+			<label class="dbm-field__label" for={fid}>{label}</label>
+			{#if onreset}
+				<IconButton size="sm" icon="undo-2" label="Reset {label}" data-testid={testid ? `${testid}-reset` : undefined} onclick={onreset} />
+			{/if}
+		</span>
 		{@render control()}
 	</span>
 {:else}

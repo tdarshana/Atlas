@@ -3,7 +3,7 @@
 	// a mark: a kind square, a coloured glyph, or a plain label. The trigger wears the
 	// select's clothes and shows the current option; `searchable` adds a filter box at
 	// the top of the menu for long lists such as a roster.
-	import { Icon, type IconName } from '$lib/ds';
+	import { Icon, IconButton, type IconName } from '$lib/ds';
 	import KindIcon from './KindIcon.svelte';
 
 	export interface MenuOption {
@@ -28,9 +28,11 @@
 		searchable?: boolean;
 		onchange?: (value: string) => void;
 		testId?: string;
+		/** A reset arrow after the label while the value differs from its default. */
+		onreset?: () => void;
 	}
 
-	let { value, options, label, placeholder = 'Select…', searchable = false, onchange, testId }: Props = $props();
+	let { value, options, label, placeholder = 'Select…', searchable = false, onchange, testId, onreset }: Props = $props();
 
 	let open = $state(false);
 	let query = $state('');
@@ -79,7 +81,14 @@
 {/snippet}
 
 <span class="dbm-field">
-	{#if label}<label class="dbm-field__label" for={uid}>{label}</label>{/if}
+	{#if label}
+		<span class="dbm-field__labelrow">
+			<label class="dbm-field__label" for={uid}>{label}</label>
+			{#if onreset}
+				<IconButton size="sm" icon="undo-2" label="Reset {label}" data-testid={testId ? `${testId}-reset` : undefined} onclick={onreset} />
+			{/if}
+		</span>
+	{/if}
 	<!-- Inline on purpose: the menu anchors to this span, and the scoped rule was seen
 	     losing to the field's own layout in the app. -->
 	<span class="wrap" style="position:relative" bind:this={root}>

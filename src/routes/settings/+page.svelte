@@ -8,7 +8,7 @@
 	// and reads a missing key as "leave it alone".
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
-	import { Button, Checkbox, Input } from '$lib/ds';
+	import { Button, Checkbox, IconButton, Input } from '$lib/ds';
 	import { api } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
 	import { inTauri, setStatusItems } from '$lib/shell';
@@ -218,7 +218,12 @@
 				</Button>
 			{/snippet}
 
-			<Checkbox label="Enable extraction" bind:checked={enabled} data-testid="settings-enabled" />
+			<Checkbox
+				label="Enable extraction"
+				bind:checked={enabled}
+				data-testid="settings-enabled"
+				onreset={enabled ? () => (enabled = false) : undefined}
+			/>
 
 			<div class="pair">
 				<Input
@@ -227,6 +232,7 @@
 					bind:value={baseUrl}
 					data-testid="settings-base-url"
 					placeholder="https://api.deepseek.com"
+					onreset={baseUrl ? () => (baseUrl = '') : undefined}
 				/>
 				<Input
 					label="Model"
@@ -234,6 +240,7 @@
 					bind:value={model}
 					data-testid="settings-model"
 					placeholder="deepseek-chat"
+					onreset={model ? () => (model = '') : undefined}
 				/>
 			</div>
 
@@ -259,7 +266,18 @@
 			{/if}
 
 			<div class="field">
-				<span class="label">Auto-accept threshold</span>
+				<span class="label dbm-field__labelrow">
+					Auto-accept threshold
+					{#if Math.abs(threshold - DEFAULT_MIN_CONFIDENCE) > 1e-9}
+						<IconButton
+							size="sm"
+							icon="undo-2"
+							label="Reset auto-accept threshold"
+							data-testid="settings-threshold-reset"
+							onclick={() => (threshold = DEFAULT_MIN_CONFIDENCE)}
+						/>
+					{/if}
+				</span>
 				<div class="slider">
 					<input
 						type="range"

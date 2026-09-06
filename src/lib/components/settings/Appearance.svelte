@@ -302,6 +302,7 @@
 			value={selectedTheme}
 			data-testid="appearance-theme"
 			onchange={(e) => onThemeChange(e.currentTarget.value)}
+			onreset={selectedTheme !== 'dark' ? () => onThemeChange('dark') : undefined}
 		/>
 		<Select
 			label="UI scale"
@@ -311,6 +312,7 @@
 			onchange={(e) => {
 				draftScale = Number(e.currentTarget.value) as UiScale;
 			}}
+			onreset={draftScale !== 100 ? () => (draftScale = 100) : undefined}
 		/>
 	</div>
 
