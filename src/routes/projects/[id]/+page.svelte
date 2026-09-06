@@ -33,6 +33,17 @@
 	const commits = $derived(profile?.recent_commits ?? []);
 	const agents = $derived(activeAgents(tasks));
 
+	/** A profile older than an hour is rebuilt quietly once per visit, so the remote,
+	 * languages and tree keep up without a click on Refresh. */
+	let refreshedFor: string | null = null;
+	$effect(() => {
+		const built = current?.profile?.built_at;
+		if (!id || !built || refreshedFor === id || project.refreshing) return;
+		if (Date.now() - Date.parse(built) < 60 * 60 * 1000) return;
+		refreshedFor = id;
+		void refresh().catch(() => {});
+	});
+
 	// The stack card counts this project's tasks, which the board route does not preload.
 	$effect(() => {
 		if (!id) return;

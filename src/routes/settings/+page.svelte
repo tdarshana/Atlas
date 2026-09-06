@@ -224,6 +224,11 @@
 				data-testid="settings-enabled"
 				onreset={enabled ? () => (enabled = false) : undefined}
 			/>
+			{#if enabled && baseUrl.trim() === ''}
+				<span class="hint warn" role="status" data-testid="settings-extraction-warning">
+					Enabled, but no base URL is set: nothing will run until one is.
+				</span>
+			{/if}
 
 			<div class="pair">
 				<Input

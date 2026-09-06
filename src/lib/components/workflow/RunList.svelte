@@ -10,8 +10,7 @@
 		RUN_STATUS_LABEL,
 		RUN_STATUS_TONE,
 		TRIGGER_TONE,
-		type RunFilterValue
-	} from '$lib/stores/workflows.svelte';
+		type RunFilterValue, runError } from '$lib/stores/workflows.svelte';
 	import type { WorkflowRun } from '$lib/types';
 
 	let {
@@ -64,8 +63,9 @@
 					<span class="trigger">
 						<Badge tone={TRIGGER_TONE[run.trigger]}>{run.trigger}</Badge>
 					</span>
-					<span class="status">
+					<span class="status" title={runError(run) ?? undefined}>
 						<Badge tone={RUN_STATUS_TONE[run.status]}>{RUN_STATUS_LABEL[run.status]}</Badge>
+						{#if runError(run)}<span class="reason">{runError(run)}</span>{/if}
 					</span>
 					<span class="mono right duration">{duration(run.started_at, run.finished_at)}</span>
 				</button>
@@ -172,5 +172,19 @@
 		padding: 20px 0;
 		text-align: center;
 		color: var(--text-secondary);
+	}
+	.status {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		min-width: 0;
+	}
+
+	.reason {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		color: var(--danger-text);
+		font-size: 11px;
 	}
 </style>

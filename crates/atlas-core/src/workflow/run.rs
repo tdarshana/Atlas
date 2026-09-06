@@ -78,7 +78,7 @@ fn fail_before_steps(workflows: &WorkflowRepo, memories: &MemoryService, run_id:
         Ok(step) => warn_if_failed("closing the validate step", run_id, workflows.finish_step(step.id, StepStatus::Failed, None, &log)),
         Err(e) => warn_if_failed("opening the validate step", run_id, Err::<(), _>(e)),
     }
-    warn_if_failed("marking the run failed", run_id, workflows.set_run_status(run_id, RunStatus::Failed, None));
+    warn_if_failed("marking the run failed", run_id, workflows.set_run_status(run_id, RunStatus::Failed, Some(json!({"error": err.to_string()}))));
     warn_if_failed("writing the audit row", run_id, memories.audit(run_actor, "run", "workflow_run", Some(run_id), json!({"status": "failed", "reason": err.to_string()})));
     Err(err)
 }
@@ -88,7 +88,7 @@ fn fail_before_steps(workflows: &WorkflowRepo, memories: &MemoryService, run_id:
 fn fail_step(workflows: &WorkflowRepo, memories: &MemoryService, run_id: Uuid, step_id: Uuid, run_actor: &str, mut log: Vec<LogLine>, err: AtlasError) -> Result<Value> {
     log.push(LogLine::now(LogLevel::Error, err.to_string()));
     warn_if_failed("closing the failed step", run_id, workflows.finish_step(step_id, StepStatus::Failed, None, &log));
-    warn_if_failed("marking the run failed", run_id, workflows.set_run_status(run_id, RunStatus::Failed, None));
+    warn_if_failed("marking the run failed", run_id, workflows.set_run_status(run_id, RunStatus::Failed, Some(json!({"error": err.to_string()}))));
     warn_if_failed("writing the audit row", run_id, memories.audit(run_actor, "run", "workflow_run", Some(run_id), json!({"status": "failed", "reason": err.to_string()})));
     Err(err)
 }

@@ -10,6 +10,7 @@
 	import { project, setHeaderActions } from '$lib/stores/project.svelte';
 	import {
 		createWorkflow,
+		runError,
 		RUN_STATUS_LABEL,
 		RUN_STATUS_TONE,
 		TRIGGER_TONE
@@ -72,9 +73,11 @@
 		}
 	}
 
-	async function newWorkflow(): Promise<void> {
+	let naming = $state(false);
+
+	async function newWorkflow(name: string): Promise<void> {
 		try {
-			const created = await createWorkflow(id || null);
+			const created = await createWorkflow(id || null, name);
 			await goto(`/workflows/${created.id}`);
 		} catch (e) {
 			push('error', errorMessage(e));
@@ -107,11 +110,13 @@
 			]
 		});
 	});
+	import NewWorkflowDialog from '$lib/components/workflow/NewWorkflowDialog.svelte';
 </script>
 
 {#snippet headerActions()}
 	<Button data-testid="workflows-editor" onclick={openEditor}>Open editor</Button>
-	<Button variant="primary" data-testid="workflows-new" onclick={newWorkflow}>New workflow</Button>
+	<Button variant="primary" data-testid="workflows-new" onclick={() => (naming = true)}>New workflow</Button>
+<NewWorkflowDialog open={naming} onclose={() => (naming = false)} oncreate={newWorkflow} />
 {/snippet}
 
 {#if error}
@@ -171,7 +176,7 @@
 						<div class="runs-row">
 							<span class="mono">{dateTime(run.started_at)}</span>
 							<span class="trigger-text">{run.trigger}</span>
-							<span><Badge tone={RUN_STATUS_TONE[run.status]}>{RUN_STATUS_LABEL[run.status]}</Badge></span>
+							<span title={runError(run) ?? undefined}><Badge tone={RUN_STATUS_TONE[run.status]}>{RUN_STATUS_LABEL[run.status]}</Badge>{#if runError(run)}<span class="reason">{runError(run)}</span>{/if}</span>
 							<span class="mono right">{duration(run.started_at, run.finished_at)}</span>
 						</div>
 					{/each}
@@ -286,5 +291,10 @@
 
 	.right {
 		text-align: right;
+	}
+	.reason {
+		margin-left: 6px;
+		color: var(--danger-text);
+		font-size: 11px;
 	}
 </style>

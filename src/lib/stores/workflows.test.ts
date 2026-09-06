@@ -433,3 +433,13 @@ describe('rerun', () => {
 		await expect(rerun(sampleRun())).rejects.toThrow('No workflow is open');
 	});
 });
+
+describe('runError', () => {
+	it('reads the reason the runner writes into a failed run summary, and nothing otherwise', async () => {
+		const { runError } = await import('./workflows.svelte');
+		expect(runError({ summary: { error: 'extraction is disabled' } })).toBe('extraction is disabled');
+		expect(runError({ summary: { error: '' } })).toBeNull();
+		expect(runError({ summary: null })).toBeNull();
+		expect(runError(null)).toBeNull();
+	});
+});

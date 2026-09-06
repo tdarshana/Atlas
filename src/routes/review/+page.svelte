@@ -41,6 +41,7 @@
 	const qualified = $derived(qualifying());
 	const extractionEnabled = $derived(settingBool('extraction.enabled'));
 	const model = $derived(settingString('extraction.model'));
+	const baseUrl = $derived(settingString('extraction.base_url'));
 	let accepting = $state(false);
 	let confirming = $state(false);
 
@@ -142,7 +143,10 @@
 
 <div class="lines">
 	<span data-testid="review-extraction-status">
-		{#if extractionEnabled}
+		{#if extractionEnabled && baseUrl.trim() === ''}
+			Extraction is on, but no base URL is set, so nothing runs.
+			<a href="/settings#extraction">Set one in Settings</a>.
+		{:else if extractionEnabled}
 			Extraction is on · <span class="mono">{model || 'model not set'}</span>
 		{:else}
 			Extraction is off. <a href="/settings#extraction">Enable it in Settings</a> to propose

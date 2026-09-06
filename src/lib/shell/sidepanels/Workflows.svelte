@@ -39,9 +39,11 @@
 		cancelled: 'var(--text-tertiary)'
 	};
 
-	async function newWorkflow(): Promise<void> {
+	let naming = $state(false);
+
+	async function newWorkflow(name: string): Promise<void> {
 		try {
-			const created = await createWorkflow();
+			const created = await createWorkflow(null, name);
 			await goto(`/workflows/${created.id}`);
 		} catch (e) {
 			push('error', e instanceof Error ? e.message : String(e));
@@ -65,7 +67,10 @@
 		if (node.data.practices.includes(name)) return;
 		updateNodeData(node.id, { practices: [...node.data.practices, name] });
 	}
+	import NewWorkflowDialog from '$lib/components/workflow/NewWorkflowDialog.svelte';
 </script>
+
+<NewWorkflowDialog open={naming} onclose={() => (naming = false)} oncreate={newWorkflow} />
 
 <TreeGroup label="Workflows" count={workflow.list.length}>
 	{#each workflow.list as w (w.id)}
@@ -78,7 +83,7 @@
 			href={`/workflows/${w.id}`}
 		/>
 	{/each}
-	<TreeRow icon="plus" label="New workflow…" onclick={newWorkflow} />
+	<TreeRow icon="plus" label="New workflow…" onclick={() => (naming = true)} />
 </TreeGroup>
 
 <TreeGroup label="Actions library">

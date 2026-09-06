@@ -7,9 +7,13 @@
 	import { errorMessage } from '$lib/errors';
 	import { push } from '$lib/platform/toasts.svelte';
 
-	async function newWorkflow(): Promise<void> {
+	import NewWorkflowDialog from '$lib/components/workflow/NewWorkflowDialog.svelte';
+
+	let naming = $state(false);
+
+	async function newWorkflow(name: string): Promise<void> {
 		try {
-			const created = await createWorkflow();
+			const created = await createWorkflow(null, name);
 			await goto(`/workflows/${created.id}`);
 		} catch (e) {
 			push('error', errorMessage(e));
@@ -17,9 +21,11 @@
 	}
 </script>
 
+<NewWorkflowDialog open={naming} onclose={() => (naming = false)} oncreate={newWorkflow} />
+
 <div class="empty">
 	<p class="title">No workflow selected</p>
-	<Button variant="primary" onclick={newWorkflow}>New workflow</Button>
+	<Button variant="primary" onclick={() => (naming = true)}>New workflow</Button>
 </div>
 
 <style>

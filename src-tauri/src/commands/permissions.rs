@@ -308,12 +308,16 @@ pub async fn permissions_status<R: Runtime>(
     // The filesystem probes and the Apple Event round trip both block; the notification
     // state is a cheap in-process read, so it is taken before the hop.
     tauri::async_runtime::spawn_blocking(move || {
-        vec![
-            notifications,
-            automation_status(false),
-            accessibility_status(false),
-            files_status(&app_data, &roots),
-        ]
+        let mut rows = vec![notifications];
+        // Driving the Finder is only the dmg bundling step's concern, which happens on a
+        // developer's machine; a release build has no use for the grant, so it does not
+        // ask a user for it.
+        if cfg!(debug_assertions) {
+            rows.push(automation_status(false));
+        }
+        rows.push(accessibility_status(false));
+        rows.push(files_status(&app_data, &roots));
+        rows
     })
     .await
     .map_err(|e| e.to_string())

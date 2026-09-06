@@ -289,7 +289,7 @@ export async function openWorkflow(id: string): Promise<void> {
 	}
 }
 
-function untitledName(): string {
+export function untitledName(): string {
 	const used = new Set(workflow.list.map((w) => w.name));
 	let n = 1;
 	while (used.has(`untitled-${n}`)) n++;
@@ -300,7 +300,7 @@ function untitledName(): string {
  * node, then pushes it onto the list. The caller navigates to it. `projectId` binds the
  * new workflow to that project (the project Workflows tab's own "New workflow"); left
  * out, it is global, matching the side panel's own "New workflow…" row. */
-export async function createWorkflow(projectId?: string | null): Promise<Workflow> {
+export async function createWorkflow(projectId?: string | null, name?: string): Promise<Workflow> {
 	const graph: Graph = {
 		nodes: [
 			{
@@ -328,7 +328,7 @@ export async function createWorkflow(projectId?: string | null): Promise<Workflo
 		]
 	};
 	const body: NewWorkflow = {
-		name: untitledName(),
+		name: name?.trim() || untitledName(),
 		project_id: projectId ?? undefined,
 		trigger: { kind: 'manual', cron: null, prompt: null },
 		graph
@@ -603,4 +603,14 @@ export async function rerun(run: WorkflowRun): Promise<WorkflowRun> {
 	const created = await api().runWorkflow(current.id, run.trigger);
 	workflow.history = [created, ...workflow.history];
 	return created;
+}
+
+/** The reason a failed run gives, from the summary the runner writes on failure. */
+export function runError(run: { summary?: unknown } | null | undefined): string | null {
+	const summary = run?.summary;
+	if (summary && typeof summary === 'object' && 'error' in summary) {
+		const e = (summary as { error?: unknown }).error;
+		return typeof e === 'string' && e !== '' ? e : null;
+	}
+	return null;
 }
