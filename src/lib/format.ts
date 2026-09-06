@@ -21,6 +21,15 @@ export function relativeAge(ts: Timestamp, now: number = Date.now()): string {
 }
 
 /**
+ * `relativeAge` as a phrase: `2d ago`, or `just now` on its own, since "just now ago"
+ * is what a caller that appended the word blindly used to print.
+ */
+export function ageText(ts: Timestamp, now: number = Date.now()): string {
+	const age = relativeAge(ts, now);
+	return age === 'just now' || age === '-' ? age : `${age} ago`;
+}
+
+/**
  * What a reading with no value prints. The design's null sentinel is an em dash; this
  * codebase does not write one, so the middle dot stands in for it. Colour it with
  * `--text-null`, which is the token the design system gives an empty reading.

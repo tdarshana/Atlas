@@ -6,7 +6,7 @@
 	import { Button, Icon, IconButton, Input, MultiSelect, Select, TagInput } from '$lib/ds';
 	import { api } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
-	import { relativeAge } from '$lib/format';
+	import { ageText } from '$lib/format';
 	import { setStatusItems } from '$lib/shell';
 	import {
 		closePersona,
@@ -368,7 +368,7 @@
 									<div class="cell mono" role="gridcell">{p.skills.length}</div>
 									<div class="cell mono" role="gridcell">{p.workflows.length}</div>
 									<div class="cell mono" role="gridcell">{projectsUsing(p.id)}</div>
-									<div class="cell" role="gridcell">{relativeAge(p.updated_at)} ago</div>
+									<div class="cell" role="gridcell">{ageText(p.updated_at)}</div>
 								</div>
 							{/each}
 						</div>

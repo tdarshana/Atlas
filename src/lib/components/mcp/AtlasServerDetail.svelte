@@ -6,7 +6,7 @@
 	import { Badge, Button, Checkbox, Icon, Table, type TableColumn } from '$lib/ds';
 	import { adopt, daemon, type DaemonHandle } from '$lib/daemon.svelte';
 	import { errorMessage } from '$lib/errors';
-	import { relativeAge } from '$lib/format';
+	import { ageText } from '$lib/format';
 	import { CLAUDE_SNIPPET, CODEX_SNIPPET, toolIcon, toolPluginId } from '$lib/mcp';
 	import { copyText, inTauri } from '$lib/shell';
 	import { loadMcp, mcp, toggleTool } from '$lib/stores/mcp.svelte';
@@ -266,7 +266,7 @@
 			>
 				{#snippet cell(clientRow: McpClient, column: TableColumn<McpClient>)}
 					{#if column.key === 'last_seen'}
-						{relativeAge(clientRow.last_seen)} ago
+						{ageText(clientRow.last_seen)}
 					{:else if column.key === 'transport'}
 						{clientRow.transport}
 					{:else if column.key === 'tool_calls'}

@@ -6,7 +6,7 @@
 	// through and takes the saved text back from the server.
 	import { Badge, Button, IconButton } from '$lib/ds';
 	import { errorMessage } from '$lib/errors';
-	import { relativeAge } from '$lib/format';
+	import { ageText } from '$lib/format';
 	import { copyText } from '$lib/shell';
 	import { DETAIL_MAX, DETAIL_MIN, sourceLabel, splitFrontmatter, type OpenSkill as Skill } from '$lib/skills';
 	import MarkdownView from '$lib/ui/MarkdownView.svelte';
@@ -156,7 +156,7 @@
 				<span class="hint">Scope {skill.scope}</span>
 				{#if skill.plugin}<span class="hint">Plugin {skill.plugin}</span>{/if}
 				{#if skill.updated_at}
-					<span class="hint">Updated {relativeAge(skill.updated_at)} ago</span>
+					<span class="hint">Updated {ageText(skill.updated_at)}</span>
 				{/if}
 				{#if !skill.editable}<span class="hint">Read only</span>{/if}
 			</div>

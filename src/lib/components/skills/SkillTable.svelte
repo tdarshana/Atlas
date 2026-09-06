@@ -4,7 +4,7 @@
 	// so both are optional rather than two near-identical tables. A practice row draws
 	// the same columns; it has no switch, so its `Enabled here` cell stays empty.
 	import { Badge, Checkbox, Table, type TableColumn } from '$lib/ds';
-	import { relativeAge } from '$lib/format';
+	import { ageText } from '$lib/format';
 	import { sourceLabel, type SkillRow as SkillSummary } from '$lib/skills';
 
 	interface Props {
@@ -77,7 +77,7 @@
 			{:else if column.key === 'scope'}
 				{row.scope}
 			{:else if column.key === 'updated_at'}
-				{row.updated_at ? `${relativeAge(row.updated_at)} ago` : '—'}
+				{row.updated_at ? ageText(row.updated_at) : '—'}
 			{:else if column.key === 'enabled_here'}
 				{#if row.source === 'practice'}
 					<span class="hint" title="A practice always applies">—</span>

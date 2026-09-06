@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { duration, eventTime, fixedTime, relativeAge } from './format';
+import { ageText, duration, eventTime, fixedTime, relativeAge } from './format';
 
 describe('duration', () => {
 	it('formats a finished span under a minute as 0m Ns', () => {
@@ -55,5 +55,15 @@ describe('history times', () => {
 		expect(eventTime(iso, at + 20_000)).toBe('just now');
 		expect(eventTime(iso, at + 2 * 86_400_000)).toBe('Sep 06, 08:39PM');
 		expect(eventTime(iso, new Date(2027, 1, 1).getTime())).toBe('2026 Sep 06, 08:39PM');
+	});
+});
+
+describe('ageText', () => {
+	it('says just now on its own and appends ago to everything older', () => {
+		const now = new Date('2026-09-03T10:00:00Z').getTime();
+		expect(ageText('2026-09-03T09:59:40Z', now)).toBe('just now');
+		expect(ageText('2026-09-03T08:00:00Z', now)).toBe('2h ago');
+		expect(ageText('2026-08-01T08:00:00Z', now)).toBe('1mo ago');
+		expect(ageText('not a date', now)).toBe('-');
 	});
 });
