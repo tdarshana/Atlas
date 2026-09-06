@@ -4,7 +4,7 @@
 	// panel issues no fetch of its own and stays whole while its own chips narrow the
 	// table. Sources have no facets-endpoint counterpart, so those still come from
 	// `memories.all`, the same load before the kind filter.
-	import { MEMORY_KINDS, memories, toggleKind } from '$lib/stores/memories.svelte';
+	import { MEMORY_KINDS, memories, toggleKind, sourceOf, toggleSource, toggleTag } from '$lib/stores/memories.svelte';
 	import TreeGroup from '../TreeGroup.svelte';
 	import TreeRow from '../TreeRow.svelte';
 
@@ -20,7 +20,7 @@
 	const sources = $derived.by(() => {
 		const counts = new Map<string, number>();
 		for (const hit of memories.all) {
-			const source = hit.memory.source_agent ?? hit.memory.source_tool ?? 'unknown';
+			const source = sourceOf(hit.memory);
 			counts.set(source, (counts.get(source) ?? 0) + 1);
 		}
 		return ranked(counts);
@@ -47,13 +47,13 @@
 
 <TreeGroup label="Tags" count={tags.length}>
 	{#each tags as [tag, count] (tag)}
-		<TreeRow icon="tag" label={tag} mono meta={count} />
+		<TreeRow icon="tag" label={tag} mono meta={count} selected={memories.tag === tag} onclick={() => toggleTag(tag)} />
 	{/each}
 </TreeGroup>
 
 <TreeGroup label="Sources" count={sources.length}>
 	{#each sources as [source, count] (source)}
-		<TreeRow icon="terminal" label={source} mono meta={count} />
+		<TreeRow icon="terminal" label={source} mono meta={count} selected={memories.source === source} onclick={() => toggleSource(source)} />
 	{/each}
 </TreeGroup>
 

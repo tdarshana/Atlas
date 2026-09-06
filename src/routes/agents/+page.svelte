@@ -74,6 +74,10 @@
 	<span class="spacer"></span>
 	<Button variant="primary" data-testid="agent-new" onclick={openNew}>New agent</Button>
 </div>
+<span class="hint" data-testid="agents-note">
+	Agents are prompt templates exported to Claude Code and Codex. For a role that carries
+	skills, workflows, practices, models and access, use <a href="/personas">Personas</a>.
+</span>
 
 {#if agents.error}
 	<ErrorState message={agents.error} logPath={daemon.logPath || undefined}>
@@ -180,5 +184,9 @@
 
 	.empty-action {
 		margin-top: 4px;
+	}
+	.hint {
+		color: var(--text-tertiary);
+		font-size: 11px;
 	}
 </style>

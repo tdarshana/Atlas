@@ -26,6 +26,10 @@ export const memories = $state({
 	/** Empty means "no project chosen"; `Select` binds a string. */
 	projectId: '' as Uuid | '',
 	kinds: [] as MemoryKind[],
+	/** One tag, or none: a client-side narrowing like `kinds`, toggled from the side panel. */
+	tag: null as string | null,
+	/** One source (agent, else tool), or none; same client-side narrowing. */
+	source: null as string | null,
 	/**
 	 * Every hit the load returned, narrowed by scope and project but not by kind. The
 	 * kind filter is a client-side view over this, so toggling a kind costs no request
@@ -97,8 +101,14 @@ function inScope(hit: RecallHit): boolean {
 /** Re-derives `hits` from `all`. The only place the kind filter is applied. */
 function applyKinds(): void {
 	const kinds = memories.kinds;
-	memories.hits =
-		kinds.length > 0 ? memories.all.filter((h) => kinds.includes(h.memory.kind)) : [...memories.all];
+	const tag = memories.tag;
+	const source = memories.source;
+	memories.hits = memories.all.filter(
+		(h) =>
+			(kinds.length === 0 || kinds.includes(h.memory.kind)) &&
+			(tag === null || (h.memory.tags ?? []).includes(tag)) &&
+			(source === null || sourceOf(h.memory) === source)
+	);
 	reselect(memories.hits);
 }
 
@@ -248,6 +258,23 @@ export function toggleKind(kind: MemoryKind): void {
 	const i = memories.kinds.indexOf(kind);
 	if (i >= 0) memories.kinds.splice(i, 1);
 	else memories.kinds.push(kind);
+	applyKinds();
+}
+
+/** The side panel's source label for a memory: the agent, else the tool. */
+export function sourceOf(m: { source_agent?: string | null; source_tool?: string | null }): string {
+	return m.source_agent ?? m.source_tool ?? 'unknown';
+}
+
+/** Narrows to one tag, or clears it when it is the current one. */
+export function toggleTag(tag: string): void {
+	memories.tag = memories.tag === tag ? null : tag;
+	applyKinds();
+}
+
+/** Narrows to one source, or clears it when it is the current one. */
+export function toggleSource(source: string): void {
+	memories.source = memories.source === source ? null : source;
 	applyKinds();
 }
 

@@ -77,6 +77,10 @@
 	/>
 	<Button size="sm" data-testid="skills-new" onclick={() => (creating = true)}>New skill</Button>
 </div>
+<span class="hint" data-testid="skills-note">
+	Skills are SKILL.md folders agents load on demand. Rules that always apply live in
+	<a href="/practices">Practices</a>.
+</span>
 
 <div class="pane" data-testid="skills-page">
 	{#if skills.error}

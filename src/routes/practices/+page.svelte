@@ -7,5 +7,5 @@
 	store={practices}
 	title="Practices"
 	noun="practice"
-	hint="A practice is a standing rule agents should follow, written in Markdown."
+	hint="A practice is a standing rule agents always follow, written in Markdown. Instructions agents load on demand are Skills."
 />

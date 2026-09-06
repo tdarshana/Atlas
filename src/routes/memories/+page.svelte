@@ -12,6 +12,8 @@
 	import { copyText, setStatusItems } from '$lib/shell';
 	import { scopeOptions, scopeSelection, scopeValue } from '$lib/components/memory-scope';
 	import RememberDialog from '$lib/components/RememberDialog.svelte';
+	import { push } from '$lib/platform/toasts.svelte';
+	import { decide } from '$lib/stores/review.svelte';
 	import {
 		MEMORY_KINDS,
 		cancelLoad,
@@ -28,7 +30,6 @@
 	import Dialog from '$lib/ui/Dialog.svelte';
 	import ErrorState from '$lib/ui/ErrorState.svelte';
 	import Textarea from '$lib/ui/Textarea.svelte';
-	import { push } from '$lib/platform/toasts.svelte';
 
 	const columns: TableColumn<RecallHit>[] = [
 		{ key: 'kind', label: 'Kind', width: '110px', sortable: true, sort: (a, b) => a.memory.kind.localeCompare(b.memory.kind) },
@@ -56,6 +57,24 @@
 	);
 
 	let remembering = $state(false);
+	let deciding = $state(false);
+
+	/** Accept or reject a pending memory from its card, the way Review does. */
+	async function decideHere(status: 'active' | 'rejected'): Promise<void> {
+		const target = memories.selected;
+		if (!target) return;
+		deciding = true;
+		try {
+			await decide(target.id, status);
+			memories.selected = null;
+			await loadMemories();
+			push('success', status === 'active' ? 'Memory accepted' : 'Memory rejected');
+		} catch (e) {
+			push('error', errorMessage(e));
+		} finally {
+			deciding = false;
+		}
+	}
 	let confirming = $state(false);
 	let reason = $state('');
 	let forgetting = $state(false);
@@ -174,6 +193,7 @@
 <div class="title-row">
 	<span class="title">Memories</span>
 	<span class="spacer"></span>
+	<Button variant="primary" data-testid="memories-remember" onclick={() => (remembering = true)}>Remember…</Button>
 	<div class="search">
 		<Input
 			bind:value={memories.query}
@@ -310,9 +330,15 @@
 					<dd class="mono id">{selected.id}</dd>
 				</dl>
 
-				<Button variant="danger" data-testid="memory-forget" onclick={() => (confirming = true)}>
-					Forget…
-				</Button>
+				<div class="detail-actions">
+					{#if selected.status === 'pending'}
+						<Button variant="primary" data-testid="memory-accept" disabled={deciding} onclick={() => decideHere('active')}>Accept</Button>
+						<Button data-testid="memory-reject" disabled={deciding} onclick={() => decideHere('rejected')}>Reject</Button>
+					{/if}
+					<Button variant="danger" data-testid="memory-forget" onclick={() => (confirming = true)}>
+						Forget…
+					</Button>
+				</div>
 			</div>
 		</aside>
 	{/if}
@@ -519,5 +545,10 @@
 
 	.empty-hint {
 		color: var(--text-secondary);
+	}
+	.detail-actions {
+		display: flex;
+		gap: 8px;
+		align-items: center;
 	}
 </style>

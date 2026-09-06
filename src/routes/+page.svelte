@@ -144,17 +144,17 @@
 <div class="stats">
 	<div class="card stat-card">
 		<span class="group-heading">Active memories</span>
-		<span class="metric">{report?.memories_active ?? '-'}</span>
+		<a class="metric" href="/memories" data-testid="dashboard-link-memories">{report?.memories_active ?? '-'}</a>
 	</div>
 
 	<div class="card stat-card">
 		<span class="group-heading">Projects</span>
-		<span class="metric">{counts.projects ?? '-'}</span>
+		<a class="metric" href="/projects" data-testid="dashboard-link-projects">{counts.projects ?? '-'}</a>
 	</div>
 
 	<div class="card stat-card">
 		<span class="group-heading">Agents</span>
-		<span class="metric">{counts.agents ?? '-'}</span>
+		<a class="metric" href="/agents" data-testid="dashboard-link-agents">{counts.agents ?? '-'}</a>
 	</div>
 
 	<div class="card stat-card rows">
@@ -163,10 +163,10 @@
 			<p class="error-line" role="alert">The board could not be read. {tasksError}</p>
 		{:else if !tasksLoading}
 			{#each openStages as stage (stage)}
-				<div class="stat-row">
+				<a class="stat-row" href="/board" data-testid="dashboard-link-board-{stage}">
 					<span>{stage}</span>
 					<span class="mono value">{openTaskCount(stage)}</span>
-				</div>
+				</a>
 			{/each}
 		{/if}
 	</div>
@@ -356,5 +356,16 @@
 		margin: 0;
 		padding: var(--space-4);
 		color: var(--text-secondary);
+	}
+	a.metric,
+	a.stat-row {
+		color: inherit;
+		text-decoration: none;
+	}
+
+	a.metric:hover,
+	a.stat-row:hover {
+		color: var(--accent);
+		text-decoration: none;
 	}
 </style>
