@@ -26,7 +26,8 @@ pub struct CliStatus {
     pub link_target: Option<String>,
     /// True when `link` resolves to the bundled binary, so the install is done.
     pub linked_to_bundle: bool,
-    /// Another `atlas` that most shells find before `/usr/local/bin`, or `None`.
+    /// Another `atlas` that most shells find before `/usr/local/bin`, or `None`. The
+    /// install replaces it with a link to the bundled binary, so after one it is `None`.
     pub shadowed_by: Option<String>,
 }
 
@@ -45,12 +46,18 @@ pub fn bundled_atlas<R: Runtime>(app: &tauri::AppHandle<R>) -> Option<PathBuf> {
     sidecar_bin(app, "atlas")
 }
 
-/// `~/.cargo/bin/atlas` when it exists: `cargo install` puts it there, and `~/.cargo/bin`
+/// `~/.cargo/bin/<name>` when it exists: `cargo install` puts it there, and `~/.cargo/bin`
 /// precedes `/usr/local/bin` on a shell set up by rustup, so that copy would win.
-fn cargo_install_copy() -> Option<PathBuf> {
+fn cargo_install_copy(name: &str) -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    let path = Path::new(&home).join(".cargo").join("bin").join(format!("atlas{}", std::env::consts::EXE_SUFFIX));
+    let path = Path::new(&home).join(".cargo").join("bin").join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
     path.exists().then_some(path)
+}
+
+/// The copies `cargo install` left that would shadow the bundled tools: `atlas`, which
+/// is what the user types, and `atlasd`, which an `atlas` on that PATH would start.
+fn cargo_copies() -> Vec<(String, PathBuf)> {
+    ["atlas", "atlasd"].into_iter().filter_map(|n| cargo_install_copy(n).map(|p| (n.to_string(), p))).collect()
 }
 
 /// The status as a pure function of the file system facts, so it can be tested on a
@@ -61,6 +68,9 @@ pub fn status_from(bundled: Option<&Path>, link: &Path, shadow: Option<&Path>) -
         (Some(target), Some(bundled)) => same_file(target, bundled),
         _ => false,
     };
+    // A copy that already resolves to the bundle (an earlier install replaced it with a
+    // link) shadows nothing: whichever one the shell picks runs the same binary.
+    let shadow = shadow.filter(|s| !bundled.is_some_and(|b| same_file(s, b)));
     CliStatus {
         bundled: bundled.map(|p| p.display().to_string()),
         bundled_version: BUNDLED_VERSION.to_string(),
@@ -131,18 +141,44 @@ pub fn install_link(bundled: &Path, link: &Path) -> Result<(), String> {
     }
 }
 
+/// Replaces a stale copy in the user's own directory with a link to the bundled binary,
+/// so a shell that finds that copy first runs the app's tool rather than an older one.
+/// No prompt: the file is the user's. A copy that is already the link is left alone.
+pub fn retire_copy(copy: &Path, bundled: &Path) -> Result<(), String> {
+    if same_file(copy, bundled) {
+        return Ok(());
+    }
+    std::fs::remove_file(copy).map_err(|e| format!("could not replace {}: {e}", copy.display()))?;
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(bundled, copy).map_err(|e| format!("could not link {}: {e}", copy.display()))
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::copy(bundled, copy).map(|_| ()).map_err(|e| format!("could not copy to {}: {e}", copy.display()))
+    }
+}
+
 /// The state of the command line tool, for Settings.
 #[tauri::command]
 pub fn cli_status<R: Runtime>(app: tauri::AppHandle<R>) -> CliStatus {
-    status_from(bundled_atlas(&app).as_deref(), Path::new(LINK_PATH), cargo_install_copy().as_deref())
+    status_from(bundled_atlas(&app).as_deref(), Path::new(LINK_PATH), cargo_install_copy("atlas").as_deref())
 }
 
-/// Links `/usr/local/bin/atlas` to the bundled binary and answers the new state.
+/// Links `/usr/local/bin/atlas` to the bundled binary, points any `cargo install` copies
+/// of `atlas` and `atlasd` at the bundled ones too, and answers the new state.
 #[tauri::command]
 pub async fn cli_install<R: Runtime>(app: tauri::AppHandle<R>) -> Result<CliStatus, String> {
     let bundled = bundled_atlas(&app).ok_or_else(|| "This build carries no atlas binary; install it with cargo instead.".to_string())?;
     let link = PathBuf::from(LINK_PATH);
-    tauri::async_runtime::spawn_blocking(move || install_link(&bundled, &link)).await.map_err(|e| e.to_string())??;
+    let copies: Vec<(PathBuf, PathBuf)> = cargo_copies().into_iter().filter_map(|(name, copy)| sidecar_bin(&app, &name).map(|b| (copy, b))).collect();
+    tauri::async_runtime::spawn_blocking(move || {
+        install_link(&bundled, &link)?;
+        for (copy, target) in &copies {
+            retire_copy(copy, target)?;
+        }
+        Ok::<(), String>(())
+    }).await.map_err(|e| e.to_string())??;
     Ok(cli_status(app))
 }
 
@@ -176,6 +212,27 @@ mod tests {
         let done = status_from(Some(&bundled), &link, None);
         assert!(done.linked_to_bundle, "{done:?}");
         assert_eq!(std::fs::read_link(&link).unwrap(), bundled);
+    }
+
+    /// A stale cargo copy is replaced by a link to the bundle and then no longer counts
+    /// as a shadow; a copy that is already that link is left alone.
+    #[test]
+    fn retiring_a_cargo_copy_links_it_to_the_bundle_and_clears_the_shadow() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundled = dir.path().join("atlas.app").join("atlas");
+        std::fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+        std::fs::write(&bundled, b"bin").unwrap();
+        let copy = dir.path().join(".cargo").join("bin").join("atlas");
+        std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        std::fs::write(&copy, b"old").unwrap();
+        let link = dir.path().join("bin").join("atlas");
+
+        assert!(status_from(Some(&bundled), &link, Some(&copy)).shadowed_by.is_some());
+        retire_copy(&copy, &bundled).unwrap();
+        assert_eq!(std::fs::read_link(&copy).unwrap(), bundled);
+        assert_eq!(status_from(Some(&bundled), &link, Some(&copy)).shadowed_by, None, "a link to the bundle shadows nothing");
+        retire_copy(&copy, &bundled).unwrap();
+        assert_eq!(std::fs::read_link(&copy).unwrap(), bundled, "a second retire leaves the link as it is");
     }
 
     #[test]

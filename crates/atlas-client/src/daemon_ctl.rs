@@ -48,8 +48,16 @@ async fn is_up_with(port: u16, token: &str) -> bool {
     body["token_sha256"].as_str() == Some(token_sha256(token).as_str())
 }
 
+/// The `atlasd` beside this binary, or the one on PATH. The executable path is resolved
+/// first: `/usr/local/bin/atlas` and `~/.cargo/bin/atlas` are links into the app
+/// bundle after the desktop's Command line install, and the daemon sits next to the
+/// real file, not next to the link.
 fn atlasd_path() -> PathBuf {
-    if let Ok(exe) = std::env::current_exe() { let sib = exe.with_file_name("atlasd"); if sib.exists() { return sib; } }
+    if let Ok(exe) = std::env::current_exe() {
+        let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+        let sib = exe.with_file_name("atlasd");
+        if sib.exists() { return sib; }
+    }
     PathBuf::from("atlasd")
 }
 

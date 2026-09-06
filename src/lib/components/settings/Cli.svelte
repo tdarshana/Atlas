@@ -44,6 +44,7 @@
 				throw new Error('Only available in the desktop app');
 			});
 			push('success', `atlas is on your PATH at ${status.link}`);
+			if (status.shadowed_by) push('info', `${status.shadowed_by} still comes first on your PATH`);
 		} catch (e) {
 			const message = errorMessage(e);
 			if (message !== 'Cancelled.') push('error', message);
@@ -75,7 +76,7 @@
 	{#if status?.shadowed_by}
 		<span class="warn" data-testid="settings-cli-shadow">
 			An older <code>atlas</code> at <code>{status.shadowed_by}</code> comes first on most
-			shells. Remove it (<code>rm {status.shadowed_by}</code>) so the linked one runs.
+			shells. Installing replaces it with a link to this app's <code>atlas</code>.
 		</span>
 	{/if}
 	<div class="actions">
