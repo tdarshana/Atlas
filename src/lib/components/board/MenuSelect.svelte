@@ -119,6 +119,10 @@
 							{@attach focusOnMount}
 							type="text"
 							placeholder="Filter"
+							autocomplete="off"
+							autocorrect="off"
+							autocapitalize="off"
+							spellcheck="false"
 							aria-label="Filter {label ?? 'options'}"
 							bind:value={query}
 							data-testid={testId ? `${testId}-search` : undefined}

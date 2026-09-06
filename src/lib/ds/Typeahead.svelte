@@ -117,6 +117,9 @@
 		class={cls}
 		{value}
 		autocomplete="off"
+		autocorrect="off"
+		autocapitalize="off"
+		spellcheck="false"
 		role="combobox"
 		aria-autocomplete="list"
 		aria-expanded={open}

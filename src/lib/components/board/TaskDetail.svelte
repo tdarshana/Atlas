@@ -1085,6 +1085,9 @@
 							placeholder="Nothing is holding this up."
 							aria-label="Blocker key or title"
 							autocomplete="off"
+							autocorrect="off"
+							autocapitalize="off"
+							spellcheck="false"
 							data-testid="task-blocker-key"
 							oninput={onBlockerInput}
 							onkeydown={onBlockerKey}
