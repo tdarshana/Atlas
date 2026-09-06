@@ -856,3 +856,46 @@ async fn a_persona_attributed_run_picks_the_model_by_case() {
     let (_, steps) = backend.workflows.get_run(run.id).unwrap();
     assert!(steps[0].log.iter().any(|l| l.level == LogLevel::Warn && l.text.contains("persona 'nobody' not found")), "{:?}", steps[0].log);
 }
+
+/// A `workflow_run` job that finds its run already `running` was requeued after the
+/// daemon stopped mid-run. It must not replay the actions (their memories and tasks
+/// may already be filed); it fails the run with a message that says what was kept.
+#[tokio::test]
+async fn an_interrupted_run_fails_explicitly_instead_of_replaying() {
+    use crate::backend::{LocalBackend, WorkflowBackend};
+    use crate::jobs::Job;
+    use crate::models::TriggerKind;
+
+    let dir = tempfile::tempdir().unwrap();
+    let paths = crate::paths::AtlasPaths::at(dir.path());
+    let backend = LocalBackend::open(&paths, None, false).unwrap();
+    let graph = Graph {
+        nodes: vec![trigger_node("t"), action_node("a", "first", at(200.0, 0.0)), action_node("b", "second", at(400.0, 0.0)), output_node("o")],
+        edges: vec![edge("t", "a"), edge("a", "b"), edge("b", "o")],
+    };
+    let workflow = backend.workflows.create(&NewWorkflow { graph, ..new_workflow("interrupted") }, "t").unwrap();
+    let run = backend.run_workflow(&workflow.id.to_string(), TriggerKind::Manual, "t", None).await.unwrap();
+    // What the first attempt left behind before the daemon stopped.
+    backend.workflows.set_run_status(run.id, RunStatus::Running, None).unwrap();
+    let step = backend.workflows.append_step(run.id, 0, "a", "first", "desktop").unwrap();
+    backend.workflows.finish_step(step.id, StepStatus::Success, Some("done"), &[]).unwrap();
+
+    let job = Job {
+        id: Uuid::new_v4(),
+        kind: "workflow_run".into(),
+        status: "queued".into(),
+        payload: json!({"workflow_id": workflow.id, "run_id": run.id, "trigger": "manual", "actor": "t"}),
+        result: None,
+        error: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    // No model endpoint is configured: replaying would fail on the first action for
+    // that reason, and a "failed" run alone would not prove the guard fired.
+    let result = super::run::run_workflow(&job, &backend).await;
+    let (after, steps) = backend.workflows.get_run(run.id).unwrap();
+    assert_eq!(after.status, RunStatus::Failed, "{result:?}");
+    let summary = after.summary.unwrap_or_default().to_string();
+    assert!(summary.contains("interrupted") && summary.contains("1 step(s) had finished"), "{summary}");
+    assert_eq!(steps.iter().filter(|s| s.status == StepStatus::Success).count(), 1, "the finished step is kept, nothing re-ran: {steps:?}");
+}

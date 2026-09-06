@@ -4,13 +4,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Change } from '$lib/types';
 
+const daemonMock = vi.hoisted(() => ({ nextToken: null as string | null }));
+
 vi.mock('$lib/daemon.svelte', () => ({
 	daemon: { port: 7433, ready: true, error: null, logPath: '' },
 	baseUrl: () => 'http://127.0.0.1:7433',
 	tokenQuery: () => '?token=test-token',
 	api: () => ({}),
 	boot: async () => {},
-	reauth: async () => null
+	reauth: async () => daemonMock.nextToken
 }));
 
 import { changes, connectChanges, disconnectChanges, dispatch, onChange } from './changes.svelte';
@@ -43,6 +45,7 @@ function change(entity: string, action = 'moved', extra: Partial<Change> = {}): 
 
 beforeEach(() => {
 	FakeSource.instances = [];
+	daemonMock.nextToken = null;
 	vi.stubGlobal('EventSource', FakeSource);
 	changes.received = 0;
 });
@@ -96,5 +99,41 @@ describe('the change stream', () => {
 		expect(changes.connected).toBe(false);
 		disconnectChanges();
 		expect(source.closed).toBe(true);
+	});
+});
+
+// A daemon restart rotates the token, so the stream errors, is reopened on the new
+// token, and every subscriber must still be there and be told about the gap.
+describe('reconnecting after a daemon restart', () => {
+	it('keeps the subscribers across the reopen and dispatches a lagged change for the gap', async () => {
+		const seen: string[] = [];
+		onChange('memory', (c) => seen.push(`memory:${c.action}`));
+		onChange('lagged', (c) => seen.push(`lagged:${c.action}`));
+		connectChanges();
+		const first = FakeSource.instances[0];
+		first.onopen?.();
+		expect(seen).toEqual([]);
+
+		daemonMock.nextToken = 'rotated';
+		first.onerror?.();
+		await vi.waitFor(() => expect(FakeSource.instances).toHaveLength(2));
+		expect(first.closed).toBe(true);
+		const second = FakeSource.instances[1];
+		second.onopen?.();
+		expect(changes.connected).toBe(true);
+		// The reopen tells subscribers to refresh.
+		expect(seen).toEqual(['lagged:reconnected']);
+
+		second.emit('memory', JSON.stringify(change('memory', 'created')));
+		// The memory subscriber survived the reconnect.
+		expect(seen).toEqual(['lagged:reconnected', 'memory:created']);
+	});
+
+	it('does not reopen when the token did not change: the browser retries on its own', async () => {
+		connectChanges();
+		FakeSource.instances[0].onerror?.();
+		await new Promise((r) => setTimeout(r, 10));
+		expect(FakeSource.instances).toHaveLength(1);
+		expect(FakeSource.instances[0].closed).toBe(false);
 	});
 });

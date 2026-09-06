@@ -4,6 +4,7 @@
 
 import { api } from '$lib/daemon.svelte';
 import { errorLogPath, errorMessage } from '$lib/errors';
+import { onChange } from '$lib/stores/changes.svelte';
 import { minConfidence } from '$lib/stores/settings.svelte';
 import type { Memory, Uuid } from '$lib/types';
 
@@ -77,4 +78,29 @@ export async function acceptAllAboveThreshold(): Promise<BulkResult> {
 		}
 	}
 	return result;
+}
+
+/** Reloads a little after a burst of memory changes, so ten writes cost one fetch. */
+export const REVIEW_CHANGE_DEBOUNCE_MS = 200;
+
+/**
+ * Keeps the pending list in step with the daemon: a memory an agent writes as pending
+ * appears in an already-open Review, and one accepted elsewhere leaves it. `lagged`
+ * (the daemon dropped events, or the stream was reopened) reloads wholesale. Returns
+ * the unsubscribe; the route calls it on unmount.
+ */
+export function followReviewChanges(): () => void {
+	let timer: ReturnType<typeof setTimeout> | null = null;
+	const schedule = () => {
+		if (timer !== null) clearTimeout(timer);
+		timer = setTimeout(() => {
+			timer = null;
+			void loadReview();
+		}, REVIEW_CHANGE_DEBOUNCE_MS);
+	};
+	const stops = [onChange('memory', schedule), onChange('lagged', schedule)];
+	return () => {
+		for (const stop of stops) stop();
+		if (timer !== null) clearTimeout(timer);
+	};
 }

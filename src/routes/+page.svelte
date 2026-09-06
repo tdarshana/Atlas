@@ -5,6 +5,7 @@
 	// counter, so those come from their list routes; open tasks come from the board's
 	// global (no project) counts.
 	import { onMount } from 'svelte';
+	import { onChange } from '$lib/stores/changes.svelte';
 	import { api } from '$lib/daemon.svelte';
 	import { loadProjects, projects } from '$lib/stores/projects.svelte';
 	import { Badge, Button, Table, type TableColumn, Select } from '$lib/ds';
@@ -99,7 +100,13 @@
 		}
 	];
 
+	// Every load carries the generation it started under. A slower answer for a scope
+	// the user has already left is dropped, so selecting A then B never shows A's rows
+	// under B's selector.
+	let generation = 0;
+
 	async function load() {
+		const mine = ++generation;
 		loading = true;
 		try {
 			const client = api();
@@ -111,42 +118,61 @@
 				client.listAgents(),
 				projectId ? client.memoryFacets(projectId, 'project_only') : Promise.resolve(null)
 			]);
+			if (mine !== generation) return;
 			counts = { projects: projectList.length, agents: agentList.length };
 			scopedActive = facets ? facets.total : null;
 			recent = active;
 			error = null;
 			loadErrorLogPath = null;
 		} catch (e) {
+			if (mine !== generation) return;
 			recent = [];
 			error = errorMessage(e);
 			loadErrorLogPath = errorLogPath(e);
 		} finally {
-			loading = false;
+			if (mine === generation) loading = false;
 		}
 	}
 
 	/** The board counts on its own, so a board that cannot answer costs this card only,
 	    not the whole page. */
+	let taskGeneration = 0;
+
 	async function loadTasks() {
+		const mine = ++taskGeneration;
 		tasksLoading = true;
 		try {
 			const projectId = scope === 'all' ? undefined : scope;
 			const [stageList, taskCounts] = await Promise.all([api().boardStages(projectId), api().taskCounts(projectId)]);
+			if (mine !== taskGeneration) return;
 			openStages = stageList.stages.filter((s) => !s.done).map((s) => s.name);
 			openTasks = taskCounts;
 			tasksError = null;
 		} catch (e) {
+			if (mine !== taskGeneration) return;
 			openStages = [];
 			openTasks = [];
 			tasksError = errorMessage(e);
 		} finally {
-			tasksLoading = false;
+			if (mine === taskGeneration) tasksLoading = false;
 		}
 	}
 
 	function refresh() {
 		void load();
 		void loadTasks();
+	}
+
+	/** Reloads a little after a burst of changes, so ten task events cost one fetch. */
+	const CHANGE_DEBOUNCE_MS = 200;
+	let changeTimer: ReturnType<typeof setTimeout> | null = null;
+	function scheduleRefresh(what: 'memories' | 'tasks' | 'all'): void {
+		if (changeTimer !== null) clearTimeout(changeTimer);
+		changeTimer = setTimeout(() => {
+			changeTimer = null;
+			if (what !== 'tasks') void load();
+			if (what !== 'memories') void loadTasks();
+		}, CHANGE_DEBOUNCE_MS);
 	}
 
 	/** The `dashboard.card` slot: one card per contributed component, after the app's own.
@@ -157,6 +183,20 @@
 	onMount(() => {
 		void loadProjects();
 		refresh();
+		// The cards follow the daemon: a memory an agent writes, a task it moves, or a
+		// project or agent it adds shows up without a Refresh. `lagged` also covers a
+		// reopened stream, whose gap may hide any of those.
+		const stops = [
+			onChange('memory', () => scheduleRefresh('memories')),
+			onChange('task', () => scheduleRefresh('tasks')),
+			onChange('project', () => scheduleRefresh('all')),
+			onChange('persona', () => scheduleRefresh('memories')),
+			onChange('lagged', () => scheduleRefresh('all'))
+		];
+		return () => {
+			for (const stop of stops) stop();
+			if (changeTimer !== null) clearTimeout(changeTimer);
+		};
 		if (!plugins.loaded && plugins.available) void loadPlugins();
 	});
 

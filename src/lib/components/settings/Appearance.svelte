@@ -72,7 +72,9 @@
 	/** The machine's font families, from the host; empty in a plain browser. */
 	let installedFonts = $state<InstalledFont[]>([]);
 	onMount(() => {
-		void loadInstalledFonts().then((fonts) => (installedFonts = fonts));
+		// A host that answers nothing (a browser, a test double) leaves the list empty
+		// rather than undefined, which the pickers would then try to filter.
+		void loadInstalledFonts().then((fonts) => (installedFonts = fonts ?? []));
 	});
 
 	/** Presets first, then every installed proportional family drawn in its own face

@@ -17,6 +17,9 @@ export const changes = $state({
 type Listener = (change: Change) => void;
 const listeners = new Map<string, Set<Listener>>();
 let source: EventSource | null = null;
+/** True once a stream has been opened before, so the next open is a reopen and the
+ * subscribers are told to refresh: events may have landed while the stream was down. */
+let openedBefore = false;
 
 /** The entities the stream names; `lagged` means the daemon dropped events and the
  * listener should refresh wholesale. Any other entity is delivered under its own name. */
@@ -60,15 +63,24 @@ export function connectChanges(): void {
 	source = new EventSource(`${baseUrl()}/api/v1/events${tokenQuery()}`);
 	source.onopen = () => {
 		changes.connected = true;
+		// A reopened stream has a gap in front of it: whatever the daemon wrote while
+		// the stream was down never arrived. Tell every subscriber to refresh wholesale,
+		// the same way a `lagged` event from the daemon does.
+		if (openedBefore) {
+			dispatch({ entity: 'lagged', action: 'reconnected', id: null, key: null, project_id: null, at: new Date().toISOString() });
+		}
+		openedBefore = true;
 	};
 	source.onerror = () => {
 		changes.connected = false;
 		// The browser retries an EventSource by itself, but with the same URL: after a
 		// daemon restart the token in that URL is stale and every retry is a 401. Ask the
 		// host for the current token and, when it changed, reopen the stream with it.
+		// Only the transport is replaced: the subscribers stay, or every mounted view
+		// would go quiet after the first daemon restart while the stream reads as open.
 		void reauth().then((token) => {
 			if (token && source) {
-				disconnectChanges();
+				closeStream();
 				connectChanges();
 			}
 		});
@@ -84,10 +96,17 @@ export function connectChanges(): void {
 	}
 }
 
-/** Closes the stream and forgets every listener. For tests and a daemon restart. */
-export function disconnectChanges(): void {
+/** Closes the transport and nothing else; the subscribers wait for the next open. */
+function closeStream(): void {
 	source?.close();
 	source = null;
 	changes.connected = false;
+}
+
+/** Closes the stream and forgets every listener: full teardown, for tests. A daemon
+ * restart goes through the reconnect path above instead, which keeps the listeners. */
+export function disconnectChanges(): void {
+	closeStream();
 	listeners.clear();
+	openedBefore = false;
 }

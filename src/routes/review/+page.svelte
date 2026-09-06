@@ -13,7 +13,8 @@
 		decide,
 		loadReview,
 		qualifying,
-		review
+		review,
+		followReviewChanges
 	} from '$lib/stores/review.svelte';
 	import { loadSettings, minConfidence, settingBool, settingString } from '$lib/stores/settings.svelte';
 	import type { Memory, MemoryKind } from '$lib/types';
@@ -105,6 +106,7 @@
 		void loadProjects();
 		void loadSettings();
 		void loadReview();
+		return followReviewChanges();
 	});
 
 	$effect(() => {

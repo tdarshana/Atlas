@@ -272,7 +272,7 @@ pub async fn run_workflow(job: &Job, backend: &LocalBackend) -> Result<Value> {
     let run_actor = job.payload["actor"].as_str().unwrap_or("scheduler").to_string();
     let input = job.payload["input"].as_str().map(str::to_string);
 
-    let (run, _) = {
+    let (run, steps) = {
         let workflows = backend.workflows.clone();
         backend.blocking(move || workflows.get_run(run_id)).await?
     };
@@ -280,6 +280,21 @@ pub async fn run_workflow(job: &Job, backend: &LocalBackend) -> Result<Value> {
         let memories = backend.memories.clone();
         let actor = run_actor.clone();
         return backend.blocking(move || Ok(cancelled_result(&memories, run_id, &actor, 0))).await;
+    }
+    // A run that is already `running` when its job starts was interrupted: the daemon
+    // stopped mid-run and `requeue_stale` put the job back. Its finished actions may
+    // have filed memories and tasks already, and running the actions again would file
+    // them twice, so the run ends here as failed and says so, rather than replaying.
+    // The person decides whether to run it again.
+    if run.status == RunStatus::Running {
+        let finished = steps.iter().filter(|s| s.status == StepStatus::Success).count();
+        let err = AtlasError::Conflict(format!(
+            "interrupted: the daemon stopped while this run was in progress; {finished} step(s) had finished and whatever they wrote was kept. Run the workflow again if the rest is still wanted."
+        ));
+        let workflows = backend.workflows.clone();
+        let memories = backend.memories.clone();
+        let actor = run_actor.clone();
+        return backend.blocking(move || fail_before_steps(&workflows, &memories, run_id, &actor, err)).await;
     }
 
     let workflow = {

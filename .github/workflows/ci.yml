@@ -1,0 +1,57 @@
+name: ci
+
+# The quality gates from CLAUDE.md, on every push and pull request to main. The
+# frontend runs on the bun the repository pins in `.bun-version`: vitest's fake-timer
+# tests are not stable under an arbitrary Node, which is how a review once read 15
+# failures from a suite that is green under bun.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: cargo test and clippy
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Set up bun (the desktop crate embeds the built frontend)
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - name: Test
+        run: cargo test --workspace
+        env:
+          ATLAS_NO_EMBED: "1"
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  frontend:
+    name: svelte-check and vitest
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - run: bun install --frozen-lockfile
+      - name: Type check
+        run: bun run check
+      - name: Unit and component tests
+        run: bunx vitest run
